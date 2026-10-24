@@ -1,12 +1,12 @@
 # DeepSeek Servant 实现说明
 
-版本：`0.1.0-alpha.3`。架构基线见 [DESIGN.md](https://github.com/Tests4gptplay/deepseek-servant/blob/main/DESIGN.md)，实施与实测记录如下。
+版本：`0.1.0-alpha.4`。架构基线见 [DESIGN.md](https://github.com/Tests4gptplay/deepseek-servant/blob/main/DESIGN.md)，实施与实测记录如下。
 
 **设计来源：**[Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness)，在 DSH 中实现其持续任务、Agent 角色分工、工作接续与知识积累机制。
 
 ## 模块交付与宿主集成
 
-本仓库提供插件生产源码、构建配置和开发说明。`build`、`typecheck` 为显式工程命令；`npm pack --ignore-scripts` 将生成的 Host/Client 构建文件装入安装包。模型转接与实验素材在隔离验证环境中使用。
+本仓库提供插件生产源码、构建配置和开发说明。`build`、`typecheck` 为显式工程命令；`npm pack --ignore-scripts` 使用正式文件白名单收录 Host/Client JS、许可证、NOTICE 和必要说明；发行构建关闭 source map。模型转接与实验素材在隔离验证环境中使用。
 
 任务和知识持久化在 DSH 的 `storageDomain`。模型调用、文件与命令工具、Session、jobs 和 Skills 使用宿主现有服务；任务流转在本地后端完成。Client 通过宿主已认证的 Connection/RPC 与流事件通道交互。
 
@@ -41,11 +41,11 @@
 
 Planner 用 `planning.commit` 保存正式 Plan 和子任务。Worker 席位默认两个，可由插件 Host 配置调整，配置范围独立于 DSH 的全局模型并发限制。每个 Worker 仍由其原生 Agent 串行处理自己的模型回合。Worker `execution_report` 通过 executionId、assignmentVersion 和 resultId 核对，不让正常并发报告竞争一个旧 Task revision。
 
-终结报告关闭该 Worker 的业务能力。报告工具是原生独占工具，持久成功后结束当前模型回合，同批后续业务工具由执行归属检查拒绝。实际 Agent 如仍有本机 jobs，则继续保有其物理归属；不能用业务报告冒充进程停止。
+终结报告关闭该 Worker 的业务能力。报告工具是原生独占工具，持久成功后结束当前模型回合，同批后续业务工具由执行归属检查拒绝。实际 Agent 如仍有本机 jobs，则继续保有其物理归属；业务结果和作业退出分别记录。
 
 Planner 读取实际产物和证据后，通过 `planning.decide` 接受、返工或继续。代码只检查当前目标、计划、子任务结果及动作条件，不代替 Planner 判断质量。完整交付需当前计划全部验收，随后由持久 `deliver` 动作交给前台，并保存稳定通知标识。
 
-界面页面关闭只移除订阅。Backend 仍持有任务与 Agent。关闭 Backend 会停止其实际拥有的资源并保存中断事实，不能宣称退出后仍在工作。
+界面页面关闭只移除订阅。Backend 仍持有任务与 Agent。关闭 Backend 会停止其实际拥有的资源并保存中断位置，后端再次启动时从本地状态恢复。
 
 ## 原生能力与权限边界
 
@@ -127,7 +127,7 @@ dsh plugin --profile <目标profile> add <本地tgz路径> --ignore-scripts
 | 场景 | 实际运行结果 |
 | --- | --- |
 | 单目标到实际交付 | 原生读取四行 CSV；第一次 shell 操作被宿主拒绝，Worker 保存失败前沿；新 Planner 改法，新 Worker 用允许的文件工具完成整数分报告，独立 Planner 再读原文和产物验收，前台交付总额 37.50 |
-| 技能形成及后续复用 | 第一项 accepted 结果形成有边界的版本；第二项 Worker 通过原生 skill 加载该版本，生成并独立验收总额 1.40 的报告；真实加载与对应 success 反馈准确关联，Planner 的目录/加载不冒充 Worker 成功 |
+| 技能形成及后续复用 | 第一项 accepted 结果形成有边界的版本；第二项 Worker 通过原生 skill 加载该版本，生成并独立验收总额 1.40 的报告；真实加载与对应 success 反馈准确关联，技能加载与对应 success 反馈以 Worker 的真实执行为依据 |
 | 两 Worker 并行 | 同一 Task 的 Alpha、Beta 在两个独立原生 Agent 中同时处于 running，各有独立写域；Alpha 先验收，Beta 保持其确切 owner |
 | 提问及回答接续 | Planner 保存问题后结束该角色；用户答复进入正式等待记录，新 Planner 可从任务记忆读取“两条中文要点”，不依赖已退出 Planner 的对话 |
 | 暂停、后端退出与恢复 | 暂停期间 Beta 保存 continue checkpoint，没有继续派发；实际停止并重启独立后端后，恢复同一 Beta execution/session，已验收 Alpha 文件哈希不变 |
