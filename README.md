@@ -56,7 +56,7 @@ dsh plugin --profile <profile> add ./deepseek-servant-0.1.0-alpha.3.tgz --ignore
 
 ## 开发文档
 
-- [开发顶层架构](DESIGN.md)
+- [开发顶层架构](https://github.com/Tests4gptplay/deepseek-servant/blob/main/DESIGN.md)
 - [实现与验证记录](IMPLEMENTATION.md)
 - [数据保留与清理](RETENTION.md)
 - [第三方版权声明](THIRD_PARTY_NOTICES.md)

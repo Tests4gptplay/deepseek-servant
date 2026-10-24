@@ -1,6 +1,6 @@
 # DeepSeek Servant 实现说明
 
-版本：`0.1.0-alpha.3`。架构基线见 [DESIGN.md](DESIGN.md)，实施与实测记录如下。
+版本：`0.1.0-alpha.3`。架构基线见 [DESIGN.md](https://github.com/Tests4gptplay/deepseek-servant/blob/main/DESIGN.md)，实施与实测记录如下。
 
 ## 模块交付与宿主集成
 
