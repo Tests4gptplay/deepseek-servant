@@ -1,0 +1,6 @@
+- insert:
+    - id: deepseek-servant
+      name: deepseek-servant
+      config:
+        workerSeats: 2
+        reviewEvery: 5
