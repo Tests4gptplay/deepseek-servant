@@ -8,7 +8,7 @@
 
 本仓库提供插件生产源码、构建配置和开发说明。`build`、`typecheck` 为显式工程命令；`npm pack --ignore-scripts` 使用正式文件白名单收录 Host/Client JS、许可证、NOTICE 和必要说明；发行构建关闭 source map。模型转接与实验素材在隔离验证环境中使用。
 
-任务和知识持久化在 DSH 的 `storageDomain`。模型调用、文件与命令工具、Session、jobs 和 Skills 使用宿主现有服务；任务流转在本地后端完成。Client 通过宿主已认证的 Connection/RPC 与流事件通道交互。
+任务和知识持久化在 DSH 的 `storageDomain`。模型调用、文件与命令工具、Session、jobs 和 Skills 使用宿主现有服务；当前模式的任务流转在所属 DSH 实例的后端完成。Client 通过宿主已认证的 Connection/RPC 与流事件通道交互。
 
 适配宿主为 DSH `0.2.1-rc.2`，核对的官方源码标签 `dsh-v0.2.1-rc.2`、提交 `687f282e8625c6b8d11ff58211a90524be2e4317`。DSH API 适配集中在 `src/adapters/dsh`，更新宿主版本时可按接口逐项核对。
 
@@ -57,7 +57,7 @@ Client 使用 DSH 原生模块加载器格式和共享组件，不另装一套�
 
 任务详情可以暂停、恢复、取消、停止确切执行、回答问题、修改目标和优先级。优先级默认为 0，较大整数优先选择，不抢占正在执行的工作。只有旧执行物理状态为 unknown 时才出现人工核对入口，要求填写已核实的事实；正常派发不经过此入口。
 
-## CAH 的本地工作记忆
+## 当前实例的任务工作记忆
 
 任务接续借鉴 CAH 的角色责任、目标约定、工作前沿和结果评价思想，在 DSH 内使用本地持久记录实现，不依赖 Git 提交或外部 Task Cell。
 
