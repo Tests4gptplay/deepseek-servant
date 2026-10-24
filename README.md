@@ -4,7 +4,7 @@
 
 **设计逻辑源自 [Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness)。** DeepSeek Servant 延续 CAH 以目标为中心的 Agent 工作闭环：理解需求、制定计划、执行工作、评价成果、调整方法、跨会话接续、故障恢复与技能积累。Servant 将这套持续工作机制整合到 DeepSeek Harness 运行环境，复用宿主的模型、工具、Session、作业与 Skill 能力。
 
-**当前版本：** `0.1.0-alpha.6` · **适配宿主：** DSH `0.2.1-rc.2` · **项目形态：** 独立安装的社区插件
+**当前版本：** `0.1.0-alpha.7` · **适配宿主：** DSH `0.2.1-rc.2` · **项目形态：** 独立安装的社区插件
 
 ## 核心能力
 
@@ -49,14 +49,14 @@ npm pack --ignore-scripts
 将生成的插件包安装到指定 DSH profile：
 
 ```sh
-dsh plugin --profile <profile> add ./deepseek-servant-0.1.0-alpha.6.tgz --ignore-scripts
+dsh plugin --profile <profile> add ./deepseek-servant-0.1.0-alpha.7.tgz --ignore-scripts
 ```
 
 建议先选择独立的 DSH profile 验证。模型提供者、工具权限与凭据使用宿主已有配置。
 
 ## 兼容性与数据存储
 
-**当前适配版本：** DSH `0.2.1-rc.2`。`alpha.3` 完成包名、服务和通信标识统一后的源码级核对。后续目标环境验收包括改名版本的宿主安装、Windows Electron 和 Codex 专有模型路由。
+**已验证宿主版本：** DSH `0.2.1-rc.2`。插件从宿主获取 DSH 组件，按宿主的实际插件接口运行。`alpha.3` 完成包名、服务和通信标识统一后的源码级核对。后续目标环境验收包括改名版本的宿主安装、Windows Electron 和 Codex 专有模型路由。
 
 当前运行模式将任务记录保存在所属 DSH 实例的 `storageDomain` 中。DSH 的原生 Session 归档保留会话日志文件，界面分别显示插件记录的实际回收量与宿主日志的保留量。详见 [数据保留与清理](RETENTION.md)。
 
