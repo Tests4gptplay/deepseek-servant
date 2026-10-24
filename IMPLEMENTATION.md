@@ -37,7 +37,7 @@
 
 `TaskService.submit` 将 Task、命令回执和 `plan` 动作一次提交。RuntimeCoordinator 收到提交事件，在满足用户控制和资源条件后保存 `action.claim`。Supervisor 再保存 execution/session 身份，最后创建原生 Agent、装入所选 preset 和角色能力、注入该动作的稳定输入。没有保存成功就没有原生派发。
 
-Planner 用 `planning.commit` 保存正式 Plan 和子任务。Worker 席位默认两个，可由插件 Host 配置调整；它不代表 DSH 的全局并发上限。每个 Worker 仍由其原生 Agent 串行处理自己的模型回合。Worker `execution_report` 通过 executionId、assignmentVersion 和 resultId 核对，不让正常并发报告竞争一个旧 Task revision。
+Planner 用 `planning.commit` 保存正式 Plan 和子任务。Worker 席位默认两个，可由插件 Host 配置调整，配置范围独立于 DSH 的全局模型并发限制。每个 Worker 仍由其原生 Agent 串行处理自己的模型回合。Worker `execution_report` 通过 executionId、assignmentVersion 和 resultId 核对，不让正常并发报告竞争一个旧 Task revision。
 
 终结报告关闭该 Worker 的业务能力。报告工具是原生独占工具，持久成功后结束当前模型回合，同批后续业务工具由执行归属检查拒绝。实际 Agent 如仍有本机 jobs，则继续保有其物理归属；不能用业务报告冒充进程停止。
 
