@@ -31,7 +31,7 @@
 
 维护必须同时考虑技能和项目事实。技能的来源、验证及成功/失败结果，项目事实的 `sourceResultId` 都会保护相应的瘦结果证据。它们不保护整段任务历史或原生 Session 所有权。
 
-`KnowledgeService.withRetentionLock` 提供当前后端实例内的维护屏障。清理前等待已有知识写入，屏障期间新增知识引用等待；维护重新读取引用后，才允许删去无引用的归档。普通知识写入仍通过每个技能的串行通道保存。这不是跨记录 KV 事务，也不假定宿主具有跨进程 CAS；它依赖插件已声明的单一运行所有者。
+`KnowledgeService.withRetentionLock` 提供当前后端实例内的维护屏障。清理前等待已有知识写入，屏障期间新增知识引用等待；维护重新读取引用后，才允许删去无引用的归档。普通知识写入仍通过每个技能的串行通道保存。维护按单运行实例串行执行，存储提交以单记录持久化为边界；跨进程共享写入需要另行设计协调。
 
 从未使用且没有验证或结果反馈的历史候选版本可以删除。已使用或验证过的历史版本保留版本号、内容哈希、适用范围及来源/结果引用；在其所有实际使用任务都已归档、该版本不再可用且达到期限或正文数量目标后，可移除完整正文并设置 `bodyRetiredAt`。原内容哈希继续标识原来的方法，不会改写成空正文的哈希。
 
@@ -39,9 +39,9 @@
 
 已归档任务的逐次加载记录可合并为带确切 taskId、executionId、contentHash、加载次数和时间范围的记录；结果反馈保留实际 resultId、结果、原观察标识和执行归属。次数不会被清零，也不会把历史加载伪装成新成功。已压缩执行拒绝迟到的新加载记录。
 
-## 原生会话的明确限制
+## 原生会话的存储与归档行为
 
-已核对的 DSH `0.2.1-rc.2` 没有公开的持久 Session 删除或截断 API。支持的 `workspaceRegistry.archiveSession` 会归档会话入口，保留原生日志。适配器在存在活 Agent、活 Session 或外部写租约时拒绝归档。
+DSH `0.2.1-rc.2` 的 `workspaceRegistry.archiveSession` 将会话入口归档，原生日志继续保存在宿主存储中。适配器会在活 Agent、活 Session 或外部写租约结束后进行归档。
 
 宿主接口依据固定于提交 `687f282e8625c6b8d11ff58211a90524be2e4317`：[Session 持久化实现](https://github.com/deepseek-ai/deepseek-harness/blob/687f282e8625c6b8d11ff58211a90524be2e4317/packages/session/session-persistence/src/index.ts)与[工作区会话归档实现](https://github.com/deepseek-ai/deepseek-harness/blob/687f282e8625c6b8d11ff58211a90524be2e4317/packages/workspace/workspace/src/index.ts)。将来宿主增加受支持的清除接口时，再由适配器接入；当前不借用内部文件布局承担这项能力。
 

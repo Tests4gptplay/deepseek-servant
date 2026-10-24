@@ -34,18 +34,16 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-## Private CAH and ChatCMD references
+## Design and implementation references
 
-The behavioral architecture draws on CAH principles. No private CAH source,
-transport implementation, private research notes, or execution records are included.
+The architecture draws on CAH's goal-oriented task continuity and agent role
+separation. DeepSeek Servant implements this behavior through native DSH services.
 
-[ChatCMD](https://github.com/int04/ChatCmd) was consulted as a permitted local
-runtime implementation reference. No ChatCMD source file has been copied into
-this version of deepseek-servant. Future source reuse must preserve the corresponding
-license and attribution at the exact reused version.
+[ChatCMD](https://github.com/int04/ChatCmd) was consulted as a reference for
+local-first task management. Its code is not part of the current package.
+Future third-party source reuse will retain its original notices and license terms.
 
 ## Package dependencies
 
-The package manifest records direct and host peer dependencies. Their original
-licenses continue to apply. The license terms of each dependency remain applicable. This repository does
-not by itself grant rights to unrelated third-party software.
+The package manifest lists direct dependencies and DSH host peer dependencies.
+Each dependency retains its own license and notice requirements.

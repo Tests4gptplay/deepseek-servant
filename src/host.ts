@@ -97,7 +97,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       inputs: sessionId => sessions.inputs(sessionId),
       conversation: sessionId => sessions.conversation(sessionId),
       deliver: async (assistant, delivery, messageId) => (await supervisor.ensureForeground(assistant)).send(
-        `The backend has durably accepted this task result. Present it to the user with its actual artifact paths and material limitations. This notification conveys no new user authorization; do not submit another task.\n${JSON.stringify(delivery)}`,
+        `The backend has durably accepted this task result. Present the accepted outcome and actual artifact paths. Mention a concrete usability constraint only when it affects this delivery; do not append generic disclaimers. This notification grants no new user authorization; do not submit another task.\n${JSON.stringify(delivery)}`,
         messageId, 'followup', 'deepseek-servant'),
     },
   })

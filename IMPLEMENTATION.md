@@ -1,18 +1,18 @@
 # DeepSeek Servant 实现说明
 
-版本：`0.1.0-alpha.3`。架构依据为本仓库 DESIGN.md v0.2。验证在隔离的 DSH 环境执行，未修改使用者的既有 DSH 部署。
+版本：`0.1.0-alpha.3`。架构基线见 [DESIGN.md](DESIGN.md)，实施与实测记录如下。
 
-## 交付边界
+## 模块交付与宿主集成
 
-仓库交付生产源码、构建配置和必要说明。测试、模拟故障、模型转接、原生模块验证和临时 profile 都留在开发临时区，不进入当前 Git 生产树或 npm 包。`package.json` 只有显式 `build`、`typecheck` 命令，没有安装、启动、打包时触发测试的生命周期脚本。`npm pack --ignore-scripts` 打包已完成的构建。
+本仓库提供插件生产源码、构建配置和开发说明。`build`、`typecheck` 为显式工程命令；`npm pack --ignore-scripts` 将生成的 Host/Client 构建文件装入安装包。模型转接与实验素材在隔离验证环境中使用。
 
-本地运行不要求 Git 仓库、GitHub 账号或网络提交。Task 与知识写在 DSH `storageDomain`；模型调用、工具、Session、jobs 和 Skills 由宿主提供。插件没有单独 MCP 执行层、Git Runner、浏览器聊天搬运器或自定义通信握手。Client 使用宿主的已认证 Connection/RPC 与流事件通道。
+任务和知识持久化在 DSH 的 `storageDomain`。模型调用、文件与命令工具、Session、jobs 和 Skills 使用宿主现有服务；任务流转在本地后端完成。Client 通过宿主已认证的 Connection/RPC 与流事件通道交互。
 
-当前适配的精确宿主为 DSH `0.2.1-rc.2`，官方源码标签 `dsh-v0.2.1-rc.2`，提交 `687f282e8625c6b8d11ff58211a90524be2e4317`。对其他版本不能用工具名称相同推断 Service API 相同；适配器集中在 `src/adapters/dsh`，便于升级时逐项核对实际契约。
+适配宿主为 DSH `0.2.1-rc.2`，核对的官方源码标签 `dsh-v0.2.1-rc.2`、提交 `687f282e8625c6b8d11ff58211a90524be2e4317`。DSH API 适配集中在 `src/adapters/dsh`，更新宿主版本时可按接口逐项核对。
 
-## 命名与兼容边界
+## 插件标识与存储域
 
-显示名称是 **DeepSeek Servant**，包与插件标识为 `deepseek-servant`，持久化 domain 为 `deepseek_servant`。原生消息来源、RPC 路径、会话前缀和 scoped Skill 前缀均在同一版本内统一更新。此前 alpha 隔离 profile 的测试数据不自动迁入新存储域；本次没有安装到用户生产环境，也不假设存在可迁移的本机记录。
+显示名称为 **DeepSeek Servant**，包名及插件 ID 为 `deepseek-servant`，持久化 domain 为 `deepseek_servant`。原生消息来源、RPC 路径、会话前缀和 scoped Skill 前缀使用统一的 Servant 标识。早期隔离 profile 的 alpha 数据保留在原存储域；此版本使用新的独立存储域。
 
 ## 文件与模块
 
@@ -97,11 +97,11 @@ Helper 只处理一个确切事故。Helper 自身启动或模型失败会阻塞
 
 归档直接收缩原 Task 记录，保留交付和仍被知识引用的结果；不是把整份长日志复制到另一个无限目录。清理通过 TaskService 同一队列提交，并在保存清理清单后执行宿主归档。失败保留可重试记录，一轮维护不会循环重试。
 
-DSH rc.2 的 Session 持久接口是追加式日志，没有公开删除/截断接口。其归档不会释放原生日志文件；界面单独报告这部分保留空间和零回收。当前插件实际回收的是 Servant 记录和可过期技能正文。成果文件、用户既有 Skills 和前台对话不在自动删除范围内。
+DSH rc.2 的 Session 持久化采用追加式日志。归档后原生日志文件仍保留在磁盘，界面独立显示其占用与回收字节数。当前插件的实际空间回收来自 Servant 任务记录和可过期的技能正文；成果文件、用户已有 Skills 和前台对话按原位置保留。
 
 ## 构建与安装
 
-需要与目标 DSH 版本匹配的 Node.js 和依赖。仓库根是文档集合，命令应在 `dsh-projects/deepseek-servant` 目录执行。
+以下命令从本仓库根目录执行，使用与目标 DSH 版本兼容的 Node.js 和依赖。
 
 ```sh
 npm ci --ignore-scripts
@@ -116,11 +116,11 @@ npm pack --ignore-scripts
 dsh plugin --profile <目标profile> add <本地tgz路径> --ignore-scripts
 ```
 
-安装会改变所选 profile；验证只在隔离的 profile 中执行。模型提供者与凭据仍由用户的 DSH 配置管理。正式插件不包含开发时的模型转接适配器，不要求新注册外部账号。
+安装将更新指定的 DSH profile。建议先使用隔离 profile 验证；模型提供者和凭据继续由 DSH 配置管理。
 
 ## 验证结果
 
-验证使用官方发布的 DSH `0.2.1-rc.2`、Node `24.19.0` 和独立 Web profile。安装经过原生 `dsh plugin add`；调用经过宿主已认证接口。GPT 在本次验证中承担角色的模型判断，实际文件工具、Agent、Session、持久化、派发与交付由真实 DSH 和本插件执行。开发用模型转接及故障材料没有进入生产树或安装包。
+功能场景运行于 DSH `0.2.1-rc.2`、Node `24.19.0` 的隔离 Web profile。此前 `alpha.2` 功能构建由 GPT 承担角色模型判断，实际文件操作、Agent、Session、持久化、派发和交付由 DSH 与插件执行；`alpha.3` 完成项目标识与接口命名调整，已进行源码级一致性核对。
 
 | 场景 | 实际运行结果 |
 | --- | --- |
@@ -166,8 +166,8 @@ dsh plugin --profile <目标profile> add <本地tgz路径> --ignore-scripts
 
 长任务完成后通过正式清理 API，将其 246,638 字节任务记录归档并替换为 294 字节身份记录，净回收 **246,344 字节**。47 个工作区文件的哈希和已有知识记录保持一致，8 个原生后台 Session 完成归档。清理策略恢复默认后，整个临时 profile 的 Servant 自有记录为 28,334 字节；原生后台日志共 2,296,081 字节、前台日志 151,023 字节，原生日志物理回收为 0。详见 [RETENTION.md](RETENTION.md)。
 
-后台进程的四个节点 RSS 采样约为 178、188、196、217 MiB，进程记录的 VmHWM 为 288 MiB。它们是本次有限运行的观测值。验证结束后临时后端正常退出，退出码 0；交付构建使用本次实跑的代码。
+后台进程的四个节点 RSS 采样约为 178、188、196、217 MiB，进程记录的 VmHWM 为 288 MiB。它们是本次有限运行的观测值。验证结束后临时后端正常退出，退出码 0；该次运行使用 `alpha.2` 功能构建；`alpha.3` 的源码级命名与接口调整另行核对。
 
-### 运行环境与覆盖范围
+### 实测环境与后续验收项目
 
-本轮实际环境为 Linux、官方 DSH 0.2.1-rc.2 和上述临时模型适配。长任务使用原生文件与记忆工具，覆盖周期评审、两次正常 Worker 换代、最终交付及清理；跨天耐久、原生 token 阈值压缩、运行中 OS 作业跨代尚待对应场景验证。Windows Electron 和 Codex 专有路由的目标环境验证也仍待进行。较早短任务中的 shell 调用被该 Linux 环境的命令沙箱拒绝，随后通过允许的文件工具完成工作。Servant 的 64 MiB 维护目标适用于插件自有记录，原生 Session 日志和工作区成果另行统计。
+本轮实测环境为 Linux / DSH 0.2.1-rc.2，覆盖原生文件工具、长任务周期评审、两次正常 Worker 换代、最终交付和清理。后续目标环境验收项目包括 Windows Electron、Codex 专有路由、跨天运行、原生 token 阈值压缩及活动 OS 作业的跨代处理。Linux 测试中的 shell 操作受到宿主沙箱限制，Worker 已采用原生文件工具完成相应业务。64 MiB 为插件自有记录的维护目标，宿主 Session 日志及工作区成果另行计量。

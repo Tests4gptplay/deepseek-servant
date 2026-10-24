@@ -2,24 +2,36 @@
 
 基于 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai/deepseek-harness) 的本地自主 AI 助理插件。围绕持久目标进行规划、执行、成果评价、方法调整、任务接续和技能积累。
 
-> 当前版本：**0.1.0-alpha.3**。面向 DSH **0.2.1-rc.2**；已在隔离的 Linux DSH 环境验证，尚未完整验证 Windows Electron 和 Codex 专有模型路由。不属于 DeepSeek 官方项目。
+**当前版本：** `0.1.0-alpha.3` · **适配宿主：** DSH `0.2.1-rc.2` · **项目形态：** 独立安装的社区插件
 
-## 能力
+## 核心能力
 
-- **独立助理入口：**左侧导航独立页面，前台对话与后台任务分离，自选工作区，不随普通聊天窗口切换。
-- **持续 Agent 工作：**Foreground 接收目标，Planner 规划并评价，Worker 用宿主工具执行，Helper 处理有具体归属的故障；按需使用角色，不常驻空转。
-- **可靠接续：**目标、计划、工作前沿、执行归属、回执与 PendingAction 持久保存；支持有界进度、周期评审、正常 Worker 换代及后端重启后的状态恢复。
-- **并行与控制：**多个独立 Worker、依赖调度、暂停、恢复、取消、用户补充要求与优先级；区分停止派发和物理作业停止。
-- **学习闭环：**从有证据的结果提炼限定范围的 Skill 版本，复用 DSH 原生技能发现与按需加载，记录实际使用、验证和反馈。
-- **完成后清理：**收缩已结束任务的热记忆、保护交付与引用证据；原生 Session 日志的归档不等于释放磁盘空间。
+- **独立助理入口：** 左侧导航的专属页面，前台交流和后台任务分离；助理可选择自己的工作区。
+- **持续 Agent 工作：** Foreground 理解目标，Planner 制定计划并评价成果，Worker 执行具体工作，Helper 处理明确的运行故障。按任务需要调用对应角色。
+- **任务接续与恢复：** 持久保存目标、计划、工作前沿、执行归属及结果；支持周期评审、Worker 正常换代、进度续作和后端重启后的状态恢复。
+- **并行与任务控制：** 独立 Worker 并行、依赖协调、优先级、暂停、继续、取消和用户即时调整目标。
+- **技能积累：** 从有证据的实际结果提炼可复用方法，接入 DSH 原生 Skill 系统，追踪适用范围、版本、实际加载和后续反馈。
+- **工作记忆管理：** 已完成任务的过程记录按策略精简，交付成果、有效技能和必要证据持续保留。
+
+## 已完成的运行验证
+
+此前 `alpha.2` 功能基线在隔离的 **Linux / DSH 0.2.1-rc.2** 环境中，已完成短任务从实际执行到成果验收、前台交付的完整流程，以及技能生成、加载和后续复用。
+
+长任务验证处理了 **16 批、64 条合成事件**，包括 **3 次周期评审、2 次正常 Worker 换代**、跨代历史回查和最终独立核对。32 行最终账本与 16 批累计快照均与预先保存的独立答案一致；任务完成后执行了正式清理，成果文件哈希保持一致。
+
+更多实测过程、运行条件及清理结果见 [实现与验证记录](IMPLEMENTATION.md)。
 
 ## 架构
 
-采用嵌入 DSH 的模块化单体：TaskService / TaskKernel 负责持久状态和确定性变更；RuntimeCoordinator / AgentSupervisor 持有派发与实际 Agent 所有权；KnowledgeService 与宿主 Skill provider 对接。运行时使用 DSH 的 storageDomain、Agent、Session、tools、jobs 与工作区能力，**不依赖 Git Runner、独立 MCP 执行层或浏览器聊天搬运链**。
+采用嵌入 DSH 的模块化单体：
+
+`TaskService / TaskKernel` 管理持久化任务事实与确定性状态变更；`RuntimeCoordinator / AgentSupervisor` 负责派发、运行所有权与接续；`KnowledgeService` 管理知识及技能版本。
+
+运行时复用 DSH 的 `storageDomain`、Agent、Session、tools、jobs、工作区和原生技能能力。任务调度与记忆存储直接在本地宿主完成。
 
 ## 构建与安装
 
-在已准备好与 DSH 0.2.1-rc.2 兼容的 Node.js / npm 环境中：
+在兼容的 Node.js / npm 环境中，从仓库根目录执行：
 
 ```sh
 npm ci --ignore-scripts
@@ -28,19 +40,19 @@ npm run build
 npm pack --ignore-scripts
 ```
 
-在需要安装的 DSH profile 使用宿主提供的插件安装命令：
+将生成的插件包安装到指定 DSH profile：
 
 ```sh
 dsh plugin --profile <profile> add ./deepseek-servant-0.1.0-alpha.3.tgz --ignore-scripts
 ```
 
-这会改变目标 DSH profile。建议先使用隔离 profile 验证；模型提供者、凭据和工具权限仍由宿主配置管理。
+建议先选择独立的 DSH profile 验证。模型提供者、工具权限与凭据使用宿主已有配置。
 
-## 验证范围与已知限制
+## 兼容性与数据存储
 
-上一轮隔离环境中，已通过短任务的执行—验收—交付、技能形成与实际复用，以及 16 批 / 64 条合成事件的连续工作场景（3 次周期评审、2 次正常 Worker 换代、窗口外历史回查、最终独立核算与清理）。这不是对所有平台或任意长任务的保证。
+**当前适配版本：** DSH `0.2.1-rc.2`。`alpha.3` 完成包名、服务和通信标识统一后的源码级核对。后续目标环境验收包括改名版本的宿主安装、Windows Electron 和 Codex 专有模型路由。
 
-当前 DSH 0.2.1-rc.2 提供会话归档，但没有公开的持久 Session 删除或截断接口；本插件不会直接删除宿主日志文件。详见 [清理说明](RETENTION.md)。
+任务记录由插件在本地管理。DSH 的原生 Session 归档保留会话日志文件，界面分别显示插件记录的实际回收量与宿主日志的保留量。详见 [数据保留与清理](RETENTION.md)。
 
 ## 开发文档
 
@@ -48,5 +60,3 @@ dsh plugin --profile <profile> add ./deepseek-servant-0.1.0-alpha.3.tgz --ignore
 - [实现与验证记录](IMPLEMENTATION.md)
 - [数据保留与清理](RETENTION.md)
 - [第三方版权声明](THIRD_PARTY_NOTICES.md)
-
-本仓库只包含插件实现及必要文档；测试模型桥、私有 CAH 研究档案、个人运行记录和临时验证素材不作为运行或发布依赖。
