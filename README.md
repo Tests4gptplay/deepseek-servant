@@ -2,6 +2,8 @@
 
 基于 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai/deepseek-harness) 的本地自主 AI 助理插件。围绕持久目标进行规划、执行、成果评价、方法调整、任务接续和技能积累。
 
+**设计逻辑源自 [Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness)。** DeepSeek Servant 延续 CAH 以目标为中心的 Agent 工作闭环：理解需求、制定计划、执行工作、评价成果、调整方法、跨会话接续、故障恢复与技能积累。Servant 将这套持续工作机制直接整合到本地 DeepSeek Harness，复用宿主的模型、工具、Session、作业与 Skill 能力。
+
 **当前版本：** `0.1.0-alpha.3` · **适配宿主：** DSH `0.2.1-rc.2` · **项目形态：** 独立安装的社区插件
 
 ## 核心能力
@@ -60,3 +62,9 @@ dsh plugin --profile <profile> add ./deepseek-servant-0.1.0-alpha.3.tgz --ignore
 - [实现与验证记录](IMPLEMENTATION.md)
 - [数据保留与清理](RETENTION.md)
 - [第三方版权声明](THIRD_PARTY_NOTICES.md)
+
+## 设计来源与开源许可
+
+DeepSeek Servant 由 [Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness) 的 Agent 设计体系延伸而来，并在 DeepSeek Harness 中实现本地化运行。
+
+本项目沿用 CAH 的 **[GNU AGPL v3.0 only（AGPL-3.0-only）](LICENSE)** 许可证。项目版权声明见 [NOTICE](NOTICE)，第三方依赖及相应许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

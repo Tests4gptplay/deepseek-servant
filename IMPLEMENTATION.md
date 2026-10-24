@@ -2,6 +2,8 @@
 
 版本：`0.1.0-alpha.3`。架构基线见 [DESIGN.md](https://github.com/Tests4gptplay/deepseek-servant/blob/main/DESIGN.md)，实施与实测记录如下。
 
+**设计来源：**[Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness)，在 DSH 中实现其持续任务、Agent 角色分工、工作接续与知识积累机制。
+
 ## 模块交付与宿主集成
 
 本仓库提供插件生产源码、构建配置和开发说明。`build`、`typecheck` 为显式工程命令；`npm pack --ignore-scripts` 将生成的 Host/Client 构建文件装入安装包。模型转接与实验素材在隔离验证环境中使用。

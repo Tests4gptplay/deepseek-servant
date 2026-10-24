@@ -1,0 +1,16 @@
+DeepSeek Servant
+Copyright (c) 2026 Tests4gptplay
+
+DeepSeek Servant extends the agent workflow and task-continuity design of
+Chat Agent Harness (CAH):
+https://github.com/Tests4gptplay/chat-agent-harness
+
+Original DeepSeek Servant source and documentation for which Tests4gptplay holds
+the necessary rights are licensed under the GNU Affero General Public License
+version 3 only (AGPL-3.0-only). See LICENSE for the full license text.
+
+Third-party applications, dependencies, imported source, assets, and separately
+attributed material retain their respective licenses and notices. See
+THIRD_PARTY_NOTICES.md for references used by this project.
+
+SPDX-License-Identifier: AGPL-3.0-only

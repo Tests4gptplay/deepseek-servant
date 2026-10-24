@@ -34,10 +34,16 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-## Design and implementation references
+## Chat Agent Harness (CAH) — design lineage
 
-The architecture draws on CAH's goal-oriented task continuity and agent role
-separation. DeepSeek Servant implements this behavior through native DSH services.
+DeepSeek Servant's agent workflow design extends the goal-oriented planning,
+execution, evaluation, task-continuity, recovery, and skill-learning architecture
+of [Chat Agent Harness (CAH)](https://github.com/Tests4gptplay/chat-agent-harness).
+DeepSeek Servant implements this workflow using native DeepSeek Harness services.
+
+CAH's public project is distributed under AGPL-3.0-only. DeepSeek Servant
+adopts the same project license; the full text is in LICENSE and this project's
+copyright notice is in NOTICE.
 
 [ChatCMD](https://github.com/int04/ChatCmd) was consulted as a reference for
 local-first task management. Its code is not part of the current package.

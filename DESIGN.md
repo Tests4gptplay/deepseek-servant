@@ -4,6 +4,8 @@
 
 本文集中说明系统的模块组成、数据与运行实例所有权、接口调用、任务闭环，以及开发依赖顺序；技术术语在首次出现时解释。
 
+本项目的 Agent 运行理念延伸自 [Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness)，继承目标驱动、规划—执行—评价、纠错、可替换上下文和技能积累的完整工作闭环，并将运行协调落实到 DSH 本地服务中。
+
 产品能力与适用环境见[项目说明](README.md)，实际宿主适配和验证过程见[实现说明](IMPLEMENTATION.md)。本文所列 Servant 服务属于插件应用层，由 DSH 适配器接入宿主接口。
 
 ## 1. 总体架构决策

@@ -2,6 +2,8 @@
 
 本仓库用于开发 DeepSeek Harness 的独立个人助理插件。项目所有者决定产品定位、公开措辞、许可证、可见性和正式发布时机。
 
+Agent 设计体系延续自 [Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness)。本仓库采用与 CAH 公库一致的 `AGPL-3.0-only` 许可证；对外说明及元数据中的 CAH 链接统一使用这个公开仓库地址。
+
 ## 开发原则
 
 - 保留 Foreground / Planner / Worker / Helper 的语义职责，复用 DSH 的原生 Agent、存储、Session、工具、作业和技能接口。
