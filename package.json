@@ -1,6 +1,6 @@
 {
   "name": "deepseek-servant",
-  "version": "0.1.0-alpha.3",
+  "version": "0.1.0-alpha.4",
   "description": "基于 DeepSeek Harness 的本地自主 AI 助理插件，支持目标规划、持续执行、多 Agent 协作、任务接续、故障恢复与技能学习。",
   "private": true,
   "type": "module",
@@ -11,7 +11,8 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib",
+    "lib/host.js",
+    "lib/client.js",
     "cordis.patch.yml",
     "README.md",
     "IMPLEMENTATION.md",

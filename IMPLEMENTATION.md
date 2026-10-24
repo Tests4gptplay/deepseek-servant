@@ -1,10 +1,10 @@
 # DeepSeek Servant 实现说明
 
-版本：`0.1.0-alpha.3`。架构基线见 [DESIGN.md](https://github.com/Tests4gptplay/deepseek-servant/blob/main/DESIGN.md)，实施与实测记录如下。
+版本：`0.1.0-alpha.4`。架构基线见 [DESIGN.md](https://github.com/Tests4gptplay/deepseek-servant/blob/main/DESIGN.md)，实施与实测记录如下。
 
 ## 模块交付与宿主集成
 
-本仓库提供插件生产源码、构建配置和开发说明。`build`、`typecheck` 为显式工程命令；`npm pack --ignore-scripts` 将生成的 Host/Client 构建文件装入安装包。模型转接与实验素材在隔离验证环境中使用。
+本仓库提供插件生产源码、构建配置和开发说明。`build`、`typecheck` 为显式工程命令；`npm pack --ignore-scripts` 仅收录正式 Host/Client 运行文件及必要说明。构建使用无 source map 的发行配置，插件包通过精确文件白名单控制内容。模型转接与实验素材在隔离验证环境中使用。
 
 任务和知识持久化在 DSH 的 `storageDomain`。模型调用、文件与命令工具、Session、jobs 和 Skills 使用宿主现有服务；任务流转在本地后端完成。Client 通过宿主已认证的 Connection/RPC 与流事件通道交互。
 

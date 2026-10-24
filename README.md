@@ -2,7 +2,7 @@
 
 基于 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai/deepseek-harness) 的本地自主 AI 助理插件。围绕持久目标进行规划、执行、成果评价、方法调整、任务接续和技能积累。
 
-**当前版本：** `0.1.0-alpha.3` · **适配宿主：** DSH `0.2.1-rc.2` · **项目形态：** 独立安装的社区插件
+**当前版本：** `0.1.0-alpha.4` · **适配宿主：** DSH `0.2.1-rc.2` · **项目形态：** 独立安装的社区插件
 
 ## 核心能力
 
@@ -43,7 +43,7 @@ npm pack --ignore-scripts
 将生成的插件包安装到指定 DSH profile：
 
 ```sh
-dsh plugin --profile <profile> add ./deepseek-servant-0.1.0-alpha.3.tgz --ignore-scripts
+dsh plugin --profile <profile> add ./deepseek-servant-0.1.0-alpha.4.tgz --ignore-scripts
 ```
 
 建议先选择独立的 DSH profile 验证。模型提供者、工具权限与凭据使用宿主已有配置。
