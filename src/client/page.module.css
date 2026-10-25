@@ -106,12 +106,22 @@
 .source { display: block; margin-top: 8px; color: var(--dsw-alias-label-secondary); }
 .settings { width: 100%; max-width: 760px; align-self: flex-start; padding-top: 8px; }
 .settingsColumn { width: 100%; max-width: 760px; }
-.retention { margin-top: 32px; padding-block: 24px; border-top: 0.5px solid var(--dsw-alias-border-l3); }
-.retention > p { margin-block: 12px; }
-.retentionStats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 24px; margin-block: 20px; font: var(--dsw-font-xs-13); }
-.retentionStats > div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-.retentionStats dt { color: var(--dsw-alias-label-secondary); }
-.retentionStats dd { margin: 0; white-space: nowrap; }
+.retention { margin-top: 32px; padding-block: 14px; border-top: 0.5px solid var(--dsw-alias-border-l3); font: var(--dsw-font-xs-13); }
+.retentionHeading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding-bottom: 10px; border-bottom: 0.5px solid var(--dsw-alias-border-l3); }
+.retentionHeading h2 { margin: 0; font: var(--dsw-font-xs-strong-13); }
+.retentionGrandTotal { display: flex; gap: 8px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.retentionColumns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-bottom: 0.5px solid var(--dsw-alias-border-l3); }
+.retentionGroup { min-width: 0; margin: 0; padding: 12px 14px 0 0; }
+.retentionGroup + .retentionGroup { padding-inline: 14px 0; border-left: 0.5px solid var(--dsw-alias-border-l3); }
+.retentionRow { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding-block: 3px; }
+.retentionRow dt { min-width: 0; color: var(--dsw-alias-label-secondary); overflow-wrap: anywhere; }
+.retentionRow dd { margin: 0; flex: none; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.retentionSubtotal { margin-top: 8px; padding-block: 10px; border-top: 0.5px solid var(--dsw-alias-border-l3); font: var(--dsw-font-xs-strong-13); }
+.retentionSubtotal dt { color: inherit; }
+.retentionManage { margin-top: 10px; }
+.retentionManage > summary { color: var(--dsw-alias-label-secondary); }
+.retentionManage > p { margin-block: 10px; }
+.retentionManage > .actions { margin-block: 10px; }
 .retention summary { cursor: pointer; font-weight: 500; }
 .retentionPolicy { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 20px; margin-top: 20px; }
 .modelSettings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
@@ -135,7 +145,9 @@
   .composerFooter { justify-content: flex-end; }
   .conversation { min-height: 420px; }
   .knowledgeCard { padding: 16px; }
-  .retentionStats, .retentionPolicy { grid-template-columns: minmax(0, 1fr); }
+  .retentionColumns, .retentionPolicy { grid-template-columns: minmax(0, 1fr); }
+  .retentionGroup { padding-inline: 0; }
+  .retentionGroup + .retentionGroup { border-left: 0; border-top: 0.5px solid var(--dsw-alias-border-l3); padding-inline: 0; }
 }
 
 /* DSH applies this attribute for light/dark/system and custom skin palette modes. */

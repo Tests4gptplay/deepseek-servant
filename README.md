@@ -71,7 +71,11 @@ dsh plugin --profile <profile> add ./deepseek-servant-0.1.0-alpha.7.tgz --ignore
 - [数据保留与清理](RETENTION.md)
 - [第三方版权声明](THIRD_PARTY_NOTICES.md)
 
-## 设计来源与开源许可
+## 设计
+
+[DeepSeek Servant 统一架构与已确认设计基线](docs/DSS_MASTER_DESIGN_20261025.md) 汇总前台、记忆、后台角色、异常恢复、records.md 留档与记录管理 UI；区分已实现与待实施。
+
+来源与开源许可
 
 DeepSeek Servant 由 [Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness) 的 Agent 设计体系延伸而来，并通过 DeepSeek Harness 的原生能力实现持续任务执行。
 

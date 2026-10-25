@@ -2,9 +2,9 @@ import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 import type { AssistantSettings } from '../contracts/assistant.js'
 import type { GoalInput } from '../contracts/task.js'
 import type { ServantView } from '../contracts/views.js'
-import type { RetentionPolicy, RetentionPreview, RetentionSweepResult } from '../contracts/retention.js'
+import type { RetentionPolicy, RetentionPreview, RetentionSweepResult, StorageUsageStats } from '../contracts/retention.js'
 
-export type RetentionRequest = { action: 'preview' } | { action: 'sweep'; previewId: string }
+export type RetentionRequest = { action: 'stats' } | { action: 'preview' } | { action: 'sweep'; previewId: string }
   | { action: 'configure'; policy: RetentionPolicy; expectedRevision: number }
 
 export interface ServantClientApi {
@@ -28,6 +28,7 @@ export interface ServantSnapshot {
   error?: string
   pending: string[]
   retention?: RetentionPreview
+  storageStats?: StorageUsageStats
   lastCleanup?: Pick<RetentionSweepResult, 'reclaimedServantBytes' | 'nativeReclaimedBytes' | 'finishedAt' | 'nativeLogsRetained' | 'skipped'>
 }
 
@@ -67,8 +68,10 @@ export function createServantSource(api: ServantClientApi, notify: (notice: Omit
     const request = ++epoch
     publish({ ...snapshot, status: 'loading', error: undefined })
     try {
-      const value = await api.view()
-      if (request === epoch) publish({ ...snapshot, status: 'ready', value, error: undefined })
+      const [value, usage] = await Promise.all([api.view(), api.retention({ action: 'stats' })])
+      if (!usage || typeof usage !== 'object' || !('totalBytes' in usage)
+        || typeof usage.totalBytes !== 'number') throw new Error('Invalid Servant storage statistics.')
+      if (request === epoch) publish({ ...snapshot, status: 'ready', value, storageStats: usage as StorageUsageStats, error: undefined })
     } catch (error) {
       if (request === epoch) publish({ ...snapshot, status: 'error', error: errorMessage(error) })
     }
@@ -129,7 +132,9 @@ export function createServantSource(api: ServantClientApi, notify: (notice: Omit
     knowledge: (input: Record<string, unknown>) => mutate(`knowledge:${String(input.skillId ?? input.id)}`, 'knowledgeUpdated', () => api.knowledge({ ...input, assistantId: assistantId() })),
     retention: (input: RetentionRequest) => mutate('retention', input.action === 'preview' ? undefined : input.action === 'configure' ? 'retentionPolicySaved' : 'retentionUpdated', async () => {
       const result = await api.retention(input)
-      if (input.action === 'sweep' && result && typeof result === 'object' && 'remaining' in result) {
+      if (input.action === 'stats') {
+        publish({ ...snapshot, storageStats: result as StorageUsageStats })
+      } else if (input.action === 'sweep' && result && typeof result === 'object' && 'remaining' in result) {
         const swept = result as RetentionSweepResult
         publish({ ...snapshot, retention: swept.remaining, lastCleanup: { reclaimedServantBytes: swept.reclaimedServantBytes,
           nativeReclaimedBytes: swept.nativeReclaimedBytes, finishedAt: swept.finishedAt, nativeLogsRetained: swept.nativeLogsRetained, skipped: swept.skipped } })

@@ -75,7 +75,7 @@ export function ServantPage(props: ServantPageProps) {
       {tab === 'tasks' && <Tasks value={value} pending={snapshot.pending} actions={props} t={t} />}
       {tab === 'knowledge' && <Knowledge value={value} pending={snapshot.pending} onKnowledge={props.onKnowledge} t={t} />}
       {tab === 'settings' && <div className={css.settingsColumn}><Settings value={value} busy={snapshot.pending.includes('configure')} onSave={props.onConfigure} t={t} />
-        <RetentionPanel preview={snapshot.retention} outcome={snapshot.lastCleanup} busy={snapshot.pending.includes('retention')} onRetention={props.onRetention} t={t} /></div>}
+        <RetentionPanel stats={snapshot.storageStats} preview={snapshot.retention} outcome={snapshot.lastCleanup} busy={snapshot.pending.includes('retention')} onRetention={props.onRetention} t={t} /></div>}
     </div>}
   </section>
 }

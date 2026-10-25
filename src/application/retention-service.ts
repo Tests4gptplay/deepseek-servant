@@ -6,8 +6,9 @@ import {
   defaultRetentionPolicy, type KnowledgeMaintenanceSession, type KnowledgeRetentionPort,
   type NativeSessionRetentionPort, type RetentionConfiguration, type RetentionPolicy,
   type RetentionPreview,
-  type RetentionSweepResult, type TaskRetentionPort, type TaskTombstone,
+  type RetentionSweepResult, type TaskRetentionPort, type TaskTombstone, type StorageUsageStats,
 } from '../contracts/retention.js'
+import { calculateStorageUsage } from './storage-usage.js'
 import { applyRetentionCommand, jsonBytes, retentionBlockers } from '../domain/retention.js'
 
 const POLICY_KEY = 'retention/policy'
@@ -32,6 +33,11 @@ export class RetentionService {
     this.serial = next
     return next
   }
+  /** Read-only storage figures; one snapshot of this plugin's own domain keys. */
+  async stats(): Promise<StorageUsageStats> {
+    return calculateStorageUsage(await this.options.store.list<unknown>(''), this.now())
+  }
+
   async configuration(): Promise<RetentionConfiguration> {
     return await this.options.store.get<RetentionConfiguration>(POLICY_KEY)
       ?? { schemaVersion: 1, revision: 0, policy: { ...defaultRetentionPolicy }, updatedAt: this.now() }
