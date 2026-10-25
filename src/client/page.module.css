@@ -138,12 +138,13 @@
   .retentionStats, .retentionPolicy { grid-template-columns: minmax(0, 1fr); }
 }
 
-/* DSH applies this attribute for light/dark/system and custom skin palette modes. */
-.servantSidebarGlyph { position: relative; display: inline-block; flex: none; vertical-align: middle; }
-.servantSidebarGlyph img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
-.servantSidebarGlyphDark { display: none; }
-/* Maid Atelier keeps its sidebar dark in both color modes. */
-body[data-ds-dark-theme] .servantSidebarGlyphLight,
-body[data-dsh-maid-atelier] .servantSidebarGlyphLight { display: none; }
-body[data-ds-dark-theme] .servantSidebarGlyphDark,
-body[data-dsh-maid-atelier] .servantSidebarGlyphDark { display: block; }
+/* Match native sidebar icons: host-owned size and inherited currentColor. */
+.servantSidebarGlyph {
+  display: inline-block;
+  flex: none;
+  vertical-align: middle;
+  background-color: currentColor;
+  mask-repeat: no-repeat;
+  mask-position: center;
+  mask-size: contain;
+}

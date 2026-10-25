@@ -6,8 +6,7 @@ import type { HostObservable, InjectFace, PropsLocale, PropsRuntime } from '@dee
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 
-declare const __SERVANT_STATUS_ICON_LIGHT_DATA_URI__: string
-declare const __SERVANT_STATUS_ICON_DARK_DATA_URI__: string
+declare const __SERVANT_STATUS_ICON_DATA_URI__: string
 import type { AssistantSettings } from '../contracts/assistant.js'
 import type { GoalInput } from '../contracts/task.js'
 import type { ServantView, TaskView } from '../contracts/views.js'
@@ -325,10 +324,9 @@ function Field({ label, children }: { label: string, children: ReactNode }) { re
 function lines(text: string): string[] { return text.split('\n').map(line => line.trim()).filter(Boolean) }
 
 export function ServantSidebarIcon({ size }: PropsRuntime<'sidebar.panellist'>) {
-  return <span className={css.servantSidebarGlyph} style={{ width: size, height: size }} aria-hidden="true">
-    <img className={css.servantSidebarGlyphLight} src={__SERVANT_STATUS_ICON_LIGHT_DATA_URI__} alt="" draggable={false} />
-    <img className={css.servantSidebarGlyphDark} src={__SERVANT_STATUS_ICON_DARK_DATA_URI__} alt="" draggable={false} />
-  </span>
+  return <span className={css.servantSidebarGlyph} aria-hidden="true" style={{
+    width: size, height: size, maskImage: `url("${__SERVANT_STATUS_ICON_DATA_URI__}")`,
+  }} />
 }
 
 export interface ServantNoticeInjected { hooks: { notice: HostObservable<ServantNotice | undefined> }, dismiss: () => void }
