@@ -27,7 +27,8 @@
 .identity { min-width: 0; }
 .identity h1 { overflow-wrap: anywhere; }
 .identity p { margin-top: 4px; color: var(--dsw-alias-label-secondary); font: var(--dsw-font-xs-13); }
-.avatar { display: grid; flex: none; place-items: center; width: 44px; height: 44px; border-radius: var(--dsw-radius-md); background: var(--dsw-alias-interactive-bg-hover); }
+.avatar { display: block; flex: none; width: 44px; height: 44px; object-fit: contain; background: transparent; }
+.welcomeIcon { display: block; flex: none; width: 64px; height: 64px; object-fit: contain; background: transparent; }
 .headerStatus { flex: none; }
 .status { gap: 6px; white-space: nowrap; font: var(--dsw-font-xs-13); }
 .navigation { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 0 clamp(24px, 4vw, 48px) 20px; }

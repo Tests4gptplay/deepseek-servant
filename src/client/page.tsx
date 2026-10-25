@@ -7,6 +7,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 
 declare const __SERVANT_STATUS_ICON_DATA_URI__: string
+declare const __SERVANT_ICON_DATA_URI__: string
 import type { AssistantSettings } from '../contracts/assistant.js'
 import type { GoalInput, ModelRoute } from '../contracts/task.js'
 import type { ServantView, TaskView } from '../contracts/views.js'
@@ -55,7 +56,7 @@ export function ServantPage(props: ServantPageProps) {
   return <section className={css.page} aria-label={t('title')}>
     <header className={css.heading}>
       <div className={css.identity}>
-        <span className={css.avatar}><IconSparkleRegular size={24} /></span>
+        <img className={css.avatar} src={__SERVANT_ICON_DATA_URI__} alt="" />
         <div><h1>{value?.assistant.settings.name || t('title')}</h1><p>{t('subtitle')}</p></div>
       </div>
       <div className={css.headerStatus}>
@@ -152,7 +153,7 @@ function Conversation({ value, busy, onSend, models, modelBusy, onModelChange, o
   useEffect(() => { bottom.current?.scrollIntoView({ block: 'end' }) }, [value.messages.length])
   return <div className={css.conversation}>
     <div className={css.messages} role="log" aria-live="polite">
-      {!value.messages.length && <div className={css.welcome}><IconSparkleRegular size={32} /><h2>{t('conversation.empty')}</h2><p>{t('conversation.hint')}</p></div>}
+      {!value.messages.length && <div className={css.welcome}><img className={css.welcomeIcon} src={__SERVANT_ICON_DATA_URI__} alt="" /><h2>{t('conversation.empty')}</h2><p>{t('conversation.hint')}</p></div>}
       {value.messages.map(message => <article key={message.id} className={`${css.message} ${message.role === 'user' ? css.userMessage : ''}`}>
         <div className={css.messageAuthor}>{message.role === 'user' ? t('conversation.you') : value.assistant.settings.name || t('conversation.assistant')}</div>
         <div className={css.messageText}>{message.text}</div>
