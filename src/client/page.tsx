@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import {
-  Button, IconSparkleRegular, Input, Menu, SegmentedControl, StateDot, Toast,
+  Button, IconSparkleRegular, IconSettingsOutlineRegular, Input, Menu, Modal, SegmentedControl, StateDot, Toast,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { HostObservable, InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
@@ -8,19 +8,23 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 
 declare const __SERVANT_STATUS_ICON_DATA_URI__: string
 import type { AssistantSettings } from '../contracts/assistant.js'
-import type { GoalInput } from '../contracts/task.js'
+import type { GoalInput, ModelRoute } from '../contracts/task.js'
 import type { ServantView, TaskView } from '../contracts/views.js'
 import type { SkillRecord, SkillVersion } from '../contracts/knowledge.js'
 import type { ServantNotice, ServantSnapshot, ServantSource } from './source.js'
 import type { ServantLocaleKey } from './locales.js'
 import { RetentionPanel } from './retention-panel.js'
+import { ModelPicker } from './model-picker.js'
+import type { ServantModels } from './models.js'
+import { isAutoModel } from '../domain/model-route.js'
 import css from './page.module.css'
 
 type Translate = PropsLocale<'dsh.servant'>['t']
-type Tab = 'conversation' | 'tasks' | 'knowledge' | 'settings'
+type Tab = 'conversation' | 'tasks'
 
 export interface ServantInjected {
-  hooks: { servant: HostObservable<ServantSnapshot> }
+  hooks: { servant: HostObservable<ServantSnapshot>; models: HostObservable<ServantModels> }
+  onRefreshModels: () => Promise<void>
   onRefresh: ServantSource['refresh']
   onSend: ServantSource['send']
   onConfigure: ServantSource['configure']
@@ -42,6 +46,9 @@ export function ServantPage(props: ServantPageProps) {
   const { t } = props
   const snapshot = props.useServant(value => value)
   const [tab, setTab] = useState<Tab>('conversation')
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsTab, setSettingsTab] = useState<'settings' | 'knowledge'>('settings')
+  const models = props.useModels(value => value)
   const value = snapshot.value
   return <section className={css.page} aria-label={t('title')}>
     <header className={css.heading}>
@@ -53,11 +60,12 @@ export function ServantPage(props: ServantPageProps) {
         {value && <span className={css.status}><StateDot state={snapshot.status === 'error' ? 'error' : value.runtime.status === 'running' ? 'done' : 'warning'} />
           {t(snapshot.status === 'error' ? 'runtime.unavailable' : `runtime.${value.runtime.status}`)}</span>}
         <Button size="sm" onClick={() => { void props.onRefresh() }} disabled={snapshot.status === 'loading'}>{t('runtime.refresh')}</Button>
+        <Button size="sm" aria-label={t('settings.open')} title={t('settings.open')} onClick={() => setSettingsOpen(true)} disabled={!value}><IconSettingsOutlineRegular size={18} /></Button>
       </div>
     </header>
     <div className={css.navigation}>
       <SegmentedControl id="servant-tabs" label={t('tabs.label')} value={tab} onChange={setTab}
-        options={(['conversation', 'tasks', 'knowledge', 'settings'] as const).map(value => ({ value, label: t(`tabs.${value}`) }))} />
+        options={(['conversation', 'tasks'] as const).map(value => ({ value, label: t(`tabs.${value}`) }))} />
       {value && <div className={css.workspaceSummary}>
         <span>{value.workspaces.find(workspace => workspace.id === value.assistant.workspace.id)?.title ?? value.assistant.workspace.directory}</span>
         <span>{t('runtime.seats', { count: value.runtime.workerSeats })}</span>
@@ -70,22 +78,44 @@ export function ServantPage(props: ServantPageProps) {
     {value?.runtime.message && <p className={css.notice} role="status">{value.runtime.message}</p>}
     {!value && snapshot.status === 'loading' && <div className={css.empty} role="status" aria-label={t('runtime.loading')}><StateDot state="ongoing" size={26} /></div>}
     {value && <div id={`servant-tabs-${tab}-panel`} role="tabpanel" aria-labelledby={`servant-tabs-${tab}`} className={css.content}>
-      {tab === 'conversation' && <Conversation value={value} busy={snapshot.pending.includes('send')} onSend={props.onSend} t={t} />}
+      {tab === 'conversation' && <Conversation value={value} busy={snapshot.pending.includes('send')} onSend={props.onSend} t={t}
+        models={models} modelBusy={snapshot.pending.includes('configure')} onRefreshModels={props.onRefreshModels}
+        onModelChange={route => props.onConfigure(value.assistant.revision, { ...value.assistant.settings, foreground: route })} />}
       {tab === 'tasks' && <Tasks value={value} pending={snapshot.pending} actions={props} t={t} />}
-      {tab === 'knowledge' && <Knowledge value={value} pending={snapshot.pending} onKnowledge={props.onKnowledge} t={t} />}
-      {tab === 'settings' && <div className={css.settingsColumn}><Settings value={value} busy={snapshot.pending.includes('configure')} onSave={props.onConfigure} t={t} />
-        <RetentionPanel preview={snapshot.retention} outcome={snapshot.lastCleanup} busy={snapshot.pending.includes('retention')} onRetention={props.onRetention} t={t} /></div>}
     </div>}
+    {value && <Modal open={settingsOpen} onClose={() => setSettingsOpen(false)} title={t('settings.open')} closeLabel={t('settings.close')}
+      className={css.settingsModal} contentClassName={css.settingsModalContent}>
+      <div className={css.settingsSurface}>
+        <SegmentedControl id="servant-settings-tabs" label={t('settings.open')} value={settingsTab} onChange={setSettingsTab}
+          options={(['settings', 'knowledge'] as const).map(value => ({ value, label: t(`tabs.${value}`) }))} />
+        <div id={`servant-settings-tabs-${settingsTab}-panel`} role="tabpanel" aria-labelledby={`servant-settings-tabs-${settingsTab}`} className={css.settingsBody}>
+          {settingsTab === 'settings' ? <div className={css.settingsColumn}>
+            <Settings value={value} busy={snapshot.pending.includes('configure')} onSave={props.onConfigure} t={t}
+              models={models} onRefreshModels={props.onRefreshModels} />
+            <RetentionPanel preview={snapshot.retention} outcome={snapshot.lastCleanup} busy={snapshot.pending.includes('retention')} onRetention={props.onRetention} t={t} />
+            <section className={css.experimental} aria-labelledby="servant-experimental-title">
+              <h3 id="servant-experimental-title">{t('experimental.title')}</h3>
+              <p className={css.muted}>{t('experimental.placeholder')}</p>
+            </section>
+          </div> : <Knowledge value={value} pending={snapshot.pending} onKnowledge={props.onKnowledge} t={t} />}
+        </div>
+      </div>
+    </Modal>}
   </section>
 }
 
-function Conversation({ value, busy, onSend, t }: { value: ServantView, busy: boolean, onSend: ServantSource['send'], t: Translate }) {
+function Conversation({ value, busy, onSend, models, modelBusy, onModelChange, onRefreshModels, t }: {
+  value: ServantView; busy: boolean; onSend: ServantSource['send']; models: ServantModels; modelBusy: boolean
+  onModelChange(route: ModelRoute): Promise<boolean>; onRefreshModels(): Promise<void>; t: Translate
+}) {
   const [draft, setDraft] = useState({ id: crypto.randomUUID(), text: '' })
   const bottom = useRef<HTMLDivElement>(null)
+  const needsAuto = isAutoModel(value.assistant.settings.foreground) || isAutoModel(value.assistant.settings.background)
+  const modelReady = !needsAuto || models.current !== null
   const send = async () => {
-    if (!draft.text.trim() || busy) return
+    if (!draft.text.trim() || busy || modelBusy || !modelReady) return
     const submitted = draft
-    if (await onSend(submitted.id, submitted.text)) setDraft(current => current.id === submitted.id ? { id: crypto.randomUUID(), text: '' } : current)
+    if (await onSend(submitted.id, submitted.text, models.current ?? undefined)) setDraft(current => current.id === submitted.id ? { id: crypto.randomUUID(), text: '' } : current)
   }
   useEffect(() => { bottom.current?.scrollIntoView({ block: 'end' }) }, [value.messages.length])
   return <div className={css.conversation}>
@@ -103,7 +133,13 @@ function Conversation({ value, busy, onSend, t }: { value: ServantView, busy: bo
       <textarea aria-label={t('conversation.input')} placeholder={t('conversation.placeholder')} value={draft.text}
         onChange={event => { setDraft({ id: crypto.randomUUID(), text: event.target.value }) }}
         onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() } }} />
-      <div className={css.composerFooter}><span>{t('conversation.keyboard')}</span><Button variant="primary" disabled={busy || !draft.text.trim()} onClick={() => { void send() }}>{t(busy ? 'conversation.sending' : 'conversation.send')}</Button></div>
+      <div className={css.composerFooter}><span className={css.composerHint}>{t('conversation.keyboard')}</span>
+        <div className={css.composerActions}><ModelPicker value={value.assistant.settings.foreground} models={models} composer
+          onChange={route => { void onModelChange(route) }} onRefresh={onRefreshModels} disabled={busy || modelBusy} label={t('settings.foreground')} t={t} />
+          <Button variant="primary" disabled={busy || modelBusy || !modelReady || !draft.text.trim()} onClick={() => { void send() }}>{t(busy ? 'conversation.sending' : 'conversation.send')}</Button>
+        </div>
+      </div>
+      {!modelReady && <p className={css.muted} role="status">{models.error ?? t('model.loading')}</p>}
     </div>
     <p className={css.footnote}>{t('conversation.background')}</p>
   </div>
@@ -285,7 +321,9 @@ function SkillEditor({ record, version, busy, onSave, onClose, t }: { record: Sk
   </form>
 }
 
-function Settings({ value, busy, onSave, t }: { value: ServantView, busy: boolean, onSave: ServantSource['configure'], t: Translate }) {
+function Settings({ value, busy, onSave, models, onRefreshModels, t }: {
+  value: ServantView; busy: boolean; onSave: ServantSource['configure']; models: ServantModels; onRefreshModels(): Promise<void>; t: Translate
+}) {
   const [settings, setSettings] = useState<AssistantSettings>(() => structuredClone(value.assistant.settings))
   const [workspaceOpen, setWorkspaceOpen] = useState(false)
   const [revision, setRevision] = useState(value.assistant.revision)
@@ -309,10 +347,10 @@ function Settings({ value, busy, onSave, t }: { value: ServantView, busy: boolea
       <p className={css.muted}>{t('settings.workspaceHint')}</p><span className={css.muted}>{t('settings.currentDirectory')}</span><code>{value.assistant.workspace.directory}</code>
     </Field>
     <Field label={t('settings.preset')}><Input required value={settings.presetId} onChange={event => { setSettings({ ...settings, presetId: event.target.value }) }} /></Field>
-    <div className={css.modelSettings}>{(['foreground', 'background'] as const).map(role => <fieldset key={role}><legend>{t(`settings.${role}`)}</legend>
-      <Field label={t('settings.provider')}><Input placeholder={t('settings.hostDefault')} value={settings[role].provider ?? ''} onChange={event => { setSettings({ ...settings, [role]: { ...settings[role], provider: event.target.value || undefined } }) }} /></Field>
-      <Field label={t('settings.model')}><Input placeholder={t('settings.hostDefault')} value={settings[role].model ?? ''} onChange={event => { setSettings({ ...settings, [role]: { ...settings[role], model: event.target.value || undefined } }) }} /></Field>
-    </fieldset>)}</div>
+    <Field label={t('settings.background')}><ModelPicker value={settings.background} models={models}
+      onChange={route => setSettings({ ...settings, background: route })} onRefresh={onRefreshModels} disabled={busy} label={t('settings.background')} t={t} />
+      <p className={css.muted}>{t('model.autoHint')}</p>
+    </Field>
     <p className={css.muted}>{t('settings.modelHint')}</p>
     <div className={css.actions}><Button type="submit" variant="primary" disabled={busy || !dirty}>{t('settings.save')}</Button>{dirty && <><Button disabled={busy} onClick={() => { setSettings(structuredClone(value.assistant.settings)); setBaseline(JSON.stringify(value.assistant.settings)); setRevision(value.assistant.revision) }}>{t('tasks.discard')}</Button><span className={css.muted}>{t('settings.changed')}</span></>}</div>
   </form>

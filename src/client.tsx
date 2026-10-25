@@ -4,6 +4,8 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
+import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
+import { createServantModels, type NativeModelDirectories, type NativeModelSessions } from './client/models.js'
 import type { ServantView } from './contracts/views.js'
 import { createServantNotices, createServantSource, type ServantClientApi } from './client/source.js'
 import { ServantNoticeOverlay, ServantPage, ServantSidebarIcon, type ServantInjected, type ServantNoticeInjected } from './client/page.js'
@@ -12,7 +14,7 @@ import { en, NS, zh } from './client/locales.js'
 declare const __SERVANT_CLIENT_CSS__: string
 
 export const name = 'deepseek-servant-client'
-export const inject = ['slots', 'locale', 'connection']
+export const inject = ['slots', 'locale', 'connection', 'sessions', 'modelDirectories']
 const PANEL_ID = 'deepseek-servant' as MainPanelId
 
 /** Native DSH page; all background execution remains owned by the Host bundle. */
@@ -59,6 +61,12 @@ export function apply(ctx: Context): void {
     subscribeReset: listener => ctx.on('connection/reset', listener),
   }
   const source = createServantSource(api, notices.show)
+  const models = createServantModels(ctx.get('sessions', true) as unknown as NativeModelSessions,
+    ctx.get('modelDirectories', true) as unknown as NativeModelDirectories, async () => {
+      const response = await connection.rpc.call('/api', 'session/modelCatalog', {})
+      if (!response.ok) throw new Error(response.error.message)
+      return response.value as ModelCatalog
+    })
   const onOpenArtifact = async (taskId: string, artifactId: string): Promise<void> => {
     try { await call('openArtifact', { taskId, artifactId }) }
     catch (error) { notices.show({ kind: 'error', key: 'failed', detail: error instanceof Error ? error.message : String(error) }) }
@@ -66,7 +74,8 @@ export function apply(ctx: Context): void {
   ctx.slots.inject('main', () => ctx.slots.register({
     name: 'main', key: PANEL_ID, locale: NS,
     inject: (): ServantInjected => ({
-      hooks: { servant: source.source },
+      hooks: { servant: source.source, models: models.source },
+      onRefreshModels: models.refresh,
       onRefresh: source.refresh, onSend: source.send, onConfigure: source.configure,
       onControl: source.control, onPriority: source.priority, onReconcile: source.reconcile, onAnswer: source.answer, onRevise: source.revise,
       onKnowledge: source.knowledge, onRetention: source.retention, onOpenArtifact,

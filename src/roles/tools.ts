@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { assistantRuntimeProfile } from '../domain/model-route.ts'
 import { deriveEventMessage, isAppendSurfaceEvent } from '@deepseek-ai/dsh-session'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-system-prompt'
@@ -107,7 +108,7 @@ export function installRoleTools(ctx: Context, agent: Agent, binding: RoleBindin
         const assistant = await options.assistants.get(binding.assistantId)
         return options.tasks.submit({ commandId: `submit:${binding.sessionId}:${source.messageId}:${input.requestKey ?? 'main'}`,
           source, assistantId: binding.assistantId, workspace: assistant.workspace,
-          runtimeProfile: { version: String(assistant.revision), presetId: assistant.settings.presetId, foreground: assistant.settings.foreground, background: assistant.settings.background },
+          runtimeProfile: assistant.inputs[source.messageId]?.runtimeProfile ?? assistantRuntimeProfile(assistant),
           goal: { ...input.goal, request, sourceRef: `${binding.sessionId}/${source.messageId}` } })
       })
     register('task_control', 'Transmit a pause/resume/cancel/stop explicitly requested in the current user message.',

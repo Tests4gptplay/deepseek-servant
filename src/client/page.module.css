@@ -51,7 +51,7 @@
 .composer:focus-within { outline: 2px solid var(--dsw-focus-ring-color); outline-offset: 3px; }
 .composer textarea::placeholder { color: var(--dsw-alias-label-tertiary); }
 .composerFooter { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 8px; }
-.composerFooter span, .footnote { color: var(--dsw-alias-label-secondary); font: var(--dsw-font-xs-13); }
+.composerHint, .footnote { color: var(--dsw-alias-label-secondary); font: var(--dsw-font-xs-13); }
 .footnote { text-align: center; padding-top: 12px; }
 .taskLayout { display: grid; grid-template-columns: minmax(0, 1fr); width: 100%; gap: 24px; align-content: start; }
 .taskLayout.hasSelection { grid-template-columns: minmax(200px, 0.7fr) minmax(0, 1.5fr); }
@@ -114,24 +114,19 @@
 .retentionStats dd { margin: 0; white-space: nowrap; }
 .retention summary { cursor: pointer; font-weight: 500; }
 .retentionPolicy { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 20px; margin-top: 20px; }
-.modelSettings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
-.modelSettings fieldset { min-width: 0; padding: 16px; border: 0.5px solid var(--dsw-alias-border-l3); border-radius: var(--dsw-radius-md); }
-.modelSettings legend { padding-inline: 6px; font-weight: 500; }
-.modelSettings .field:last-child { margin-bottom: 0; }
 @media (max-width: 800px) {
   .heading { align-items: flex-start; flex-direction: column; gap: 12px; }
   .headerStatus { width: 100%; justify-content: space-between; }
   .taskLayout.hasSelection { grid-template-columns: minmax(0, 1fr); }
   .hasSelection .taskList { display: none; }
   .taskDetail { padding-left: 0; border-left: 0; }
-  .modelSettings { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 480px) {
   .heading { padding-inline: 16px; }
   .navigation, .content { padding-inline: 16px; }
   .navigation > div:first-child { width: 100%; }
   .avatar { display: none; }
-  .composerFooter span { display: none; }
+  .composerHint { display: none; }
   .composerFooter { justify-content: flex-end; }
   .conversation { min-height: 420px; }
   .knowledgeCard { padding: 16px; }
@@ -148,3 +143,25 @@
   mask-position: center;
   mask-size: contain;
 }
+
+/* Shared DSH controls: model selection beside Send and a compact settings entry. */
+.composerActions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
+.modelTrigger { gap: 6px; max-width: 100%; }
+.modelTrigger > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modelTrigger > svg { flex: none; }
+.composerActions .modelTrigger { max-width: min(460px, 52vw); }
+.modelMenu { min-width: 280px; max-width: min(420px, calc(100vw - 32px)); }
+.modelMenuRow { display: flex; gap: 20px; justify-content: space-between; width: 100%; }
+.modelMenuRow > span:last-child { color: var(--dsw-alias-label-secondary); max-width: 250px; overflow: hidden; text-overflow: ellipsis; }
+.modelOption { display: flex; flex-direction: column; gap: 4px; }
+.modelOption small { color: var(--dsw-alias-label-secondary); font: var(--dsw-font-xs-13); white-space: normal; }
+.settingsModal { width: min(880px, calc(100vw - 32px)); max-width: 880px; }
+.settingsModalContent { max-height: min(780px, calc(100vh - 140px)); overflow: auto; }
+.settingsSurface { color: var(--dsw-alias-label-primary); font: var(--dsw-font-s-14); }
+.settingsSurface, .settingsSurface * { box-sizing: border-box; }
+.settingsBody { padding-top: 20px; }
+.settingsSurface .settings, .settingsSurface .settingsColumn { max-width: none; }
+
+.experimental { border-top: 0.5px solid var(--dsw-alias-border-l3); padding-top: 20px; }
+.experimental h3 { margin: 0 0 8px; font: var(--dsw-font-s-strong-14); }
+.experimental p { margin: 0; }

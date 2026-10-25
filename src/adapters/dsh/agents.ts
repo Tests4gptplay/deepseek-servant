@@ -66,6 +66,17 @@ export class DshAgentGateway {
         if (event.agent === agent) lastError = { message: errorChain(event.error), turn: event.turn, step: event.step }
       })
       if (presets !== undefined && presetId !== undefined) await presets.mount(agentCtx, presetId)
+      // DSH rc.2 reuses the last request header after the first request.
+      // Keep this owned execution on its captured route, including after resume.
+      const provider = route?.provider, model = route?.model
+      if (provider && model) agentCtx.on('agent/request', async ({ agent: owner }, next) => {
+        const previous = await next()
+        if (owner !== agent) return previous
+        const config = { ...previous, provider, model }
+        if (route.reasoningEffort === undefined) delete config.reasoningEffort
+        else config.reasoningEffort = route.reasoningEffort as ReasoningEffortId
+        return config
+      })
       return await request.setup?.(agentCtx, agent)
     }
     const native: AgentHandle = request.resume

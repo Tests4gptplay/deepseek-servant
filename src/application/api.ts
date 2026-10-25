@@ -8,7 +8,7 @@ import type { KnowledgeService } from './knowledge-service.ts'
 import type { QueryService } from './query-service.ts'
 import type { RuntimeCoordinator } from '../runtime/coordinator.ts'
 import type { RetentionService } from './retention-service.ts'
-import { GoalSchema, Id, SettingsSchema, Text } from '../contracts/schemas.ts'
+import { GoalSchema, Id, ModelRouteSchema, SettingsSchema, Text } from '../contracts/schemas.ts'
 
 export interface ServantApiOptions {
   assistants: AssistantService
@@ -37,8 +37,9 @@ export class ServantApi {
       case 'view': ScopeTarget.parse(raw); return this.options.query.view()
       case 'task': return this.options.query.task(Target.parse(raw).taskId)
       case 'send': {
-        const input = ScopeTarget.extend({ messageId: Id, text: Text }).parse(raw)
-        return this.options.assistants.sendMessage(input.assistantId, input.messageId, input.text)
+        const input = ScopeTarget.extend({ messageId: Id, text: Text,
+          autoModel: ModelRouteSchema.extend({ provider: z.string().min(1).max(200), model: z.string().min(1).max(200) }).optional() }).parse(raw)
+        return this.options.assistants.sendMessage(input.assistantId, input.messageId, input.text, input.autoModel)
       }
       case 'configure': {
         const input = ScopeTarget.extend({ expectedRevision: z.int().positive(), settings: SettingsSchema }).parse(raw)

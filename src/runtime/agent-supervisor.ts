@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { resolveModelRoute } from '../domain/model-route.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Assistant } from '../contracts/assistant.ts'
@@ -36,6 +37,7 @@ const unsupervisedTools = new Set(['subagent', 'subagent_fork', 'send_message', 
 export class AgentSupervisor {
   private readonly owners = new Map<string, OwnedExecution>()
   private readonly foreground = new Map<string, OwnedDshAgent>()
+  private readonly foregroundRoutes = new Map<string, string>()
   private readonly foregroundOpening = new Map<string, Promise<OwnedDshAgent>>()
   private readonly foregroundSubscriptions = new Map<string, () => void>()
   private readonly observationChains = new Map<string, Promise<void>>()
@@ -65,7 +67,8 @@ export class AgentSupervisor {
     const opening = this.foregroundOpening.get(assistant.id)
     if (opening) return opening
     const cached = this.foreground.get(assistant.id)
-    if (cached?.sessionId === assistant.sessionId) return cached
+    const route = JSON.stringify(resolveModelRoute(assistant.settings.foreground, assistant.autoModel))
+    if (cached?.sessionId === assistant.sessionId && this.foregroundRoutes.get(assistant.id) === route) return cached
     if (cached) await this.releaseForegroundIfIdle(assistant)
     const work = this.openForeground(assistant).finally(() => this.foregroundOpening.delete(assistant.id))
     this.foregroundOpening.set(assistant.id, work)
@@ -85,13 +88,14 @@ export class AgentSupervisor {
     this.foregroundSubscriptions.get(assistant.id)?.()
     this.foregroundSubscriptions.delete(assistant.id)
     this.foreground.delete(assistant.id)
+    this.foregroundRoutes.delete(assistant.id)
   }
 
   private async openForeground(assistant: Assistant): Promise<OwnedDshAgent> {
     const binding: RoleBinding = { assistantId: assistant.id, sessionId: assistant.sessionId, role: 'foreground' }
     const handle = await this.options.gateway.create({
       sessionId: assistant.sessionId, cwd: assistant.workspace.directory, role: 'foreground',
-      model: assistant.settings.foreground, presetId: assistant.settings.presetId,
+      model: resolveModelRoute(assistant.settings.foreground, assistant.autoModel), presetId: assistant.settings.presetId,
       resume: await this.options.gateway.exists(assistant.sessionId),
       setup: async (ctx, agent) => {
         await this.options.setupRole(ctx, agent, binding)
@@ -104,6 +108,7 @@ export class AgentSupervisor {
     })
     if (this.stopping) { await handle.dispose(); throw new Error('Servant stopped while opening foreground') }
     this.foreground.set(assistant.id, handle)
+    this.foregroundRoutes.set(assistant.id, JSON.stringify(resolveModelRoute(assistant.settings.foreground, assistant.autoModel)))
     this.foregroundSubscriptions.set(assistant.id, handle.subscribe(() => this.options.onChanged?.()))
     return handle
   }

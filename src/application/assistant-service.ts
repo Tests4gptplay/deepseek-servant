@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { assistantRuntimeProfile } from '../domain/model-route.ts'
 import type { StoragePort } from '../contracts/ports.ts'
 import type { Assistant, AssistantSettings, AssistantSettingsChange, AssistantUserInput, ConversationMessage, AssistantInputEvidence, AssistantDeliveryReceipt } from '../contracts/assistant.ts'
-import type { Delivery, WorkspaceBinding } from '../contracts/task.ts'
+import type { Delivery, ModelRoute, WorkspaceBinding } from '../contracts/task.ts'
 
 export interface AssistantRuntimePort {
   send(assistant: Assistant, text: string, messageId: string, source?: 'user' | 'deepseek-servant'): Promise<void>
@@ -135,7 +136,7 @@ export class AssistantService {
       return updated
     })
   }
-  async sendMessage(id: string, messageId: string, text: string): Promise<{ messageId: string; status: 'sent' | 'duplicate' }> {
+  async sendMessage(id: string, messageId: string, text: string, autoModel?: ModelRoute): Promise<{ messageId: string; status: 'sent' | 'duplicate' }> {
     if (!messageId || !text.trim()) throw new Error('消息标识和正文不能为空。')
     await this.get(id)
     return this.serial(id, async () => {
@@ -155,7 +156,9 @@ export class AssistantService {
         prior = { ...prior, fingerprint: hash, sessionId, workspaceId }
       } else {
         const at = this.now()
-        prior = { text, fingerprint: hash, sessionId: assistant.sessionId, workspaceId: assistant.workspace.id, status: 'pending', at }
+        if (autoModel) assistant.autoModel = jsonSnapshot(autoModel)
+        prior = { text, fingerprint: hash, sessionId: assistant.sessionId, workspaceId: assistant.workspace.id, status: 'pending', at,
+          runtimeProfile: assistantRuntimeProfile(assistant) }
         put(assistant.inputs, messageId, prior)
         assistant.latestUser = { id: messageId, text, at }
         assistant.revision += 1
@@ -179,14 +182,16 @@ export class AssistantService {
           await this.save(assistant)
           // Even a queued cold Session needs its native owner resumed. The gateway
           // recognizes that current queued ID and does not insert a second copy.
-          await this.options.runtime.send(assistant, text, messageId, 'user')
+          const execution = prior.runtimeProfile ? { ...assistant, settings: { ...assistant.settings,
+            presetId: prior.runtimeProfile.presetId, foreground: prior.runtimeProfile.foreground } } : assistant
+          await this.options.runtime.send(execution, text, messageId, 'user')
         }
       } catch (error) {
         put(assistant.inputs, messageId, { ...prior, error: String(error) })
         await this.save(assistant)
         throw error
       }
-      put(assistant.inputs, messageId, { fingerprint: hash, sessionId: prior.sessionId, workspaceId: prior.workspaceId, status: 'sent', at: prior.at })
+      put(assistant.inputs, messageId, { fingerprint: hash, sessionId: prior.sessionId, workspaceId: prior.workspaceId, status: 'sent', at: prior.at, runtimeProfile: prior.runtimeProfile })
       assistant.updatedAt = this.now()
       await this.save(assistant)
       return { messageId, status: duplicate ? 'duplicate' : 'sent' }

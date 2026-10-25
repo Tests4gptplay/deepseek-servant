@@ -1,6 +1,6 @@
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 import type { AssistantSettings } from '../contracts/assistant.js'
-import type { GoalInput } from '../contracts/task.js'
+import type { GoalInput, ModelRoute } from '../contracts/task.js'
 import type { ServantView } from '../contracts/views.js'
 import type { RetentionPolicy, RetentionPreview, RetentionSweepResult } from '../contracts/retention.js'
 
@@ -9,7 +9,7 @@ export type RetentionRequest = { action: 'preview' } | { action: 'sweep'; previe
 
 export interface ServantClientApi {
   view(): Promise<ServantView>
-  send(input: { assistantId: string, messageId: string, text: string }): Promise<unknown>
+  send(input: { assistantId: string, messageId: string, text: string, autoModel?: ModelRoute }): Promise<unknown>
   configure(input: { assistantId: string, expectedRevision: number, settings: AssistantSettings }): Promise<unknown>
   control(input: { taskId: string, intent: 'pause' | 'resume' | 'cancel' | 'stop', executionId?: string }): Promise<unknown>
   priority(input: { taskId: string, priority: number }): Promise<unknown>
@@ -119,7 +119,7 @@ export function createServantSource(api: ServantClientApi, notify: (notice: Omit
       },
     } satisfies HostObservable<ServantSnapshot>,
     refresh,
-    send: (messageId: string, text: string) => mutate('send', 'sent', () => api.send({ assistantId: assistantId(), messageId, text })),
+    send: (messageId: string, text: string, autoModel?: ModelRoute) => mutate('send', 'sent', () => api.send({ assistantId: assistantId(), messageId, text, autoModel })),
     configure: (expectedRevision: number, settings: AssistantSettings) => mutate('configure', 'settingsSaved', () => api.configure({ assistantId: assistantId(), expectedRevision, settings })),
     control: (taskId: string, intent: 'pause' | 'resume' | 'cancel' | 'stop', executionId?: string) => mutate(`task:${taskId}`, 'taskUpdated', () => api.control({ taskId, intent, executionId })),
     priority: (taskId: string, priority: number) => mutate(`task:${taskId}`, 'taskUpdated', () => api.priority({ taskId, priority })),

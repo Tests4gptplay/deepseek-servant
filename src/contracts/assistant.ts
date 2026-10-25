@@ -1,4 +1,4 @@
-import type { WorkspaceBinding, ModelRoute, Delivery } from './task.ts'
+import type { WorkspaceBinding, ModelRoute, RuntimeProfile, Delivery } from './task.ts'
 
 /** Settings belong to the assistant, independently of the selected ordinary chat. */
 export interface AssistantSettings {
@@ -17,6 +17,8 @@ export interface Assistant {
   priorSessionIds: string[]
   sessionWorkspaces: Record<string, WorkspaceBinding>
   settings: AssistantSettings
+  /** Last main-composer selection admitted with a user message; used when a route is Auto. */
+  autoModel?: ModelRoute
   workspace: WorkspaceBinding
   latestUser?: { id: string; text: string; at: string }
   inputs: Record<string, AssistantInputReceipt>
@@ -25,6 +27,8 @@ export interface Assistant {
   updatedAt: string
 }
 export interface AssistantInputReceipt {
+  /** Execution choices captured with this actual user input, not later UI changes. */
+  runtimeProfile?: RuntimeProfile
   text?: string
   fingerprint: string
   sessionId: string
