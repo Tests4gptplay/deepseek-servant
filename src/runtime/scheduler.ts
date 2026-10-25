@@ -6,17 +6,40 @@ export interface LiveExecutionState {
   ownedJobIds?: readonly string[]
 }
 export interface Admission { allowed: boolean; reason?: string; code?: string }
+export interface WorkerCapacity { maxWorkerSeats: number; occupiedWorkerSeats: number; availableWorkerSeats: number }
 export interface SchedulerOptions { workerSeats?: number; platform?: 'win32' | 'posix' }
 export type LiveExecutions = ReadonlyMap<string, LiveExecutionState>
 
 /** Servant-only admission, not an OS lock and not a new global DSH capacity pool. */
 export class Scheduler {
-  readonly workerSeats: number
+  private seats: number
+  get workerSeats(): number { return this.seats }
+  setWorkerSeats(value: number): void {
+    if (!Number.isInteger(value) || value < 1 || value > 32) throw new Error('workerSeats must be an integer from 1 to 32')
+    this.seats = value
+  }
+  capacity(tasks: readonly Task[], live: LiveExecutions = new Map(), except?: { taskId: string; actionId: string; executionId?: string }): WorkerCapacity {
+    const occupied = new Set<string>()
+    for (const task of tasks) {
+      for (const execution of Object.values(task.executions)) {
+        if (execution.role !== 'worker' || execution.executionId === except?.executionId) continue
+        const state = live.get(execution.executionId)?.state ?? execution.physicalState
+        if (['starting', 'running', 'stopping', 'unknown'].includes(state)) occupied.add(execution.executionId)
+      }
+      for (const action of Object.values(task.pendingActions)) {
+        if (action.status !== 'running' || task.id === except?.taskId && action.id === except.actionId) continue
+        if (action.kind === 'dispatch' && !action.executionId) occupied.add(task.id + '/claim/' + action.id)
+        if (action.kind === 'continue' && action.payload.executionId && action.payload.executionId !== except?.executionId) occupied.add(action.payload.executionId)
+      }
+    }
+    return { maxWorkerSeats: this.seats, occupiedWorkerSeats: occupied.size, availableWorkerSeats: Math.max(0, this.seats - occupied.size) }
+  }
   private readonly platform?: 'win32' | 'posix'
 
   constructor(options: SchedulerOptions | number = {}) {
     const settings = typeof options === 'number' ? { workerSeats: options } : options
-    this.workerSeats = settings.workerSeats ?? 2
+    this.seats = 2
+    this.setWorkerSeats(settings.workerSeats ?? 2)
     this.platform = settings.platform
     if (!Number.isInteger(this.workerSeats) || this.workerSeats < 1) throw new Error('workerSeats must be a positive integer')
   }
@@ -42,11 +65,15 @@ export class Scheduler {
       return action.payload.resultIds?.length && action.payload.resultIds.every(id => ['accepted', 'rework'].includes(task.reports[id]?.disposition))
         ? { allowed: true } : deny('FEEDBACK_NOT_DECIDED', 'Feedback must reference saved accepted/rework decisions and observed skill uses.')
     }
-    if (action.kind === 'help') {
+    if (action.kind === 'help') return deny('LEGACY_HELPER', 'Historical Helper actions are read-only evidence.')
+    if (action.kind === 'recover') {
       const incident = task.incidents[action.payload.incidentId ?? '']
-      if (!incident || incident.state === 'resolved') return deny('INCIDENT_NOT_ACTIVE', 'The exact recovery incident is no longer active.')
-      if (Object.values(task.executions).some(e => e.role === 'helper' && e.incidentId === incident.id && occupiesPhysicalOwner(e, live))) return deny('HELPER_BUSY', 'This incident still has an exact physical Helper owner or unreconciled jobs.')
-      if (Object.values(task.pendingActions).some(a => a.id !== action.id && a.kind === 'help' && a.payload.incidentId === incident.id && a.status === 'running')) return deny('HELPER_RESERVED', 'Another saved Helper action already owns this incident.')
+      if (!incident || incident.state !== 'open') return deny('INCIDENT_NOT_ACTIVE', 'The incident is resolved or waiting for a recorded condition.')
+      const execution = task.executions[incident.executionId], state = execution && (live.get(execution.executionId)?.state ?? execution.physicalState)
+      const jobs = execution && (live.get(execution.executionId)?.ownedJobIds ?? execution.ownedJobIds)
+      if (!execution || !['idle', 'stopped', 'lost'].includes(state!) || jobs?.length) return deny('RECOVERY_OWNER_BUSY', 'The original owner or its native jobs still need to settle.')
+      if (incident.helperExecutionId && occupiesPhysicalOwner(task.executions[incident.helperExecutionId], live))
+        return deny('LEGACY_OWNER_BUSY', 'The historical recovery owner still needs physical reconciliation.')
       return { allowed: true }
     }
     if (action.payload.goalRevision !== task.goal.revision) return deny('GOAL_CHANGED', 'The action belongs to an older goal.')
@@ -74,9 +101,11 @@ export class Scheduler {
 
     let ownExecution: ExecutionBinding | undefined
     if (action.kind === 'dispatch') {
-      if (!['pending', 'rework'].includes(child.status) || child.activeExecutionId) return deny('CHILD_ALREADY_OWNED', 'This assignment already has an owner or a result.')
+      if (!['pending', 'rework'].includes(child.status) || child.activeExecutionId || child.handoff?.reviewRequired) return deny('CHILD_ALREADY_OWNED', 'This assignment already has an owner or a result.')
       const predecessorId = action.payload.predecessorExecutionId
-      if (child.handoff?.predecessorExecutionId !== predecessorId) return deny('HANDOFF_CHANGED', 'The dispatch does not match this assignment’s saved handoff.')
+      const recovery = action.payload.recoveryIncidentId ? task.incidents[action.payload.recoveryIncidentId] : undefined
+      if (recovery ? recovery.state !== 'resolved' || recovery.executionId !== predecessorId : child.handoff?.predecessorExecutionId !== predecessorId)
+        return deny('HANDOFF_CHANGED', 'The dispatch does not match this assignment’s saved handoff or recovery.')
       if (predecessorId) {
         const predecessor = task.executions[predecessorId]
         if (!predecessor || predecessor.role !== 'worker' || predecessor.childId !== child.id || predecessor.assignmentVersion !== child.assignmentVersion
@@ -99,17 +128,7 @@ export class Scheduler {
     // Idle/waiting Agents release inference capacity but retain their exact
     // physical claims. A still-live job is a resource reservation, not an
     // additional model seat. Unknown execution is conservatively counted.
-    let occupied = 0
-    for (const ownerTask of tasks) {
-      for (const execution of Object.values(ownerTask.executions)) {
-        if (execution.role !== 'worker' || execution.executionId === ownExecution?.executionId) continue
-        const state = live.get(execution.executionId)?.state ?? execution.physicalState
-        if (['starting', 'running', 'stopping', 'unknown'].includes(state)) occupied++
-      }
-      // Claim-to-binding is also a durable reservation. Exclude this action
-      // when it is rechecked after claim and before its binding is committed.
-      occupied += Object.values(ownerTask.pendingActions).filter(a => a.kind === 'dispatch' && a.status === 'running' && !a.executionId && !(ownerTask.id === task.id && a.id === action.id)).length
-    }
+    const occupied = this.capacity(tasks, live, { taskId: task.id, actionId: action.id, executionId: ownExecution?.executionId }).occupiedWorkerSeats
     if (occupied >= this.workerSeats) return deny('WORKER_CAPACITY', `All ${this.workerSeats} configured Servant Worker inference seats are occupied.`)
 
     const claims = normalizeClaims(task, child.writeScopes, this.platform)

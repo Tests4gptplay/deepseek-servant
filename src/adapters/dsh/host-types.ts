@@ -18,6 +18,7 @@ export interface DshAgentRequest {
   role: Role
   model?: DshModelRoute
   resume?: boolean
+  recentExchanges?: import('../../contracts/assistant.js').ConversationMessage[][]
   presetId?: string
   setup?: AgentSetup
 }
@@ -37,7 +38,7 @@ export interface OwnedDshAgent {
   }
   getMessages(): readonly Message[]
   hasMessage(messageId: string): boolean
-  subscribe(listener: () => void): () => void
+  subscribe(listener: () => void, terminalOnly?: boolean): () => void
 }
 
 export type ExecutionPermission = (agent: Agent, toolName: string) => boolean | Promise<boolean>

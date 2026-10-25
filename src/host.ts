@@ -8,7 +8,8 @@ import { DshWorkspaceAdapter } from './adapters/dsh/workspace.ts'
 import { installRemoteTransport } from './adapters/dsh/remote.ts'
 import { ServantStore } from './application/servant-store.ts'
 import { TaskService } from './application/task-service.ts'
-import { AssistantService } from './application/assistant-service.ts'
+import { RuntimeSettingsService } from './application/runtime-settings.js'
+import { AssistantService, deliveryMessageText } from './application/assistant-service.ts'
 import { KnowledgeService } from './application/knowledge-service.ts'
 import { QueryService } from './application/query-service.ts'
 import { RetentionService } from './application/retention-service.ts'
@@ -20,13 +21,11 @@ import { installRoleTools } from './roles/tools.ts'
 import { ModelRouteSchema } from './contracts/schemas.ts'
 import type { Assistant } from './contracts/assistant.ts'
 import type { RuntimeProfile } from './contracts/task.ts'
-import { hasRetentionLimits } from './contracts/retention.ts'
 
 export const name = 'deepseek-servant'
 export const inject = ['storage', 'storageDomain', 'agents', 'sessions', 'sessionPersistence', 'workspaceRegistry', 'workingDirectory', 'agentPresets']
 export const Config = z.object({ workerSeats: z.int().min(1).max(32).default(2), reviewEvery: z.int().min(1).max(100).default(5),
-  presetId: z.string().min(1).default('standard'), foreground: ModelRouteSchema.default({}), background: ModelRouteSchema.default({}),
-  retentionIntervalMinutes: z.number().min(1).max(1440).default(60) })
+  presetId: z.string().min(1).default('standard'), foreground: ModelRouteSchema.default({}), background: ModelRouteSchema.default({}) })
 export type Config = z.infer<typeof Config>
 
 export interface ServantHost {
@@ -50,12 +49,13 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const changed = () => { for (const listener of listeners) { try { listener() } catch (error) { console.error('deepseek-servant view listener', error) } } }
   const runtimeChanged = () => { changed(); coordinator?.wake() }
   const reportError = (error: unknown) => { console.error('deepseek-servant', error); changed() }
+  const runtimeSettings = await RuntimeSettingsService.open(store, config.workerSeats, settings => { coordinator?.setWorkerSeats(settings.workerSeats); changed() })
   const tasks = new TaskService(new ServantStore(store), { reviewEvery: config.reviewEvery, onNotificationError: reportError })
   const defaults: RuntimeProfile = { version: 'host-1', presetId: config.presetId, foreground: config.foreground, background: config.background }
   let assistants!: AssistantService
   const knowledge = new KnowledgeService({ store, onChanged: changed, evidence: {
     resolveResult: async resultId => {
-      const matches = (await tasks.list()).flatMap(task => {
+      const matches = [...new Map([...await tasks.history(true), ...await tasks.list()].map(task => [task.id, task])).values()].flatMap(task => {
         const report = Object.hasOwn(task.reports, resultId) ? task.reports[resultId] : undefined
         return report ? [{ task, report }] : []
       })
@@ -78,9 +78,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     },
   } })
   const supervisor: AgentSupervisor = new AgentSupervisor({ gateway, tasks, knowledge, defaults, onChanged: runtimeChanged,
+    recentExchanges: id => assistants.conversations.seed(id),
+    onForegroundChanged: (id, sessionId) => { void assistants.advance(id, sessionId).catch(reportError) },
+    workerCapacity: () => coordinator!.capacity(),
     onError: error => { coordinator?.reportError(error); reportError(error) },
     setupRole: (scope, agent, binding) => installRoleTools(scope, agent, binding, { assistants, tasks, knowledge,
-      prepareRecoveryResolution: (taskId, incidentId, helperExecutionId) => supervisor.prepareRecoveryResolution(taskId, incidentId, helperExecutionId),
       memoryQuery: async (taskId, input, executionId) => {
         const task = await tasks.get(taskId)
         if (!task) throw new Error('Task memory does not exist')
@@ -93,19 +95,24 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     foreground: config.foreground, background: config.background }, resolveWorkspace: (id, directory) => workspace.resolve(id, directory), onChanged: changed,
     runtime: {
       prepareConfiguration: previous => supervisor.releaseForegroundIfIdle(previous),
+      capture: sessionId => sessions.capture(sessionId),
+      retire: assistant => supervisor.retireForeground(assistant),
+      cancel: assistant => supervisor.cancelForeground(assistant),
+      resume: async assistant => { await supervisor.ensureForeground(assistant) },
       send: async (assistant, text, messageId, source = 'user') => (await supervisor.ensureForeground(assistant)).send(text, messageId, 'followup', source),
       hasInput: (sessionId, messageId) => sessions.hasMessage(sessionId, messageId),
       inputs: sessionId => sessions.inputs(sessionId),
       conversation: sessionId => sessions.conversation(sessionId),
       deliver: async (assistant, delivery, messageId) => (await supervisor.ensureForeground(assistant)).send(
-        `The backend has durably accepted this task result. Present the accepted outcome and actual artifact paths. Mention a concrete usability constraint only when it affects this delivery; do not append generic disclaimers. This notification grants no new user authorization; do not submit another task.\n${JSON.stringify(delivery)}`,
+        deliveryMessageText(delivery),
         messageId, 'followup', 'deepseek-servant'),
     },
   })
-  coordinator = new RuntimeCoordinator({ tasks, assistants, knowledge, supervisor, sessions, workerSeats: config.workerSeats, onChanged: changed, onError: reportError })
-  const retention = new RetentionService({ store, tasks, knowledge, nativeSessions: sessions, onChanged: changed })
-  const query = new QueryService({ assistants, tasks, knowledge, workspaces: () => workspace.list(), runtime: () => coordinator!.status(), recordStorage: () => store.storageView() })
-  const api = new ServantApi({ assistants, tasks, knowledge, query, coordinator, retention,
+  coordinator = new RuntimeCoordinator({ tasks, assistants, knowledge, supervisor, sessions, workerSeats: runtimeSettings.get().workerSeats,
+    afterCleanup: async () => { await retention.sweep() }, onChanged: changed, onError: reportError })
+  const retention = new RetentionService({ store, tasks, knowledge, nativeSessions: sessions, onChanged: changed, completedTasks: tasks })
+  const query = new QueryService({ assistants, tasks, knowledge, workspaces: () => workspace.list(), runtime: () => coordinator!.status(), runtimeSettings: () => runtimeSettings.get(), recordStorage: () => store.storageView() })
+  const api = new ServantApi({ assistants, tasks, knowledge, query, coordinator, retention, runtimeSettings,
     recordsDirectory: () => store.ensureRecordsDirectory(),
     moveRecords: async (directory, expectedDirectory, signal) => {
       const result = await store.moveRecords(directory, expectedDirectory, signal)
@@ -123,29 +130,17 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     listeners.add(listener); return () => { listeners.delete(listener) }
   } })
 
-  // Slow housekeeping, unrelated to model continuation. Completion events also
-  // request a sweep, with eligibility and reference checks in RetentionService.
-  let maintenance: Promise<unknown> | undefined
-  let closing = false
-  const maintain = () => {
-    if (closing || maintenance) return
-    maintenance = retention.configuration().then(configuration => hasRetentionLimits(configuration.policy) ? retention.sweep({}) : undefined)
-      .catch(reportError).finally(() => { maintenance = undefined })
-  }
-  const interval = setInterval(maintain, config.retentionIntervalMinutes * 60_000)
-  interval.unref()
-  const stopTaskNotifications = tasks.subscribe(task => { changed(); if (task.phase === 'completed' || task.control === 'cancelled') maintain() })
+  // The coordinator seals records and cleans ended Tasks on native completion events.
+  const stopTaskNotifications = tasks.subscribe(() => changed())
   ctx.effect(() => async () => {
-    closing = true; clearInterval(interval); stopTaskNotifications()
+    stopTaskNotifications()
     await coordinator!.dispose()
     await supervisor.dispose()
-    await maintenance
-    await assistants.flush(); await tasks.flush()
+    await assistants.flush(); await tasks.flush(); await runtimeSettings.flush()
     await store.close()
     listeners.clear()
   }, 'servant.host.ownership')
   await coordinator.start()
   const admissions = await assistants.recoverInputs()
   if (admissions.failed.length) coordinator.reportError(new Error(`${admissions.failed.length} 条前台消息等待修复后重新接纳。`))
-  maintain()
 }

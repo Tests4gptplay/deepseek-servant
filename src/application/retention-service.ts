@@ -20,6 +20,7 @@ export interface RetentionServiceOptions {
   nativeSessions?: NativeSessionRetentionPort
   now?: () => string
   onChanged?: () => void
+  completedTasks?: Pick<import('./task-service.js').TaskService, 'cleanupCompleted' | 'archives'>
 }
 
 /** Local record maintenance. It never runs models, deletes artifact files, or edits native Skills. */
@@ -53,14 +54,16 @@ export class RetentionService {
       return next
     })
   }
-  async preview(input: { scope?: KnowledgeScope } = {}): Promise<RetentionPreview> {
-    return this.options.knowledge.withRetentionLock(session => this.makePreview(session, input.scope))
+  async preview(input: { scope?: KnowledgeScope; manual?: boolean } = {}): Promise<RetentionPreview> {
+    return this.options.knowledge.withRetentionLock(session => this.makePreview(session, input.scope, input.manual))
   }
-  sweep(input: { previewId?: string; scope?: KnowledgeScope } = {}): Promise<RetentionSweepResult> {
+  sweep(input: { previewId?: string; scope?: KnowledgeScope; manual?: boolean } = {}): Promise<RetentionSweepResult> {
     return this.enqueue(async () => {
+      if (this.options.completedTasks) return this.sweepCompleted(input)
       const startedAt = this.now()
       const requested = input.previewId ? this.previews.get(input.previewId) : undefined
-      if (input.previewId && (!requested || Date.parse(startedAt) - Date.parse(requested.createdAt) > 15 * 60_000)) throw new Error('The cleanup preview expired; request a new preview.')
+      if (input.previewId && (!requested || !requested.manual && Date.parse(startedAt) - Date.parse(requested.createdAt) > 15 * 60_000)) throw new Error('The cleanup preview expired; request a new preview.')
+      const manual = requested?.manual ?? input.manual ?? false
       const scope = requested?.scope ?? input.scope
       const result: Omit<RetentionSweepResult, 'remaining'> = {
         startedAt, finishedAt: startedAt, archivedTasks: [], deletedArchives: [], compactedSkills: [],
@@ -69,9 +72,9 @@ export class RetentionService {
       let plan!: RetentionPreview
       let startingBytes = 0
       await this.options.knowledge.withRetentionLock(async session => {
-        const fresh = await this.makePreview(session, scope)
+        const fresh = await this.makePreview(session, scope, manual)
         startingBytes = fresh.totals.servantBytes
-        if (requested && requested.policyRevision !== fresh.policyRevision) throw new Error('The retention policy changed after this preview.')
+        if (!manual && requested && requested.policyRevision !== fresh.policyRevision) throw new Error('The retention policy changed after this preview.')
         plan = requested ?? fresh
         const freshSkills = new Map(fresh.compactSkills.map(item => [skillKey(item), item]))
         for (const candidate of plan.compactSkills) {
@@ -82,7 +85,7 @@ export class RetentionService {
             if (compacted.status === 'applied') { result.compactedSkills.push(candidate.skillId); result.reclaimedServantBytes += compacted.reclaimedBytes }
           } catch (error) { result.skipped.push({ id: candidate.skillId, reason: message(error) }) }
         }
-        const pins = await this.resultPins(session)
+        const pins = manual ? new Set<string>() : await this.resultPins(session)
         const freshTasks = new Map(fresh.archiveTasks.map(item => [item.taskId, item]))
         for (const candidate of plan.archiveTasks) {
           const current = freshTasks.get(candidate.taskId)
@@ -109,7 +112,7 @@ export class RetentionService {
       for (const taskId of allowedTasks) await this.retireNative(taskId, result)
 
       await this.options.knowledge.withRetentionLock(async session => {
-        const pins = await this.resultPins(session)
+        const pins = manual ? new Set<string>() : await this.resultPins(session)
         for (const candidate of plan.deleteArchives) {
           const task = await this.options.tasks.get(candidate.taskId)
           if (!task?.archive || task.archive.purgeId !== candidate.purgeId) { result.skipped.push({ id: candidate.taskId, reason: 'Archive changed after preview.' }); continue }
@@ -121,9 +124,51 @@ export class RetentionService {
         }
       })
       this.changed()
-      const remaining = await this.preview({ scope })
+      const remaining = await this.preview({ scope, manual })
       return { ...result, reclaimedServantBytes: Math.max(0, startingBytes - remaining.totals.servantBytes), finishedAt: this.now(), remaining }
     })
+  }
+
+  private async sweepCompleted(input: { previewId?: string; scope?: KnowledgeScope; manual?: boolean }): Promise<RetentionSweepResult> {
+    const requested = input.previewId ? this.previews.get(input.previewId) : undefined
+    if (input.previewId && !requested) throw new Error('请重新查看本次清理范围。')
+    const scope = requested?.scope ?? input.scope, startedAt = this.now()
+    const manual = requested?.manual ?? input.manual ?? false
+    const fresh = await this.preview({ scope, manual }), plan = requested ?? fresh
+    if (!manual && plan.policyRevision !== fresh.policyRevision) throw new Error('The retention policy changed after this preview.')
+    const archivedTasks: string[] = [], deletedArchives: string[] = [], compactedSkills: string[] = []
+    const skipped: Array<{ id: string; reason: string }> = []
+    const allowed = new Map([...fresh.archiveTasks, ...fresh.deleteArchives].map(row => [row.taskId, row.expectedRevision]))
+    for (const candidate of plan.archiveTasks) {
+      if (allowed.get(candidate.taskId) !== candidate.expectedRevision) { skipped.push({ id: candidate.taskId, reason: 'Task changed after preview.' }); continue }
+      try {
+        if (await this.options.completedTasks!.cleanupCompleted(candidate.taskId)) archivedTasks.push(candidate.taskId)
+        else if (!(await this.options.completedTasks!.archives.index(candidate.taskId))?.cleanedAt)
+          skipped.push({ id: candidate.taskId, reason: '任务仍有尚未结束的执行或作业。' })
+      } catch (error) { skipped.push({ id: candidate.taskId, reason: message(error) }) }
+    }
+    await this.options.completedTasks!.archives.resumeCleanup()
+    for (const candidate of plan.deleteArchives) {
+      if (allowed.get(candidate.taskId) !== candidate.expectedRevision) continue
+      if (!(await this.options.completedTasks!.archives.index(candidate.taskId))?.cleanedAt) continue
+      await this.options.completedTasks!.archives.hide(candidate.taskId)
+      deletedArchives.push(candidate.taskId)
+    }
+    await this.options.knowledge.withRetentionLock(async session => {
+      const current = await this.makePreview(session, scope, manual)
+      for (const candidate of plan.compactSkills) {
+        const fresh = current.compactSkills.find(row => skillKey(row) === skillKey(candidate))
+        if (!fresh || fresh.expectedRevision !== candidate.expectedRevision) { skipped.push({ id: candidate.skillId, reason: 'Skill changed after preview.' }); continue }
+        try {
+          if ((await session.compactSkill(fresh)).status === 'applied') compactedSkills.push(candidate.skillId)
+        } catch (error) { skipped.push({ id: candidate.skillId, reason: message(error) }) }
+      }
+    })
+    const remaining = await this.preview({ scope, manual })
+    this.changed()
+    return { startedAt, finishedAt: this.now(), archivedTasks, deletedArchives, compactedSkills,
+      retiredNativeSessions: [], nativeLogsRetained: [], skipped,
+      reclaimedServantBytes: Math.max(0, fresh.totals.servantBytes - remaining.totals.servantBytes), nativeReclaimedBytes: 0, remaining }
   }
 
   private async retireNative(taskId: string, result: Omit<RetentionSweepResult, 'remaining'>): Promise<void> {
@@ -163,19 +208,25 @@ export class RetentionService {
     }
   }
 
-  private async makePreview(session: KnowledgeMaintenanceSession, scope?: KnowledgeScope): Promise<RetentionPreview> {
-    const [configuration, allTasks, skills, rows] = await Promise.all([
+  private async makePreview(session: KnowledgeMaintenanceSession, scope?: KnowledgeScope, manual = false): Promise<RetentionPreview> {
+    const [configuration, liveTasks, skills, rows] = await Promise.all([
       this.configuration(), this.options.tasks.list(), session.listSkills(), this.options.store.list<unknown>(''),
     ])
-    const policy = parseRetentionPolicy(configuration.policy)
+    const sealed = this.options.completedTasks ? await this.options.completedTasks.archives.list() : []
+    const historical = this.options.completedTasks ? (await Promise.all(sealed.filter(index => index.tombstone && !index.hidden)
+      .map(index => this.options.completedTasks!.archives.task(index.taskId)))).filter((task): task is Task => !!task) : []
+    const allTasks = [...new Map([...historical, ...liveTasks].map(task => [task.id, task])).values()]
+    // Manual cleanup targets ended Tasks immediately and leaves knowledge and settings unchanged.
+    const policy: RetentionPolicy = manual ? { taskDetailDays: 0, archiveDays: 0 } : parseRetentionPolicy(configuration.policy)
     const taskRetentionEnabled = policy.taskDetailDays !== undefined || policy.archiveDays !== undefined
       || policy.maxArchives !== undefined || policy.maxServantBytes !== undefined
     const now = this.now()
     const inScope = (task: Task) => !scope || task.assistantId === scope.assistantId && task.workspace.id === scope.workspaceId
     const tasks = allTasks.filter(inScope).sort((a, b) => terminalAt(a).localeCompare(terminalAt(b)))
-    const pins = await this.resultPins(session, skills, rows)
-    const archives = allTasks.filter(task => !!task.archive)
-    const archivedTaskIds = archives.map(task => task.id)
+    const pins = manual ? new Set<string>() : await this.resultPins(session, skills, rows)
+    const endedIds = new Set(sealed.filter(index => index.stage === 'ended').map(index => index.taskId))
+    const archives = allTasks.filter(task => !!task.archive || endedIds.has(task.id))
+    const archivedTaskIds = [...new Set([...archives.map(task => task.id), ...endedIds])]
     const tombstones = rows.map(row => row.value).filter(isTombstone)
     const totals: RetentionPreview['totals'] = {
       servantBytes: rows.reduce((sum, row) => sum + jsonBytes(row.value), 0),
@@ -191,7 +242,7 @@ export class RetentionService {
       estimatedReclaimedBytes: 0, overBudgetBytes: 0,
     }
     const plan: RetentionPreview = { previewId: `retention-${randomUUID()}`, createdAt: now, policyRevision: configuration.revision,
-      policy: structuredClone(policy), ...(scope ? { scope: { ...scope } } : {}), archiveTasks: [], deleteArchives: [], compactSkills: [], nativeCleanup: [], blocked: [], totals }
+      manual, policy: structuredClone(configuration.policy), ...(scope ? { scope: { ...scope } } : {}), archiveTasks: [], deleteArchives: [], compactSkills: [], nativeCleanup: [], blocked: [], totals }
     const bytePressure = policy.maxServantBytes !== undefined && totals.servantBytes > policy.maxServantBytes
     let countPressure = policy.maxArchives === undefined ? 0 : Math.max(0, allTasks.filter(task => ['completed', 'cancelled'].includes(task.phase)).length - policy.maxArchives)
     for (const task of tasks) {
@@ -201,6 +252,15 @@ export class RetentionService {
       const age = ageDays(now, terminalAt(task))
       const detailExpires = policy.taskDetailDays !== undefined && age >= policy.taskDetailDays
       const historyExpires = policy.archiveDays !== undefined && age >= policy.archiveDays
+      if (this.options.completedTasks) {
+        const index = sealed.find(row => row.taskId === task.id)
+        if (!index?.cleanedAt) plan.archiveTasks.push({ taskId: task.id, expectedRevision: task.revision, retainResultIds: [], estimatedReclaimedBytes: 0 })
+        if (manual || detailExpires || historyExpires || countPressure > 0 || bytePressure) {
+          plan.deleteArchives.push({ taskId: task.id, expectedRevision: task.revision, purgeId: 'records:' + task.id, estimatedReclaimedBytes: 0 })
+          if (countPressure > 0) countPressure--
+        }
+        continue
+      }
       if (!task.archive && (detailExpires || historyExpires || bytePressure || countPressure > 0)) {
         const retained = Object.keys(task.reports).filter(id => pins.has(id))
         projected = structuredClone(task)

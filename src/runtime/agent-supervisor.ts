@@ -5,18 +5,19 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Assistant } from '../contracts/assistant.ts'
 import type { ExecutionBinding, PendingAction, PhysicalState, Role, RuntimeProfile, Task } from '../contracts/task.ts'
 import type { TaskService } from '../application/task-service.ts'
+import { TaskRecordAccess } from '../application/task-record-access.ts'
 import type { KnowledgeService } from '../application/knowledge-service.ts'
 import type { DshAgentGateway } from '../adapters/dsh/agents.ts'
 import { installExecutionGuard } from '../adapters/dsh/agents.ts'
 import type { OwnedDshAgent } from '../adapters/dsh/host-types.ts'
 import { installSkillProvider } from '../adapters/dsh/skills.ts'
-import { roleInput } from '../roles/prompts.ts'
+import { roleInput, type SemanticRole } from '../roles/prompts.ts'
 import { assembleRoleInput } from './context-assembler.ts'
 
 export interface RoleBinding {
   assistantId: string
   sessionId: string
-  role: Role
+  role: SemanticRole
   taskId?: string
   executionId?: string
 }
@@ -25,11 +26,17 @@ export interface SupervisorOptions {
   tasks: TaskService
   knowledge: KnowledgeService
   defaults: RuntimeProfile
+  workerCapacity?(): Promise<import('./scheduler.js').WorkerCapacity>
   setupRole(ctx: Context, agent: Agent, binding: RoleBinding): void | Promise<void>
   onChanged?(): void
+  onForegroundChanged?(assistantId: string, sessionId: string): void
+  recentExchanges?(assistantId: string): Promise<import('../contracts/assistant.js').ConversationMessage[][]>
   onError(error: unknown): void
 }
 interface OwnedExecution { taskId: string; executionId: string; handle: OwnedDshAgent; unsubscribe: () => void }
+function hasPendingInput(handle: OwnedDshAgent): boolean {
+  return handle.actualAgent.inbox.nextTurn.length > 0 || handle.actualAgent.inbox.nextStep.length > 0
+}
 const unsupervisedTools = new Set(['subagent', 'subagent_fork', 'send_message', 'interrupt_agent',
   'workflow', 'schedule_create', 'schedule_list', 'schedule_delete', 'schedule_update', 'create_goal', 'update_goal'])
 
@@ -52,7 +59,7 @@ export class AgentSupervisor {
   live(): ReadonlyMap<string, { state: PhysicalState | 'waiting'; ownedJobIds: string[] }> {
     return new Map([...this.owners].map(([id, owner]) => {
       const observation = owner.handle.observe()
-      return [id, { state: observation.state, ownedJobIds: observation.jobs.filter(job => job.status === 'running' || job.status === 'stopping').map(job => job.id) }]
+      return [id, { state: observation.state === 'idle' && hasPendingInput(owner.handle) ? 'running' : observation.state, ownedJobIds: observation.jobs.filter(job => job.status === 'running' || job.status === 'stopping').map(job => job.id) }]
     }))
   }
   get(executionId: string): OwnedDshAgent | undefined { return this.owners.get(executionId)?.handle }
@@ -81,7 +88,7 @@ export class AgentSupervisor {
     const handle = this.foreground.get(assistant.id)
     if (!handle) return
     const state = handle.observe()
-    if (state.state === 'running' || state.jobs.some(job => job.status === 'running' || job.status === 'stopping')) {
+    if (state.state === 'running' || state.jobs.some(job => job.status === 'running' || job.status === 'stopping') || hasPendingInput(handle)) {
       throw new Error('前台正在处理消息，请等本轮结束后再更换工作区或前台模型。后台任务保持其创建时的配置。')
     }
     await handle.dispose()
@@ -91,32 +98,68 @@ export class AgentSupervisor {
     this.foregroundRoutes.delete(assistant.id)
   }
 
+  /** Retirement is gated by actual native ownership, not a timeout. */
+  async retireForeground(assistant: Assistant): Promise<boolean> {
+    await this.foregroundOpening.get(assistant.id)
+    const handle = this.foreground.get(assistant.id)
+    if (!handle) return !this.options.gateway.hasLiveOwner(assistant.sessionId)
+    if (handle.sessionId !== assistant.sessionId) return false
+    const state = handle.observe()
+    if (state.state === 'running' || state.jobs.some(job => job.status === 'running' || job.status === 'stopping')
+      || hasPendingInput(handle)) return false
+    await this.releaseForegroundIfIdle(assistant)
+    return true
+  }
+
+  async cancelForeground(assistant: Assistant): Promise<boolean> {
+    await this.foregroundOpening.get(assistant.id)
+    const handle = this.foreground.get(assistant.id)
+    if (!handle) return !this.options.gateway.hasLiveOwner(assistant.sessionId)
+    if (handle.sessionId !== assistant.sessionId) return false
+    await handle.cancel()
+    await handle.whenIdle()
+    const state = handle.observe()
+    if (state.state === 'running' || state.jobs.some(job => job.status === 'running' || job.status === 'stopping')) return false
+    // The owner explicitly discarded this conversation, including its pending foreground inbox.
+    await handle.dispose()
+    this.foregroundSubscriptions.get(assistant.id)?.()
+    this.foregroundSubscriptions.delete(assistant.id)
+    this.foreground.delete(assistant.id); this.foregroundRoutes.delete(assistant.id)
+    return true
+  }
+
   private async openForeground(assistant: Assistant): Promise<OwnedDshAgent> {
     const binding: RoleBinding = { assistantId: assistant.id, sessionId: assistant.sessionId, role: 'foreground' }
     const handle = await this.options.gateway.create({
       sessionId: assistant.sessionId, cwd: assistant.workspace.directory, role: 'foreground',
       model: resolveModelRoute(assistant.settings.foreground, assistant.autoModel), presetId: assistant.settings.presetId,
       resume: await this.options.gateway.exists(assistant.sessionId),
+      recentExchanges: await this.options.recentExchanges?.(assistant.id),
       setup: async (ctx, agent) => {
         await this.options.setupRole(ctx, agent, binding)
         const visible = ctx.tools.schemas().map(tool => tool.name).filter(name => unsupervisedTools.has(name))
         if (visible.length) ctx.tools.restrict({ deny: visible })
         installSkillProvider(ctx, agent, this.options.knowledge, { assistantId: assistant.id, workspaceId: assistant.workspace.id })
-        const allowed = new Set(['task_submit', 'task_query', 'task_control', 'task_priority', 'task_revise_goal', 'memory_query', 'knowledge_query', 'knowledge_preference', 'skill', 'run_code'])
+        const allowed = new Set(['task_submit', 'task_query', 'task_records', 'task_control', 'task_priority', 'task_revise_goal', 'memory_query', 'conversation_search', 'conversation_read', 'memory_index', 'memory_read', 'memory_search', 'task_origin_read', 'planner_note_read', 'child_reply_read', 'knowledge_query', 'knowledge_preference', 'skill', 'run_code'])
+        ctx.tools.restrict({ deny: ctx.tools.schemas().map(tool => tool.name).filter(name => !allowed.has(name)) })
         installExecutionGuard(ctx, agent, (_owner, name) => allowed.has(name))
       },
     })
     if (this.stopping) { await handle.dispose(); throw new Error('Servant stopped while opening foreground') }
     this.foreground.set(assistant.id, handle)
     this.foregroundRoutes.set(assistant.id, JSON.stringify(resolveModelRoute(assistant.settings.foreground, assistant.autoModel)))
-    this.foregroundSubscriptions.set(assistant.id, handle.subscribe(() => this.options.onChanged?.()))
+    this.foregroundSubscriptions.set(assistant.id, handle.subscribe(() => {
+      if (!this.stopping) this.options.onForegroundChanged?.(assistant.id, handle.sessionId)
+      this.options.onChanged?.()
+    }, true))
     return handle
   }
 
   async start(task: Task, action: PendingAction): Promise<void> {
     if (this.stopping) throw new Error('Servant is stopping')
-    const role: Role = action.kind === 'dispatch' ? 'worker' : action.kind === 'help' ? 'helper' : 'planner'
-    const identity = createHash('sha256').update(`${task.id}\0${action.id}`).digest('hex').slice(0, 32)
+    if (!['dispatch', 'plan', 'evaluate'].includes(action.kind)) throw new Error('Only Worker and Planner actions create native Agents.')
+    const role = action.kind === 'dispatch' ? 'worker' as const : 'planner' as const
+    const identity = createHash('sha256').update(`${task.id}\0${action.id}\0${action.payload.predecessorExecutionId ?? ''}`).digest('hex').slice(0, 32)
     const executionId = `servant-exec-${identity}`
     const sessionId = `servant-${role}-${identity}`
     const profile = task.runtimeProfile ?? this.options.defaults
@@ -152,6 +195,7 @@ export class AgentSupervisor {
 
   private async openOwner(task: Task, execution: ExecutionBinding, resume: boolean): Promise<OwnedExecution> {
     const { executionId, sessionId, role } = execution
+    if (role === 'helper') throw new Error('Historical Helper records are retained; recovery opens the original Worker or Planner.')
     const profile = task.runtimeProfile ?? this.options.defaults
     const binding: RoleBinding = { assistantId: task.assistantId, taskId: task.id, executionId, sessionId, role }
     const handle = await this.options.gateway.create({
@@ -170,8 +214,8 @@ export class AgentSupervisor {
           const current = await this.options.tasks.get(task.id)
           const execution = current?.executions[executionId]
           if (!current || !execution || execution.state !== 'active' || execution.stopRequested) return false
-          if (current.control === 'cancelled') return toolName === 'execution_report' || toolName === 'recovery_report'
-          if (current.control === 'paused' && role !== 'helper') return ['execution_report', 'execution_request_help', 'task_query', 'memory_query', 'planning_checkpoint', 'planning_decide'].includes(toolName)
+          if (current.control === 'cancelled') return toolName === 'execution_report'
+          if (current.control === 'paused') return ['execution_report', 'execution_wait', 'task_query', 'memory_query', 'planning_checkpoint', 'planning_decide'].includes(toolName)
           return true
         })
       },
@@ -199,32 +243,20 @@ export class AgentSupervisor {
     this.watch(owner)
   }
 
-  /** A Helper may request retirement; only observed native quiescence authorizes it. */
-  async prepareRecoveryResolution(taskId: string, incidentId: string, helperExecutionId: string): Promise<void> {
-    const task = await this.options.tasks.get(taskId)
-    const incident = task?.incidents[incidentId]
-    const binding = incident ? task?.executions[incident.executionId] : undefined
-    if (!task || !incident || !binding) throw new Error('Recovery incident disappeared')
-    const helper = task.executions[helperExecutionId]
-    if (!helper || helper.role !== 'helper' || helper.state !== 'active' || helper.incidentId !== incidentId || incident.helperExecutionId !== helperExecutionId) {
-      throw new Error('This exact Helper no longer owns the recovery incident')
-    }
-    if (binding.role === 'worker' || binding.state !== 'active') return
-    const owner = this.owners.get(binding.executionId)
-    if (!owner) throw new Error('The absent semantic owner needs cold native ownership reconciliation before recovery can resume it')
-    const observation = owner.handle.observe()
-    if (observation.state === 'running' || observation.jobs.some(job => job.status === 'running' || job.status === 'stopping')) {
-      throw new Error('The original semantic owner is still physically running')
-    }
-    if (!await this.release(owner)) throw new Error('The original semantic owner became busy before retirement; its jobs remain with that exact owner')
-    await this.options.tasks.execute(taskId, { type: 'execution.abandon', commandId: `repaired-retire:${binding.executionId}`,
-      source: { kind: 'runtime', id: 'deepseek-servant' }, executionId: binding.executionId,
-      evidence: `Bound Helper ${incident.helperExecutionId ?? incidentId} finished its inspection. The exact native non-Worker owner was idle, had no live jobs, and has been disposed before replacing its semantic action.` })
+  /** Release this exact owned runtime once its turn and jobs have settled. */
+  async retireExecution(executionId: string): Promise<boolean> {
+    const owner = this.owners.get(executionId)
+    return owner ? this.release(owner) : false
   }
 
   private async prompt(task: Task, action: PendingAction, execution: ExecutionBinding): Promise<string> {
+    if (execution.role === 'helper') throw new Error('Historical recovery roles have no executable prompt.')
     const knowledge = await this.options.knowledge.list({ assistantId: task.assistantId, workspaceId: task.workspace.id })
-    return roleInput(execution.role, assembleRoleInput(task, execution, action, knowledge.filter(record => record.kind !== 'skill')))
+    const records = new TaskRecordAccess(this.options.tasks, { assistantId: task.assistantId, taskId: task.id, role: execution.role,
+      executionId: execution.executionId, agentId: execution.agentId, sessionId: execution.sessionId })
+    return roleInput(execution.role, { ...assembleRoleInput(task, execution, action, knowledge.filter(record => record.kind !== 'skill')),
+      directRecords: await records.context(task, execution),
+      ...(execution.role === 'planner' && this.options.workerCapacity ? { workerCapacity: await this.options.workerCapacity() } : {}) })
   }
 
   private requestObservation(owner: OwnedExecution): void {
@@ -237,25 +269,28 @@ export class AgentSupervisor {
         await this.observe(owner)
       } while (this.observationAgain.has(owner.executionId) && !this.stopping && this.owners.get(owner.executionId) === owner)
     }).catch(error => this.options.onError(error))
-      .finally(() => { this.observationChains.delete(owner.executionId) })
+      .finally(() => {
+        this.observationChains.delete(owner.executionId)
+        // Native status, inbox and Job events re-arm completion; no polling.
+        if (!this.stopping && this.owners.get(owner.executionId) === owner) this.watch(owner)
+      })
     this.observationChains.set(owner.executionId, work)
   }
 
   private watch(owner: OwnedExecution): void {
+    if (this.stopping || this.owners.get(owner.executionId) !== owner) return
     if (this.watches.has(owner.executionId)) { this.watchAgain.add(owner.executionId); return }
     const work = owner.handle.whenIdle().then(async () => {
-      if (this.stopping) return
+      if (this.stopping || this.owners.get(owner.executionId) !== owner) return
       await this.observe(owner)
       const task = await this.options.tasks.get(owner.taskId)
       const binding = task?.executions[owner.executionId]
-      if (!task || !binding || this.stopping) return
+      if (!task || !binding || this.stopping || this.owners.get(owner.executionId) !== owner) return
       const observation = owner.handle.observe()
-      if (binding.stopRequested && !observation.jobs.some(job => job.status === 'running' || job.status === 'stopping')) {
+      if (!['idle', 'stopped'].includes(observation.state) || hasPendingInput(owner.handle)
+        || observation.jobs.some(job => job.status === 'running' || job.status === 'stopping')) return
+      if (binding.stopRequested || binding.state !== 'active') {
         await this.release(owner)
-        return
-      }
-      if (binding.state !== 'active') {
-        if (!observation.jobs.some(job => job.status === 'running' || job.status === 'stopping')) await this.release(owner)
         return
       }
       if (observation.error) {
@@ -280,7 +315,7 @@ export class AgentSupervisor {
   private async observe(owner: OwnedExecution): Promise<void> {
     if (this.stopping || this.owners.get(owner.executionId) !== owner) return
     const task = await this.options.tasks.get(owner.taskId)
-    if (this.stopping) return
+    if (this.stopping || this.owners.get(owner.executionId) !== owner) return
     const binding = task?.executions[owner.executionId]
     if (!task || !binding) return
     const observation = owner.handle.observe()
@@ -307,16 +342,9 @@ export class AgentSupervisor {
     if (this.stopping) return
     const task = await this.options.tasks.get(owner.taskId)
     const execution = task?.executions[owner.executionId]
-    if (execution?.role === 'helper' && execution.incidentId) {
-      // A failed Helper cannot recursively spawn another Helper forever.
-      await this.options.tasks.execute(owner.taskId, { type: 'recovery.block',
-        commandId: `helper-failed:${owner.executionId}:${createHash('sha256').update(operation + message).digest('hex').slice(0, 12)}`,
-        source: { kind: 'runtime', id: 'deepseek-servant' }, helperExecutionId: owner.executionId, reason: `${operation}: ${message}`,
-        wait: { id: `helper-error:${owner.executionId}`, kind: 'configuration', reason: `${operation}: ${message}`,
-          condition: 'The reported Helper runtime/configuration problem has been corrected.', resume: 'Run one new bounded Helper for the same original incident.' } })
-      await this.observe(owner)
-      return
-    }
+    if (!execution || execution.role === 'helper' || this.owners.get(owner.executionId) !== owner) return
+    if (Object.values(task!.incidents).some(entry => entry.executionId === owner.executionId && entry.state !== 'resolved'
+      && entry.errors.some(error => error.operation === operation && error.message === message))) return
     await this.options.tasks.execute(owner.taskId, { type: 'incident.open', commandId: `incident:${owner.executionId}:${task?.revision}:${createHash('sha256').update(operation + message).digest('hex').slice(0, 16)}`,
       source: { kind: 'runtime', id: 'deepseek-servant' }, executionId: owner.executionId, operation, message })
   }
@@ -328,7 +356,7 @@ export class AgentSupervisor {
     // Earlier observation/command writes may have yielded. Recheck the actual
     // handle immediately before disposal so a normal handoff never kills jobs.
     const observation = owner.handle.observe()
-    if (!['idle', 'stopped'].includes(observation.state)
+    if (!['idle', 'stopped'].includes(observation.state) || hasPendingInput(owner.handle)
       || observation.jobs.some(job => job.status === 'running' || job.status === 'stopping')) return false
     const work = (async () => {
       await owner.handle.dispose()

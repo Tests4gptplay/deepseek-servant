@@ -27,7 +27,8 @@ export function calculateStorageUsage(rows: UsageRows, recordedAt: string): Stor
       // Split their serialized field byte sizes without double counting.
       if (isTombstone(value)) addPermanent('historyBytes', size)
       else splitLegacyTask(value, size, addTemporary)
-    } else if (key.startsWith('conversations/') || key.startsWith('conversation/')) {
+    } else if (key.startsWith('conversations/') || key.startsWith('conversation/') || key.startsWith('conversation-index/')
+      || key.startsWith('conversation-exchanges/') || key.startsWith('conversation-staging/') || key.startsWith('conversation-cleanup/')) {
       addPermanent('chatBytes', size)
     } else if (key.startsWith('knowledge/')) {
       addPermanent('knowledgeBytes', size)

@@ -163,6 +163,7 @@ export interface StorageUsageStats {
   }
 }
 export interface RetentionPreview {
+  manual?: boolean
   previewId: string
   createdAt: string
   policyRevision: number

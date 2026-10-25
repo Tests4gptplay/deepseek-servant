@@ -14,12 +14,13 @@ export interface CoordinatorOptions {
   supervisor: AgentSupervisor
   sessions: DshSessionReader
   workerSeats?: number
+  afterCleanup?(): Promise<void>
   onChanged?(): void
   onError?(error: unknown): void
 }
 
 const source = { kind: 'runtime' as const, id: 'deepseek-servant' }
-const priority = { stop: 0, deliver: 1, feedback: 2, learn: 3, help: 4, evaluate: 5, plan: 6, continue: 7, dispatch: 8 }
+const priority = { stop: 0, deliver: 1, feedback: 2, learn: 3, recover: 4, evaluate: 5, plan: 6, continue: 7, dispatch: 8, help: 9 }
 
 /** Event-driven local action dispatcher. It never invents plans or accepts quality. */
 export class RuntimeCoordinator {
@@ -40,9 +41,13 @@ export class RuntimeCoordinator {
       ...(this.error ? { message: this.error } : {}), workerSeats: this.scheduler.workerSeats }
   }
 
+  setWorkerSeats(value: number): void { this.scheduler.setWorkerSeats(value); this.wake() }
+  async capacity() { return this.scheduler.capacity(await this.options.tasks.list(), this.options.supervisor.live()) }
+
   async start(): Promise<void> {
     if (this.running) return
     this.unsubscribe = this.options.tasks.subscribe(() => this.wake())
+    await this.options.tasks.archives.resumeCleanup()
     await this.recover()
     this.running = true
     this.wake()
@@ -82,6 +87,13 @@ export class RuntimeCoordinator {
         await this.finish(task.id, action, `Exact owner ${execution.executionId} is ${execution.physicalState} with no owned jobs.`)
       }
     }
+    for (const task of snapshot) if (['completed', 'cancelled'].includes(task.phase)) {
+      if (await this.options.tasks.cleanupCompleted(task.id)) {
+        for (const key of this.failed.keys()) if (key.startsWith(task.id + '/')) this.failed.delete(key)
+        await this.options.afterCleanup?.()
+        this.options.onChanged?.()
+      }
+    }
     const candidates = snapshot.flatMap(task => Object.values(task.pendingActions).filter(action => action.status === 'pending').map(action => ({ task, action })))
       .sort((a, b) => priority[a.action.kind] - priority[b.action.kind] || b.task.priority - a.task.priority || a.action.createdAt.localeCompare(b.action.createdAt))
     for (const candidate of candidates) {
@@ -114,10 +126,32 @@ export class RuntimeCoordinator {
       return
     }
     switch (action.kind) {
-      case 'plan': case 'evaluate': case 'help': case 'dispatch':
+      case 'plan': case 'evaluate': case 'dispatch':
         await this.options.supervisor.start(task, action)
         if (action.kind === 'dispatch') await this.finish(taskId, action, 'The exact native Agent admitted and durably flushed its stable input id.')
         break
+      case 'recover': {
+        const incident = task.incidents[action.payload.incidentId ?? '']
+        const execution = incident && task.executions[incident.executionId]
+        if (!incident || !execution) throw new Error('Recovery needs its exact saved incident and original owner.')
+        if (this.options.supervisor.get(execution.executionId)) {
+          if (!await this.options.supervisor.retireExecution(execution.executionId)) {
+            await this.reset(taskId, action, 'The original owner still has native work; no successor was started.')
+            return
+          }
+        } else if (!['stopped', 'lost'].includes(execution.physicalState)) {
+          await this.recoverExecution(task, execution)
+        }
+        const current = (await this.options.tasks.get(taskId))!
+        const previous = current.executions[execution.executionId]
+        if (!['stopped', 'lost'].includes(previous.physicalState) || previous.ownedJobIds.length) {
+          await this.reset(taskId, action, 'The exact owner has not yet settled; preserve this recovery action for native evidence.')
+          return
+        }
+        await this.command(taskId, { type: 'recovery.restart', commandId: 'restart:' + incident.id, source,
+          incidentId: incident.id, evidence: `Previous ${execution.role} ${execution.executionId} is ${previous.physicalState} with no owned jobs. Continue its saved work under the same role and assignment.` })
+        break
+      }
       case 'continue':
         await this.options.supervisor.continue(task, action)
         await this.finish(taskId, action, 'The existing exact owner durably admitted this bounded continuation.')
@@ -131,6 +165,7 @@ export class RuntimeCoordinator {
       }
       case 'deliver': {
         if (!task.delivery) throw new Error('Delivery action has no saved accepted delivery')
+        await this.options.tasks.prepareDelivery(task.id)
         const notificationId = await this.options.assistants.deliver(task.assistantId, task.id, task.delivery)
         await this.finish(taskId, action, 'Accepted delivery is saved and its stable foreground notification is durable.', notificationId)
         break
@@ -196,28 +231,19 @@ export class RuntimeCoordinator {
     const action = task?.pendingActions[actionId]
     if (!task || !action || !['running', 'uncertain'].includes(action.status)) return
     const execution = action.executionId ? task.executions[action.executionId] : undefined
-    if (execution?.role === 'helper') {
-      await this.blockHelper(task, execution, `Helper runtime could not perform its bounded action: ${String(error)}`, 'configuration')
-      await this.options.supervisor.observeExecution(execution.executionId)
-      if (!this.options.supervisor.get(execution.executionId)) {
-        const inspection = await this.options.sessions.inspect(execution.sessionId)
-        const ownership = await this.options.sessions.probeOwnership(execution.sessionId)
-        const noSideEffects = ownership !== 'busy' && !inspection.liveAgent && !execution.ownedJobIds.length
-          && !inspection.unresolvedToolCallIds.length && !inspection.jobs.some(job => job.state === 'registered' && job.owner === execution.agentId)
-        await this.command(taskId, { type: 'execution.observed', commandId: `helper-failure-physical:${this.ownerId}:${execution.executionId}`, source,
-          executionId: execution.executionId, physicalState: noSideEffects ? 'lost' : 'unknown', ...(noSideEffects ? { ownedJobIds: [] } : {}) })
-      }
-      return
-    }
     await this.command(taskId, { type: 'action.reconcile', commandId: `failure:${attemptId}`, source,
       actionId, resolution: 'unknown', evidence: `Runtime action failed after admission: ${String(error)}. Inspect saved/native evidence before repeating it.` })
-    if (action.executionId) await this.command(taskId, { type: 'incident.open', commandId: `failure-incident:${attemptId}`, source,
-      executionId: action.executionId, operation: action.kind, message: String(error) })
+    if (execution && execution.role !== 'helper') await this.command(taskId, { type: 'incident.open', commandId: `failure-incident:${attemptId}`, source,
+      executionId: execution.executionId, operation: action.kind, message: String(error) })
   }
 
   /** Cold evidence precedes resume. A stored job id is never treated as a surviving job. */
   async recover(): Promise<void> {
-    for (const task of await this.options.tasks.list()) {
+    for (const saved of await this.options.tasks.list()) {
+      if (Object.values(saved.pendingActions).some(action => action.kind === 'help' && ['pending', 'running', 'uncertain'].includes(action.status))) {
+        await this.command(saved.id, { type: 'recovery.legacy', commandId: 'migrate-helper:' + saved.id, source })
+      }
+      const task = (await this.options.tasks.get(saved.id))!
       for (const execution of Object.values(task.executions)) {
         if (this.options.supervisor.get(execution.executionId)) continue
         try { await this.recoverExecution(task, execution) } catch (error) { this.reportError(error) }
@@ -266,7 +292,9 @@ export class RuntimeCoordinator {
       return
     }
     const unsettledJobs = inspection.jobs.filter(job => job.owner === execution.agentId && job.state === 'registered')
-    if (execution.ownedJobIds.length || unsettledJobs.length || inspection.unresolvedToolCallIds.length) {
+    const settledJobs = new Set(inspection.jobs.filter(job => job.owner === execution.agentId && job.state !== 'registered').map(job => job.id))
+    if (execution.ownedJobIds.some(id => !settledJobs.has(id)) || unsettledJobs.length || inspection.unresolvedToolCallIds.length
+      || inspection.exists && !inspection.lifecycleKnown) {
       await this.uncertainExecution(task, execution, 'Restart left unmatched native tools or job identities. The original OS side effects are not proven stopped. Inspect the actual process/artifact state; do not replay the operation.')
       return
     }
@@ -284,11 +312,12 @@ export class RuntimeCoordinator {
     }
     await this.command(task.id, { type: 'execution.observed', commandId: `recovery-absent:${this.ownerId}:${execution.executionId}`, source,
       executionId: execution.executionId, physicalState: 'lost', ownedJobIds: [] })
-    if (execution.state === 'active' || unfinishedSemantic) {
-      await this.command(task.id, { type: 'execution.abandon', commandId: `recovery-retire:${this.ownerId}:${execution.executionId}`, source,
-        executionId: execution.executionId, evidence: inspection.exists
-          ? 'Exclusive cold lease and settled native tool/job history prove the old runtime is absent. Preserve saved work/frontier; create a new bounded semantic action rather than resuming queued inputs.'
-          : 'Native Session is absent: the saved execution binding committed before native creation. Retire that identity and plan from saved state.' })
+    if ((execution.state === 'active' || unfinishedSemantic) && execution.role !== 'helper') {
+      await this.command(task.id, { type: 'incident.open', commandId: `cold-incident:${execution.executionId}`, source,
+        executionId: execution.executionId, operation: inspection.lastTurn?.error ? 'native Agent error' : 'interrupted execution',
+        message: inspection.lastTurn?.error ?? (inspection.exists
+          ? 'The previous runtime ended before finishing its semantic action. Native ownership and tool/job history are settled.'
+          : 'The execution binding was saved before its native Session was created.') })
     } else {
       const action = task.pendingActions[execution.actionId]
       if (action?.kind === 'dispatch' && ['running', 'uncertain'].includes(action.status) && lastReport) await this.finish(task.id, action, 'A durable terminal worker report proves dispatch occurred; the old owner is now absent.')
@@ -299,7 +328,11 @@ export class RuntimeCoordinator {
     await this.command(task.id, { type: 'execution.observed', commandId: `recovery-unknown:${this.ownerId}:${execution.executionId}`, source,
       executionId: execution.executionId, physicalState: 'unknown', ownedJobIds: execution.ownedJobIds })
     if (execution.role === 'helper') {
-      await this.blockHelper(task, execution, evidence, 'recovery')
+      const incident = task.incidents[execution.incidentId ?? '']
+      if (incident && incident.state !== 'resolved') await this.command(task.id, { type: 'incident.open',
+        commandId: `legacy-owner-uncertain:${this.ownerId}:${execution.executionId}`, source,
+        executionId: incident.executionId, operation: 'historical recovery owner reconciliation',
+        message: `${execution.executionId}: ${evidence}` })
       return
     }
     const action = task.pendingActions[execution.actionId]
@@ -307,14 +340,6 @@ export class RuntimeCoordinator {
       commandId: `recovery-uncertain:${this.ownerId}:${action.id}`, source, actionId: action.id, resolution: 'unknown', evidence })
     await this.command(task.id, { type: 'incident.open', commandId: `recovery-incident:${execution.executionId}`, source,
       executionId: execution.executionId, operation: 'backend restart ownership reconciliation', message: evidence })
-  }
-
-  private async blockHelper(task: Task, execution: ExecutionBinding, reason: string, kind: 'configuration' | 'recovery'): Promise<void> {
-    const identity = createHash('sha256').update(reason).digest('hex').slice(0, 12)
-    await this.command(task.id, { type: 'recovery.block', commandId: `block-helper:${execution.executionId}:${identity}`, source,
-      helperExecutionId: execution.executionId, reason, wait: { id: `helper-block:${execution.executionId}:${identity}`, kind, reason,
-        condition: kind === 'configuration' ? 'Correct the reported runtime/configuration problem.' : 'Establish that this exact old Helper and any prior OS jobs have stopped.',
-        resume: 'Retry one bounded Helper for the original incident after the condition is confirmed.' } })
   }
 
   /** Only the authenticated human API calls this; models cannot manufacture it. */
@@ -327,8 +352,13 @@ export class RuntimeCoordinator {
     }
     await this.command(taskId, { type: 'execution.observed', commandId: `${commandId}:observed`, source,
       executionId, physicalState: 'lost', ownedJobIds: [] })
+    const current = (await this.options.tasks.get(taskId))!
+    const incident = Object.values(current.incidents).find(entry => entry.executionId === executionId && entry.state === 'open')
+    const disposition = `The user confirmed this exact execution and its recorded jobs (${execution.ownedJobIds.join(', ') || 'none recorded'}) stopped; its native Session lease was free. Evidence: ${evidence}`
+    if (incident && execution.role !== 'helper') return this.command(taskId, { type: 'recovery.restart',
+      commandId: `${commandId}:restart`, source, incidentId: incident.id, evidence: disposition })
     return this.command(taskId, { type: 'execution.abandon', commandId: `${commandId}:retire`, source,
-      executionId, evidence: `The authenticated user explicitly confirmed this old execution and its recorded OS jobs (${execution.ownedJobIds.join(', ') || 'none recorded'}) stopped. The native Session lease was free. User evidence: ${evidence}` })
+      executionId, evidence: disposition })
   }
 
   async dispose(): Promise<void> {

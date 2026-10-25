@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { conversationMessages, conversationSnapshot } from './conversation.js'
 import { SessionId, SessionLogOffset, deriveEventMessage, isAppendSurfaceEvent } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { SessionAlreadyOwnedError, SessionPersistenceNotFoundError } from '@deepseek-ai/dsh-session-persistence'
@@ -7,9 +8,8 @@ import type {} from '@deepseek-ai/dsh-session-projection'
 import type {} from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-workspace'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
-import type { AssistantInputEvidence } from '../../contracts/assistant.ts'
+import type { AssistantInputEvidence, ConversationMessage } from '../../contracts/assistant.ts'
 
-export interface ConversationMessage { id: string; role: 'user' | 'assistant'; text: string }
 export interface DshSessionCatalogEntry {
   sessionId: string
   createdAt: number
@@ -177,30 +177,20 @@ export class DshSessionReader {
     } finally { await lease.close() }
   }
 
-  async conversation(sessionId: string): Promise<ConversationMessage[]> {
-    const output: ConversationMessage[] = []
-    const seen = new Set<string>()
-    for (const event of await this.events(sessionId)) {
-      // A queued or interrupted user admission is still the user's actual
-      // message. Keep it visible even before the model consumes it.
-      if (event.type === 'agent/inbox/spliced') for (const message of event.data.inserted) {
-        if (message.source.kind !== 'user' || seen.has(message.id)) continue
-        const text = message.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
-        if (!text) continue
-        seen.add(message.id)
-        output.push({ id: message.id, role: 'user', text })
-      }
-      if (!isAppendSurfaceEvent(event)) continue
-      const message = deriveEventMessage(event)
-      if (message === null || seen.has(message.id)) continue
-      if (message.role !== 'user' && message.role !== 'assistant') continue
-      if (message.role === 'user' && message.source.kind !== 'user') continue
-      const text = message.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
-      if (text.length === 0) continue
-      seen.add(message.id)
-      output.push({ id: message.id, role: message.role, text })
+  async capture(sessionId: string) {
+    const live = this.ctx.sessions.get(SessionId(sessionId))
+    if (live) await this.ctx.sessions.flush(live)
+    const snapshot = conversationSnapshot(await this.events(sessionId))
+    if (snapshot.finished) {
+      const state = await this.inspect(sessionId)
+      snapshot.finished = state.lifecycleKnown && state.queuedInbox.nextTurn.length === 0
+        && state.queuedInbox.nextStep.length === 0 && state.unresolvedToolCallIds.length === 0
     }
-    return output
+    return snapshot
+  }
+
+  async conversation(sessionId: string): Promise<ConversationMessage[]> {
+    return conversationMessages(await this.events(sessionId))
   }
 }
 

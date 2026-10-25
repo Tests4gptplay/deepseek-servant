@@ -16,6 +16,7 @@ export interface ServantApiOptions {
   knowledge: KnowledgeService
   query: QueryService
   coordinator: RuntimeCoordinator
+  runtimeSettings: import('./runtime-settings.js').RuntimeSettingsService
   retention: RetentionService
   recordsDirectory(): string | Promise<string>
   moveRecords(directory: string, expectedDirectory: string, signal: AbortSignal): Promise<unknown>
@@ -36,12 +37,20 @@ export class ServantApi {
       return value
     }
     switch (method) {
-      case 'view': ScopeTarget.parse(raw); return this.options.query.view()
+      case 'view': {
+        const input = ScopeTarget.extend({ conversation: z.strictObject({ before: z.string().min(1).optional(),
+          date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() }).optional() }).parse(raw)
+        return this.options.query.view(input.assistantId, input.conversation)
+      }
       case 'task': return this.options.query.task(Target.parse(raw).taskId)
       case 'send': {
         const input = ScopeTarget.extend({ messageId: Id, text: Text,
-          autoModel: ModelRouteSchema.extend({ provider: z.string().min(1).max(200), model: z.string().min(1).max(200) }).optional() }).parse(raw)
+          autoModel: ModelRouteSchema.extend({ provider: z.string().min(1), model: z.string().min(1) }).optional() }).parse(raw)
         return this.options.assistants.sendMessage(input.assistantId, input.messageId, input.text, input.autoModel)
+      }
+      case 'configureRuntime': {
+        const input = z.strictObject({ expectedRevision: z.int().positive(), workerSeats: z.int().min(1).max(32) }).parse(raw)
+        return this.options.runtimeSettings.configure(input.expectedRevision, input.workerSeats)
       }
       case 'configure': {
         const input = ScopeTarget.extend({ expectedRevision: z.int().positive(), settings: SettingsSchema }).parse(raw)
@@ -77,6 +86,16 @@ export class ServantApi {
         return this.options.tasks.execute(input.taskId, { type: 'task.reviseGoal', commandId, source,
           expectedGoalRevision: input.expectedGoalRevision, goal: { ...input.goal, sourceRef: commandId } })
       }
+      case 'exportRecords': {
+        const input = Target.parse(raw)
+        await task(input.taskId)
+        return this.options.tasks.exportRecords(input.taskId)
+      }
+      case 'records': {
+        const input = Target.extend({ cursor: z.int().nonnegative().optional(), limit: z.int().min(1).max(262144).optional() }).parse(raw)
+        await task(input.taskId)
+        return this.options.tasks.archives.read(input.taskId, input.cursor, input.limit)
+      }
       case 'readDelivery': {
         const input = Target.parse(raw)
         await task(input.taskId)
@@ -84,11 +103,18 @@ export class ServantApi {
       }
       case 'knowledge': return this.knowledge(raw)
       case 'retention': {
-        const input = z.strictObject({ action: z.enum(['stats', 'preview', 'sweep', 'configure']), previewId: z.string().optional(),
+        if (raw.action === 'clearConversation') {
+          z.strictObject({ action: z.literal('clearConversation'), confirmation: z.literal('clear-foreground-conversation') }).parse(raw)
+          return this.options.assistants.clearConversation()
+        }
+        const input = z.strictObject({ action: z.enum(['stats', 'preview', 'sweep', 'configure']), previewId: z.string().optional(), confirmation: z.literal('clear-ended-task-records').optional(),
           expectedRevision: z.int().nonnegative().optional(), policy: z.record(z.string(), z.number()).optional() }).parse(raw)
         if (input.action === 'stats') return this.options.retention.stats()
-        if (input.action === 'preview') return this.options.retention.preview()
-        if (input.action === 'sweep') return this.options.retention.sweep({ previewId: input.previewId })
+        if (input.action === 'preview') return this.options.retention.preview({ manual: true })
+        if (input.action === 'sweep') {
+          if (!input.previewId || input.confirmation !== 'clear-ended-task-records') throw new Error('请先查看清理范围并确认删除已结束任务记录。')
+          return this.options.retention.sweep({ previewId: input.previewId, manual: true })
+        }
         if (!input.policy) throw new Error('清理策略不能为空。')
         // RetentionService validates optional limits and publishes one record.
         return this.options.retention.configure(input.policy as unknown as import('../contracts/retention.ts').RetentionPolicy, input.expectedRevision)
@@ -102,7 +128,7 @@ export class ServantApi {
         return this.options.coordinator.attestStopped(input.taskId, input.executionId, input.evidence, commandId)
       }
       case 'moveRecords': {
-        const input = z.strictObject({ directory: z.string().trim().min(1).max(4000), expectedDirectory: z.string().min(1).max(4000) }).parse(raw)
+        const input = z.strictObject({ directory: z.string().trim().min(1), expectedDirectory: z.string().min(1) }).parse(raw)
         return this.options.moveRecords(input.directory, input.expectedDirectory, signal)
       }
       case 'openRecords': {
@@ -135,7 +161,7 @@ export class ServantApi {
     const assistant = await this.options.assistants.get('default')
     const scope = { assistantId: assistant.id, workspaceId: assistant.workspace.id }
     if (action === 'revise') {
-      const input = common.extend({ expectedVersion: z.int().positive(), title: Text, description: Text, body: z.string().min(1).max(64_000),
+      const input = common.extend({ expectedVersion: z.int().positive(), title: Text, description: Text, body: z.string().min(1),
         applicability: Text, sourceResultId: Id }).parse(raw)
       return this.options.knowledge.reviseSkill({ ...input, scope, commandId: input.commandId ?? `ui:${randomUUID()}` })
     }

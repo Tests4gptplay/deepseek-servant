@@ -1,6 +1,6 @@
 {
   "name": "deepseek-servant",
-  "version": "0.1.0-alpha.25",
+  "version": "0.1.0-alpha.37",
   "description": "基于 DeepSeek Harness 的自主 AI 助理与多 Agent 协作插件，支持目标规划、持续执行、任务接续、故障恢复与技能学习。\n\n设计逻辑源自 Chat Agent Harness（CAH）：https://github.com/Tests4gptplay/chat-agent-harness",
   "private": true,
   "type": "module",
@@ -17,6 +17,7 @@
     "icon.png",
     "assets/page-icon.png",
     "assets/welcome-character.png",
+    "assets/task-empty-character.png",
     "assets/statusbar-icon.png",
     "assets/statusbar-icon-black.png",
     "cordis.patch.yml",
@@ -50,7 +51,8 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/test.mjs"
   },
   "dependencies": {
     "zod": "4.4.3"
@@ -79,7 +81,7 @@
     "@deepseek-ai/dsh-client-ui-renderer": "*",
     "@deepseek-ai/dsh-client-ui-primitives": "*",
     "@deepseek-ai/dsh-client-ui-slots": "*",
-    "@deepseek-ai/dsh-storage-json": "^0.2.1-rc.2"
+    "@deepseek-ai/dsh-storage-json": "*"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

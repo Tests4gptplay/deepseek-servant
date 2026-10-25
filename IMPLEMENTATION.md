@@ -1,6 +1,6 @@
 # DeepSeek Servant 实现说明
 
-版本：`0.1.0-alpha.4`。架构基线见 [DESIGN.md](https://github.com/Tests4gptplay/deepseek-servant/blob/main/DESIGN.md)，实施与实测记录如下。
+版本：`0.1.0-alpha.37`。架构基线见 [DESIGN.md](https://github.com/Tests4gptplay/deepseek-servant/blob/main/DESIGN.md)，实施与实测记录如下。
 
 **设计来源：**[Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness)，在 DSH 中实现其持续任务、Agent 角色分工、工作接续与知识积累机制。
 
@@ -10,11 +10,11 @@
 
 任务和知识持久化在 DSH 的 `storageDomain`。模型调用、文件与命令工具、Session、jobs 和 Skills 使用宿主现有服务；当前模式的任务流转在所属 DSH 实例的后端完成。Client 通过宿主已认证的 Connection/RPC 与流事件通道交互。
 
-适配宿主为 DSH `0.2.1-rc.2`，核对的官方源码标签 `dsh-v0.2.1-rc.2`、提交 `687f282e8625c6b8d11ff58211a90524be2e4317`。DSH API 适配集中在 `src/adapters/dsh`，更新宿主版本时可按接口逐项核对。
+当前 Windows 运行验收使用 DSH `0.2.1-rc.3`。此前 API 基线为官方源码标签 `dsh-v0.2.1-rc.2`、提交 `687f282e8625c6b8d11ff58211a90524be2e4317`。DSH API 适配集中在 `src/adapters/dsh`，插件按实际服务接口运行，不以宿主版本字符串拦截启动。
 
 ## 插件标识与存储域
 
-显示名称为 **DeepSeek Servant**，包名及插件 ID 为 `deepseek-servant`，持久化 domain 为 `deepseek_servant`。原生消息来源、RPC 路径、会话前缀和 scoped Skill 前缀使用统一的 Servant 标识。早期隔离 profile 的 alpha 数据保留在原存储域；此版本使用新的独立存储域。
+显示名称为 **DeepSeek Servant**，包名及插件 ID 为 `deepseek-servant`，持久化 domain 为 `deepseek_servant`。原生消息来源、RPC 路径、会话前缀和 scoped Skill 前缀使用统一的 Servant 标识。升级继续使用原存储域与目录指针，旧版内嵌字段按稳定身份迁移。
 
 ## 文件与模块
 
@@ -27,9 +27,9 @@
 | 实际所有权 | `runtime/agent-supervisor.ts` | 创建/持有/停止/释放确切 Agent，观察其模型回合和精确作业 |
 | 外置任务记忆 | `runtime/context-assembler.ts`、Task 数据契约 | 当前目标、正式计划、规划记录、工作前沿与按需引用 |
 | 知识与技能 | `application/knowledge-service.ts`、`adapters/dsh/skills.ts` | 候选、验证、版本、真实加载和结果反馈，发布原生 scoped provider |
-| 角色工具 | `roles/tools.ts`、四份角色契约 | 实际 Agent 绑定的能力；Planner 判断方法和质量，代码检验身份和状态 |
+| 角色工具 | `roles/tools.ts`、前台及后台角色契约 | 实际 Agent 绑定的能力；Planner 判断方法和质量，代码检验身份和状态 |
 | 读取与界面 | `application/query-service.ts`、`client.tsx`、`client/` | 原生独立页面、对话、任务、产物、知识、设置与清理操作 |
-| 保留与清理 | `application/retention-service.ts`、`domain/retention.ts` | 终态详情精简、引用保护、过期历史、技能旧正文、真实回收统计 |
+| 保留与清理 | `application/retention-service.ts`、`domain/retention.ts` | 完整 records 封存、自动临时清理、历史入口与技能维护、真实大小统计 |
 
 ## 正常任务调用链
 
@@ -39,7 +39,7 @@
 
 `TaskService.submit` 将 Task、命令回执和 `plan` 动作一次提交。RuntimeCoordinator 收到提交事件，在满足用户控制和资源条件后保存 `action.claim`。Supervisor 再保存 execution/session 身份，最后创建原生 Agent、装入所选 preset 和角色能力、注入该动作的稳定输入。没有保存成功就没有原生派发。
 
-Planner 用 `planning.commit` 保存正式 Plan 和子任务。Worker 席位默认两个，可由插件 Host 配置调整，配置范围独立于 DSH 的全局模型并发限制。每个 Worker 仍由其原生 Agent 串行处理自己的模型回合。Worker `execution_report` 通过 executionId、assignmentVersion 和 resultId 核对，不让正常并发报告竞争一个旧 Task revision。
+Planner 用 `planning.commit` 保存正式 Plan 和子任务。Worker 席位默认两个，可在设置页保存为 1–32，已有 Host 配置用于初始化。持久设置立即影响后续调度与新 Planner 的容量快照；降低席位不停止当前所有者。该配置独立于 DSH 的全局模型并发限制。每个 Worker 仍由其原生 Agent 串行处理自己的模型回合。Worker `execution_report` 通过 executionId、assignmentVersion 和 resultId 核对，不让正常并发报告竞争一个旧 Task revision。
 
 终结报告关闭该 Worker 的业务能力。报告工具是原生独占工具，持久成功后结束当前模型回合，同批后续业务工具由执行归属检查拒绝。实际 Agent 如仍有本机 jobs，则继续保有其物理归属；业务结果和作业退出分别记录。
 
@@ -89,17 +89,17 @@ Worker 报告可以先于原派发动作的完成回执到达。原派发仍为 
 
 保存了派发 claim 但尚无 execution binding，说明还未进入原生创建阶段，可重新排队。已经绑定但原生 Session 不存在，采用明确缺席证据退休旧身份，并从保存工作前沿建立新动作。Planner 或 Helper 的旧语义动作必须明确收敛，不能用 idle 当作业务成功，也不能遗留一个永远阻塞新 Planner 的旧身份。
 
-Helper 只处理一个确切事故。Helper 自身启动或模型失败会阻塞原事故并记录具体条件，不递归制造 Helper。原生创建前已经失败、确实没有 Session/工具/作业的情况自动释放物理保留；不会要求用户为一个从未启动的进程做额外握手。真正不确定的旧 OS 作业需要有证据的处置，且不能夺取其他活所有者的 Session。
+异常先保存确切事故，再等待原所有者、作业和 Inbox 收束。随后创建同角色的新 generation，保留 Child、assignmentVersion、累计段数与工作前沿；保存过的最终结果直接进入评价。普通工具报错继续由原执行处理，相同故障反复出现时进入可说明原因的配置等待。既有 Helper 历史可读，恢复链使用原角色。
 
 后台动作失败会保存明确等待或不确定状态，并向界面暴露原因；没有无上限自动重试、定时催模型继续或后台测试守护程序。持续推进来自已提交结果、作业事件、用户输入和满足等待条件后的动作。
 
 ## 完成后的清理
 
-详见 [RETENTION.md](RETENTION.md)。默认 7 天精简终态任务详情，90 天或超过 200 条目标时清理无引用旧历史，Servant 自有记录目标为 64 MiB。安全的终态记录可以在容量压力下提前精简，活跃/暂停/待恢复记录不会为了凑数被删除。技能旧正文和可保留的薄证据分开处理。
+详见 [RETENTION.md](RETENTION.md)。当前版本先在同一 Domain 封存完整 records，唤醒前台交付，再自动释放终态 Task 的临时运行记录。封存内容落盘重读后发布清单；永久身份先保存，Task 热状态最后删除。
 
-归档直接收缩原 Task 记录，保留交付和仍被知识引用的结果；不是把整份长日志复制到另一个无限目录。清理通过 TaskService 同一队列提交，并在保存清理清单后执行宿主归档。失败保留可重试记录，一轮维护不会循环重试。
+完整原始需求、规划与执行正文、成果证据和前台原文长期保留。手动清理和可选历史策略收起任务入口，旧技能按用户设置维护；清理中断后按已封存的准确键列表继续。records 可通过前台工具和任务详情导出 Markdown，原记录引用在清理后继续有效。
 
-DSH rc.2 的 Session 持久化采用追加式日志。归档后原生日志文件仍保留在磁盘，界面独立显示其占用与回收字节数。当前插件的实际空间回收来自 Servant 任务记录和可过期的技能正文；成果文件、用户已有 Skills 和前台对话按原位置保留。
+DSH 原生 Session 日志保存在宿主配置的目录。页面按 Domain 实际内容分别统计六项长期记录和六项临时记录，并提供原生日志目录入口。
 
 ## 构建与安装
 
@@ -120,7 +120,9 @@ dsh plugin --profile <目标profile> add <本地tgz路径> --ignore-scripts
 
 安装将更新指定的 DSH profile。建议先使用隔离 profile 验证；模型提供者和凭据继续由 DSH 配置管理。
 
-## 验证结果
+## 历史版本验证结果
+
+以下为此前 alpha.2 / alpha.3 的运行记录；当前升级验收另列于文末。
 
 功能场景运行于 DSH `0.2.1-rc.2`、Node `24.19.0` 的隔离 Web profile。此前 `alpha.2` 功能构建由 GPT 承担角色模型判断，实际文件操作、Agent、Session、持久化、派发和交付由 DSH 与插件执行；`alpha.3` 完成项目标识与接口命名调整，已进行源码级一致性核对。
 
@@ -170,6 +172,33 @@ dsh plugin --profile <目标profile> add <本地tgz路径> --ignore-scripts
 
 后台进程的四个节点 RSS 采样约为 178、188、196、217 MiB，进程记录的 VmHWM 为 288 MiB。它们是本次有限运行的观测值。验证结束后临时后端正常退出，退出码 0；该次运行使用 `alpha.2` 功能构建；`alpha.3` 的源码级命名与接口调整另行核对。
 
-### 实测环境与后续验收项目
+### 历史实测环境与当时的后续项目
 
-本轮实测环境为 Linux / DSH 0.2.1-rc.2，覆盖原生文件工具、长任务周期评审、两次正常 Worker 换代、最终交付和清理。后续目标环境验收项目包括 Windows Electron、Codex 专有路由、跨天运行、原生 token 阈值压缩及活动 OS 作业的跨代处理。Linux 测试中的 shell 操作受到宿主沙箱限制，Worker 已采用原生文件工具完成相应业务。64 MiB 为插件自有记录的维护目标，宿主 Session 日志及工作区成果另行计量。
+该轮实测环境为 Linux / DSH 0.2.1-rc.2，覆盖原生文件工具、长任务周期评审、两次正常 Worker 换代、最终交付和清理。当时列出的后续项目包括 Windows Electron、Codex 专有路由、跨天运行、原生 token 阈值压缩及活动 OS 作业的跨代处理。Linux 测试中的 shell 操作受到宿主沙箱限制，Worker 已采用原生文件工具完成相应业务。64 MiB 为当时的记录维护目标，宿主 Session 日志及工作区成果另行计量。
+
+## alpha.37 升级验收（2026-10-26）
+
+生产源码 `npm run typecheck`、`npm run build` 均退出 0。源码回归 `npm test` 通过 59 项；随后新增的 Domain 分类统计检查单独通过 1 项。覆盖完整记录与迁移、增量规划、工作段和评审、故障归属、席位调整、六次完整交互、归档失败与恢复、导出冲突、旧维护操作和已确认的 UI 状态逻辑。
+
+### Windows 原生集成
+
+在独立 DSH_HOME 与 SDK profile 中，用 DSH `0.2.1-rc.3` 的原生插件命令安装 `alpha.37` 候选。只有外部模型响应被替换为受控 SSE；Agent、Session、Inbox、工具执行、事件、配置和 Windows JSON storageDomain 均由真实宿主管理。测试没有访问生产 profile 或用户凭据，也没有开启浏览器。
+
+| 场景 | 观测结果 |
+| --- | --- |
+| 前台接续 | 8 次问答逐条保存并进入不同物理 Session；随后种子只保留最近 6 次完整交互 |
+| 长任务 | 同一 Child、3 代 Worker、16 份正式报告；13 次 continue、2 次 handoff、1 次 complete，即 15 个有效接续段；在 5/10/15 段评审，最终第 16 份报告验收 |
+| 实际文件 | Worker 经原生 read/write 写出 16 行 `segment-1` 至 `segment-16`，最终逐字节符合预期 |
+| 原生故障 | 第一代 Worker 收到真实原生模型错误；事故保存后第二代 Worker 接续，assignmentVersion 不变，产物为 `recovered`；两个任务均无新 Helper |
+| 完成交付 | 完整 records 封存后程序唤醒前台，各产生一次结果留言；Delivery 为 delivered，最终档案为 ended，Task 热键删除 |
+| records 导出 | 长任务 409,262 字节，SHA-256 `4df3594fbe0b7f18c02a90b9da6cf5035fc9d2dfe7301c62a0eb608d8791e726`；恢复任务 114,576 字节，SHA-256 `4a2a2cf385f9704320b27b399ee67c26fd53b1cf64ef1037ed1399f7de9bc8c6`；导出文件哈希与封存清单相同 |
+| 后端重启 | 两项已清理 Task 的完整档案仍可回读，旧热键未复活，Domain 更新后的值及席位 3 保持 |
+| 原生配置及迁移 | 新安装默认席位 2；实际 API 保存 3，重启读取 3，再保存 1、4、32，Scheduler 即时一致；迁移整个 records 目录后 probe 数据保持 |
+| Domain 统计 | 迁移后逐键求和 1,675,454 字节，与服务统计一致；长期加临时等于总量，临时为 0，原生 Session 日志另存 |
+
+隔离驱动的 `continue`、`restart` 命令均退出 0。长任务初次检查把最终 complete 也计入有效接续段，产生 15/16 的断言差异；仅修正验证脚本，随后直接读取已完成档案继续验收，未重跑任务或改动产物。Jobs/未知副作用、跨日期记录及错误重试边界由针对性源码回归覆盖；本轮原生场景没有另跑 30 分钟静默 OS 作业或 Codex 专有路由。已被用户接受的 Desktop 外观、透明插画、设置和 alpha.36 侧栏隐藏规则直接继承，不重新操作浏览器。
+
+### 首轮上下文比较
+
+同一原生宿主、standard preset 与首次问候输入，按实际发送的 `system`、`tools`、`messages` JSON 使用 `o200k_base` 统一计数：alpha.36 为 **6,101**，alpha.37 为 **4,696**，减少 **1,405（约 23.0%）**；可见工具由 30 个降为 20 个。该计数用于相同输入的比较，不是模型供应商账单 Token。角色正文和旧原文按需读取，完整永久记录没有缩短。
+

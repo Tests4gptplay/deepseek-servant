@@ -9,6 +9,8 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 declare const __SERVANT_STATUS_ICON_DATA_URI__: string
 declare const __SERVANT_ICON_DATA_URI__: string
 declare const __SERVANT_WELCOME_CHARACTER_DATA_URI__: string
+declare const __SERVANT_TASK_EMPTY_CHARACTER_DATA_URI__: string
+import { illustrationFor, showCornerIllustration, type IllustrationPage } from './illustrations.js'
 import type { AssistantSettings } from '../contracts/assistant.js'
 import type { GoalInput, ModelRoute } from '../contracts/task.js'
 import type { ServantView, TaskView } from '../contracts/views.js'
@@ -17,8 +19,9 @@ import type { ServantNotice, ServantSnapshot, ServantSource } from './source.js'
 import type { ServantLocaleKey } from './locales.js'
 import { RetentionPanel } from './retention-panel.js'
 import { ModelPicker } from './model-picker.js'
+import { PresetPicker, type ServantPreset } from './preset-picker.js'
 import type { ServantModels } from './models.js'
-import { isAutoModel } from '../domain/model-route.js'
+import { isAutoModel, resolveModelRoute } from '../domain/model-route.js'
 import css from './page.module.css'
 
 type Translate = PropsLocale<'dsh.servant'>['t']
@@ -27,10 +30,13 @@ type Tab = 'conversation' | 'tasks'
 export interface ServantInjected {
   hooks: { servant: HostObservable<ServantSnapshot>; models: HostObservable<ServantModels> }
   onRefreshModels: () => Promise<void>
+  onLoadPresets: () => Promise<readonly ServantPreset[]>
   onPickDirectory?: () => Promise<string | null>
   onRefresh: ServantSource['refresh']
+  onHistoryPage: ServantSource['historyPage']
   onSend: ServantSource['send']
   onConfigure: ServantSource['configure']
+  onConfigureRuntime: ServantSource['configureRuntime']
   onControl: ServantSource['control']
   onPriority: ServantSource['priority']
   onReconcile: ServantSource['reconcile']
@@ -39,6 +45,7 @@ export interface ServantInjected {
   onKnowledge: ServantSource['knowledge']
   onRetention: ServantSource['retention']
   onMoveRecords: ServantSource['moveRecords']
+  onExportRecords: ServantSource['exportRecords']
   onOpenRecords: () => Promise<void>
   onOpenArtifact: (taskId: string, artifactId: string) => Promise<void>
 }
@@ -54,6 +61,7 @@ export function ServantPage(props: ServantPageProps) {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const models = props.useModels(value => value)
   const value = snapshot.value
+  const showCorner = !!value && showCornerIllustration(tab === 'conversation' ? value.messages.length > 0 : value.tasks.length > 0, value.assistant.settings)
   return <section className={css.page} aria-label={t('title')}>
     <header className={css.heading}>
       <div className={css.identity}>
@@ -81,11 +89,15 @@ export function ServantPage(props: ServantPageProps) {
     </div>}
     {value?.runtime.message && <p className={css.notice} role="status">{value.runtime.message}</p>}
     {!value && snapshot.status === 'loading' && <div className={css.empty} role="status" aria-label={t('runtime.loading')}><StateDot state="ongoing" size={26} /></div>}
-    {value && <div id={`servant-tabs-${tab}-panel`} role="tabpanel" aria-labelledby={`servant-tabs-${tab}`} className={css.content}>
+    {value && <div id={`servant-tabs-${tab}-panel`} role="tabpanel" aria-labelledby={`servant-tabs-${tab}`} className={`${css.content} ${showCorner ? css.contentWithCorner : ''} `}>
       {tab === 'conversation' && <Conversation value={value} busy={snapshot.pending.includes('send')} onSend={props.onSend} t={t}
         models={models} modelBusy={snapshot.pending.includes('configure')} onRefreshModels={props.onRefreshModels}
+        history={snapshot.history} historyBusy={snapshot.status === 'loading'} onHistoryPage={props.onHistoryPage}
         onModelChange={route => props.onConfigure(value.assistant.revision, { ...value.assistant.settings, foreground: route })} />}
       {tab === 'tasks' && <Tasks value={value} pending={snapshot.pending} actions={props} t={t} />}
+    </div>}
+    {value && showCorner && <div className={css.cornerArt} aria-hidden="true">
+      <PageIllustration page={tab} settings={value.assistant.settings} corner />
     </div>}
     {value && <Modal open={settingsOpen} onClose={() => setSettingsOpen(false)} title={t('settings.open')} closeLabel={t('settings.close')}
       className={css.settingsModal} contentClassName={css.settingsModalContent}>
@@ -124,13 +136,16 @@ function ServantSettingsContent({ snapshot, models, actions, t }: {
       <div id={`${id}-${tab}-panel`} role="tabpanel" aria-labelledby={`${id}-${tab}`} className={css.settingsBody}>
         {tab === 'settings' ? <div className={css.settingsColumn}>
           <Settings value={value} busy={snapshot.pending.includes('configure')} onSave={actions.onConfigure} t={t}
-            models={models} onRefreshModels={actions.onRefreshModels} onPickDirectory={actions.onPickDirectory} />
+            models={models} onRefreshModels={actions.onRefreshModels} onLoadPresets={actions.onLoadPresets} onPickDirectory={actions.onPickDirectory} />
+          <WorkerSeatsSettings value={value} busy={snapshot.pending.includes('configureRuntime')} onSave={actions.onConfigureRuntime} t={t} />
           <RetentionPanel stats={snapshot.storageStats} preview={snapshot.retention} outcome={snapshot.lastCleanup} busy={snapshot.pending.includes('retention')}
             recordStorage={value.recordStorage} moving={snapshot.pending.includes('moveRecords')} onMoveRecords={actions.onMoveRecords}
             onPickDirectory={actions.onPickDirectory} onRetention={actions.onRetention} onOpenRecords={actions.onOpenRecords} t={t} />
           <section className={css.experimental} aria-labelledby={`${id}-experimental`}>
             <h3 id={`${id}-experimental`}>{t('experimental.title')}</h3>
-            <p className={css.muted}>{t('experimental.placeholder')}</p>
+            <div className={css.experimentalGroups}>
+              <IllustrationSettings value={value} busy={snapshot.pending.includes('configure')} onSave={actions.onConfigure} t={t} />
+            </div>
           </section>
         </div> : <Knowledge value={value} pending={snapshot.pending} onKnowledge={actions.onKnowledge} t={t} />}
       </div>
@@ -138,25 +153,39 @@ function ServantSettingsContent({ snapshot, models, actions, t }: {
   </div>
 }
 
-function Conversation({ value, busy, onSend, models, modelBusy, onModelChange, onRefreshModels, t }: {
+function Conversation({ value, busy, onSend, models, modelBusy, onModelChange, onRefreshModels, history, historyBusy, onHistoryPage, t }: {
   value: ServantView; busy: boolean; onSend: ServantSource['send']; models: ServantModels; modelBusy: boolean
   onModelChange(route: ModelRoute): Promise<boolean>; onRefreshModels(): Promise<void>; t: Translate
+  history: ServantSnapshot['history']; historyBusy: boolean; onHistoryPage: ServantSource['historyPage']
 }) {
   const [draft, setDraft] = useState({ id: crypto.randomUUID(), text: '' })
   const bottom = useRef<HTMLDivElement>(null)
-  const needsAuto = isAutoModel(value.assistant.settings.foreground) || isAutoModel(value.assistant.settings.background)
+  const messages = useRef<HTMLDivElement>(null)
+  const needsAuto = isAutoModel(value.assistant.settings.foreground)
   const modelReady = !needsAuto || models.current !== null
   const send = async () => {
     if (!draft.text.trim() || busy || modelBusy || !modelReady) return
     const submitted = draft
-    if (await onSend(submitted.id, submitted.text, models.current ?? undefined)) setDraft(current => current.id === submitted.id ? { id: crypto.randomUUID(), text: '' } : current)
+    if (await onSend(submitted.id, submitted.text, resolveModelRoute(value.assistant.settings.foreground, models.current ?? undefined))) setDraft(current => current.id === submitted.id ? { id: crypto.randomUUID(), text: '' } : current)
   }
-  useEffect(() => { bottom.current?.scrollIntoView({ block: 'end' }) }, [value.messages.length])
+  useEffect(() => {
+    if (history.before) messages.current?.scrollTo({ top: 0 })
+    else bottom.current?.scrollIntoView({ block: 'end' })
+  }, [history.before, history.date, value.messages.at(-1)?.ref ?? value.messages.at(-1)?.id])
   return <div className={css.conversation}>
-    <div className={css.messages} role="log" aria-live="polite">
-      {!value.messages.length && <div className={css.welcome}><img className={css.welcomeIcon} src={__SERVANT_WELCOME_CHARACTER_DATA_URI__} alt="" /><h2>{t('conversation.empty')}</h2><p>{t('conversation.hint')}</p></div>}
-      {value.messages.map(message => <article key={message.id} className={`${css.message} ${message.role === 'user' ? css.userMessage : ''}`}>
-        <div className={css.messageAuthor}>{message.role === 'user' ? t('conversation.you') : value.assistant.settings.name || t('conversation.assistant')}</div>
+    <nav className={css.historyNavigation} aria-label={t('conversation.history')}>
+      <Button size="sm" disabled={historyBusy || !value.conversationBefore} onClick={() => { void onHistoryPage('older') }}>{t('conversation.older')}</Button>
+      {history.canGoNewer && <Button size="sm" disabled={historyBusy} onClick={() => { void onHistoryPage('newer') }}>{t('conversation.newer')}</Button>}
+      <label>{t('conversation.date')}<Input type="date" value={history.date ?? ''} disabled={historyBusy}
+        onChange={event => { void onHistoryPage('date', event.target.value) }} /></label>
+      {(history.before || history.date) && <Button size="sm" disabled={historyBusy} onClick={() => { void onHistoryPage('latest') }}>{t('conversation.latest')}</Button>}
+    </nav>
+    <div ref={messages} className={css.messages} role="log" aria-live="polite">
+      {!value.messages.length && history.date && <p className={css.muted}>{t('conversation.noHistory')}</p>}
+      {!value.messages.length && !history.date && <div className={css.welcome}><PageIllustration page="conversation" settings={value.assistant.settings} /><h2>{t('conversation.empty')}</h2><p>{t('conversation.hint')}</p></div>}
+      {value.messages.map(message => <article key={message.ref ?? message.id} className={`${css.message} ${message.role === 'user' ? css.userMessage : ''}`}>
+        {(message.role !== 'user' || Boolean(value.assistant.settings.userName)) &&
+          <div className={css.messageAuthor}>{message.role === 'user' ? value.assistant.settings.userName : value.assistant.settings.name || t('conversation.assistant')}</div>}
         <div className={css.messageText}>{message.text}</div>
       </article>)}
       {value.assistant.pendingInputs.length > 0 && <p className={css.muted} role="status">{t('conversation.pending')}</p>}
@@ -182,7 +211,7 @@ function Conversation({ value, busy, onSend, models, modelBusy, onModelChange, o
 function Tasks({ value, pending, actions, t }: { value: ServantView, pending: string[], actions: ServantActions, t: Translate }) {
   const [selectedId, setSelectedId] = useState<string>()
   const selected = value.tasks.find(task => task.id === selectedId)
-  if (!value.tasks.length) return <Empty title={t('tasks.empty')} detail={t('tasks.hint')} />
+  if (!value.tasks.length) return <Empty title={t('tasks.empty')} detail={t('tasks.hint')} artwork={<PageIllustration page="tasks" settings={value.assistant.settings} />} />
   return <div className={`${css.taskLayout} ${selected ? css.hasSelection : ''}`}>
     <div className={css.taskList} aria-label={t('tasks.current')}>
       {value.tasks.map(task => {
@@ -209,6 +238,7 @@ function TaskDetails({ task, busy, actions, onBack, t }: { task: TaskView, busy:
   return <section className={css.taskDetail}>
     <div className={css.detailActions}><Button size="sm" onClick={onBack}>{t('tasks.back')}</Button><span className={css.badge}>{t(`control.${task.control}`)}</span></div>
     <h2>{task.goal.objective}</h2>
+    {ended && <Button size="sm" variant="outline" disabled={busy} onClick={() => { void actions.onExportRecords(task.id) }}>{t('tasks.exportRecords')}</Button>}
     {!ended && <div className={css.actions}>
       <Button size="sm" variant="outline" disabled={busy} onClick={() => { void actions.onControl(task.id, task.control === 'paused' ? 'resume' : 'pause') }}>{t(task.control === 'paused' ? 'tasks.resume' : 'tasks.pause')}</Button>
       <Button size="sm" disabled={busy} onClick={() => { setEditing(true) }}>{t('tasks.edit')}</Button>
@@ -268,7 +298,7 @@ function ExecutionReconciliation({ executionId, sessionId, busy, onReconcile, t 
     <p>{t('tasks.reconcileHint')}</p>
     <p className={css.muted}>{t('tasks.executionId')}<code>{executionId}</code></p>
     <p className={css.muted}>{t('tasks.sessionId')}<code>{sessionId}</code></p>
-    <Field label={t('tasks.reconcileEvidence')}><textarea value={evidence} required maxLength={32000} disabled={busy}
+    <Field label={t('tasks.reconcileEvidence')}><textarea value={evidence} required disabled={busy}
       placeholder={t('tasks.reconcilePlaceholder')} onChange={event => { setEvidence(event.target.value) }} /></Field>
     <Button type="submit" size="sm" variant="outline" disabled={busy || !evidence.trim()}>{t('tasks.reconcileStopped')}</Button>
   </form>
@@ -355,8 +385,20 @@ function SkillEditor({ record, version, busy, onSave, onClose, t }: { record: Sk
   </form>
 }
 
-function Settings({ value, busy, onSave, models, onRefreshModels, onPickDirectory, t }: {
+function WorkerSeatsSettings({ value, busy, onSave, t }: { value: ServantView; busy: boolean; onSave: ServantSource['configureRuntime']; t: Translate }) {
+  const [seats, setSeats] = useState(String(value.runtime.workerSeats))
+  useEffect(() => { setSeats(String(value.runtime.workerSeats)) }, [value.runtimeSettings.revision, value.runtime.workerSeats])
+  const number = Number(seats), valid = Number.isInteger(number) && number >= 1 && number <= 32
+  return <form className={css.settings} onSubmit={event => { event.preventDefault(); if (valid) void onSave(value.runtimeSettings.revision, number) }}>
+    <Field label={t('settings.workerSeats')}><Input type="number" min={1} max={32} step={1} required value={seats}
+      disabled={busy} onChange={event => setSeats(event.target.value)} /></Field>
+    <div className={css.actions}><Button type="submit" disabled={busy || !valid || number === value.runtime.workerSeats}>{t('settings.save')}</Button></div>
+  </form>
+}
+
+function Settings({ value, busy, onSave, models, onRefreshModels, onLoadPresets, onPickDirectory, t }: {
   value: ServantView; busy: boolean; onSave: ServantSource['configure']; models: ServantModels; onRefreshModels(): Promise<void>
+  onLoadPresets(): Promise<readonly ServantPreset[]>
   onPickDirectory?: () => Promise<string | null>; t: Translate
 }) {
   const [settings, setSettings] = useState<AssistantSettings>(() => structuredClone(value.assistant.settings))
@@ -378,6 +420,8 @@ function Settings({ value, busy, onSave, models, onRefreshModels, onPickDirector
   }, [value.assistant.revision, value.assistant.settings, revision, baseline, dirty])
   return <form className={css.settings} onSubmit={event => { event.preventDefault(); const submitted = JSON.stringify(settings); void onSave(revision, settings).then(ok => { if (ok) setBaseline(submitted) }) }}>
     <Field label={t('settings.name')}><Input required value={settings.name} onChange={event => { setSettings({ ...settings, name: event.target.value }) }} /></Field>
+    <Field label={t('settings.userName')}><Input value={settings.userName ?? ''} placeholder={t('settings.userNamePlaceholder')}
+      onChange={event => { setSettings({ ...settings, userName: event.target.value }) }} /></Field>
     <ControlField label={t('settings.workspace')}><Menu open={workspaceOpen} portal className={css.menuAnchor} selectedId={customWorkspace ? 'custom' : settings.workspaceId ?? 'default'}
       anchor={<Button type="button" variant="outline" disabled={busy || picking} aria-label={t('settings.workspace')} aria-expanded={workspaceOpen} aria-haspopup="menu"
         onClick={() => { setWorkspaceOpen(!workspaceOpen) }}>{customWorkspace ? t('settings.customWorkspace') : selectedWorkspace?.title ?? t('settings.defaultWorkspace')}</Button>}
@@ -390,7 +434,7 @@ function Settings({ value, busy, onSave, models, onRefreshModels, onPickDirector
       }} onClose={() => { setWorkspaceOpen(false) }} />
       {customWorkspace && <div className={css.customWorkspace}>
         <label className={css.directoryField}><span>{t('settings.customDirectory')}</span>
-          <Input required value={settings.workspaceDirectory ?? ''} disabled={busy || picking} maxLength={4000}
+          <Input required value={settings.workspaceDirectory ?? ''} disabled={busy || picking}
             placeholder={t('settings.directoryPlaceholder')} onChange={event => { setSettings({ ...settings, workspaceDirectory: event.target.value }); setDirectoryError(undefined) }} />
         </label>
         {onPickDirectory && <Button type="button" variant="outline" disabled={busy || picking} onClick={() => {
@@ -404,17 +448,48 @@ function Settings({ value, busy, onSave, models, onRefreshModels, onPickDirector
       </div>}
       <p className={css.muted}>{t('settings.workspaceHint')}</p><span className={css.muted}>{t('settings.currentDirectory')}</span><code>{value.assistant.workspace.directory}</code>
     </ControlField>
-    <Field label={t('settings.preset')}><Input required value={settings.presetId} onChange={event => { setSettings({ ...settings, presetId: event.target.value }) }} /></Field>
-    <ControlField label={t('settings.background')}><ModelPicker value={settings.background} models={models}
-      onChange={route => setSettings({ ...settings, background: route })} onRefresh={onRefreshModels} disabled={busy} label={t('settings.background')} t={t} />
-      <p className={css.muted}>{t('model.autoHint')}</p>
-    </ControlField>
-    <p className={css.muted}>{t('settings.modelHint')}</p>
+    <div className={css.runtimeControls}>
+      <ControlField label={t('settings.preset')}><PresetPicker value={settings.presetId} onLoad={onLoadPresets}
+        onChange={presetId => setSettings({ ...settings, presetId })} disabled={busy} t={t} />
+        <p className={css.muted}>{t('mode.hint')}</p>
+      </ControlField>
+      <ControlField label={t('settings.background')}><ModelPicker value={settings.background} models={models}
+        followModel={resolveModelRoute(settings.foreground, models.current ?? undefined)}
+        onChange={route => setSettings({ ...settings, background: route })} onRefresh={onRefreshModels} disabled={busy} label={t('settings.background')} t={t} />
+        <p className={css.muted}>{t('model.autoHint')}</p>
+      </ControlField>
+    </div>
+    <p className={css.settingsHint}>{t('settings.modelHint')}</p>
     <div className={css.actions}><Button type="submit" variant="primary" disabled={busy || picking || !dirty || (customWorkspace && !settings.workspaceDirectory?.trim())}>{t('settings.save')}</Button>{dirty && <><Button type="button" disabled={busy || picking} onClick={() => { setDirectoryError(undefined); setSettings(structuredClone(value.assistant.settings)); setBaseline(JSON.stringify(value.assistant.settings)); setRevision(value.assistant.revision) }}>{t('tasks.discard')}</Button><span className={css.muted}>{t('settings.changed')}</span></>}</div>
   </form>
 }
 
-function Empty({ title, detail }: { title: string, detail: string }) { return <div className={css.empty}><IconSparkleRegular size={28} /><h2>{title}</h2><p>{detail}</p></div> }
+function PageIllustration({ page, settings, corner = false }: { page: IllustrationPage; settings: AssistantSettings; corner?: boolean }) {
+  const artwork = illustrationFor(page, settings)
+  return <img className={corner ? css.cornerCharacter : css.welcomeIcon}
+    src={artwork === 'welcome' ? __SERVANT_WELCOME_CHARACTER_DATA_URI__ : __SERVANT_TASK_EMPTY_CHARACTER_DATA_URI__}
+    alt="" draggable={false} data-servant-illustration={artwork} data-placement={corner ? 'corner' : 'center'} />
+}
+function IllustrationSettings({ value, busy, onSave, t }: { value: ServantView; busy: boolean; onSave: ServantSource['configure']; t: Translate }) {
+  const settings = value.assistant.settings
+  return <section className={css.experimentalCard} aria-label={t('experimental.illustrations')}>
+    <h4>{t('experimental.illustrations')}</h4>
+    <p className={css.muted}>{t('experimental.illustrationsHint')}</p>
+    <label className={css.illustrationOption}>
+      <span><strong>{t('experimental.showCorner')}</strong><small>{t('experimental.showCornerHint')}</small></span>
+      <input type="checkbox" role="switch" aria-label={t('experimental.showCorner')} checked={settings.showCornerCharacter !== false} disabled={busy}
+        onChange={event => { void onSave(value.assistant.revision, { ...settings, showCornerCharacter: event.target.checked }) }} />
+    </label>
+    <label className={css.illustrationOption}>
+      <span><strong>{t('experimental.swapIllustrations')}</strong><small>{t('experimental.swapIllustrationsHint')}</small></span>
+      <input type="checkbox" role="switch" aria-label={t('experimental.swapIllustrations')} checked={settings.swapPageIllustrations === true} disabled={busy}
+        onChange={event => { void onSave(value.assistant.revision, { ...settings, swapPageIllustrations: event.target.checked }) }} />
+    </label>
+  </section>
+}
+function Empty({ title, detail, artwork }: { title: string, detail: string; artwork?: ReactNode }) {
+  return <div className={`${css.empty} ${artwork ? css.illustratedEmpty : ''}`}>{artwork ?? <IconSparkleRegular size={28} />}<h2>{title}</h2><p>{detail}</p></div>
+}
 function Section({ title, children }: { title: string, children: ReactNode }) { return <section className={css.section}><h3>{title}</h3>{children}</section> }
 // A compound menu is not a labelable form input: wrapping it in a label makes
 // clicks on its hint/blank space activate the trigger again after dismissal.
@@ -424,10 +499,24 @@ function ControlField({ label, children }: { label: string, children: ReactNode 
 function Field({ label, children }: { label: string, children: ReactNode }) { return <label className={css.field}><span>{label}</span>{children}</label> }
 function lines(text: string): string[] { return text.split('\n').map(line => line.trim()).filter(Boolean) }
 
-export function ServantSidebarIcon({ size }: PropsRuntime<'sidebar.panellist'>) {
-  return <span className={css.servantSidebarGlyph} aria-hidden="true" style={{
-    width: size, height: size, maskImage: `url("${__SERVANT_STATUS_ICON_DATA_URI__}")`,
-  }} />
+interface ServantSidebarInjected {
+  hooks: { servant: HostObservable<ServantSnapshot> }
+  onReadDeliveries: ServantSource['readDeliveries']
+}
+export function ServantSidebarIcon({ size, active, useServant, onReadDeliveries, t }:
+  PropsRuntime<'sidebar.panellist'> & InjectFace<ServantSidebarInjected> & PropsLocale<'dsh.servant'>) {
+  const pending = useServant(value => JSON.stringify((value.value?.tasks ?? [])
+    .filter(task => task.delivery?.status === 'delivered' && !task.delivery.readAt).map(task => task.id)))
+  useEffect(() => {
+    const ids = JSON.parse(pending) as string[]
+    if (active && ids.length) void onReadDeliveries(ids)
+  }, [active, pending, onReadDeliveries])
+  return <span className={css.servantSidebarStatus} style={{ width: size, height: size }}>
+    <span className={css.servantSidebarGlyph} aria-hidden="true" style={{
+      width: size, height: size, maskImage: `url("${__SERVANT_STATUS_ICON_DATA_URI__}")`,
+    }} />
+    {!active && pending !== '[]' && <span className={css.servantCompletion} title={t('notice.completed')}><StateDot state="done" /></span>}
+  </span>
 }
 
 export interface ServantNoticeInjected { hooks: { notice: HostObservable<ServantNotice | undefined> }, dismiss: () => void }

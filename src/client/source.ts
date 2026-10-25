@@ -1,15 +1,17 @@
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
-import type { AssistantSettings } from '../contracts/assistant.js'
+import type { AssistantSettings, ConversationQuery } from '../contracts/assistant.js'
 import type { GoalInput, ModelRoute } from '../contracts/task.js'
 import type { ServantView } from '../contracts/views.js'
 import type { RetentionPolicy, RetentionPreview, RetentionSweepResult, StorageUsageStats } from '../contracts/retention.js'
 
-export type RetentionRequest = { action: 'stats' } | { action: 'preview' } | { action: 'sweep'; previewId: string }
+export type RetentionRequest = { action: 'stats' } | { action: 'preview' } | { action: 'sweep'; previewId: string; confirmation: 'clear-ended-task-records' }
   | { action: 'configure'; policy: RetentionPolicy; expectedRevision: number }
+  | { action: 'clearConversation'; confirmation: 'clear-foreground-conversation' }
 
 export interface ServantClientApi {
-  view(): Promise<ServantView>
+  view(input?: { conversation?: ConversationQuery }): Promise<ServantView>
   send(input: { assistantId: string, messageId: string, text: string, autoModel?: ModelRoute }): Promise<unknown>
+  configureRuntime(input: { expectedRevision: number; workerSeats: number }): Promise<unknown>
   configure(input: { assistantId: string, expectedRevision: number, settings: AssistantSettings }): Promise<unknown>
   control(input: { taskId: string, intent: 'pause' | 'resume' | 'cancel' | 'stop', executionId?: string }): Promise<unknown>
   priority(input: { taskId: string, priority: number }): Promise<unknown>
@@ -19,6 +21,8 @@ export interface ServantClientApi {
   knowledge(input: Record<string, unknown>): Promise<unknown>
   retention(input: RetentionRequest): Promise<unknown>
   moveRecords(input: { directory: string; expectedDirectory: string }): Promise<unknown>
+  readDelivery(input: { taskId: string }): Promise<unknown>
+  exportRecords(input: { taskId: string }): Promise<{ path: string; sha256: string; bytes: number }>
   subscribeChanged(listener: () => void): () => void
   subscribeReset(listener: () => void): () => void
 }
@@ -28,6 +32,7 @@ export interface ServantSnapshot {
   value?: ServantView
   error?: string
   pending: string[]
+  history: ConversationQuery & { canGoNewer: boolean }
   retention?: RetentionPreview
   storageStats?: StorageUsageStats
   lastCleanup?: Pick<RetentionSweepResult, 'reclaimedServantBytes' | 'nativeReclaimedBytes' | 'finishedAt' | 'nativeLogsRetained' | 'skipped'>
@@ -36,7 +41,7 @@ export interface ServantSnapshot {
 export interface ServantNotice {
   sequence: number
   kind: 'success' | 'error'
-  key: 'sent' | 'settingsSaved' | 'taskUpdated' | 'knowledgeUpdated' | 'retentionUpdated' | 'retentionPolicySaved' | 'recordsMoved' | 'failed'
+  key: 'sent' | 'settingsSaved' | 'taskUpdated' | 'knowledgeUpdated' | 'retentionUpdated' | 'retentionPolicySaved' | 'recordsMoved' | 'recordsExported' | 'completed' | 'failed'
   detail?: string
 }
 
@@ -58,7 +63,9 @@ export function createServantNotices() {
 
 /** Read-only subscriptions follow the page; mutations always go through the Host services. */
 export function createServantSource(api: ServantClientApi, notify: (notice: Omit<ServantNotice, 'sequence'>) => void) {
-  let snapshot: ServantSnapshot = { status: 'loading', pending: [] }
+  let snapshot: ServantSnapshot = { status: 'loading', pending: [], history: { canGoNewer: false } }
+  let history: ConversationQuery[] = [{}]
+  let historyIndex = 0
   const listeners = new Set<() => void>()
   let epoch = 0
   let disposers: Array<() => void> = []
@@ -69,13 +76,31 @@ export function createServantSource(api: ServantClientApi, notify: (notice: Omit
     const request = ++epoch
     publish({ ...snapshot, status: 'loading', error: undefined })
     try {
-      const [value, usage] = await Promise.all([api.view(), api.retention({ action: 'stats' })])
+      const [value, usage] = await Promise.all([api.view({ conversation: history[historyIndex] }), api.retention({ action: 'stats' })])
       if (!usage || typeof usage !== 'object' || !('totalBytes' in usage)
         || typeof usage.totalBytes !== 'number') throw new Error('Invalid Servant storage statistics.')
-      if (request === epoch) publish({ ...snapshot, status: 'ready', value, storageStats: usage as StorageUsageStats, error: undefined })
+      if (request === epoch) {
+        const previous = snapshot.value && new Set(snapshot.value.tasks.filter(task => task.delivery?.status === 'delivered').map(task => task.id + '/' + task.delivery!.id))
+        publish({ ...snapshot, status: 'ready', value, storageStats: usage as StorageUsageStats, error: undefined })
+        if (previous) for (const task of value.tasks) if (task.delivery?.status === 'delivered' && !previous.has(task.id + '/' + task.delivery.id)) {
+          notify({ kind: 'success', key: 'completed', detail: task.goal.objective })
+        }
+      }
     } catch (error) {
       if (request === epoch) publish({ ...snapshot, status: 'error', error: errorMessage(error) })
     }
+  }
+  const historyPage = async (action: 'older' | 'newer' | 'latest' | 'date', date?: string): Promise<void> => {
+    if (action === 'older') {
+      const before = snapshot.value?.conversationBefore
+      if (!before || snapshot.status === 'loading') return
+      history = [...history.slice(0, historyIndex + 1), { ...history[historyIndex], before }]; historyIndex++
+    } else if (action === 'newer') {
+      if (historyIndex === 0 || snapshot.status === 'loading') return
+      historyIndex--
+    } else { history = [action === 'date' && date ? { date } : {}]; historyIndex = 0 }
+    publish({ ...snapshot, history: { ...history[historyIndex], canGoNewer: historyIndex > 0 } })
+    await refresh()
   }
   const invalidate = (): void => {
     // One commit can invalidate several projections; a microtask coalesces their reads.
@@ -123,7 +148,15 @@ export function createServantSource(api: ServantClientApi, notify: (notice: Omit
       },
     } satisfies HostObservable<ServantSnapshot>,
     refresh,
+    historyPage,
+    exportRecords: (taskId: string) => mutate('task:' + taskId, undefined, async () => {
+      const result = await api.exportRecords({ taskId })
+      notify({ kind: 'success', key: 'recordsExported', detail: result.path })
+      return result
+    }),
+    readDeliveries: (taskIds: string[]) => Promise.all(taskIds.map(taskId => mutate('read:' + taskId, undefined, () => api.readDelivery({ taskId })))),
     send: (messageId: string, text: string, autoModel?: ModelRoute) => mutate('send', 'sent', () => api.send({ assistantId: assistantId(), messageId, text, autoModel })),
+    configureRuntime: (expectedRevision: number, workerSeats: number) => mutate('configureRuntime', 'settingsSaved', () => api.configureRuntime({ expectedRevision, workerSeats })),
     configure: (expectedRevision: number, settings: AssistantSettings) => mutate('configure', 'settingsSaved', () => api.configure({ assistantId: assistantId(), expectedRevision, settings })),
     control: (taskId: string, intent: 'pause' | 'resume' | 'cancel' | 'stop', executionId?: string) => mutate(`task:${taskId}`, 'taskUpdated', () => api.control({ taskId, intent, executionId })),
     priority: (taskId: string, priority: number) => mutate(`task:${taskId}`, 'taskUpdated', () => api.priority({ taskId, priority })),
@@ -134,7 +167,10 @@ export function createServantSource(api: ServantClientApi, notify: (notice: Omit
     moveRecords: (directory: string, expectedDirectory: string) => mutate('moveRecords', 'recordsMoved', () => api.moveRecords({ directory, expectedDirectory })),
     retention: (input: RetentionRequest) => mutate('retention', input.action === 'preview' ? undefined : input.action === 'configure' ? 'retentionPolicySaved' : 'retentionUpdated', async () => {
       const result = await api.retention(input)
-      if (input.action === 'stats') {
+      if (input.action === 'clearConversation') {
+        history = [{}]; historyIndex = 0
+        publish({ ...snapshot, history: { canGoNewer: false } })
+      } else if (input.action === 'stats') {
         publish({ ...snapshot, storageStats: result as StorageUsageStats })
       } else if (input.action === 'sweep' && result && typeof result === 'object' && 'remaining' in result) {
         const swept = result as RetentionSweepResult

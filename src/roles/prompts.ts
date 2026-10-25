@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 
-export type SemanticRole = 'foreground' | 'planner' | 'worker' | 'helper'
+export type SemanticRole = 'foreground' | 'planner' | 'worker'
 
 declare const __SERVANT_ROLE_TEXTS__: Record<SemanticRole, string> | undefined
 
@@ -8,7 +8,6 @@ const sourcePaths: Record<SemanticRole, URL> = {
   foreground: new URL('./foreground.md', import.meta.url),
   planner: new URL('./planner.md', import.meta.url),
   worker: new URL('./worker.md', import.meta.url),
-  helper: new URL('./helper.md', import.meta.url),
 }
 
 /** Bundle embeds exactly the checked-in role contracts; source tests read the same files. */

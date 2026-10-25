@@ -20,13 +20,14 @@ export interface GoalContract extends GoalInput { revision: number }
 export interface GoalHistoryEntry { goal: GoalContract; replacedAt: string; commandId: string; changeSource: CommandSource }
 export interface FailedApproach { approach: string; outcome: string; evidence: string[] }
 export interface WorkCheckpoint { completed: string[]; failedApproaches: FailedApproach[]; remaining: string[]; nextAction: string; nextReads: string[] }
-export interface PlannerNote { revision: number; goalRevision: number; body: string; frontier: string; updatedAt: string; commandId: string }
+export interface PlannerBacklog { id: string; objective: string; reason: string; dependsOn: string[]; trigger: string; required: boolean; status: 'pending' | 'done' | 'cancelled' }
+export interface PlannerNote { revision: number; goalRevision: number; body: string; frontier: string; updatedAt: string; commandId: string; backlog?: PlannerBacklog[] }
 export interface PlannerMemoryInput {
   frontier?: string
   evidence?: string[]
   failedApproaches?: string[]
   changedAssumptions?: string[]
-  planNote?: { expectedRevision: number; body: string; frontier: string; changeSummary: string }
+  planNote?: { expectedRevision: number; body: string; frontier: string; changeSummary: string; backlog?: PlannerBacklog[] }
   noteUse?: { revision: number; summary: string; frontier: string }
 }
 export interface ChildSpec {
@@ -47,7 +48,7 @@ export interface Child extends ChildSpec {
   progressSegments: number
   activeExecutionId?: string
   /** Normal continuation in a new native owner, preserving this assignment. */
-  handoff?: { predecessorExecutionId: string; resultId: string; reviewRequired: boolean }
+  handoff?: { predecessorExecutionId: string; resultId: string; reviewRequired: boolean; recoveryIncidentId?: string }
   currentResultId?: string
   acceptedResultId?: string
   acceptedAtGoalRevision?: number
@@ -117,10 +118,12 @@ export interface Incident {
   childId?: string
   state: 'open' | 'repairing' | 'resolved' | 'waiting'
   errors: Array<{ operation: string; message: string; at: string }>
+  /** Saved work/configuration identity; repeated faults only block an unchanged frontier. */
+  frontier?: string
   resolution?: string
   helperExecutionId?: string
 }
-export type ActionKind = 'plan' | 'evaluate' | 'dispatch' | 'continue' | 'stop' | 'deliver' | 'learn' | 'feedback' | 'help'
+export type ActionKind = 'plan' | 'evaluate' | 'dispatch' | 'continue' | 'stop' | 'deliver' | 'learn' | 'feedback' | 'recover' | 'help'
 export interface LearningProposal {
   skillId: string
   title: string
@@ -141,6 +144,7 @@ export interface ActionPayload {
   executionId?: string
   /** A normal handoff cannot dispatch until this exact physical owner is gone. */
   predecessorExecutionId?: string
+  recoveryIncidentId?: string
   assignmentVersion?: number
   resultIds?: string[]
   incidentId?: string
@@ -230,8 +234,9 @@ export interface SubmitTaskInput extends CommandBase { taskId?: string; assistan
 export interface ChildDecision { childId: string; resultId: string; outcome: 'accept' | 'rework' | 'continue'; reason: string; revisedChild?: ChildSpec }
 export type TaskCommand = CommandBase & (
   | { type: 'task.submit'; taskId: string; assistantId: string; workspace: WorkspaceBinding; goal: GoalInput; runtimeProfile?: RuntimeProfile; foregroundEvaluator?: string; priority?: number }
-  | { type: 'planning.commit'; expectedPlanRevision: number; expectedGoalRevision: number; strategy: string; children: ChildSpec[]; retainAcceptedChildIds?: string[]; memory?: PlannerMemoryInput }
+  | { type: 'planning.commit'; expectedPlanRevision: number; expectedGoalRevision: number; strategy: string; children: ChildSpec[]; updates?: ChildSpec[]; cancelChildIds?: string[]; retainAcceptedChildIds?: string[]; memory?: PlannerMemoryInput }
   | { type: 'planning.decide'; expectedGoalRevision: number; decisions: ChildDecision[]; summary: string; deliver?: { id: string; summary: string; artifacts: ArtifactRef[] }; learn?: { resultIds: string[]; reason: string; proposals?: LearningProposal[] }; memory?: PlannerMemoryInput }
+  | { type: 'planning.handoff'; expectedGoalRevision: number; summary: string; frontier: string; memory?: PlannerMemoryInput }
   | { type: 'planning.checkpoint'; expectedGoalRevision: number; summary: string; frontier: string; memory?: PlannerMemoryInput }
   | { type: 'task.reviseGoal'; expectedGoalRevision: number; goal: GoalInput }
   | { type: 'task.control'; intent: 'pause' | 'resume' | 'cancel' | 'stop'; executionId?: string }
@@ -244,8 +249,8 @@ export type TaskCommand = CommandBase & (
   | { type: 'execution.observed'; executionId: string; physicalState: PhysicalState; ownedJobIds?: string[] }
   | { type: 'execution.abandon'; executionId: string; evidence: string }
   | { type: 'incident.open'; executionId: string; operation: string; message: string }
-  | { type: 'recovery.report'; incidentId: string; outcome: 'resolved' | 'wait' | 'failed'; summary: string; wait?: WaitSpec }
-  | { type: 'recovery.block'; helperExecutionId: string; reason: string; wait: WaitSpec }
+  | { type: 'recovery.restart'; incidentId: string; evidence: string }
+  | { type: 'recovery.legacy' }
   | { type: 'action.claim'; actionId: string; ownerId: string }
   | { type: 'action.finish'; actionId: string; evidence?: string; notificationId?: string }
   | { type: 'action.reconcile'; actionId: string; resolution: 'not_started' | 'completed' | 'unknown'; evidence: string; notificationId?: string }

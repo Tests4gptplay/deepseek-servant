@@ -5,7 +5,6 @@ lib/
 coverage/
 *.tsbuildinfo
 
-# Development verification stays local; never ships or enters repository deliverables.
-tests/
+# Generated verification output stays local; regression sources are maintained separately.
 validation/
 tsconfig.validation.json

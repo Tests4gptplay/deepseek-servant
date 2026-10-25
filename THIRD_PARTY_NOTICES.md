@@ -10,6 +10,10 @@ The native browser module registration pattern follows the DSH client build
 convention. DSH runtime packages remain external peer dependencies; deepseek-servant
 does not vendor another copy of the host, its tool executor or its skill loader.
 
+The browser bundle includes the native preset display resolver from
+`@deepseek-ai/dsh-agent-preset-registry/display` under the MIT license below.
+Preset choices and localized descriptions come from the running DSH host.
+
 The referenced DSH source is licensed as follows:
 
 MIT License
@@ -58,12 +62,15 @@ These visual assets and their adaptations are licensed separately under
 (CC BY-NC-SA 4.0)](https://creativecommons.org/licenses/by-nc-sa/4.0/)**.
 
 Covered files: `icon.png`, `assets/page-icon.png`, `assets/statusbar-icon.png`,
-`assets/statusbar-icon-black.png`, `assets/welcome-character.png`, and
+`assets/statusbar-icon-black.png`, `assets/welcome-character.png`,
+`assets/task-empty-character.png`, and
 `docs/images/deepseek-servant-mascot.png`, including their copies embedded in the
 built client. The user-selected navy whale-tail maid icon was supplied on
 2026-10-25. The plugin adaptation scales it to 256 × 256 pixels and preserves
 its original silhouette and transparency in the plugin list and page heading.
 The sidebar icon and welcome illustration retain their existing artwork.
+The task-page illustration uses the additional user-supplied full-body artwork
+from 2026-10-25, adapted by removing its background and ground shadow.
 
 Character reference and source index:
 [AI-gijinka character atlas](https://github.com/Tests4gptplay/ai-gijinka-art-world/blob/main/CHARACTER_ATLAS.md).

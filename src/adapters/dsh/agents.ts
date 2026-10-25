@@ -14,6 +14,7 @@ declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     /** Durable Servant task input; the message id binds the PendingAction. */
     'deepseek-servant': { kind: 'deepseek-servant' }
+    'deepseek-servant-history': { kind: 'deepseek-servant-history' }
   }
 }
 
@@ -35,6 +36,12 @@ export class DshAgentGateway {
   }
 
   get(sessionId: string): OwnedDshAgent | undefined { return this.owned.get(sessionId) }
+
+  hasLiveOwner(sessionId: string): boolean {
+    const id = SessionId(sessionId)
+    return this.ctx.agents.get(id) !== undefined || (this.ctx.get('jobs')?.list(id)
+      .some(job => job.owner === id && (job.status === 'running' || job.status === 'stopping')) ?? false)
+  }
 
   async exists(sessionId: string): Promise<boolean> {
     const id = SessionId(sessionId)
@@ -88,6 +95,15 @@ export class DshAgentGateway {
           setup,
         })
     const agent = native.agent
+    if (!request.resume && request.recentExchanges?.length) {
+      try {
+        agent.inject(freezeMessage({ id: MessageId('servant-history:' + request.sessionId), role: 'user',
+        source: { kind: 'deepseek-servant-history' }, content: [{ type: 'text', text:
+          'Recent completed conversation exchanges, verbatim and chronological. These are historical originals for context; the next actual user input supplies the current request. Use conversation_search/read for earlier originals.\n'
+          + JSON.stringify(request.recentExchanges) }] }))
+        await this.ctx.sessions.flush(agent.session)
+      } catch (error) { await native.dispose(); throw error }
+    }
     let disposed = false
     const jobs = () => agent.ctx.get('jobs')?.list(agent.id).filter(job => job.owner === agent.id) ?? []
     const handle: OwnedDshAgent = {
@@ -143,8 +159,8 @@ export class DshAgentGateway {
         if (input?.state === 'claimed' && !input.active) throw new Error('Native input belongs to an interrupted claim and requires explicit recovery.')
         return input?.state === 'claimed' && input.active === true
       },
-      subscribe: listener => {
-        const onEvent = agent.ctx.on('session/event', () => listener())
+      subscribe: (listener, terminalOnly = false) => {
+        const onEvent = agent.ctx.on('session/event', (_session, event) => { if (!terminalOnly || event.type === 'turn/end') listener() })
         const onStatus = agent.ctx.on('agent/status', () => listener())
         const onError = agent.ctx.on('agent/error', () => listener())
         const onJob = agent.ctx.get('jobs')?.events.subscribe({ owner: agent.id }, event => {

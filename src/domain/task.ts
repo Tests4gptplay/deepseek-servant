@@ -13,8 +13,8 @@ function check(condition: unknown, code: string, message: string, status: 'stale
 }
 const own = <T>(record: Record<string, T>, key: string): T | undefined => Object.hasOwn(record, key) ? record[key] : undefined
 const values = <T>(record: Record<string, T>): T[] => Object.values(record)
-const semanticKinds = new Set<ActionKind>(['plan', 'evaluate', 'help'])
-const runtimeKinds = new Set<ActionKind>(['dispatch', 'continue', 'stop', 'deliver', 'learn', 'feedback'])
+const semanticKinds = new Set<ActionKind>(['plan', 'evaluate'])
+const runtimeKinds = new Set<ActionKind>(['dispatch', 'continue', 'stop', 'deliver', 'learn', 'feedback', 'recover'])
 
 /** Pure transition: no host calls, file checks, timers, or semantic quality scores. */
 export function applyTaskCommand(current: Task | undefined, command: TaskCommand, env: KernelEnvironment): Transition {
@@ -89,7 +89,8 @@ export function applyTaskCommand(current: Task | undefined, command: TaskCommand
           && !values(task.incidents).some(incident => incident.childId === child.id && incident.state !== 'resolved')
           && !actionExists('dispatch', a => a.payload.childId === child.id && a.payload.assignmentVersion === child.assignmentVersion)) {
           addAction('dispatch', { childId: child.id, assignmentVersion: child.assignmentVersion, planRevision: task.plan.revision,
-            ...(child.handoff ? { predecessorExecutionId: child.handoff.predecessorExecutionId } : {}) })
+            ...(child.handoff ? { predecessorExecutionId: child.handoff.predecessorExecutionId,
+              ...(child.handoff.recoveryIncidentId ? { recoveryIncidentId: child.handoff.recoveryIncidentId } : {}) } : {}) })
         }
       }
     }
@@ -114,11 +115,27 @@ export function applyTaskCommand(current: Task | undefined, command: TaskCommand
       let existing = values(task.incidents).find(i => i.executionId === executionId && ['open', 'repairing', 'waiting'].includes(i.state))
       if (!existing) {
         const id = `${command.commandId}:incident`
-        existing = { id, executionId, childId: execution.childId, state: 'open', errors: [] }
+        const frontier = JSON.stringify([task.goal.revision, execution.configurationVersion, execution.model,
+          execution.childId ? task.children[execution.childId].currentResultId : task.plannerNote?.revision,
+          execution.childId ? task.children[execution.childId].assignmentVersion
+            : task.decisions.filter(entry => ['plan', 'evaluation', 'checkpoint'].includes(entry.kind ?? '')).at(-1)?.commandId])
+        existing = { id, executionId, childId: execution.childId, state: 'open', errors: [], frontier }
         task.incidents[id] = existing
-        addAction('help', { incidentId: id, executionId, childId: execution.childId, reason: message })
+        const repeated = values(task.incidents).some(entry => entry.id !== id && entry.state === 'resolved'
+          && task.executions[entry.executionId]?.role === execution.role && entry.childId === execution.childId
+          && task.executions[entry.executionId]?.assignmentVersion === execution.assignmentVersion
+          && (entry.frontier === undefined || entry.frontier === frontier)
+          && entry.errors.some(error => error.operation === operation && error.message === message))
+        if (repeated) {
+          existing.state = 'waiting'
+          const waitId = id + ':configuration'
+          addWait({ id: waitId, kind: 'configuration', reason: message,
+            condition: 'Correct the reported fault or confirm a changed environment before another attempt.',
+            resume: 'Continue the same role from the preserved checkpoint after this condition is explicitly resolved.' }, execution)
+          task.waits[waitId].incidentId = id
+        } else addAction('recover', { incidentId: id, executionId, childId: execution.childId, reason: message })
       }
-      existing.errors.push({ operation, message, at: env.now })
+      if (!existing.errors.some(error => error.operation === operation && error.message === message)) existing.errors.push({ operation, message, at: env.now })
       if (execution.childId && task.children[execution.childId].activeExecutionId === executionId) task.children[execution.childId].status = 'waiting'
       for (const action of values(task.pendingActions)) if (action.kind === 'continue' && action.payload.executionId === executionId && action.status === 'pending') action.status = 'superseded'
     }
@@ -141,21 +158,33 @@ export function applyTaskCommand(current: Task | undefined, command: TaskCommand
         check(command.expectedGoalRevision === task.goal.revision, 'GOAL_CHANGED', 'Read the current goal before planning.', 'stale')
         check(command.expectedPlanRevision === task.plan.revision, 'PLAN_CHANGED', 'Read the current plan before replacing it.', 'stale')
         text(command.strategy, 'strategy')
-        check(Array.isArray(command.children) && command.children.length > 0, 'EMPTY_PLAN', 'A plan needs at least one bounded child.')
-        command.children.forEach(validChildSpec)
-        const ids = command.children.map(c => c.id)
-        check(new Set(ids).size === ids.length, 'DUPLICATE_CHILD', 'Child ids must be unique.')
-        check(command.children.every(c => c.dependsOn.every(id => ids.includes(id))), 'MISSING_DEPENDENCY', 'Every dependency must belong to this plan.')
-        check(!hasCycle(command.children), 'DEPENDENCY_CYCLE', 'A plan cannot contain dependency cycles.')
+        check(Array.isArray(command.children), 'INVALID_PLAN', 'children must be an array of new assignments.')
+        const additions = command.children, updates = command.updates ?? [], cancelled = new Set(command.cancelChildIds ?? [])
+        check(Array.isArray(updates), 'INVALID_PLAN', 'updates must be an array.')
+        strings(command.cancelChildIds ?? [], 'cancelChildIds')
+        const changed = [...additions, ...updates]
+        changed.forEach(validChildSpec)
+        check(new Set(changed.map(child => child.id)).size === changed.length, 'DUPLICATE_CHILD', 'A Child may appear only once in this change.')
+        for (const spec of additions) check(!task.children[spec.id] || task.plan.childIds.includes(spec.id) && sameSpec(task.children[spec.id], spec),
+          'EXPLICIT_UPDATE_REQUIRED', 'Use updates to change or restore an existing Child.')
+        for (const spec of updates) check(!!task.children[spec.id], 'CHILD_NOT_FOUND', 'An update needs an existing Child.')
+        for (const id of cancelled) check(task.plan.childIds.includes(id) && !changed.some(spec => spec.id === id), 'INVALID_CANCEL', 'Cancel an existing Child separately from an update.')
+        const merged = new Map(task.plan.childIds.filter(id => !cancelled.has(id)).map(id => [id, childSpec(task.children[id])]))
+        for (const spec of changed) merged.set(spec.id, spec)
+        const specs = [...merged.values()], ids = [...merged.keys()]
+        check(ids.length > 0, 'EMPTY_PLAN', 'A plan needs at least one bounded Child.')
+        check(specs.every(spec => spec.dependsOn.every(id => merged.has(id))), 'MISSING_DEPENDENCY', 'Dependencies must exist in the combined plan; update dependents when cancelling a Child.')
+        check(!hasCycle(specs), 'DEPENDENCY_CYCLE', 'The combined plan cannot contain dependency cycles.')
         const retain = new Set(command.retainAcceptedChildIds ?? [])
-        for (const id of retain) check(ids.includes(id) && task.children[id]?.status === 'accepted', 'INVALID_RETAIN', 'Only a previously accepted child in this plan can be retained.')
-        for (const oldId of task.plan.childIds.filter(id => !ids.includes(id))) {
+        for (const id of retain) check(ids.includes(id) && task.children[id]?.status === 'accepted', 'INVALID_RETAIN', 'Only a previously accepted Child in this plan can be retained.')
+        for (const oldId of cancelled) {
           const old = task.children[oldId]; old.status = 'cancelled'
           supersedeChildActions(task, old.id)
-          if (old.activeExecutionId) { const execution = mustExecution(task, old.activeExecutionId); execution.state = 'superseded'; stop(execution, 'Child removed from the current plan.'); delete old.activeExecutionId }
+          if (old.activeExecutionId) { const execution = mustExecution(task, old.activeExecutionId); execution.state = 'superseded'; stop(execution, 'Planner explicitly cancelled this Child.'); delete old.activeExecutionId }
+          delete old.handoff
         }
         const reviewResults: string[] = []
-        for (const spec of command.children) {
+        for (const spec of specs) {
           const old = own(task.children, spec.id)
           if (!old) {
             task.children[spec.id] = { ...structuredClone(spec), assignmentVersion: 1, goalRevision: task.goal.revision, status: 'pending', progressSegments: 0 }
@@ -223,7 +252,7 @@ export function applyTaskCommand(current: Task | undefined, command: TaskCommand
             check(spec.dependsOn.every(id => task.plan.childIds.includes(id)), 'MISSING_DEPENDENCY', 'Unknown rework dependency.')
             task.children[child.id] = { ...structuredClone(spec), assignmentVersion: child.assignmentVersion + 1, goalRevision: task.goal.revision, status: 'rework', progressSegments: 0 }
           } else if (decision.outcome === 'continue') {
-            if (report.outcome === 'handoff') {
+            if (report.outcome === 'handoff' || child.handoff?.resultId === report.resultId) {
               check(child.handoff?.resultId === report.resultId && child.handoff.predecessorExecutionId === report.executionId
                 && !child.activeExecutionId, 'HANDOFF_CHANGED', 'Review the current handoff before dispatching its next generation.', 'stale')
               const previous = mustExecution(task, report.executionId)
@@ -255,6 +284,7 @@ export function applyTaskCommand(current: Task | undefined, command: TaskCommand
         if (command.deliver) {
           check(task.control !== 'cancelled', 'TASK_CANCELLED', 'A cancelled goal cannot be newly accepted for delivery.')
           check(task.plan.childIds.length > 0 && task.plan.childIds.every(id => task.children[id].status === 'accepted' && task.children[id].acceptedAtGoalRevision === task.goal.revision), 'INCOMPLETE_PLAN', 'All current children require acceptance for this goal.')
+          check(!task.plannerNote?.backlog?.some(item => item.required && item.status === 'pending'), 'REQUIRED_BACKLOG', 'Required future work remains in the planning note.')
           check(!hasWait(task), 'UNRESOLVED_WAIT', 'Resolve task waits before final delivery.')
           validId(command.deliver.id, 'delivery.id'); text(command.deliver.summary, 'delivery.summary'); validArtifacts(command.deliver.artifacts)
           check(!task.delivery, 'ALREADY_DELIVERING', 'A delivery already exists.')
@@ -279,6 +309,22 @@ export function applyTaskCommand(current: Task | undefined, command: TaskCommand
             ...(command.learn.proposals ? { learningProposals: structuredClone(command.learn.proposals) } : {}) })
         }
         finishEvaluation(binding, action); dispatchReady()
+        if (!task.delivery && command.decisions.length && task.plan.childIds.every(id => task.children[id].status === 'accepted')) {
+          plan('The current Children are accepted. Reconcile the complete user goal and saved future backlog; add the next stage or deliver the fully accepted result.')
+        }
+        break
+      }
+
+      case 'planning.handoff': {
+        const { binding, action } = requireEvaluator(task, command.source, command.actionId)
+        check(binding?.role === 'planner', 'PLANNER_ONLY', 'Only the bound Planner can hand off its unfinished action.')
+        check(command.expectedGoalRevision === task.goal.revision, 'GOAL_CHANGED', 'Read the current goal before handing off.', 'stale')
+        text(command.summary, 'summary'); text(command.frontier, 'frontier')
+        remember({ kind: 'checkpoint', summary: command.summary, frontier: command.frontier, executionId: binding.executionId }, command.memory)
+        binding.state = 'closed'; binding.closedAt = env.now
+        action.status = 'pending'; action.payload.predecessorExecutionId = binding.executionId
+        action.payload.reason = command.frontier
+        delete action.executionId; delete action.ownerId; delete action.startedAt
         break
       }
 
@@ -352,12 +398,10 @@ export function applyTaskCommand(current: Task | undefined, command: TaskCommand
         const blockedIncident = wait.incidentId ? task.incidents[wait.incidentId] : undefined
         if (blockedIncident && blockedIncident.state === 'waiting' && task.control !== 'cancelled'
           && !values(task.waits).some(other => other.incidentId === blockedIncident.id && other.state === 'waiting')) {
-          const previousHelper = blockedIncident.helperExecutionId ? task.executions[blockedIncident.helperExecutionId] : undefined
-          check(!previousHelper || previousHelper.state !== 'active', 'HELPER_STILL_ACTIVE', 'The original Helper must yield its semantic capability before recovery can be resumed.')
-          blockedIncident.state = 'open'; delete blockedIncident.helperExecutionId
-          if (!actionExists('help', action => action.payload.incidentId === blockedIncident.id)) addAction('help', { incidentId: blockedIncident.id, executionId: blockedIncident.executionId, childId: blockedIncident.childId, reason: `The recorded incident dependency was explicitly resolved: ${wait.answer}` })
+          blockedIncident.state = 'open'
+          if (!actionExists('recover', action => action.payload.incidentId === blockedIncident.id)) addAction('recover', { incidentId: blockedIncident.id, executionId: blockedIncident.executionId, childId: blockedIncident.childId, reason: `The recorded incident dependency was explicitly resolved: ${wait.answer}` })
         }
-        if (wait.executionId) {
+        if (wait.executionId && !blockedIncident) {
           const execution = mustExecution(task, wait.executionId)
           if (execution.state === 'active') {
             if (execution.childId && !hasWait(task, execution.childId)) task.children[execution.childId].status = 'running'
@@ -396,7 +440,7 @@ export function applyTaskCommand(current: Task | undefined, command: TaskCommand
           actionId: action.id, goalRevision: task.goal.revision, generation: command.generation ?? 1 + Math.max(0, ...values(task.executions).filter(e => e.role === command.role && e.childId === (command.role === 'worker' ? child?.id : undefined)).map(e => e.generation)), state: 'active', physicalState: 'starting', ownedJobIds: [], startedAt: env.now, observedAt: env.now,
           writeScopes: command.role === 'worker' && child ? [...child.writeScopes] : [], resources: command.role === 'worker' && child ? [...child.resources] : [],
           ...(command.role === 'worker' && child ? { childId: child.id, assignmentVersion: child.assignmentVersion } : {}),
-          ...(action.payload.incidentId ? { incidentId: action.payload.incidentId } : {}),
+          ...(action.payload.recoveryIncidentId ? { incidentId: action.payload.recoveryIncidentId } : {}),
           ...(command.model ? { model: command.model } : {}), ...(command.configurationVersion ? { configurationVersion: command.configurationVersion } : {}),
         }
         check(Number.isInteger(binding.generation) && binding.generation >= 1, 'INVALID_GENERATION', 'Generation must be positive.')
@@ -407,7 +451,6 @@ export function applyTaskCommand(current: Task | undefined, command: TaskCommand
         }
         task.executions[binding.executionId] = binding; action.executionId = binding.executionId
         if (command.role === 'worker' && child) { child.activeExecutionId = binding.executionId; child.status = 'running'; delete child.handoff }
-        if (binding.incidentId) { task.incidents[binding.incidentId].state = 'repairing'; task.incidents[binding.incidentId].helperExecutionId = binding.executionId }
         break
       }
 
@@ -451,8 +494,8 @@ export function applyTaskCommand(current: Task | undefined, command: TaskCommand
         } else if (report.outcome === 'wait') {
           check(report.wait, 'MISSING_WAIT', 'A wait report requires a concrete condition and resume entry.'); addWait(report.wait!, binding); child.status = 'waiting'
         } else {
-          child.progressSegments += 1
           if (report.outcome === 'continue') {
+            child.progressSegments += 1
             if (child.progressSegments % env.reviewEvery === 0 && !task.needsPlanning && task.control !== 'cancelled') { child.status = 'waiting'; evaluate([report.resultId], 'Periodic review of bounded work segments.') }
             else continueExecution(binding, 'Continue from the recorded work frontier.')
           }
@@ -462,7 +505,7 @@ export function applyTaskCommand(current: Task | undefined, command: TaskCommand
 
       case 'execution.requestHelp': {
         const binding = requireBinding(task, command.source)
-        if (command.kind === 'mechanical') incident(binding.executionId, command.operation, command.message)
+        if (command.kind === 'mechanical') throw new DomainError('RUNTIME_RECOVERY', 'Fatal execution recovery is driven by native lifecycle evidence.')
         else {
           check(command.wait && command.wait.kind === command.kind, 'MISSING_WAIT', 'A dependency request needs a matching explicit wait.')
           addWait(command.wait!, binding)
@@ -496,13 +539,15 @@ export function applyTaskCommand(current: Task | undefined, command: TaskCommand
           if (task.control !== 'cancelled') {
             if (binding.role === 'helper' && binding.incidentId) {
               const original = task.incidents[binding.incidentId]
-              original.state = 'waiting'
-              const helpAction = mustAction(task, binding.actionId); helpAction.status = 'superseded'; helpAction.evidence = 'The physical Helper stopped before a recovery disposition.'
-              const waitId = `${command.commandId}:helper-stopped`
-              addWait({ id: waitId, kind: 'configuration', reason: 'The incident Helper stopped before recording a recovery disposition.', condition: 'The user resolves the Helper failure and explicitly authorizes another bounded recovery attempt.', resume: `Reopen original incident ${original.id}; inspect its saved evidence before any retry.` }, mustExecution(task, original.executionId))
-              task.waits[waitId].incidentId = original.id
+              const helpAction = mustAction(task, binding.actionId); helpAction.status = 'superseded'; helpAction.evidence = 'Historical Helper retired; continue through the original role.'
+              if (original && original.state !== 'resolved' && original.state !== 'waiting') {
+                original.state = 'open'
+                if (!actionExists('recover', action => action.payload.incidentId === original.id))
+                  addAction('recover', { incidentId: original.id, executionId: original.executionId, childId: original.childId, reason: 'Historical owner settled; preserve the original work frontier.' })
+              }
             } else if (binding.stopRequested) addWait({ id: `${command.commandId}:stopped`, kind: 'user', reason: 'The requested execution has stopped before a final result.', condition: 'The user decides how to continue this work.', resume: 'Replan from the preserved work frontier.', question: 'This execution stopped. Should the remaining work be replanned?' }, binding)
-            else incident(binding.executionId, 'execution stopped', 'The physical execution ended without a terminal business report.')
+            else if (!values(task.incidents).some(entry => entry.executionId === binding.executionId && entry.state !== 'resolved'))
+              incident(binding.executionId, 'execution stopped', 'The physical execution ended without a terminal business report.')
           }
         }
         break
@@ -534,69 +579,89 @@ export function applyTaskCommand(current: Task | undefined, command: TaskCommand
           const original = task.incidents[owner.incidentId]
           if (original && original.state !== 'resolved') {
             original.state = 'open'; delete original.helperExecutionId
-            if (!actionExists('help', a => a.payload.incidentId === original.id)) addAction('help', { incidentId: original.id, executionId: original.executionId, childId: original.childId, reason: 'Replace the proven lost Helper for this original incident.' })
+            if (!actionExists('recover', a => a.payload.incidentId === original.id)) addAction('recover', { incidentId: original.id, executionId: original.executionId, childId: original.childId, reason: 'Historical recovery owner is retired; continue the original role from saved evidence.' })
           }
         }
         break
       }
 
-      case 'recovery.report': {
-        const binding = requireBinding(task, command.source, 'helper')
-        check(binding.incidentId === command.incidentId, 'WRONG_INCIDENT', 'The helper may only report its bound incident.')
-        const entry = own(task.incidents, command.incidentId); check(entry, 'INCIDENT_NOT_FOUND', 'Incident is missing.'); text(command.summary, 'summary')
-        entry.resolution = command.summary
-        if (command.outcome === 'resolved') {
-          entry.state = 'resolved'
-          const owner = mustExecution(task, entry.executionId)
-          check(owner.state !== 'active' || ['running', 'idle'].includes(owner.physicalState), 'OWNER_DISPOSITION_REQUIRED', 'An absent or unknown owner needs proven physical disposition before recovery may resume work.')
-          check(owner.state !== 'active' || owner.role === 'worker', 'OWNER_DISPOSITION_REQUIRED', 'A failed Planner or Helper requires explicit physical retirement and a new bounded semantic action; Worker continuation cannot resume it.')
-          if (owner.state === 'active') {
-            if (owner.childId && !hasWait(task, owner.childId)) task.children[owner.childId].status = 'running'
-            continueExecution(owner, 'The specific execution fault was repaired.')
+      case 'recovery.legacy': {
+        requireRuntime(command.source)
+        for (const action of values(task.pendingActions)) if (action.kind === 'help' && ['pending', 'running', 'uncertain'].includes(action.status)) {
+          action.status = 'superseded'; action.finishedAt = env.now
+          action.evidence = 'Preserved historical Helper action; recovery now continues the original role.'
+          if (action.executionId) {
+            const owner = task.executions[action.executionId]
+            if (owner) { owner.state = 'closed'; owner.closedAt ??= env.now }
           }
-          else if (task.control === 'running' && owner.childId) {
-            const child = task.children[owner.childId]
-            if (child.handoff?.predecessorExecutionId === owner.executionId) { stageHandoff(child); dispatchReady() }
-            else { task.needsPlanning = true; plan('Recover the work frontier after an ended execution.') }
+          const entry = task.incidents[action.payload.incidentId ?? '']
+          if (entry && entry.state !== 'resolved' && entry.state !== 'waiting') {
+            entry.state = 'open'
+            if (!actionExists('recover', pending => pending.payload.incidentId === entry.id))
+              addAction('recover', { incidentId: entry.id, executionId: entry.executionId, childId: entry.childId, reason: 'Continue the original interrupted role from saved evidence.' })
           }
-        } else {
-          entry.state = 'waiting'
-          check(command.wait, 'MISSING_WAIT', 'An unresolved incident requires a concrete wait and recovery entry.'); addWait(command.wait!, mustExecution(task, entry.executionId))
-          task.waits[command.wait!.id].incidentId = entry.id
         }
-        const repairedOwner = mustExecution(task, entry.executionId)
-        remember({ kind: 'recovery', summary: command.summary, incidentId: entry.id, executionId: entry.executionId,
-          ...(entry.childId ? { childId: entry.childId } : {}), recoveryOutcome: command.outcome,
-          physicalDisposition: { state: repairedOwner.physicalState, ownedJobIds: [...repairedOwner.ownedJobIds] } })
-        finishEvaluation(binding, mustAction(task, binding.actionId)); break
+        break
       }
 
-      case 'recovery.block': {
-        requireRuntime(command.source); text(command.reason, 'reason'); validWait(command.wait)
-        check(command.wait.kind === 'configuration' || command.wait.kind === 'recovery', 'INVALID_RECOVERY_WAIT', 'A blocked Helper needs a concrete configuration or physical recovery dependency.')
-        const helper = mustExecution(task, command.helperExecutionId)
-        check(helper.role === 'helper' && !!helper.incidentId, 'HELPER_ONLY', 'Only an exact incident-bound Helper can be blocked this way.')
-        const original = own(task.incidents, helper.incidentId!)
-        check(original && original.helperExecutionId === helper.executionId, 'WRONG_INCIDENT', 'This Helper no longer owns the original recovery incident.', 'stale')
-        check(original.state !== 'resolved', 'INCIDENT_RESOLVED', 'A late Helper callback cannot reopen a resolved incident.', 'stale')
-        const action = mustAction(task, helper.actionId)
-        check(action.kind === 'help' && action.payload.incidentId === original.id, 'WRONG_INCIDENT', 'The Helper action does not match the original incident.')
-        const existing = own(task.waits, command.wait.id)
-        if (existing?.state === 'waiting') check(existing.incidentId === original.id && existing.executionId === helper.executionId, 'WAIT_EXISTS', 'This wait identity belongs to another unresolved dependency.')
-        else {
-          addWait(command.wait, helper)
-          task.waits[command.wait.id].incidentId = original.id
-          if (original.childId) task.waits[command.wait.id].childId = original.childId
+      case 'recovery.restart': {
+        requireRuntime(command.source); text(command.evidence, 'evidence')
+        const entry = task.incidents[command.incidentId]
+        check(entry, 'INCIDENT_NOT_FOUND', 'The exact recovery incident is missing.')
+        if (entry.state === 'resolved') return duplicate('This incident already has a recovery disposition.')
+        check(entry.state !== 'waiting', 'RECOVERY_WAITING', 'Resolve the recorded fault condition before restarting.')
+        const owner = mustExecution(task, entry.executionId), oldAction = mustAction(task, owner.actionId)
+        check(['worker', 'planner'].includes(owner.role), 'RECOVERY_ROLE', 'Recovery continues a Worker or Planner.')
+        check(['stopped', 'lost'].includes(owner.physicalState) && !owner.ownedJobIds.length,
+          'OWNER_NOT_PROVEN_GONE', 'Retire the exact previous owner and its native jobs before restarting.')
+        check(!entry.helperExecutionId || (['stopped', 'lost'].includes(task.executions[entry.helperExecutionId]?.physicalState)
+          && !task.executions[entry.helperExecutionId]?.ownedJobIds.length), 'LEGACY_OWNER_BUSY', 'The historical recovery owner still requires physical reconciliation.')
+        owner.state = 'superseded'; owner.closedAt = env.now
+        entry.state = 'resolved'; entry.resolution = command.evidence
+        for (const action of values(task.pendingActions)) if (action.kind === 'recover' && action.payload.incidentId === entry.id
+          && ['pending', 'running', 'uncertain'].includes(action.status)) finishRuntimeAction(task, action, env.now, command.evidence)
+        resolveActionWaits(task, oldAction.id, env.now)
+        for (const action of values(task.pendingActions)) if (action.payload.executionId === owner.executionId
+          && ['continue', 'stop'].includes(action.kind) && ['pending', 'running', 'uncertain'].includes(action.status)) {
+          action.status = 'superseded'; action.evidence = command.evidence; resolveActionWaits(task, action.id, env.now)
         }
-        helper.state = 'closed'; helper.closedAt ??= env.now
-        if (['pending', 'running', 'uncertain'].includes(action.status)) { action.status = 'superseded'; action.finishedAt = env.now; action.evidence = command.reason }
-        original.state = 'waiting'; original.resolution = command.reason
-        original.errors.push({ operation: `Helper ${helper.executionId}`, message: command.reason, at: env.now })
-        remember({ kind: 'recovery', summary: command.reason, incidentId: original.id, executionId: helper.executionId,
-          ...(original.childId ? { childId: original.childId } : {}), recoveryOutcome: 'failed',
-          physicalDisposition: { state: helper.physicalState, ownedJobIds: [...helper.ownedJobIds] } })
-        // Fencing a failed semantic role neither kills nor migrates its jobs.
-        // The original incident is the only recovery target; no Helper cascade.
+        remember({ kind: 'recovery', summary: command.evidence, incidentId: entry.id, executionId: owner.executionId,
+          ...(owner.childId ? { childId: owner.childId } : {}), recoveryOutcome: 'resolved',
+          physicalDisposition: { state: owner.physicalState, ownedJobIds: [] } })
+        if (owner.role === 'worker' && owner.childId) {
+          oldAction.status = 'superseded'
+          const child = mustChild(task, owner.childId)
+          if (child.activeExecutionId === owner.executionId) delete child.activeExecutionId
+          if (child.assignmentVersion === owner.assignmentVersion && !child.activeExecutionId
+            && task.plan.childIds.includes(child.id) && !['accepted', 'cancelled'].includes(child.status) && task.control !== 'cancelled') {
+            const report = child.currentResultId ? task.reports[child.currentResultId] : undefined
+            if (report?.executionId === owner.executionId && ['complete', 'failed'].includes(report.outcome)) {
+              child.status = 'reported'
+              if (report.disposition === 'unreviewed') evaluate([report.resultId], 'Restore evaluation of the saved terminal result; do not repeat the completed execution.')
+            } else if (report?.executionId === owner.executionId) {
+              const pendingReview = values(task.pendingActions)
+                .filter(action => action.kind === 'evaluate' && ['pending', 'running', 'uncertain'].includes(action.status))
+                .flatMap(action => action.payload.resultIds ?? []).map(id => task.reports[id])
+                .filter(result => result?.executionId === owner.executionId && result.disposition === 'unreviewed').at(-1)
+              child.handoff = { predecessorExecutionId: owner.executionId, resultId: pendingReview?.resultId ?? report.resultId, recoveryIncidentId: entry.id,
+                reviewRequired: child.handoff?.reviewRequired === true || !!pendingReview
+                  || report.disposition === 'unreviewed' && report.outcome === 'continue'
+                    && child.progressSegments > 0 && child.progressSegments % env.reviewEvery === 0 }
+              stageHandoff(child); dispatchReady()
+            } else {
+              child.status = 'pending'
+              if (!actionExists('dispatch', action => action.payload.childId === child.id && action.payload.assignmentVersion === child.assignmentVersion))
+                addAction('dispatch', { childId: child.id, assignmentVersion: child.assignmentVersion, planRevision: task.plan.revision,
+                  predecessorExecutionId: owner.executionId, recoveryIncidentId: entry.id, reason: 'Continue the same unfinished Child after recorded execution failure.' })
+            }
+          }
+        } else if (owner.role === 'planner' && ['plan', 'evaluate'].includes(oldAction.kind) && task.control !== 'cancelled'
+          && ['pending', 'running', 'uncertain'].includes(oldAction.status) && !task.delivery
+          && oldAction.payload.goalRevision === task.goal.revision) {
+          oldAction.status = 'pending'; delete oldAction.executionId; delete oldAction.ownerId; delete oldAction.startedAt; delete oldAction.finishedAt
+          oldAction.payload.predecessorExecutionId = owner.executionId
+          oldAction.payload.recoveryIncidentId = entry.id
+        } else if (oldAction.status !== 'done') oldAction.status = 'superseded'
         break
       }
 
@@ -705,7 +770,17 @@ function persistPlannerMemory(task: Task, memory: PlannerMemoryInput | undefined
     const note = memory.planNote
     check(Number.isInteger(note.expectedRevision) && note.expectedRevision === oldRevision, 'PLAN_NOTE_CHANGED', 'The mutable planning note changed; read its current revision.', 'stale')
     text(note.body, 'planNote.body'); text(note.frontier, 'planNote.frontier'); text(note.changeSummary, 'planNote.changeSummary')
-    task.plannerNote = { revision: oldRevision + 1, goalRevision: task.goal.revision, body: note.body, frontier: note.frontier, updatedAt: now, commandId }
+    if (note.backlog !== undefined) {
+      check(Array.isArray(note.backlog), 'INVALID_BACKLOG', 'Planning backlog must be an array.')
+      check(new Set(note.backlog.map(item => item.id)).size === note.backlog.length, 'DUPLICATE_BACKLOG', 'Backlog item ids must be unique.')
+      for (const item of note.backlog) {
+        validId(item.id, 'backlog.id'); text(item.objective, 'backlog.objective'); text(item.reason, 'backlog.reason'); text(item.trigger, 'backlog.trigger'); strings(item.dependsOn, 'backlog.dependsOn')
+        check(typeof item.required === 'boolean' && ['pending', 'done', 'cancelled'].includes(item.status), 'INVALID_BACKLOG', 'Backlog entries need required and status.')
+      }
+    }
+    const backlog = note.backlog ?? task.plannerNote?.backlog
+    task.plannerNote = { revision: oldRevision + 1, goalRevision: task.goal.revision, body: note.body, frontier: note.frontier, updatedAt: now, commandId,
+      ...(backlog ? { backlog: structuredClone(backlog) } : {}) }
     result.planNoteChange = { fromRevision: oldRevision, toRevision: oldRevision + 1, summary: note.changeSummary, frontier: note.frontier }
   }
   return result
@@ -741,15 +816,22 @@ function hasCycle(children: ChildSpec[]): boolean {
 function dependenciesAccepted(task: Task, child: Child): boolean { return child.dependsOn.every(id => task.children[id]?.status === 'accepted' && task.children[id].acceptedAtGoalRevision === task.goal.revision) }
 function hasWait(task: Task, childId?: string): boolean { return values(task.waits).some(w => w.state === 'waiting' && (!childId || !w.childId || w.childId === childId)) }
 function supersedeChildActions(task: Task, childId: string): void { for (const action of values(task.pendingActions)) if (action.payload.childId === childId && ['dispatch', 'continue'].includes(action.kind) && ['pending', 'running', 'uncertain'].includes(action.status)) action.status = 'superseded' }
-function roleForAction(kind: ActionKind): string | undefined { return kind === 'plan' || kind === 'evaluate' ? 'planner' : kind === 'dispatch' ? 'worker' : kind === 'help' ? 'helper' : undefined }
+function roleForAction(kind: ActionKind): string | undefined { return kind === 'plan' || kind === 'evaluate' ? 'planner' : kind === 'dispatch' ? 'worker' : undefined }
 function assertActionRunnable(task: Task, action: PendingAction, binding = false): void {
   if (action.kind === 'stop') return
   check(task.control !== 'cancelled', 'TASK_CANCELLED', 'Cancelled tasks cannot start more work.')
-  if (action.kind === 'help' || action.kind === 'deliver' || action.kind === 'learn' || action.kind === 'feedback') return
+  check(action.kind !== 'help', 'LEGACY_HELPER', 'Historical Helper actions are retained as evidence; new recovery uses the original role.')
+  if (action.kind === 'recover' || action.kind === 'deliver' || action.kind === 'learn' || action.kind === 'feedback') return
   check(task.control === 'running', 'TASK_PAUSED', 'The user has paused further work.')
   check(action.payload.goalRevision === task.goal.revision, 'GOAL_CHANGED', 'This action belongs to an older goal.', 'stale')
   if (action.kind === 'plan' || action.kind === 'evaluate') {
     check(!values(task.waits).some(w => w.state === 'waiting' && !w.childId), 'WAITING', 'A required task-level decision is unresolved.')
+    if (action.payload.predecessorExecutionId) {
+      const previous = mustExecution(task, action.payload.predecessorExecutionId)
+      check(previous.role === 'planner' && previous.actionId === action.id && previous.state !== 'active'
+        && ['stopped', 'lost'].includes(previous.physicalState) && previous.ownedJobIds.length === 0,
+        'HANDOFF_OWNER_ACTIVE', 'Retire the exact previous Planner and its jobs before continuing the same action.')
+    }
     check(!values(task.pendingActions).some(a => a.id !== action.id && ['plan', 'evaluate'].includes(a.kind) && a.status === 'running'), 'PLANNER_BUSY', 'Another planning/evaluation action already owns the task.')
     return
   }
@@ -759,11 +841,13 @@ function assertActionRunnable(task: Task, action: PendingAction, binding = false
   check(task.plan.childIds.includes(child.id) && child.assignmentVersion === action.payload.assignmentVersion, 'ASSIGNMENT_CHANGED', 'This action belongs to an older assignment.', 'stale')
   check(dependenciesAccepted(task, child), 'DEPENDENCIES_PENDING', 'The input dependencies have not been accepted.')
   if (action.kind === 'dispatch') {
-    check(['pending', 'rework'].includes(child.status) && !child.activeExecutionId, 'CHILD_NOT_READY', 'This assignment already has work or a result.')
+    check(['pending', 'rework'].includes(child.status) && !child.activeExecutionId && !child.handoff?.reviewRequired, 'CHILD_NOT_READY', 'This assignment already has work, a result, or a due review.')
     if (child.handoff || action.payload.predecessorExecutionId) {
-      check(child.handoff && action.payload.predecessorExecutionId === child.handoff.predecessorExecutionId && !child.handoff.reviewRequired,
-        'HANDOFF_CHANGED', 'The next generation must use the current reviewed handoff.', 'stale')
-      const previous = mustExecution(task, child.handoff.predecessorExecutionId)
+      const recovery = action.payload.recoveryIncidentId ? task.incidents[action.payload.recoveryIncidentId] : undefined
+      check(recovery ? recovery.state === 'resolved' && recovery.executionId === action.payload.predecessorExecutionId
+        : child.handoff && action.payload.predecessorExecutionId === child.handoff.predecessorExecutionId && !child.handoff.reviewRequired,
+        'HANDOFF_CHANGED', 'The next generation must use its exact reviewed handoff or recorded recovery.', 'stale')
+      const previous = mustExecution(task, action.payload.predecessorExecutionId!)
       check(previous.role === 'worker' && previous.childId === child.id && previous.assignmentVersion === child.assignmentVersion && previous.state !== 'active',
         'HANDOFF_OWNER_CHANGED', 'The handoff must retain the exact previous Worker and unchanged assignment.', 'stale')
       check(['stopped', 'lost'].includes(previous.physicalState) && previous.ownedJobIds.length === 0,
@@ -778,6 +862,7 @@ function assertActionRunnable(task: Task, action: PendingAction, binding = false
   void binding
 }
 function finishRuntimeAction(task: Task, action: PendingAction, now: string, evidence?: string, notificationId?: string): void {
+  if (action.kind === 'recover') check(task.incidents[action.payload.incidentId ?? '']?.state === 'resolved', 'RECOVERY_NOT_FINISHED', 'Recovery completes only with a saved disposition for its exact incident.')
   if (action.kind === 'dispatch') check(!!action.executionId, 'NO_EXECUTION', 'Dispatch completion requires a persisted execution binding.')
   if (action.kind === 'stop') { const execution = mustExecution(task, action.payload.executionId!); check(['stopped', 'lost'].includes(execution.physicalState) && execution.ownedJobIds.length === 0, 'STILL_RUNNING', 'A stop request is not proof that the exact owner and its jobs have ended.') }
   if (action.kind === 'deliver') {
@@ -822,7 +907,12 @@ export function assertTaskRecord(value: unknown): asserts value is Task {
         const previous = own(task.executions, child.handoff.predecessorExecutionId)
         const report = own(task.reports, child.handoff.resultId)
         check(!child.activeExecutionId && previous?.role === 'worker' && previous.childId === id && previous.assignmentVersion === child.assignmentVersion && previous.state !== 'active'
-          && report?.outcome === 'handoff' && report.executionId === previous.executionId && child.currentResultId === report.resultId
+          && report && (report.outcome === 'handoff' || (['progress', 'continue', 'wait'].includes(report.outcome)
+            && !!child.handoff.recoveryIncidentId && task.incidents[child.handoff.recoveryIncidentId]?.executionId === previous.executionId
+            && task.incidents[child.handoff.recoveryIncidentId]?.state === 'resolved'))
+          && report.executionId === previous.executionId
+          && (child.currentResultId === report.resultId || !!child.handoff.recoveryIncidentId
+            && task.reports[child.currentResultId ?? '']?.executionId === previous.executionId)
           && typeof child.handoff.reviewRequired === 'boolean', 'CORRUPT', 'Child handoff lost its exact predecessor or saved work frontier.')
       }
       if (child.currentResultId) check(own(task.reports, child.currentResultId)?.childId === child.id, 'CORRUPT', 'Missing current result.')
@@ -836,7 +926,7 @@ export function assertTaskRecord(value: unknown): asserts value is Task {
       if (binding.childId) check(!!own(task.children, binding.childId), 'CORRUPT', 'Execution references missing child.')
     }
     for (const [id, report] of Object.entries(task.reports)) { check(report.resultId === id && !!own(task.executions, report.executionId) && !!own(task.children, report.childId), 'CORRUPT', 'Report ownership mismatch.'); validReport(report, !!task.archive) }
-    for (const [id, action] of Object.entries(task.pendingActions)) { check(action.id === id, 'CORRUPT', 'Action identity mismatch.'); validId(id, 'action.id'); check([...semanticKinds, ...runtimeKinds].includes(action.kind), 'CORRUPT', 'Unknown action kind.'); check(['pending', 'running', 'done', 'uncertain', 'superseded'].includes(action.status), 'CORRUPT', 'Invalid action status.'); check(action.payload && Number.isInteger(action.payload.goalRevision), 'CORRUPT', 'Invalid action payload.'); if (action.executionId) check(!!own(task.executions, action.executionId), 'CORRUPT', 'Action points to missing execution.') }
+    for (const [id, action] of Object.entries(task.pendingActions)) { check(action.id === id, 'CORRUPT', 'Action identity mismatch.'); validId(id, 'action.id'); check([...semanticKinds, ...runtimeKinds, 'help'].includes(action.kind), 'CORRUPT', 'Unknown action kind.'); check(['pending', 'running', 'done', 'uncertain', 'superseded'].includes(action.status), 'CORRUPT', 'Invalid action status.'); check(action.payload && Number.isInteger(action.payload.goalRevision), 'CORRUPT', 'Invalid action payload.'); if (action.executionId) check(!!own(task.executions, action.executionId), 'CORRUPT', 'Action points to missing execution.') }
     for (const [id, wait] of Object.entries(task.waits)) { check(wait.id === id, 'CORRUPT', 'Wait identity mismatch.'); validWait(wait); check(['waiting', 'resolved'].includes(wait.state), 'CORRUPT', 'Invalid wait state.') }
     for (const [id, entry] of Object.entries(task.receipts)) check(entry.receipt.commandId === id && entry.receipt.taskId === task.id && typeof entry.fingerprint === 'string', 'CORRUPT', 'Invalid receipt identity.')
     check(Array.isArray(task.decisions), 'CORRUPT', 'Invalid decision records.')

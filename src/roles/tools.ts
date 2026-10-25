@@ -7,9 +7,10 @@ import type {} from '@deepseek-ai/dsh-system-prompt'
 import { z } from 'zod'
 import type { AssistantService } from '../application/assistant-service.ts'
 import type { TaskService } from '../application/task-service.ts'
+import { TaskRecordAccess } from '../application/task-record-access.ts'
 import type { KnowledgeService } from '../application/knowledge-service.ts'
 import type { CommandReceipt, CommandSource, TaskCommand } from '../contracts/task.ts'
-import { ArtifactSchema, ChildSchema, DecisionSchema, GoalSchema, Id, MemorySchema, ProposalSchema, ReportSchema, Text, WaitSchema, toolParameters } from '../contracts/schemas.ts'
+import { ArtifactSchema, BacklogSchema, ChildSchema, DecisionSchema, GoalSchema, Id, MemorySchema, ProposalSchema, ReportSchema, Text, WaitSchema, toolParameters } from '../contracts/schemas.ts'
 import type { RoleBinding } from '../runtime/agent-supervisor.ts'
 import { assembleRoleInput, memoryRef } from '../runtime/context-assembler.ts'
 import type { Task } from '../contracts/task.ts'
@@ -20,7 +21,6 @@ export interface RoleToolsOptions {
   tasks: TaskService
   knowledge: KnowledgeService
   memoryQuery(taskId: string, input: { ref: string; offset?: number; limit?: number }, executionId?: string): Promise<unknown>
-  prepareRecoveryResolution(taskId: string, incidentId: string, helperExecutionId: string): Promise<void>
 }
 type BoundCommand<T = TaskCommand> = T extends unknown ? Omit<T, 'source' | 'commandId'> : never
 
@@ -29,6 +29,7 @@ export function installRoleTools(ctx: Context, agent: Agent, binding: RoleBindin
   ctx.systemPrompt.section({ name: 'deepseek-servant:role', order: 100, text: rolePrompt(binding.role), interpolate: false })
   ctx.systemPrompt.section({ name: 'deepseek-servant:ownership', order: 102, interpolate: false,
     text: 'Servant owns this Agent lifecycle. Use its task/plan/report tools for goals and continuations. Do not call create_goal, update_goal, subagent, subagent_fork, workflow, schedule_* or cross-Agent messaging: they would create execution outside the saved Servant ownership. Ask the Planner for bounded Children when parallel work is useful.' })
+  const records = new TaskRecordAccess(options.tasks, { ...binding, agentId: agent.id })
   const latestUser = () => {
     const events = agent.session.snapshotEvents()
     for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -53,6 +54,14 @@ export function installRoleTools(ctx: Context, agent: Agent, binding: RoleBindin
         return JSON.parse(JSON.stringify(await run(schema.parse(input), exec)))
       },
     })
+  }
+  if (binding.role === 'foreground') {
+    register('conversation_search', 'Search dated original conversations; returns excerpts, message identities and exact references.',
+      z.strictObject({ query: z.string().min(1).max(500), cursor: z.int().nonnegative().optional(), limit: z.int().min(1).max(50).optional() }),
+      input => options.assistants.conversations.search(binding.assistantId, input.query, input.cursor, input.limit))
+    register('conversation_read', 'Read original conversation text from an exact reference, with a continuation cursor.',
+      z.strictObject({ ref: z.string().min(1), cursor: z.int().nonnegative().optional(), limit: z.int().min(1).max(262144).optional() }),
+      input => options.assistants.conversations.read(binding.assistantId, input.ref, input.cursor, input.limit))
   }
   const roleSource = (): CommandSource => {
     if (!binding.executionId) throw new Error('This role has no execution authority')
@@ -85,11 +94,53 @@ export function installRoleTools(ctx: Context, agent: Agent, binding: RoleBindin
     if (binding.role === 'foreground') return taskSummary(task)
     const execution = task.executions[binding.executionId!]
     if (!execution) throw new Error('Bound execution no longer exists')
-    return assembleRoleInput(task, execution, task.pendingActions[execution.actionId]!)
+    return { ...assembleRoleInput(task, execution, task.pendingActions[execution.actionId]!), directRecords: await records.context(task, execution) }
   })
-  register('memory_query', 'Read referenced CAH-style task memory pages without replacing current goal or formal plan.',
-    z.strictObject({ taskId: Id.optional(), ref: z.string().min(1).max(2000), offset: z.int().nonnegative().optional(), limit: z.int().min(1).max(50).optional() }),
+  register('memory_query', 'Read referenced task history pages. Large pages return JSON text fragments with a continuation cursor.',
+    z.strictObject({ taskId: Id.optional(), ref: z.string().min(1).max(2000), offset: z.int().nonnegative().optional(), limit: z.int().min(1).max(50).optional(), characterOffset: z.int().nonnegative().optional() }),
     async input => options.memoryQuery((await currentTask(input.taskId)).id, input, binding.executionId))
+  register('memory_read', 'Read an exact saved record as text pages, including original requirements, decisions and Child replies.',
+    z.strictObject({ ref: z.string().min(1).describe('Exact dss-record reference from memory_search or the current context.'),
+      cursor: z.int().nonnegative().optional().describe('Character cursor; omitted starts at zero.'),
+      limit: z.int().min(1).max(32768).optional().describe('Characters per page; default 8192.') }),
+    async input => records.read(input.ref, input.cursor, input.limit))
+  register('memory_search', 'Find full-text records or list their exact read references. Omit query to page the record index.',
+    z.strictObject({ taskId: Id.optional(), kind: z.enum(['planner-memory', 'planner-note', 'worker-reply', 'task-origin']),
+      childId: Id.optional().describe('Child for worker-reply; Workers default to their own assignment.'),
+      query: Text.optional(), cursor: z.int().nonnegative().optional(), limit: z.int().min(1).max(100).optional().describe('Entries per page; default 20.') }),
+    async input => {
+      const task = await currentTask(input.taskId)
+      const childId = input.childId ?? task.executions[binding.executionId!]?.childId
+      return records.page({ kind: input.kind, taskId: task.id, ...(input.kind === 'worker-reply' ? { childId } : {}) }, input.query, input.cursor, input.limit)
+    })
+  register('task_origin_read', 'Page the complete original user requirement and its revision history; each entry includes an exact text reference.',
+    z.strictObject({ taskId: Id.optional(), cursor: z.int().nonnegative().optional(), limit: z.int().min(1).max(100).optional() }),
+    async input => records.page({ kind: 'task-origin', taskId: (await currentTask(input.taskId)).id }, undefined, input.cursor, input.limit))
+  if (binding.role === 'planner' || binding.role === 'foreground') {
+    register('planner_note_read', 'Read the current planning note body or its explicit future-work index, including its revision for the next write.',
+      z.strictObject({ taskId: Id.optional(), part: z.enum(['body', 'backlog']).optional(),
+        cursor: z.int().nonnegative().optional(), limit: z.int().min(1).max(32768).optional().describe('Body: characters, default 8192, max 32768. Backlog: entries, default 20, max 100.') }),
+      async input => records.note((await currentTask(input.taskId)).id, input.part, input.cursor, input.limit))
+  }
+  if (binding.role === 'planner') {
+    register('planner_memory_append', 'Append full planning reasoning, evidence, failed approaches or a continuation frontier to this Task.',
+      z.strictObject({ text: Text }), async (input, exec) => records.append('planner-memory', input.text, `tool:${binding.sessionId}:${exec.callId}`))
+    register('planner_note_write', 'Save the complete current planning note and future-work index, keeping all prior versions.',
+      z.strictObject({ expectedRevision: z.int().nonnegative(), body: Text, frontier: Text, changeSummary: Text,
+        backlog: z.array(BacklogSchema).describe('All current future stages, including delayed required work, dependencies and triggers. Empty when there is no future work.') }),
+      async (input, exec) => commit(exec, { type: 'planning.checkpoint', expectedGoalRevision: (await currentTask()).goal.revision,
+        summary: input.changeSummary, frontier: input.frontier, memory: { planNote: input } }, false))
+  }
+  if (binding.role === 'worker' || binding.role === 'planner' || binding.role === 'foreground') {
+    register('child_reply_read', 'Page saved work and full reply references for a Child across its generations.',
+      z.strictObject({ taskId: Id.optional(), childId: Id.optional(), cursor: z.int().nonnegative().optional(), limit: z.int().min(1).max(100).optional() }),
+      async input => {
+        const task = await currentTask(input.taskId)
+        return records.page({ kind: 'worker-reply', taskId: task.id, childId: input.childId ?? task.executions[binding.executionId!]?.childId }, undefined, input.cursor, input.limit)
+      })
+  }
+  if (binding.role === 'worker') register('child_reply_append', 'Append complete work details, failures, artifacts or checkpoint notes to your Child. Use execution_report for work-segment status.',
+    z.strictObject({ text: Text }), async (input, exec) => records.append('worker-reply', input.text, `tool:${binding.sessionId}:${exec.callId}`))
   register('knowledge_query', 'List evidence-backed scoped facts and skill metadata. Use native skill to load skill bodies.', z.strictObject({}), async () => {
     const assistant = await options.assistants.get(binding.assistantId)
     const task = binding.taskId ? await currentTask() : undefined
@@ -100,6 +151,13 @@ export function installRoleTools(ctx: Context, agent: Agent, binding: RoleBindin
   })
 
   if (binding.role === 'foreground') {
+    register('task_records', 'Read sealed task records or export a Markdown copy into its workspace.',
+      z.strictObject({ taskId: Id, action: z.enum(['read', 'export']), cursor: z.int().nonnegative().optional(),
+        limit: z.int().min(1).max(262144).optional().describe('Characters per read page; default 32768.') }), async input => {
+        const task = await currentTask(input.taskId)
+        if (input.action === 'export') { userSource(); return options.tasks.exportRecords(task.id) }
+        return options.tasks.archives.read(task.id, input.cursor, input.limit)
+      })
     register('task_submit', 'Persist a goal from the current actual user message. A queued task is not a completed result.',
       z.strictObject({ sourceMessageId: Id.optional(), requestKey: Id.optional(), goal: GoalSchema.omit({ request: true, sourceRef: true }) }), async input => {
         const source = userSource(input.sourceMessageId)
@@ -147,14 +205,20 @@ export function installRoleTools(ctx: Context, agent: Agent, binding: RoleBindin
     register('planning_checkpoint', 'Persist a meaningful planning frontier and note-change trace without dispatch or acceptance.',
       z.strictObject({ expectedGoalRevision: z.int().positive(), summary: Text, frontier: Text, memory: MemorySchema.optional() }),
       async (input, exec) => commit(exec, { type: 'planning.checkpoint', ...input }, false))
-    register('planning_commit', 'Save a formal plan, preserve useful accepted children, and conclude this planning turn. Code dispatches admitted work.',
+    register('planning_handoff', 'Save the current frontier and yield this Planner generation. A fresh Planner resumes the same unfinished plan or evaluation action.',
+      z.strictObject({ expectedGoalRevision: z.int().positive(), summary: Text, frontier: Text, memory: MemorySchema.optional() }),
+      async (input, exec) => commit(exec, { type: 'planning.handoff', ...input }))
+    register('planning_commit', 'Apply incremental plan changes and conclude this planning turn. Omitted Children retain their assignments, owners and accepted results.',
       z.strictObject({ expectedPlanRevision: z.int().nonnegative(), expectedGoalRevision: z.int().positive(), strategy: Text,
-        children: z.array(ChildSchema).min(1).max(100), retainAcceptedChildIds: z.array(Id).optional(), memory: MemorySchema.optional() }),
+        children: z.array(ChildSchema).describe('New Children; may reference retained dependencies. Empty when only updating.'),
+        updates: z.array(ChildSchema).optional().describe('Explicit replacements of existing Child instructions.'),
+        cancelChildIds: z.array(Id).optional().describe('Explicit cancellations; update surviving dependents in the same call.'),
+        retainAcceptedChildIds: z.array(Id).optional(), memory: MemorySchema.optional() }),
       async (input, exec) => commit(exec, { type: 'planning.commit', ...input }))
     register('planning_decide', 'Judge actual results against the current goal. Persist acceptance/rework, optional delivery, and bounded evidence-backed learning candidates, then conclude.',
-      z.strictObject({ expectedGoalRevision: z.int().positive(), decisions: z.array(DecisionSchema).max(100), summary: Text, memory: MemorySchema.optional(),
-        deliver: z.strictObject({ id: Id, summary: Text, artifacts: z.array(ArtifactSchema).max(200) }).optional(),
-        learn: z.strictObject({ resultIds: z.array(Id).min(1).max(100), reason: Text, proposals: z.array(ProposalSchema).max(20).optional() }).optional() }),
+      z.strictObject({ expectedGoalRevision: z.int().positive(), decisions: z.array(DecisionSchema), summary: Text, memory: MemorySchema.optional(),
+        deliver: z.strictObject({ id: Id, summary: Text, artifacts: z.array(ArtifactSchema) }).optional(),
+        learn: z.strictObject({ resultIds: z.array(Id).min(1), reason: Text, proposals: z.array(ProposalSchema).optional() }).optional() }),
       async (input, exec) => commit(exec, { type: 'planning.decide', ...input }))
   }
   if (binding.role === 'worker') {
@@ -172,19 +236,9 @@ export function installRoleTools(ctx: Context, agent: Agent, binding: RoleBindin
       })
   }
   if (binding.role === 'worker' || binding.role === 'planner') {
-    register('execution_request_help', 'Record a concrete execution/configuration/user/resource blocker and its resumption condition. Mechanical repair belongs to a bounded Helper.',
-      z.strictObject({ kind: z.enum(['mechanical', 'user', 'configuration', 'resource']), operation: Text, message: Text, wait: WaitSchema.optional() }),
+    register('execution_wait', 'Record a user decision, configuration requirement or resource dependency and how to resume the current work.',
+      z.strictObject({ kind: z.enum(['user', 'configuration', 'resource']), operation: Text, message: Text, wait: WaitSchema }),
       async (input, exec) => commit(exec, { type: 'execution.requestHelp', ...input }))
-  }
-  if (binding.role === 'helper') {
-    register('recovery_report', 'Report only the bound recovery incident. Do not accept business results, broaden scope, or claim missing OS jobs resumed.',
-      z.strictObject({ outcome: z.enum(['resolved', 'wait', 'failed']), summary: Text, wait: WaitSchema.optional() }), async (input, exec) => {
-        const task = await currentTask()
-        const incidentId = task.executions[binding.executionId!]?.incidentId
-        if (!incidentId) throw new Error('Helper has no bound incident')
-        if (input.outcome === 'resolved') await options.prepareRecoveryResolution(task.id, incidentId, binding.executionId!)
-        return commit(exec, { type: 'recovery.report', incidentId, ...input })
-      })
   }
 }
 

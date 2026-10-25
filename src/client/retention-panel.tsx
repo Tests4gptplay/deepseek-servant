@@ -5,6 +5,7 @@ import { defaultRetentionPolicy, hasRetentionLimits, parseRetentionPolicy, parse
 import type { ServantSnapshot, ServantSource } from './source.js'
 import type { ServantLocaleKey } from './locales.js'
 import type { RecordStorageView } from '../contracts/views.js'
+import { ManualTaskCleanup, ManualConversationCleanup } from './manual-cleanup.js'
 import css from './page.module.css'
 
 type Translate = PropsLocale<'dsh.servant'>['t']
@@ -45,8 +46,8 @@ export function RetentionPanel({ stats, preview, outcome, busy, recordStorage, m
       {recordStorage && <RecordLocation storage={recordStorage} busy={moving || busy} moving={moving} onMove={onMoveRecords} onOpen={onOpenRecords} onPickDirectory={onPickDirectory} t={t} />}
       <div className={css.actions}>
         <Button size="sm" variant="outline" disabled={busy} onClick={() => { void onRetention({ action: 'preview' }) }}>{t('retention.preview')}</Button>
-        <Button size="sm" variant="outline" disabled={busy || !preview || !(preview.archiveTasks.length || preview.deleteArchives.length || preview.compactSkills.length || preview.nativeCleanup.length)}
-          onClick={() => { if (preview) void onRetention({ action: 'sweep', previewId: preview.previewId }) }}>{t('retention.clean')}</Button>
+        <ManualTaskCleanup preview={preview} busy={busy || moving} onRetention={onRetention} t={t} />
+        <ManualConversationCleanup busy={busy || moving} onRetention={onRetention} t={t} />
       </div>
       {preview && <>
         <p className={css.muted}>{t('retention.plan', { archive: preview.archiveTasks.length, remove: preview.deleteArchives.length,
@@ -88,7 +89,7 @@ function RecordLocation({ storage, busy, moving, onMove, onOpen, onPickDirectory
   }}>
     <div className={css.recordLocationRow}>
       <label className={css.directoryField} htmlFor={id}><span>{t('retention.directory')}</span>
-        <Input id={id} required maxLength={4000} value={directory} title={directory} disabled={disabled}
+        <Input id={id} required value={directory} title={directory} disabled={disabled}
           placeholder={t('retention.directoryPlaceholder')} onChange={event => { setDirectory(event.target.value); setError(undefined) }} />
       </label>
       <div className={css.recordLocationActions}>
@@ -174,7 +175,6 @@ function RetentionPolicyEditor({ preview, busy, onRetention, t }: { preview: Ret
         event.currentTarget.value = ''
         if (!file) return
         setError(undefined); setNotice(undefined)
-        if (file.size > 64 * 1024) { setError(t('retention.importTooLarge')); return }
         setFileBusy(true)
         void file.text().then(text => { const imported = parseRetentionPolicyFile(text); setPolicy(imported); setNotice('retention.importedDraft') })
           .catch(fail).finally(() => setFileBusy(false))

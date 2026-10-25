@@ -5,6 +5,8 @@ import type { ArchiveDeleteResult, TaskTombstone } from '../contracts/retention.
 import { applyTaskCommand } from '../domain/task.js'
 import { jsonBytes, retentionBlockers } from '../domain/retention.js'
 import { ServantStore } from './servant-store.js'
+import { TaskArchiveStore } from './task-archive-store.js'
+import { exportTaskRecords } from './task-record-export.js'
 
 export interface TaskServiceOptions { clock?: Clock; id?: () => string; reviewEvery?: number; onNotificationError?: (error: unknown) => void }
 export type TaskListener = (task: Task, receipt: CommandReceipt) => void | Promise<void>
@@ -15,10 +17,12 @@ export class TaskService {
   private readonly clock: Clock
   private readonly id: () => string
   private readonly reviewEvery: number
+  readonly archives: TaskArchiveStore
 
   constructor(readonly store: ServantStore, private readonly options: TaskServiceOptions = {}) {
     this.clock = options.clock ?? { now: () => new Date().toISOString() }
     this.id = options.id ?? randomUUID
+    this.archives = new TaskArchiveStore(store.storage, () => this.clock.now())
     this.reviewEvery = options.reviewEvery ?? 5
     if (!Number.isInteger(this.reviewEvery) || this.reviewEvery < 1) throw new Error('reviewEvery must be a positive integer')
   }
@@ -37,13 +41,23 @@ export class TaskService {
     const pending = previous.catch(() => {}).then(async () => {
       const current = await this.store.getTask(taskId)
       const tombstone = !current && await this.store.getTombstone(taskId)
+      if (tombstone && command.type === 'delivery.read' && command.source.kind === 'user') {
+        await this.archives.markDeliveryRead(taskId)
+        const receipt: CommandReceipt = { commandId: command.commandId, taskId, status: 'applied', revision: tombstone.revision, actionIds: [] }
+        const task = await this.archives.task(taskId)
+        if (task) for (const listener of this.listeners) {
+          try { void Promise.resolve(listener(structuredClone(task), receipt)).catch(error => this.options.onNotificationError?.(error)) }
+          catch (error) { this.options.onNotificationError?.(error) }
+        }
+        return receipt
+      }
       if (tombstone) return { commandId: command.commandId, taskId, status: 'rejected' as const, revision: tombstone.revision,
         actionIds: [], code: 'TASK_RETIRED', reason: 'This task identity is permanently retired; submit a new goal with a new identity.' }
       if (command.type === 'task.submit' && command.taskId !== taskId) throw new Error('Task command target mismatch')
       if (!current && command.type !== 'task.submit') return { commandId: command.commandId, taskId, status: 'rejected' as const, revision: 0, actionIds: [], code: 'TASK_NOT_FOUND', reason: 'Task does not exist.' }
       const transition = applyTaskCommand(current, command, { now: this.clock.now(), fingerprint, reviewEvery: this.reviewEvery })
       if (transition.changed && transition.task) {
-        await this.store.putTask(transition.task)
+        await this.store.putTask(transition.task, current)
         for (const listener of this.listeners) {
           // Notifications are hints, never part of the storage commit or a reason
           // to roll back an accepted command. Recovery scans durable actions.
@@ -59,7 +73,33 @@ export class TaskService {
     try { return await pending } finally { if (this.queues.get(taskId) === pending) this.queues.delete(taskId) }
   }
 
-  get(taskId: string): Promise<Task | undefined> { return this.store.getTask(taskId) }
+  async get(taskId: string): Promise<Task | undefined> { return await this.store.getTask(taskId) ?? await this.archives.task(taskId) }
+  async history(includeHidden = false): Promise<Task[]> {
+    const rows = (await this.archives.list()).filter(row => row.tombstone && (includeHidden || !row.hidden))
+    return (await Promise.all(rows.map(row => this.archives.task(row.taskId)))).filter((task): task is Task => !!task)
+  }
+  async exportRecords(taskId: string): Promise<{ path: string; sha256: string; bytes: number }> {
+    const task = await this.get(taskId)
+    if (!task) throw new Error('Task does not exist.')
+    return exportTaskRecords(this.archives, taskId, task.workspace.directory)
+  }
+  async prepareDelivery(taskId: string): Promise<void> {
+    const task = await this.store.getTask(taskId)
+    if (!task?.delivery) throw new Error('Records require the accepted task delivery.')
+    await this.archives.seal(task, 'accepted')
+  }
+  /** Completion cleanup shares the same Task queue as every business write. */
+  async cleanupCompleted(taskId: string): Promise<boolean> {
+    const previous = this.queues.get(taskId) ?? Promise.resolve()
+    const pending = previous.catch(() => {}).then(async () => {
+      const task = await this.store.getTask(taskId)
+      if (!task || retentionBlockers(task).length) return false
+      await this.archives.cleanup(task)
+      return true
+    })
+    this.queues.set(taskId, pending)
+    try { return await pending } finally { if (this.queues.get(taskId) === pending) this.queues.delete(taskId) }
+  }
   list(): Promise<Task[]> { return this.store.listTasks() }
   subscribe(listener: TaskListener): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   async flush(): Promise<void> { await Promise.allSettled([...this.queues.values()]) }

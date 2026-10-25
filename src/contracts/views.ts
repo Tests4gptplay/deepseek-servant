@@ -22,10 +22,12 @@ export interface RecordStorageView {
   retainedSource?: string
 }
 export interface ServantView {
+  runtimeSettings: import('../application/runtime-settings.js').RuntimeSettings
   recordStorage: RecordStorageView
   assistant: AssistantView
   tasks: TaskView[]
   messages: ConversationMessage[]
+  conversationBefore?: string
   knowledge: KnowledgeRecord[]
   workspaces: Array<WorkspaceBinding & { title: string }>
   runtime: { status: 'running' | 'stopping' | 'degraded'; message?: string; workerSeats: number }

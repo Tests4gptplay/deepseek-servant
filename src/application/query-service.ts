@@ -1,3 +1,4 @@
+import type { ConversationQuery } from '../contracts/assistant.js'
 import type { Task } from '../contracts/task.ts'
 import type { ServantView, TaskView } from '../contracts/views.ts'
 import type { AssistantService } from './assistant-service.ts'
@@ -12,15 +13,16 @@ export interface QueryServiceOptions {
   knowledge: KnowledgeService
   workspaces(): ServantView['workspaces']
   runtime(): ServantView['runtime']
+  runtimeSettings(): ServantView['runtimeSettings']
   recordStorage(): ServantView['recordStorage']
 }
 
 export class QueryService {
   constructor(private readonly options: QueryServiceOptions) {}
-  async view(assistantId = 'default'): Promise<ServantView> {
+  async view(assistantId = 'default', conversation: ConversationQuery = {}): Promise<ServantView> {
     const assistant = await this.options.assistants.get(assistantId)
-    const [tasks, messages, knowledge] = await Promise.all([
-      this.options.tasks.list(), this.options.assistants.conversation(assistantId),
+    const [tasks, page, knowledge] = await Promise.all([
+      this.options.tasks.list(), this.options.assistants.conversationPage(assistantId, conversation.before, 40, conversation.date),
       this.options.knowledge.list({ assistantId, workspaceId: assistant.workspace.id }),
     ])
     return {
@@ -29,9 +31,10 @@ export class QueryService {
         pendingInputs: Object.entries(assistant.inputs).filter(([, input]) => input.status === 'pending' || input.error !== undefined)
           .map(([messageId, input]) => ({ messageId, ...(input.error ? { error: input.error } : {}) })),
       },
-      tasks: tasks.filter(task => task.assistantId === assistantId)
+      tasks: [...new Map([...tasks, ...await this.options.tasks.history()].map(task => [task.id, task])).values()].filter(task => task.assistantId === assistantId)
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map(taskView),
-      messages, knowledge, workspaces: this.options.workspaces(), runtime: this.options.runtime(), recordStorage: this.options.recordStorage(),
+      runtimeSettings: this.options.runtimeSettings(),
+      messages: page.messages, ...(page.before ? { conversationBefore: page.before } : {}), knowledge, workspaces: this.options.workspaces(), runtime: this.options.runtime(), recordStorage: this.options.recordStorage(),
     }
   }
   async task(taskId: string): Promise<TaskView | undefined> {

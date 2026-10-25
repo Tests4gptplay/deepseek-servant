@@ -3,9 +3,9 @@ import type { Child, CommandSource, DecisionRecord, ExecutionBinding, ExecutionR
 
 /** References identify local authoritative Task data, never a Git transport or Session transcript. */
 export type MemorySection = 'goal' | 'origin' | 'plan' | 'children' | 'planner' | 'note' | 'child' | 'report' | 'incident' | 'execution' | 'wait' | 'waits'
-export interface TaskMemoryQuery { ref: string; offset?: number; limit?: number }
+export interface TaskMemoryQuery { ref: string; offset?: number; limit?: number; characterOffset?: number }
 export interface MemoryRead extends TaskMemoryQuery { purpose: string }
-export interface TaskMemoryPage { ref: string; taskRevision: number; offset: number; total: number; entries: unknown[]; next?: TaskMemoryQuery }
+export interface TaskMemoryPage { ref: string; taskRevision: number; offset: number; total: number; entries: unknown[]; text?: string; textFormat?: 'json'; characterOffset?: number; totalCharacters?: number; next?: TaskMemoryQuery }
 export interface MemoryEntry {
   kind: 'work' | 'feedback' | 'recovery'
   sequence: number
@@ -31,6 +31,16 @@ const MAX_PAGE = 50
 const own = <T>(map: Record<string, T>, id: string): T | undefined => Object.hasOwn(map, id) ? map[id] : undefined
 const clipped = (value: string, limit = 1600): string => value.length > limit ? `${value.slice(0, limit)}\n[Truncated in handoff; read its exact memory ref for the remainder.]` : value
 const recent = <T>(values: T[], count = HOT_ENTRIES): T[] => values.slice(Math.max(0, values.length - count))
+const hotStrings = (values: string[], count = 12, length = 800) => values.slice(0, count).map(value => clipped(value, length))
+const hotArtifacts = (values: ExecutionReport['artifacts']) => values.slice(0, 12).map(value => ({ ...value, description: clipped(value.description, 500) }))
+function hotNote(task: Task) {
+  const note = task.plannerNote!
+  return { revision: note.revision, goalRevision: note.goalRevision, body: clipped(note.body, 3000), frontier: clipped(note.frontier, 1200),
+    currentGoal: note.goalRevision === task.goal.revision, ref: memoryRef(task.id, 'note'),
+    backlog: (note.backlog ?? []).slice(0, 20).map(item => ({ ...item, objective: clipped(item.objective, 500), reason: clipped(item.reason, 500),
+      trigger: clipped(item.trigger, 500), dependsOn: item.dependsOn.slice(0, 24) })),
+    backlogCount: note.backlog?.length ?? 0, requiredPendingCount: note.backlog?.filter(item => item.required && item.status === 'pending').length ?? 0 }
+}
 
 export function memoryRef(taskId: string, section: MemorySection, id?: string): string {
   return `servant-memory://tasks/${encodeURIComponent(taskId)}/${section}${id === undefined ? '' : `/${encodeURIComponent(id)}`}`
@@ -53,8 +63,10 @@ function caller(task: Task, supplied: ExecutionBinding | undefined): ExecutionBi
 }
 function childScope(task: Task, execution: ExecutionBinding): Set<string> {
   const childId = execution.childId ?? (execution.incidentId ? task.incidents[execution.incidentId]?.childId : undefined)
-  const child = childId ? task.children[childId] : undefined
-  return new Set(child ? [child.id, ...child.dependsOn] : [])
+  const ids = new Set<string>()
+  const add = (id: string) => { if (ids.has(id)) return; ids.add(id); for (const dep of task.children[id]?.dependsOn ?? []) add(dep) }
+  if (childId) add(childId)
+  return ids
 }
 function authorize(task: Task, execution: ExecutionBinding | undefined, section: MemorySection, id?: string): void {
   if (!execution || execution.role === 'planner' || execution.role === 'foreground') return
@@ -172,37 +184,46 @@ export function queryTaskMemory(task: Task, execution: ExecutionBinding | undefi
       exactRef: memoryRef(task.id, 'wait', id!), exactRead: { ref: memoryRef(task.id, 'wait', id!), offset: index, limit: 1 } })); break
     case 'waits': entries = waitMemory(task, current).map(entry => waitView(task, entry)); break
   }
-  return { ref: query.ref, taskRevision: task.revision, offset, total: entries.length, entries: structuredClone(entries.slice(offset, offset + limit)),
-    ...(offset + limit < entries.length ? { next: { ref: query.ref, offset: offset + limit, limit } } : {}) }
+  const selected = entries.slice(offset, offset + limit), serialized = JSON.stringify(selected)
+  const characterOffset = query.characterOffset ?? 0
+  if (!Number.isInteger(characterOffset) || characterOffset < 0 || characterOffset > serialized.length) throw new Error('MEMORY_PAGE: Invalid character cursor.')
+  const following = offset + limit < entries.length ? { ref: query.ref, offset: offset + limit, limit } : undefined
+  if (serialized.length > 32768 || characterOffset) {
+    const end = Math.min(serialized.length, characterOffset + 32768)
+    return { ref: query.ref, taskRevision: task.revision, offset, total: entries.length, entries: [],
+      textFormat: 'json', text: serialized.slice(characterOffset, end), characterOffset, totalCharacters: serialized.length,
+      next: end < serialized.length ? { ref: query.ref, offset, limit, characterOffset: end } : following }
+  }
+  return { ref: query.ref, taskRevision: task.revision, offset, total: entries.length, entries: structuredClone(selected), next: following }
 }
 
 function compactEntry(entry: MemoryEntry): MemoryEntry {
   return { ...entry, summary: clipped(entry.summary), ...(entry.frontier ? { frontier: clipped(entry.frontier, 1200) } : {}),
     ...(entry.evidence ? { evidence: entry.evidence.slice(0, 8).map(item => clipped(item, 500)) } : {}),
-    ...(entry.artifacts ? { artifacts: entry.artifacts.slice(0, 12) } : {}),
+    ...(entry.artifacts ? { artifacts: hotArtifacts(entry.artifacts) } : {}),
     ...(entry.checkpoint ? { checkpoint: {
       completed: entry.checkpoint.completed.slice(0, 8).map(item => clipped(item, 500)),
       failedApproaches: entry.checkpoint.failedApproaches.slice(0, 4).map(failed => ({ approach: clipped(failed.approach, 700), outcome: clipped(failed.outcome, 700), evidence: failed.evidence.slice(0, 4).map(item => clipped(item, 500)) })),
-      remaining: entry.checkpoint.remaining.slice(0, 8).map(item => clipped(item, 500)), nextAction: clipped(entry.checkpoint.nextAction, 1000), nextReads: entry.checkpoint.nextReads.slice(0, 8),
+      remaining: entry.checkpoint.remaining.slice(0, 8).map(item => clipped(item, 500)), nextAction: clipped(entry.checkpoint.nextAction, 1000), nextReads: hotStrings(entry.checkpoint.nextReads, 8, 500),
     } } : {}) }
 }
 function compactDecision(task: Task, entry: DecisionRecord, index: number) {
   return { commandId: entry.commandId, kind: entry.kind ?? 'plan', goalRevision: entry.goalRevision, planRevision: entry.planRevision,
     summary: clipped(entry.summary), ...(entry.frontier ? { frontier: clipped(entry.frontier, 1200) } : {}),
-    ...(entry.childDecisions ? { childDecisions: entry.childDecisions.map(decision => ({ childId: decision.childId, resultId: decision.resultId, outcome: decision.outcome, reason: clipped(decision.reason, 1200), assignmentVersion: decision.assignmentVersion, resultingAssignmentVersion: decision.resultingAssignmentVersion })) } : {}),
+    ...(entry.childDecisions ? { childDecisions: entry.childDecisions.slice(0, 24).map(decision => ({ childId: decision.childId, resultId: decision.resultId, outcome: decision.outcome, reason: clipped(decision.reason, 1200), assignmentVersion: decision.assignmentVersion, resultingAssignmentVersion: decision.resultingAssignmentVersion })) } : {}),
     ...(entry.failedApproaches ? { failedApproaches: entry.failedApproaches.slice(0, 8).map(item => clipped(item, 500)) } : {}),
     ...(entry.changedAssumptions ? { changedAssumptions: entry.changedAssumptions.slice(0, 8).map(item => clipped(item, 500)) } : {}),
-    ...(entry.planNoteUsage ? { planNoteUsage: entry.planNoteUsage } : {}), ...(entry.planNoteChange ? { planNoteChange: entry.planNoteChange } : {}),
+    ...(entry.planNoteUsage ? { planNoteUsage: { ...entry.planNoteUsage, summary: clipped(entry.planNoteUsage.summary, 800), frontier: clipped(entry.planNoteUsage.frontier, 800) } } : {}), ...(entry.planNoteChange ? { planNoteChange: { ...entry.planNoteChange, summary: clipped(entry.planNoteChange.summary, 800), frontier: clipped(entry.planNoteChange.frontier, 800) } } : {}),
     ...(entry.physicalDisposition ? { physicalDisposition: entry.physicalDisposition } : {}),
     ...(entry.resolvedWait ? { resolvedWait: { ...entry.resolvedWait, reason: clipped(entry.resolvedWait.reason, 800), condition: clipped(entry.resolvedWait.condition, 1200), resume: clipped(entry.resolvedWait.resume, 1200),
-      ...(entry.resolvedWait.answer ? { answer: clipped(entry.resolvedWait.answer, 2400) } : {}), exactRef: memoryRef(task.id, 'wait', entry.resolvedWait.id) } } : {}),
+      ...(entry.resolvedWait.answer ? { answer: clipped(entry.resolvedWait.answer, 2400) } : {}), ...(entry.resolvedWait.question ? { question: clipped(entry.resolvedWait.question, 800) } : {}), exactRef: memoryRef(task.id, 'wait', entry.resolvedWait.id) } } : {}),
     exactRead: { ref: memoryRef(task.id, 'planner'), offset: index, limit: 1 },
   }
 }
 function childSummary(task: Task, child: Child) {
   const report = child.currentResultId ? task.reports[child.currentResultId] : undefined
   return { id: child.id, title: child.title, objective: clipped(child.objective, 1000), assignmentVersion: child.assignmentVersion, goalRevision: child.goalRevision,
-    status: child.status, dependsOn: child.dependsOn, ...(child.acceptedResultId ? { acceptedResultId: child.acceptedResultId, acceptedAtGoalRevision: child.acceptedAtGoalRevision } : {}),
+    status: child.status, dependsOn: child.dependsOn.slice(0, 24), dependencyCount: child.dependsOn.length, ...(child.acceptedResultId ? { acceptedResultId: child.acceptedResultId, acceptedAtGoalRevision: child.acceptedAtGoalRevision } : {}),
     ...(report ? { latestResultId: report.resultId, frontier: clipped(report.frontier, 900), outcome: report.outcome, disposition: report.disposition } : {}), historyRef: memoryRef(task.id, 'child', child.id) }
 }
 function childContext(task: Task, child: Child) {
@@ -211,11 +232,11 @@ function childContext(task: Task, child: Child) {
   const previouslyAccepted = new Set(task.decisions.flatMap(entry => (entry.childDecisions ?? []).filter(decision => decision.childId === child.id && decision.outcome === 'accept').map(decision => decision.resultId)))
   const accepted = Object.values(task.reports).filter(report => report.childId === child.id && report.outcome === 'complete' && (report.disposition === 'accepted' || previouslyAccepted.has(report.resultId)))
   const latest = history.filter(entry => entry.kind === 'work').at(-1)
-  return { childId: child.id, currentAssignment: structuredClone(child),
-    latestFrontier: latest ? { resultId: latest.resultId, frontier: latest.frontier, ref: latest.ref, assignmentVersion: latest.assignmentVersion } : undefined,
+  return { childId: child.id, currentAssignment: { ...childSummary(task, child), objective: clipped(child.objective, 4000), inputArtifacts: hotArtifacts(child.inputArtifacts), acceptanceCriteria: hotStrings(child.acceptanceCriteria, 20), writeScopes: hotStrings(child.writeScopes, 24, 4000), resources: child.resources.slice(0, 24) },
+    latestFrontier: latest ? { resultId: latest.resultId, frontier: latest.frontier ? clipped(latest.frontier, 1600) : undefined, ref: latest.ref, assignmentVersion: latest.assignmentVersion } : undefined,
     acceptedWork: recent(accepted, HOT_ENTRIES).map(report => ({ resultId: report.resultId, assignmentVersion: report.assignmentVersion, goalRevision: report.goalRevision,
       acceptedForCurrentGoal: child.acceptedResultId === report.resultId && child.acceptedAtGoalRevision === task.goal.revision,
-      summary: clipped(report.summary), artifacts: report.artifacts.slice(0, 12), ref: memoryRef(task.id, 'report', report.resultId) })),
+      summary: clipped(report.summary), artifacts: hotArtifacts(report.artifacts), ref: memoryRef(task.id, 'report', report.resultId) })),
     failedApproaches: recent(failures, HOT_FAILURES).map(compactEntry), recentEntries: recent(history).map(compactEntry),
     history: { ref: memoryRef(task.id, 'child', child.id), total: history.length, hotOffset: Math.max(0, history.length - HOT_ENTRIES), earlierEntries: Math.max(0, history.length - HOT_ENTRIES), failureCount: failures.length },
   }
@@ -235,6 +256,7 @@ export function assembleRoleInput(task: Task, execution: ExecutionBinding, actio
   const relevantChildren = broad ? allCurrentChildren : allCurrentChildren.filter(child => scope.has(child.id))
   const childIds = new Set(relevantChildren.map(child => child.id))
   const waits = waitMemory(task, bound)
+  const restart = bound.incidentId ? task.incidents[bound.incidentId] : undefined
   const resolvedWaits = waits.filter(entry => entry.wait.state === 'resolved')
   const next_reads: MemoryRead[] = []
   const read = (section: MemorySection, purpose: string, id?: string, offset?: number) => next_reads.push({ ref: memoryRef(task.id, section, id), purpose, ...(offset !== undefined ? { offset, limit: 20 } : {}) })
@@ -246,8 +268,8 @@ export function assembleRoleInput(task: Task, execution: ExecutionBinding, actio
     if (allCurrentChildren.length > HOT_CHILDREN) read('children', 'Continue the current plan child index beyond the hot handoff.', undefined, HOT_CHILDREN)
   }
   for (const child of relevantChildren.slice(0, broad ? HOT_CHILDREN : HOT_ENTRIES)) read('child', `Inspect durable work, failures, planner feedback, and recovery history for child ${child.id}.`, child.id, Math.max(0, childMemory(task, child.id).length - HOT_ENTRIES - 20))
-  for (const resultId of savedAction.payload.resultIds ?? []) if (task.reports[resultId]) read('report', 'Read the exact saved result this action must evaluate; summary is not acceptance.', resultId)
-  if (bound.incidentId) read('incident', 'Inspect the exact incident; verify physical ownership/job evidence before any recovery disposition.', bound.incidentId)
+  for (const resultId of (savedAction.payload.resultIds ?? []).slice(0, HOT_CHILDREN)) if (task.reports[resultId]) read('report', 'Read the exact saved result this action must evaluate; summary is not acceptance.', resultId)
+  if (bound.incidentId) read('incident', 'Read the exact prior error and saved restart evidence relevant to the next operation.', bound.incidentId)
   if (waits.length) read('waits', 'Read scoped dependency questions, exact user answers, and recovery conditions; resolved answers remain part of the work requirements.', undefined, Math.max(0, waits.length - HOT_ENTRIES - 20))
   for (const entry of recent(resolvedWaits)) next_reads.push({ ...entry.exactRead, purpose: 'Read the exact resolved dependency and answer before continuing the affected work.' })
   const relatedExecutions = Object.values(task.executions).filter(owner => owner.executionId === bound.executionId || (broad ? owner.state === 'active' || !['stopped', 'lost'].includes(owner.physicalState) : !!owner.childId && childIds.has(owner.childId))
@@ -257,32 +279,37 @@ export function assembleRoleInput(task: Task, execution: ExecutionBinding, actio
   const facts = knowledgeFacts.filter((record): record is Exclude<KnowledgeRecord, { kind: 'skill' }> => record.kind !== 'skill' && record.scope.assistantId === task.assistantId && record.scope.workspaceId === task.workspace.id)
   return {
     authority: { taskId: task.id, revision: task.revision, assistantId: task.assistantId, workspace: structuredClone(task.workspace), control: task.control,
-      currentGoal: structuredClone(task.goal), originalRequestRef: memoryRef(task.id, 'origin'), needsPlanning: task.needsPlanning,
+      currentGoal: broad ? { ...task.goal, request: clipped(task.goal.request, 3000), objective: clipped(task.goal.objective, 2000), constraints: hotStrings(task.goal.constraints), deliverables: hotStrings(task.goal.deliverables), acceptanceCriteria: hotStrings(task.goal.acceptanceCriteria), sourceRef: clipped(task.goal.sourceRef, 500), exactRef: memoryRef(task.id, 'goal') } : { revision: task.goal.revision, exactRef: memoryRef(task.id, 'goal') }, originalRequestRef: memoryRef(task.id, 'origin'), needsPlanning: task.needsPlanning,
       rule: 'Current user requirements are authoritative. Formal plans and historical decisions are evidence and instructions only within that goal. A saved Session or job id does not prove a live physical owner.' },
     role: { role: bound.role, executionId: bound.executionId, generation: bound.generation, sessionId: bound.sessionId,
-      actionId: savedAction.id, actionKind: savedAction.kind, reason: savedAction.payload.reason,
+      actionId: savedAction.id, actionKind: savedAction.kind, reason: savedAction.payload.reason ? clipped(savedAction.payload.reason, 1200) : undefined,
       ...(bound.childId ? { childId: bound.childId, assignmentVersion: bound.assignmentVersion } : {}), ...(bound.incidentId ? { incidentId: bound.incidentId } : {}) },
     plan: { revision: task.plan.revision, goalRevision: task.plan.goalRevision,
       ...(broad ? { strategy: clipped(task.plan.strategy, 4000), children: relevantChildren.slice(0, HOT_CHILDREN).map(child => childSummary(task, child)), totalChildren: allCurrentChildren.length,
-        exactRef: memoryRef(task.id, 'plan') } : { relevantChildren: relevantChildren.map(child => childSummary(task, child)) }) },
+        exactRef: memoryRef(task.id, 'plan') } : { relevantChildren: relevantChildren.slice(0, HOT_CHILDREN).map(child => childSummary(task, child)), relevantChildrenCount: relevantChildren.length }) },
     ...(broad ? { plannerMemory: { recentEntries: recent(task.decisions).map((entry, index) => compactDecision(task, entry, Math.max(0, task.decisions.length - HOT_ENTRIES) + index)),
       history: { ref: memoryRef(task.id, 'planner'), total: task.decisions.length, earlierEntries: Math.max(0, task.decisions.length - HOT_ENTRIES) } },
-      ...(task.plannerNote ? { planNote: { ...task.plannerNote, body: clipped(task.plannerNote.body, 4000), currentGoal: task.plannerNote.goalRevision === task.goal.revision, ref: memoryRef(task.id, 'note') } } : {}),
-      eventResults: (savedAction.payload.resultIds ?? []).flatMap(id => task.reports[id] ? [compactEntry(childMemory(task, task.reports[id].childId).find(entry => entry.kind === 'work' && entry.resultId === id)!)] : []),
+      ...(task.plannerNote ? { planNote: hotNote(task) } : {}),
+      eventResults: (savedAction.payload.resultIds ?? []).slice(0, HOT_CHILDREN).flatMap(id => task.reports[id] ? [compactEntry(childMemory(task, task.reports[id].childId).find(entry => entry.kind === 'work' && entry.resultId === id)!)] : []),
     } : {}),
-    ...(ownChild ? { childMemory: childContext(task, ownChild), dependencyResults: ownChild.dependsOn.flatMap(id => {
+    ...(ownChild ? { childMemory: childContext(task, ownChild), dependencyResults: ownChild.dependsOn.slice(0, HOT_CHILDREN).flatMap(id => {
       const dependency = task.children[id]
       const report = dependency?.acceptedResultId ? task.reports[dependency.acceptedResultId] : undefined
-      return report && dependency.acceptedAtGoalRevision === task.goal.revision ? [{ childId: id, resultId: report.resultId, summary: clipped(report.summary), artifacts: report.artifacts, ref: memoryRef(task.id, 'report', report.resultId) }] : []
+      return report && dependency.acceptedAtGoalRevision === task.goal.revision ? [{ childId: id, resultId: report.resultId, summary: clipped(report.summary), artifacts: hotArtifacts(report.artifacts), ref: memoryRef(task.id, 'report', report.resultId) }] : []
     }) } : {}),
-    handoff: { ...(predecessor ? { predecessor: { executionId: predecessor.executionId, sessionId: predecessor.sessionId, generation: predecessor.generation, assignmentVersion: predecessor.assignmentVersion, state: predecessor.state, physicalState: predecessor.physicalState,
+    handoff: { ...(restart?.state === 'resolved' ? { recovery: {
+      notice: 'The previous execution failed. The runtime settled its exact owner and jobs, then restarted this same role for the original Task and Child. Resume the saved frontier and retained artifacts; this is not a new user request.',
+      incidentId: restart.id, previousExecutionId: restart.executionId,
+      errors: restart.errors.slice(-3).map(error => ({ ...error, operation: clipped(error.operation, 500), message: clipped(error.message, 1000) })),
+      resolution: restart.resolution ? clipped(restart.resolution, 1500) : undefined, ref: memoryRef(task.id, 'incident', restart.id),
+    } } : {}), ...(predecessor ? { predecessor: { executionId: predecessor.executionId, sessionId: predecessor.sessionId, generation: predecessor.generation, assignmentVersion: predecessor.assignmentVersion, state: predecessor.state, physicalState: predecessor.physicalState,
       ref: memoryRef(task.id, 'execution', predecessor.executionId) } } : {}),
       actualOwners: relatedExecutions.filter(owner => owner.state === 'active' || !['stopped', 'lost'].includes(owner.physicalState)).map(owner => ({ executionId: owner.executionId, role: owner.role, childId: owner.childId,
-        semanticState: owner.state, physicalState: owner.physicalState, ownedJobIds: [...owner.ownedJobIds], observedAt: owner.observedAt, ref: memoryRef(task.id, 'execution', owner.executionId) })),
-      waits: waits.filter(entry => entry.current && entry.wait.state === 'waiting').map(entry => waitView(task, entry, true)),
+        semanticState: owner.state, physicalState: owner.physicalState, ownedJobIds: owner.ownedJobIds.slice(0, 24), observedAt: owner.observedAt, ref: memoryRef(task.id, 'execution', owner.executionId) })),
+      waits: waits.filter(entry => entry.current && entry.wait.state === 'waiting').slice(0, HOT_CHILDREN).map(entry => waitView(task, entry, true)),
       resolvedWaits: recent(resolvedWaits).map(entry => waitView(task, entry, true)),
       resolvedWaitsOmitted: Math.max(0, resolvedWaits.length - HOT_ENTRIES),
-      incidents: Object.values(task.incidents).filter(incident => incident.state !== 'resolved' && (broad || bound.incidentId === incident.id || (!!incident.childId && childIds.has(incident.childId)))),
+      incidents: Object.values(task.incidents).filter(incident => incident.state !== 'resolved' && (broad || bound.incidentId === incident.id || (!!incident.childId && childIds.has(incident.childId)))).slice(0, HOT_CHILDREN).map(incident => ({ id: incident.id, executionId: incident.executionId, childId: incident.childId, state: incident.state, errors: incident.errors.slice(-3).map(error => ({ ...error, operation: clipped(error.operation, 500), message: clipped(error.message, 1000) })), ref: memoryRef(task.id, 'incident', incident.id) })),
       next_reads,
     },
     knowledgeFacts: facts.slice(-24).map(record => ({ kind: record.kind, id: record.id, revision: record.revision, text: clipped(record.text, 1500),
