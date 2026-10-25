@@ -62,8 +62,8 @@ Covered files: `icon.png`, `assets/page-icon.png`, `assets/statusbar-icon.png`,
 `docs/images/deepseek-servant-mascot.png`, including their copies embedded in the
 built client. The user-selected navy whale-tail maid icon was supplied on
 2026-10-25. The plugin adaptation scales it to 256 × 256 pixels and preserves
-its original silhouette and transparency; the sidebar uses its alpha channel
-with the host theme's icon color. The welcome illustration is unchanged.
+its original silhouette and transparency in the plugin list and page heading.
+The sidebar icon and welcome illustration retain their existing artwork.
 
 Character reference and source index:
 [AI-gijinka character atlas](https://github.com/Tests4gptplay/ai-gijinka-art-world/blob/main/CHARACTER_ATLAS.md).
