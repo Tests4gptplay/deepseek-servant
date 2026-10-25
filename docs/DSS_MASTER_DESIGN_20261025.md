@@ -118,7 +118,39 @@ Root Task 全部验收后，Planner 写最后的验收与实际产物引用并�
 - **尚待实现**：设置页 Worker 并发席位（默认 2，可配置 1～32）持久化与运行时更新、Planner 每次规划/评审时获得真实并发容量快照；前台每轮新 Session 与按日完整原文，固定六轮自动装载/历史搜索；Planner/Worker 独立 Domain Keys 与自主读写；增量 Plan/未完成规划中途 handoff；完全去除 Helper 及同角色异常重启；任务终态 records.md 写入/封口/自动精确清理；Native Session 物理清理兼容等。这些是相互配套的下一阶段任务，不能当作本次 UI 已经实施。
 - 旧版 DSH `storageDomain` 对版本与 schema 有严格校验，未来迁移需要保持旧记录可读，不可直接提高版本导致宿主无法打开；原生 DSH Storage Domain 不是普通 Agent Workspace，日常直接读写应通过 DSS 的 Domain-bound 受控原生工具，不进行“复制回去覆盖”的中转操作。
 
-## I. 详细审查与先前讨论原文索引
+## I. GitHub 实验性集成：复用 dsh-github，用户在 DSS 设置中配置 Token（2026-10-25）
+
+**最新用户需求：** 将 [PerryLink/dsh-github](https://github.com/PerryLink/dsh-github) 的 GitHub 集成能力纳入 DSS，作为 **用户自愿启用的实验功能**，在 DSS 自身设置页配置 GitHub Token。此功能应与现有 Foreground、Planner、Worker 的正常任务链配合使用，保留 DSS 已确认的存储、上下文、任务生命周期和兼容性原则。此节为实施设计，尚未写入 DSS 正式运行代码。
+
+**已核对上游源码：** 上游公开仓库许可证为 `Apache-2.0`；参考 `v0.7.27`（2026-10-23 Release）和 2026-10-24 `main` commit `02bb9565bd1be132e3a942b828b8d8b4b5693da6`。上游已实现 `gh_repo`、`gh_file`、`gh_repo_search`、`gh_search`、`gh_review`、`gh_issue`、`gh_checks`，以及 `pr_create/pr_update/pr_merge`、`issue_open/issue_comment/issue_close`、`review_post`，并有按需 PR 审查、`/ci`、可选 CI 机器人；GitHub Token 由官方 DSH Credentials 服务解析，非普通插件配置字段。源代码参考和许可证必须在实现时保留归属与必要 NOTICE。
+
+### I.1 目标交互
+
+- DSS「设置」中增加简洁的 **GitHub（实验性）** 区域：启用开关、GitHub Token 密码输入、已配置/未配置状态，以及可选的默认 `owner/repo`。保持现有 UI 风格，不添加重复的第二套设置页。
+- 默认不调用 GitHub、不启动 GitHub 轮询任务；用户开启后，本 DSS 的授权 Foreground/Planner/Worker 可以调用对应 GitHub 工具。Planner 可根据既有任务目标规划 GitHub 工作，Worker 执行实际仓库/PR/Issue 相关子任务；前台处理用户直接要求。
+- Token 的用户配置入口参考上游 `src/client.ts` 已验证设计：使用 DSH 客户端 `remote.credentials.describe([tokenRef])` 查询**配置状态**，经 `remote.credentials.set(tokenRef, token)` 将用户输入的 Token 写入 DSH Credentials；Host 通过 `ctx.credentials.resolve(credentialRef(tokenRef))` **逐次操作读取**。默认引用名可沿用上游 `GITHUB_TOKEN`。输入框为 password，保存后清空，不从 Host 向浏览器回传既存明文。Token 不放进 `deepseek_servant` 普通 JSON、提示词、Session、Worker Reply、日志或 `records.md`。
+- 启用标记、`tokenRef`、可选默认仓库、CI 可选项等**非秘密配置**保留在原有 `deepseek_servant` Storage Domain。Token 放在 DSH 官方凭据容器，是有明确权限语义的凭据数据，不改变 DSS 内部业务记录的统一存储位置。
+- 提供明确的连通性验证状态，验证时经上游 REST 客户端发出真实只读请求，显示结果/错误类型，不泄露 Token。Token 更新下次调用即生效，不重启完整 DSS，也不因未配置 Token 阻止 DSS 其他功能。
+
+### I.2 集成方式和权限边界
+
+- **复用上游 GitHub 实现**，而不是复制 API 表面名称却另造不同 GitHub 行为。优先评估把上游所需模块作为 **DSS 包内可交付的组件**进行作用域注册，安装一份 DSS 即可使用这一实验功能；不要要求用户另外安装一套 dsh-github 才能用。现有独立 dsh-github 已安装时应避免重复注册同名工具/命令。
+- **不把上游 `package.json` 的 `engines.dsh >=0.2.1-0 <0.3.0` 或复杂精确 peer ranges 原样作为 DSS 宿主准入限制。** 这是上游包自己的声明，不是 DSS 的版本锁。DSS 原有“宿主依实际 API 能力与错误判定兼容性”原则继续适用。若选择依赖打包，必须核验最终安装包/依赖解析不会重新添加硬版本阻断。
+- 实际注册遵守 DSS 现有 Host → Agent scope → `ctx.tools` 体系，**只有启用时**注册/暴露相关 GitHub 能力，停用后按实际作用域释放；不越过原有 TaskService、ExecutionBinding、原生 DSH 权限。GitHub 操作应以真实任务和用户输入为来源，不能由 GitHub 返回的外部文本冒充用户的新授权。
+- GitHub 写操作复用上游已有的 **DSH 原生 Approval/Tools 机制**及宿主实际策略，不再额外叠加 DSS 自创审批、二次确认、版本检查或任意拒绝条件。Token/凭据必须保密，外部 GitHub 响应作为外部资料处理。
+- 上游 `ci.enabled` 默认 `false`，所以 DSS 初始实验开关启用并不自动打开轮询 CI 机器人。PR/Issue/Repo 工具可按实际请求使用；用户如独立启用 CI 功能，再按照原功能和真实宿主 Job 事件工作。不要为监控 CI 消耗周期性 AI Token。
+- 此项整合提供 GitHub 工具能力。跨设备 Planner/Worker Task 状态同步仍按已确定的 DSS Task/Memory/GitHub 协作架构另行完成，不把 GitHub API 工具接入当作远程任务执行闭环已经验收。
+
+### I.3 要求 Codex 实测的闭环
+
+1. **单份 DSS 安装包**在真实 DSH 中包含可用 GitHub 实验功能，默认关闭，不改变普通聊天、Planner/Worker、运行内存与 UI。
+2. 设置中保存/更新 GitHub Token 后客户端只得到是否已配置，网络请求可真实使用新凭据；重启后仍有效。替换 Token 后不需修改普通 Domain JSON 中的任何明文。
+3. 启用后至少能实际查询私有仓库、读取文件、搜索仓库/Issue/PR、查看 checks；写操作在宿主允许时能完成真实 PR/Issue 工作并返回结果引用。工具注册不与单独安装的 dsh-github 重复冲突。
+4. GitHub 相关操作可被现有 Worker 用作 Child 工作的一部分，符合本 DSS Task/Memory/结果归档接口；Agent 换代与异常同角色重启后仍可使用凭据，但 Token 不进入任何 AI 上下文。
+5. 禁用后不影响 DSS 其他功能，外部授权与凭据仍按用户原有设置保留；不因为关闭插件就擅自销毁用户的 GitHub 登录。
+6. 检查 TypeScript、bundle、pack、最终包许可证/NOTICE、中英文 UI，按可用 DSH 版本实际测试，不能用上游包的版本字符串人为拒绝宿主；对不可用实际接口给出真实具体错误。
+
+## J. 详细审查与先前讨论原文索引
 
 以下是此前已经存在的详细设计资料，保存在私人临时 Git 仓库 `Tests4gptplay/temp/DSS/`，本文件为集中入口，相关旧主张以本文件的新决定为准。
 
