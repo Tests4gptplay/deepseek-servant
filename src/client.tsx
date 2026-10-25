@@ -71,6 +71,10 @@ export function apply(ctx: Context): void {
     try { await call('openArtifact', { taskId, artifactId }) }
     catch (error) { notices.show({ kind: 'error', key: 'failed', detail: error instanceof Error ? error.message : String(error) }) }
   }
+  const onOpenRecords = async (): Promise<void> => {
+    try { await call('openRecords', {}) }
+    catch (error) { notices.show({ kind: 'error', key: 'failed', detail: error instanceof Error ? error.message : String(error) }) }
+  }
   const directoryPicker = (globalThis as typeof globalThis & {
     __DSH_DIRECTORY_PICKER__?: { pick(): Promise<string | null> }
   }).__DSH_DIRECTORY_PICKER__
@@ -80,7 +84,7 @@ export function apply(ctx: Context): void {
     onPickDirectory: directoryPicker ? () => directoryPicker.pick() : undefined,
     onRefresh: source.refresh, onSend: source.send, onConfigure: source.configure,
     onControl: source.control, onPriority: source.priority, onReconcile: source.reconcile, onAnswer: source.answer, onRevise: source.revise,
-    onKnowledge: source.knowledge, onRetention: source.retention, onOpenArtifact,
+    onKnowledge: source.knowledge, onRetention: source.retention, onOpenArtifact, onOpenRecords,
   })
   ctx.slots.inject('main', () => ctx.slots.register({
     name: 'main', key: PANEL_ID, locale: NS, inject: injectPage,

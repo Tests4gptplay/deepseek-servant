@@ -7,12 +7,18 @@ import type { ServantLocaleKey } from './locales.js'
 import css from './page.module.css'
 
 type Translate = PropsLocale<'dsh.servant'>['t']
-export function RetentionPanel({ preview, outcome, busy, onRetention, t }: {
-  preview?: RetentionPreview; outcome?: ServantSnapshot['lastCleanup']; busy: boolean; onRetention: ServantSource['retention']; t: Translate
+export function RetentionPanel({ preview, outcome, busy, onRetention, onOpenRecords, t }: {
+  preview?: RetentionPreview; outcome?: ServantSnapshot['lastCleanup']; busy: boolean; onRetention: ServantSource['retention']; onOpenRecords: () => Promise<void>; t: Translate
 }) {
   useEffect(() => { void onRetention({ action: 'preview' }) }, [onRetention])
   return <section className={css.retention} aria-label={t('retention.title')}>
-    <div className={css.rowBetween}><h2>{t('retention.title')}</h2><Button size="sm" disabled={busy} onClick={() => { void onRetention({ action: 'preview' }) }}>{t('retention.preview')}</Button></div>
+    <div className={`${css.rowBetween} ${css.retentionHeader}`}>
+      <h2>{t('retention.title')}</h2>
+      <div className={css.retentionActions}>
+        <Button size="sm" onClick={() => { void onOpenRecords() }}>{t('retention.openFolder')}</Button>
+        <Button size="sm" disabled={busy} title={t('retention.previewHint')} onClick={() => { void onRetention({ action: 'preview' }) }}>{t('retention.preview')}</Button>
+      </div>
+    </div>
     <p className={css.muted}>{t('retention.description')}</p>
     {!preview && busy && <div className={css.empty}><StateDot state="ongoing" /></div>}
     {preview && <>

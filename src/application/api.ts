@@ -17,6 +17,7 @@ export interface ServantApiOptions {
   query: QueryService
   coordinator: RuntimeCoordinator
   retention: RetentionService
+  recordsDirectory(): string
   openPath(path: string, signal: AbortSignal): Promise<unknown>
 }
 const Target = z.strictObject({ taskId: Id, commandId: Id.optional() })
@@ -97,6 +98,12 @@ export class ServantApi {
         if (!execution || execution.physicalState !== 'unknown') throw new Error('此操作只用于需要人工核对的未知旧执行。')
         const commandId = input.commandId ?? `ui-reconcile:${randomUUID()}`
         return this.options.coordinator.attestStopped(input.taskId, input.executionId, input.evidence, commandId)
+      }
+      case 'openRecords': {
+        ScopeTarget.parse(raw)
+        const target = await realpath(this.options.recordsDirectory())
+        signal.throwIfAborted()
+        return this.options.openPath(target, signal)
       }
       case 'openArtifact': {
         const input = z.strictObject({ taskId: Id, artifactId: Id }).parse(raw)

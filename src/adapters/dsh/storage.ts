@@ -1,3 +1,4 @@
+import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import type { Domain } from '@deepseek-ai/dsh-storage-domain'
@@ -15,6 +16,17 @@ export class DshStorageAdapter implements StoragePort {
 
   static async open(ctx: Context): Promise<DshStorageAdapter> {
     return new DshStorageAdapter(await ctx.storageDomain.open(servantDomain))
+  }
+
+  /** DSH 0.2.1's JSON unit owns the resolved file path; never infer it from the task workspace. */
+  recordsDirectory(): string {
+    // The domain API has no public location accessor. Keep this host-specific
+    // diagnostic read here; all record IO still goes through domain.table().
+    const unit = (this.domain as unknown as { unit?: { path?: unknown } }).unit
+    if (typeof unit?.path !== 'string' || !path.isAbsolute(unit.path)) {
+      throw new Error('当前记录存储没有可打开的本地文件夹。')
+    }
+    return path.dirname(unit.path)
   }
 
   async get<T>(key: string): Promise<T | undefined> {

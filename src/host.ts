@@ -105,9 +105,10 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const retention = new RetentionService({ store, tasks, knowledge, nativeSessions: sessions, onChanged: changed })
   const query = new QueryService({ assistants, tasks, knowledge, workspaces: () => workspace.list(), runtime: () => coordinator!.status() })
   const api = new ServantApi({ assistants, tasks, knowledge, query, coordinator, retention,
+    recordsDirectory: () => store.recordsDirectory(),
     openPath: async (target, signal) => {
       const controller = ctx.get('sessionController')
-      if (!controller?.canOpenWorkspacePath()) throw new Error(`当前宿主没有本地打开文件能力。产物仍保存在：${target}`)
+      if (!controller?.canOpenWorkspacePath()) throw new Error(`当前宿主没有本地打开文件能力。路径：${target}`)
       return controller.openWorkspacePath({ path: target }, signal)
     },
   })

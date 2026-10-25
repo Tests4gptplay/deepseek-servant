@@ -174,3 +174,6 @@
 
 /* Keep outside whitespace outside the native Menu anchor hit area. */
 .menuAnchor { width: fit-content; max-width: 100%; }
+
+.retentionHeader { flex-wrap: wrap; }
+.retentionActions { display: flex; align-items: center; gap: 4px; margin-left: auto; }
