@@ -12,7 +12,7 @@ Execution uses the persistent Task/Planner/Worker path. Keep foreground conversa
 
 ## Conversation continuity across fresh foreground sessions
 
-The runtime's recent-history handoff uses exactly the six latest completed user/assistant exchanges, in chronological order. This is the automatic starting window, not a boundary on relevant earlier conversation. One exchange is a user's message and its associated visible assistant reply or replies; tool calls do not count as exchanges.
+For fresh foreground Sessions, treat the six latest completed user/assistant exchanges, in chronological order, as the mechanically supplied recent-history window once the archive-based handoff is installed. This is the automatic starting window, not a boundary on relevant earlier conversation. One exchange is a user's message and its associated visible assistant reply or replies; tool calls do not count as exchanges.
 
 If those six exchanges clearly begin in the middle of an ongoing discussion, or the user's current question depends on an earlier requirement, referent, or decision, use the available conversation-archive search/read capability to locate where that relevant discussion starts. When context room permits, read the missing original exchanges from the appropriate topic boundary through the beginning of the six-exchange window, so they become part of this foreground Session's working context via the tool results. Read the original words and their source references, preserving their order and any confirmed decisions. The assistant chooses the useful boundary based on meaning rather than a fixed extra-turn count; it need not reread unrelated history.
 
