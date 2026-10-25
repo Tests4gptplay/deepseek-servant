@@ -17,7 +17,7 @@ export interface ServantApiOptions {
   query: QueryService
   coordinator: RuntimeCoordinator
   retention: RetentionService
-  recordsDirectory(): string
+  recordsDirectory(): string | Promise<string>
   moveRecords(directory: string, expectedDirectory: string, signal: AbortSignal): Promise<unknown>
   openPath(path: string, signal: AbortSignal): Promise<unknown>
 }
@@ -106,7 +106,7 @@ export class ServantApi {
       }
       case 'openRecords': {
         ScopeTarget.parse(raw)
-        const target = await realpath(this.options.recordsDirectory())
+        const target = await realpath(await this.options.recordsDirectory())
         signal.throwIfAborted()
         return this.options.openPath(target, signal)
       }

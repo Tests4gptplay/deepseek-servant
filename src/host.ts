@@ -106,7 +106,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const retention = new RetentionService({ store, tasks, knowledge, nativeSessions: sessions, onChanged: changed })
   const query = new QueryService({ assistants, tasks, knowledge, workspaces: () => workspace.list(), runtime: () => coordinator!.status(), recordStorage: () => store.storageView() })
   const api = new ServantApi({ assistants, tasks, knowledge, query, coordinator, retention,
-    recordsDirectory: () => store.recordsDirectory(),
+    recordsDirectory: () => store.ensureRecordsDirectory(),
     moveRecords: async (directory, expectedDirectory, signal) => {
       const result = await store.moveRecords(directory, expectedDirectory, signal)
       changed()

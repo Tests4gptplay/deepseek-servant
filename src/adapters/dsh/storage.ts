@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
-import { copyFile, cp, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
+import { copyFile, cp, lstat, mkdir, open, readdir, realpath, rename, rm, stat, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
@@ -10,7 +10,7 @@ import { JsonStorageBackend } from '@deepseek-ai/dsh-storage-json'
 import { z } from 'zod'
 import type { StoragePort } from '../../contracts/ports.js'
 import type { RecordStorageView } from '../../contracts/views.js'
-import { RecordFilesBackend, recordCategories } from './record-files.js'
+import { RecordFilesBackend, ensureRecordTree, recordFolder } from './record-files.js'
 
 interface StoredEnvelope { key: string; value: unknown }
 const storedEnvelope: z.ZodType<StoredEnvelope> = z.object({ key: z.string().min(1), value: z.json() })
@@ -20,7 +20,6 @@ const locationDomain = defineDomain({ name: 'deepseek_servant_location', version
     z.object({ directory: z.string().min(1), layout: z.literal('folders-v1').optional() })) } })
 const DATA_FOLDER = 'deepseek_servant'
 const LEGACY_FILE = 'deepseek_servant.json'
-const LAYOUT = { format: 'deepseek-servant-record-folders', version: 1 } as const
 type Records = Domain<typeof servantDomain>
 interface OpenRecords { domain: Records; close(): Promise<void> }
 
@@ -41,6 +40,8 @@ export class DshStorageAdapter implements StoragePort {
     try {
       const selected = location.table('settings').get('active')
       if (selected) {
+        if (!path.isAbsolute(selected.directory)) throw new Error('记录目录必须是完整路径。')
+        await mkdir(selected.directory, { recursive: true })
         directory = await realpath(selected.directory)
         if (!(await stat(directory)).isDirectory()) throw new Error('记录目录不可用：' + directory)
       } else {
@@ -49,13 +50,10 @@ export class DshStorageAdapter implements StoragePort {
         directory = path.dirname(legacyFile(domain))
       }
       const tree = path.join(directory, DATA_FOLDER)
-      if (await exists(tree)) {
-        await validateTree(tree)
+      if (selected?.layout === 'folders-v1' || await exists(tree)) {
         records = await openTree(ctx, tree)
       } else {
-        if (selected?.layout === 'folders-v1') throw new Error('记录子文件夹不可用：' + tree)
         if (!legacy) {
-          if (!(await stat(path.join(directory, LEGACY_FILE))).isFile()) throw new Error('原记录文件不可用：' + directory)
           legacy = await openBackend(ctx, new JsonStorageBackend(directory))
         }
         stage = path.join(directory, '.servant-split-' + randomUUID())
@@ -81,7 +79,8 @@ export class DshStorageAdapter implements StoragePort {
         records = await openTree(ctx, tree)
       }
       // The complete new tree is already durable before the native locator
-      // switches. An old/unplugged source never silently becomes empty storage.
+      // switches. Missing local folders are recreated at their configured location.
+      // We never redirect an unavailable drive to a different default location.
       await location.table('settings').put('active', { directory, layout: 'folders-v1' })
       const adapter = new DshStorageAdapter(ctx, records, directory, location)
       if (legacy) {
@@ -102,6 +101,9 @@ export class DshStorageAdapter implements StoragePort {
   }
 
   recordsDirectory(): string { return this.directory }
+  ensureRecordsDirectory(): Promise<string> {
+    return this.serial(async () => { await this.prepareRecords(true); return this.directory })
+  }
   storageView(): RecordStorageView {
     const nativeRoot = (this.ctx.get('sessionPersistence') as unknown as { root?: unknown } | undefined)?.root
     return { directory: this.directory,
@@ -114,7 +116,9 @@ export class DshStorageAdapter implements StoragePort {
     return this.serial(async () => {
       signal.throwIfAborted()
       if (expectedDirectory !== this.directory) throw new Error('记录目录已变化，请刷新后重试。')
-      if (!path.isAbsolute(directory)) throw new Error('请输入已有文件夹的完整绝对路径。')
+      if (!path.isAbsolute(directory)) throw new Error('请输入文件夹的完整绝对路径。')
+      await this.prepareRecords(true)
+      await mkdir(directory, { recursive: true })
       const destination = await realpath(directory)
       if (!(await stat(destination)).isDirectory()) throw new Error('请选择一个文件夹。')
       if (destination === await realpath(this.directory)) return this.storageView()
@@ -166,7 +170,7 @@ export class DshStorageAdapter implements StoragePort {
   }
   set<T>(key: string, value: T): Promise<void> {
     const record = storedEnvelope.parse({ key, value: structuredClone(value) })
-    return this.serial(() => this.records.domain.table('records').put(key, record))
+    return this.serial(async () => { await this.prepareRecords(); await this.records.domain.table('records').put(key, record) })
   }
   list<T>(prefix: string): Promise<Array<{ key: string; value: T }>> {
     return this.serial(async () => {
@@ -178,8 +182,21 @@ export class DshStorageAdapter implements StoragePort {
       return records
     })
   }
-  delete(key: string): Promise<void> { return this.serial(async () => { await this.records.domain.table('records').delete(key) }) }
+  delete(key: string): Promise<void> { return this.serial(async () => { await this.prepareRecords(); await this.records.domain.table('records').delete(key) }) }
   close(): Promise<void> { return this.serial(async () => { await this.records.close(); await this.location.close() }) }
+  private async prepareRecords(repairMissingFiles = false): Promise<void> {
+    const tree = path.join(this.directory, DATA_FOLDER)
+    const recreated = await ensureRecordTree(tree)
+    if (recreated || repairMissingFiles) {
+      // Only current, known in-memory records can be written back. On restart,
+      // missing history is absent; old backups are never silently replayed.
+      for (const [key, record] of this.records.domain.table('records').entries()) {
+        if (!await exists(path.join(tree, recordFolder(key), 'record.json'))) {
+          await this.records.domain.table('records').put(key, record)
+        }
+      }
+    }
+  }
   private serial<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.chain.then(operation)
     this.chain = result.catch(() => {})
@@ -202,20 +219,12 @@ async function openBackend(ctx: Context, backend: Pick<JsonStorageBackend, 'kv' 
   } catch (error) { await backend.close(); unregister(); throw error }
 }
 async function openTree(ctx: Context, tree: string): Promise<OpenRecords> {
-  await validateTree(tree)
+  await ensureRecordTree(tree)
   return openBackend(ctx, new RecordFilesBackend(tree))
-}
-async function validateTree(tree: string): Promise<void> {
-  const kind = await lstat(tree)
-  if (!kind.isDirectory() || kind.isSymbolicLink()) throw new Error('Servant 记录目录不是普通文件夹：' + tree)
-  const format: unknown = JSON.parse(await readFile(path.join(tree, 'layout.json'), 'utf8'))
-  if (!isDeepStrictEqual(format, LAYOUT)) throw new Error('不支持的 Servant 记录目录格式：' + tree)
 }
 async function createTree(tree: string): Promise<void> {
   await mkdir(tree)
-  for (const category of [...recordCategories, 'backups']) await mkdir(path.join(tree, category), { recursive: true })
-  await writeFile(path.join(tree, 'layout.json'), JSON.stringify(LAYOUT, null, 2) + '\n', { flag: 'wx' })
-  await syncFile(path.join(tree, 'layout.json'))
+  await ensureRecordTree(tree)
 }
 function assertSameRecords(left: Records, right: Records): void {
   if (!isDeepStrictEqual(new Map(left.table('records').entries()), new Map(right.table('records').entries()))) {

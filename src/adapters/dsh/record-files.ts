@@ -1,11 +1,13 @@
 import { createHash } from 'node:crypto'
-import { lstat, readdir, rmdir, unlink } from 'node:fs/promises'
+import { lstat, mkdir, open, readFile, readdir, rmdir, unlink } from 'node:fs/promises'
+import { isDeepStrictEqual } from 'node:util'
 import path from 'node:path'
 import { JsonStorageBackend } from '@deepseek-ai/dsh-storage-json'
 
 type KvFacet = JsonStorageBackend['kv']
 type KvUnit = Awaited<ReturnType<KvFacet['open']>>
 const descriptor = { name: 'record', version: 1, tables: ['records'], hasGlobal: false } as const
+const LAYOUT = { format: 'deepseek-servant-record-folders', version: 1 } as const
 export const recordCategories = ['tasks', 'assistants', 'skills', 'knowledge/facts', 'knowledge/preferences', 'settings', 'other'] as const
 
 /** A readable ID plus a digest keeps distinct scopes and Windows case variants apart. */
@@ -50,6 +52,7 @@ export class RecordFilesBackend {
           const relative = recordFolder(key)
           const file = this.files.get(relative)
           if (!file) return
+          await mkdir(path.join(this.directory, relative), { recursive: true })
           // First publish the empty native unit. Cleanup below cannot resurrect
           // deleted data if interrupted; an empty unit reads as no record.
           await file.unit.deleteRecord('records', key)
@@ -73,6 +76,9 @@ export class RecordFilesBackend {
   }
   private async openFile(relative: string): Promise<OpenFile> {
     this.assertOpen()
+    // The handle may outlive a folder removed in Explorer. Recreate its parent
+    // before the native atomic JSON write, including for cached handles.
+    await mkdir(path.join(this.directory, relative), { recursive: true })
     const existing = this.files.get(relative)
     if (existing) return existing
     const backend = new JsonStorageBackend(path.join(this.directory, relative))
@@ -111,4 +117,26 @@ export class RecordFilesBackend {
     }
     return { tables: { records }, global: null }
   }
+}
+
+/** Create missing structure only; existing malformed files are never overwritten. */
+export async function ensureRecordTree(directory: string): Promise<boolean> {
+  await mkdir(directory, { recursive: true })
+  const kind = await lstat(directory)
+  if (!kind.isDirectory() || kind.isSymbolicLink()) throw new Error('Servant 记录目录不是普通文件夹：' + directory)
+  const marker = path.join(directory, 'layout.json')
+  let created = false
+  let text: string | undefined
+  try { text = await readFile(marker, 'utf8') }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+  if (text === undefined) {
+    const handle = await open(marker, 'wx')
+    try { await handle.writeFile(JSON.stringify(LAYOUT, null, 2) + '\n', 'utf8'); await handle.sync() }
+    finally { await handle.close() }
+    created = true
+  } else if (!isDeepStrictEqual(JSON.parse(text), LAYOUT)) {
+    throw new Error('不支持的 Servant 记录目录格式：' + directory)
+  }
+  for (const category of [...recordCategories, 'backups']) await mkdir(path.join(directory, category), { recursive: true })
+  return created
 }

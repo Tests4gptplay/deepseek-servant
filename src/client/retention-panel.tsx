@@ -63,7 +63,7 @@ function RecordLocation({ storage, busy, moving, onMove, onOpen, onPickDirectory
     <div className={css.recordLocationRow}>
       <label className={css.directoryField} htmlFor={id}><span>{t('retention.directory')}</span>
         <Input id={id} required maxLength={4000} value={directory} title={directory} disabled={disabled}
-          placeholder={t('settings.directoryPlaceholder')} onChange={event => { setDirectory(event.target.value); setError(undefined) }} />
+          placeholder={t('retention.directoryPlaceholder')} onChange={event => { setDirectory(event.target.value); setError(undefined) }} />
       </label>
       <div className={css.recordLocationActions}>
         {onPickDirectory && <Button type="button" variant="outline" disabled={disabled} onClick={() => {
