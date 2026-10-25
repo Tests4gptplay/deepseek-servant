@@ -89,7 +89,7 @@ export class ServantApi {
         if (input.action === 'preview') return this.options.retention.preview()
         if (input.action === 'sweep') return this.options.retention.sweep({ previewId: input.previewId })
         if (!input.policy) throw new Error('清理策略不能为空。')
-        // RetentionService validates the complete policy and publishes one record.
+        // RetentionService validates optional limits and publishes one record.
         return this.options.retention.configure(input.policy as unknown as import('../contracts/retention.ts').RetentionPolicy, input.expectedRevision)
       }
       case 'reconcile': {

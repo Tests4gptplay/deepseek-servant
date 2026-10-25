@@ -20,6 +20,7 @@ import { installRoleTools } from './roles/tools.ts'
 import { ModelRouteSchema } from './contracts/schemas.ts'
 import type { Assistant } from './contracts/assistant.ts'
 import type { RuntimeProfile } from './contracts/task.ts'
+import { hasRetentionLimits } from './contracts/retention.ts'
 
 export const name = 'deepseek-servant'
 export const inject = ['storage', 'storageDomain', 'agents', 'sessions', 'sessionPersistence', 'workspaceRegistry', 'workingDirectory', 'agentPresets']
@@ -128,7 +129,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   let closing = false
   const maintain = () => {
     if (closing || maintenance) return
-    maintenance = retention.sweep({}).catch(reportError).finally(() => { maintenance = undefined })
+    maintenance = retention.configuration().then(configuration => hasRetentionLimits(configuration.policy) ? retention.sweep({}) : undefined)
+      .catch(reportError).finally(() => { maintenance = undefined })
   }
   const interval = setInterval(maintain, config.retentionIntervalMinutes * 60_000)
   interval.unref()

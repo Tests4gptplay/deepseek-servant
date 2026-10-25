@@ -1,20 +1,54 @@
 import type { CommandBase, CommandReceipt, Task } from './task.js'
 import type { KnowledgeScope, SkillRecord } from './knowledge.js'
 
+/** Omitted fields are unlimited. Only explicitly configured limits trigger maintenance. */
 export interface RetentionPolicy {
-  /** Age of a quiescent terminal Task before its detailed record may shrink. */
-  taskDetailDays: number
-  archiveDays: number
-  maxArchives: number
+  taskDetailDays?: number
+  archiveDays?: number
+  maxArchives?: number
   /** Soft target for Servant-owned records, excluding native Session logs and artifacts. */
-  maxServantBytes: number
-  skillHistoryDays: number
-  maxFullSkillVersions: number
-  maxSkillReceipts: number
+  maxServantBytes?: number
+  skillHistoryDays?: number
+  maxFullSkillVersions?: number
+  maxSkillReceipts?: number
 }
-export const defaultRetentionPolicy: RetentionPolicy = {
-  taskDetailDays: 7, archiveDays: 90, maxArchives: 200, maxServantBytes: 64 * 1024 * 1024,
-  skillHistoryDays: 30, maxFullSkillVersions: 12, maxSkillReceipts: 256,
+export const defaultRetentionPolicy: RetentionPolicy = {}
+export const retentionPolicyBounds: Record<keyof RetentionPolicy, readonly [number, number]> = {
+  taskDetailDays: [0, 3650], archiveDays: [0, 36500], maxArchives: [1, 100000], maxServantBytes: [1024, 1024 ** 4],
+  skillHistoryDays: [0, 3650], maxFullSkillVersions: [0, 1000], maxSkillReceipts: [1, 10000],
+}
+export const retentionPolicyKeys = Object.keys(retentionPolicyBounds) as Array<keyof RetentionPolicy>
+export function hasRetentionLimits(policy: RetentionPolicy): boolean {
+  return retentionPolicyKeys.some(key => policy[key] !== undefined)
+}
+/** Shared validation for owner API, local editor and portable policy files. */
+export function parseRetentionPolicy(value: unknown): RetentionPolicy {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid retention policy.')
+  const raw = value as Record<string, unknown>
+  for (const key of Object.keys(raw)) if (!Object.hasOwn(retentionPolicyBounds, key)) throw new Error('Unknown retention setting: ' + key)
+  const policy: RetentionPolicy = {}
+  for (const key of retentionPolicyKeys) {
+    if (!Object.hasOwn(raw, key)) continue
+    const number = raw[key]
+    const [minimum, maximum] = retentionPolicyBounds[key]
+    if (typeof number !== 'number' || !Number.isInteger(number) || number < minimum || number > maximum) throw new Error('Invalid retention setting: ' + key)
+    policy[key] = number
+  }
+  if (policy.archiveDays !== undefined && policy.taskDetailDays !== undefined && policy.archiveDays < policy.taskDetailDays) {
+    throw new Error('Archive retention cannot be shorter than Task detail retention.')
+  }
+  return policy
+}
+export function serializeRetentionPolicy(policy: RetentionPolicy): string {
+  return JSON.stringify({ format: 'deepseek-servant-retention-policy', version: 1, policy: parseRetentionPolicy(policy) }, null, 2) + '\n'
+}
+export function parseRetentionPolicyFile(text: string): RetentionPolicy {
+  const data: unknown = JSON.parse(text.replace(/^\uFEFF/, ''))
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Invalid retention policy file.')
+  const file = data as Record<string, unknown>
+  if (file.format !== 'deepseek-servant-retention-policy' || file.version !== 1
+    || Object.keys(file).some(key => !['format', 'version', 'policy'].includes(key))) throw new Error('Unsupported retention policy file.')
+  return parseRetentionPolicy(file.policy)
 }
 export interface RetentionConfiguration { schemaVersion: 1; revision: number; policy: RetentionPolicy; updatedAt: string }
 
@@ -88,7 +122,7 @@ export interface SkillCompactionRequest {
   retireBodies?: number[]
   /** Actual archived Tasks; there can be no late role loads or unprocessed feedback for them. */
   archivedTaskIds: string[]
-  maxReceipts: number
+  maxReceipts?: number
 }
 export interface SkillCompactionResult { status: 'applied' | 'unchanged' | 'stale'; reclaimedBytes: number }
 /** The shared in-process maintenance lease prevents new cross-record evidence pins while archives prune. */

@@ -1,7 +1,7 @@
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { Button, Input, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
-import type { RetentionPolicy, RetentionPreview } from '../contracts/retention.js'
+import { defaultRetentionPolicy, hasRetentionLimits, parseRetentionPolicy, parseRetentionPolicyFile, serializeRetentionPolicy, retentionPolicyBounds, retentionPolicyKeys, type RetentionPolicy, type RetentionPreview } from '../contracts/retention.js'
 import type { ServantSnapshot, ServantSource } from './source.js'
 import type { ServantLocaleKey } from './locales.js'
 import type { RecordStorageView } from '../contracts/views.js'
@@ -37,7 +37,7 @@ export function RetentionPanel({ preview, outcome, busy, recordStorage, moving, 
       <p className={css.muted}>{t('retention.nativeHint')}</p>
       {(preview.totals.nativeSizeUnknown + preview.totals.foregroundSizeUnknown) > 0 && <p className={css.muted}>{t('retention.unknownSizes', { count: preview.totals.nativeSizeUnknown + preview.totals.foregroundSizeUnknown })}</p>}
       <div className={css.actions}><Button variant="outline" disabled={busy || moving || !(preview.archiveTasks.length || preview.deleteArchives.length || preview.compactSkills.length || preview.nativeCleanup.length)}
-        onClick={() => { void onRetention({ action: 'sweep', previewId: preview.previewId }) }}>{t('retention.clean')}</Button><span className={css.muted}>{t('retention.automatic')}</span></div>
+        onClick={() => { void onRetention({ action: 'sweep', previewId: preview.previewId }) }}>{t('retention.clean')}</Button><span className={css.muted}>{t(hasRetentionLimits(preview.policy) ? 'retention.automatic' : 'retention.unlimited')}</span></div>
       {outcome && <p role="status">{t('retention.actual', { bytes: bytes(outcome.reclaimedServantBytes), native: bytes(outcome.nativeReclaimedBytes) })}</p>}
       {!!outcome?.skipped.length && <details><summary>{t('retention.skipped', { count: outcome.skipped.length })}</summary><ul>{outcome.skipped.map((item, index) => <li key={`${item.id}:${index}`}><code>{item.id}</code> · {item.reason}</li>)}</ul></details>}
       <details><summary>{t('retention.policy')}</summary><RetentionPolicyEditor key={preview.policyRevision} preview={preview} busy={busy || moving} onRetention={onRetention} t={t} /></details>
@@ -95,19 +95,67 @@ function RecordLocation({ storage, busy, moving, onMove, onOpen, onPickDirectory
 }
 function RetentionPolicyEditor({ preview, busy, onRetention, t }: { preview: RetentionPreview; busy: boolean; onRetention: ServantSource['retention']; t: Translate }) {
   const [policy, setPolicy] = useState<RetentionPolicy>(() => structuredClone(preview.policy))
-  const fields: Array<{ key: keyof RetentionPolicy; label: ServantLocaleKey; min: number; max: number; scale?: number }> = [
-    { key: 'taskDetailDays', label: 'retention.detailDays', min: 0, max: 3650 },
-    { key: 'archiveDays', label: 'retention.archiveDays', min: 0, max: 36500 },
-    { key: 'maxArchives', label: 'retention.maxArchives', min: 1, max: 100000 },
-    { key: 'maxServantBytes', label: 'retention.maxBytes', min: 1, max: 1048576, scale: 1024 * 1024 },
-    { key: 'skillHistoryDays', label: 'retention.skillDays', min: 0, max: 3650 },
-    { key: 'maxFullSkillVersions', label: 'retention.skillVersions', min: 0, max: 1000 },
-    { key: 'maxSkillReceipts', label: 'retention.receipts', min: 1, max: 10000 },
+  const [fileBusy, setFileBusy] = useState(false)
+  const [error, setError] = useState<string>()
+  const [notice, setNotice] = useState<ServantLocaleKey>()
+  const form = useRef<HTMLFormElement>(null)
+  const fileInput = useRef<HTMLInputElement>(null)
+  const disabled = busy || fileBusy
+  const dirty = retentionPolicyKeys.some(key => policy[key] !== preview.policy[key])
+  const fields: Array<{ key: keyof RetentionPolicy; label: ServantLocaleKey; scale?: number }> = [
+    { key: 'taskDetailDays', label: 'retention.detailDays' },
+    { key: 'archiveDays', label: 'retention.archiveDays' },
+    { key: 'maxArchives', label: 'retention.maxArchives' },
+    { key: 'maxServantBytes', label: 'retention.maxBytes', scale: 1024 * 1024 },
+    { key: 'skillHistoryDays', label: 'retention.skillDays' },
+    { key: 'maxFullSkillVersions', label: 'retention.skillVersions' },
+    { key: 'maxSkillReceipts', label: 'retention.receipts' },
   ]
-  return <form className={css.retentionPolicy} onSubmit={event => { event.preventDefault(); void onRetention({ action: 'configure', policy, expectedRevision: preview.policyRevision }) }}>
-    {fields.map(field => <label key={field.key} className={css.field}><span>{t(field.label)}</span><Input type="number" required step="1" min={field.min} max={field.max}
-      value={policy[field.key] / (field.scale ?? 1)} onChange={event => { setPolicy({ ...policy, [field.key]: Number(event.target.value) * (field.scale ?? 1) }) }} /></label>)}
-    <div className={css.actions}><Button type="submit" variant="primary" size="sm" disabled={busy || JSON.stringify(policy) === JSON.stringify(preview.policy)}>{t('retention.savePolicy')}</Button></div>
+  const fail = (error: unknown) => { setNotice(undefined); setError(error instanceof Error ? error.message : String(error)) }
+  return <form ref={form} className={css.retentionPolicy} onSubmit={event => {
+    event.preventDefault(); setError(undefined); setNotice(undefined)
+    try { void onRetention({ action: 'configure', policy: parseRetentionPolicy(policy), expectedRevision: preview.policyRevision }) }
+    catch (error) { fail(error) }
+  }}>
+    <p className={css.retentionPolicyHint}>{t('retention.policyHint')}</p>
+    {fields.map(field => <label key={field.key} className={css.field}><span>{t(field.label)}</span><Input type="number" disabled={disabled}
+      step={field.scale ? 'any' : 1} min={retentionPolicyBounds[field.key][0] / (field.scale ?? 1)} max={retentionPolicyBounds[field.key][1] / (field.scale ?? 1)}
+      value={policy[field.key] === undefined ? '' : policy[field.key]! / (field.scale ?? 1)} onChange={event => {
+        const value = event.target.value
+        setPolicy(current => { const next = { ...current }; if (value === '') delete next[field.key]; else next[field.key] = Number(value) * (field.scale ?? 1); return next })
+        setError(undefined); setNotice(undefined)
+      }} /></label>)}
+    <div className={css.retentionPolicyActions}>
+      <Button type="submit" variant="primary" size="sm" disabled={disabled || !dirty}>{t('retention.savePolicy')}</Button>
+      <Button type="button" variant="outline" size="sm" disabled={disabled} onClick={() => {
+        if (!form.current?.reportValidity()) return
+        setError(undefined); setNotice(undefined)
+        try {
+          const url = URL.createObjectURL(new Blob([serializeRetentionPolicy(policy)], { type: 'application/json;charset=utf-8' }))
+          const anchor = document.createElement('a')
+          anchor.href = url; anchor.download = 'deepseek-servant-retention-policy.json'
+          document.body.append(anchor)
+          try { anchor.click() } finally { anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000) }
+          setNotice('retention.exportReady')
+        } catch (error) { fail(error) }
+      }}>{t('retention.exportPolicy')}</Button>
+      <Button type="button" variant="outline" size="sm" disabled={disabled} onClick={() => fileInput.current?.click()}>{t('retention.importPolicy')}</Button>
+      <Button type="button" variant="outline" size="sm" disabled={disabled} onClick={() => {
+        setPolicy({ ...defaultRetentionPolicy }); setError(undefined); setNotice('retention.resetDraft')
+      }}>{t('retention.resetPolicy')}</Button>
+      <input ref={fileInput} type="file" accept=".json,application/json" hidden disabled={disabled} aria-label={t('retention.importPolicy')} onChange={event => {
+        const file = event.currentTarget.files?.[0]
+        event.currentTarget.value = ''
+        if (!file) return
+        setError(undefined); setNotice(undefined)
+        if (file.size > 64 * 1024) { setError(t('retention.importTooLarge')); return }
+        setFileBusy(true)
+        void file.text().then(text => { const imported = parseRetentionPolicyFile(text); setPolicy(imported); setNotice('retention.importedDraft') })
+          .catch(fail).finally(() => setFileBusy(false))
+      }} />
+    </div>
+    {error && <p className={css.retentionPolicyHint} role="alert">{t('retention.policyError')} {error}</p>}
+    {notice && <p className={css.retentionPolicyHint} role="status">{t(notice)}</p>}
   </form>
 }
 function bytes(value: number): string {

@@ -114,6 +114,8 @@
 .retentionStats dd { margin: 0; white-space: nowrap; }
 .retention summary { cursor: pointer; font-weight: 500; }
 .retentionPolicy { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 20px; margin-top: 20px; }
+.retentionPolicyHint { grid-column: 1 / -1; color: var(--dsw-alias-label-secondary); font: var(--dsw-font-xs-13); margin: 0 0 16px; overflow-wrap: anywhere; }
+.retentionPolicyActions { grid-column: 1 / -1; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-block: 4px 12px; }
 @media (max-width: 800px) {
   .heading { align-items: flex-start; flex-direction: column; gap: 12px; }
   .headerStatus { width: 100%; justify-content: space-between; }

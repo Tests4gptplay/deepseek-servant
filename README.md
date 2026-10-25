@@ -4,7 +4,7 @@
 
 **设计逻辑源自 [Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness)。** DeepSeek Servant 延续 CAH 以目标为中心的 Agent 工作闭环：理解需求、制定计划、执行工作、评价成果、调整方法、跨会话接续、故障恢复与技能积累。Servant 将这套持续工作机制整合到 DeepSeek Harness 运行环境，复用宿主的模型、工具、Session、作业与 Skill 能力。
 
-**当前版本：** `0.1.0-alpha.14` · **适配宿主：** DSH `0.2.1-rc.2` · **项目形态：** 独立安装的社区插件
+**当前版本：** `0.1.0-alpha.15` · **适配宿主：** DSH `0.2.1-rc.2` · **项目形态：** 独立安装的社区插件
 
 ## 核心能力
 
@@ -14,7 +14,7 @@
 - **任务接续与恢复：** 持久保存目标、计划、工作前沿、执行归属及结果；支持周期评审、Worker 正常换代、进度续作和后端重启后的状态恢复。
 - **并行与任务控制：** 独立 Worker 并行、依赖协调、优先级、暂停、继续、取消和用户即时调整目标。
 - **技能积累：** 从有证据的实际结果提炼可复用方法，接入 DSH 原生 Skill 系统，追踪适用范围、版本、实际加载和后续反馈。
-- **工作记忆管理：** 已完成任务的过程记录按策略精简，交付成果、有效技能和必要证据持续保留。
+- **工作记忆管理：** 默认不限期、数量或容量保留记录；可选策略支持导入、导出与重置，只在用户设置后精简已完成任务的过程记录，交付成果、有效技能和必要证据持续保留。
 
 ## 已完成的运行验证
 
@@ -50,7 +50,7 @@ npm pack --ignore-scripts
 将生成的插件包安装到指定 DSH profile：
 
 ```sh
-dsh plugin --profile <profile> add ./deepseek-servant-0.1.0-alpha.14.tgz --ignore-scripts
+dsh plugin --profile <profile> add ./deepseek-servant-0.1.0-alpha.15.tgz --ignore-scripts
 ```
 
 建议先选择独立的 DSH profile 验证。模型提供者、工具权限与凭据使用宿主已有配置。

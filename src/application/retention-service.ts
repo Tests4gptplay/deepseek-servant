@@ -3,7 +3,7 @@ import type { StoragePort } from '../contracts/ports.js'
 import type { KnowledgeScope, SkillRecord, SkillVersion } from '../contracts/knowledge.js'
 import type { Task } from '../contracts/task.js'
 import {
-  defaultRetentionPolicy, type KnowledgeMaintenanceSession, type KnowledgeRetentionPort,
+  defaultRetentionPolicy, parseRetentionPolicy, type KnowledgeMaintenanceSession, type KnowledgeRetentionPort,
   type NativeSessionRetentionPort, type RetentionConfiguration, type RetentionPolicy,
   type RetentionPreview,
   type RetentionSweepResult, type TaskRetentionPort, type TaskTombstone,
@@ -38,10 +38,10 @@ export class RetentionService {
   }
   configure(policy: RetentionPolicy, expectedRevision?: number): Promise<RetentionConfiguration> {
     return this.enqueue(async () => {
-      validatePolicy(policy)
+      const normalized = parseRetentionPolicy(policy)
       const current = await this.configuration()
       if (expectedRevision !== undefined && expectedRevision !== current.revision) throw new Error('Retention settings changed; refresh before saving.')
-      const next: RetentionConfiguration = { schemaVersion: 1, revision: current.revision + 1, policy: structuredClone(policy), updatedAt: this.now() }
+      const next: RetentionConfiguration = { schemaVersion: 1, revision: current.revision + 1, policy: normalized, updatedAt: this.now() }
       await this.options.store.set(POLICY_KEY, next)
       this.changed()
       return next
@@ -161,8 +161,9 @@ export class RetentionService {
     const [configuration, allTasks, skills, rows] = await Promise.all([
       this.configuration(), this.options.tasks.list(), session.listSkills(), this.options.store.list<unknown>(''),
     ])
-    const { policy } = configuration
-    validatePolicy(policy)
+    const policy = parseRetentionPolicy(configuration.policy)
+    const taskRetentionEnabled = policy.taskDetailDays !== undefined || policy.archiveDays !== undefined
+      || policy.maxArchives !== undefined || policy.maxServantBytes !== undefined
     const now = this.now()
     const inScope = (task: Task) => !scope || task.assistantId === scope.assistantId && task.workspace.id === scope.workspaceId
     const tasks = allTasks.filter(inScope).sort((a, b) => terminalAt(a).localeCompare(terminalAt(b)))
@@ -185,13 +186,16 @@ export class RetentionService {
     }
     const plan: RetentionPreview = { previewId: `retention-${randomUUID()}`, createdAt: now, policyRevision: configuration.revision,
       policy: structuredClone(policy), ...(scope ? { scope: { ...scope } } : {}), archiveTasks: [], deleteArchives: [], compactSkills: [], nativeCleanup: [], blocked: [], totals }
-    const bytePressure = totals.servantBytes > policy.maxServantBytes
-    let countPressure = Math.max(0, allTasks.filter(task => ['completed', 'cancelled'].includes(task.phase)).length - policy.maxArchives)
+    const bytePressure = policy.maxServantBytes !== undefined && totals.servantBytes > policy.maxServantBytes
+    let countPressure = policy.maxArchives === undefined ? 0 : Math.max(0, allTasks.filter(task => ['completed', 'cancelled'].includes(task.phase)).length - policy.maxArchives)
     for (const task of tasks) {
       const blockers = retentionBlockers(task)
       if (blockers.length) { plan.blocked.push({ id: task.id, kind: 'task', bytes: jsonBytes(task), reasons: blockers }); continue }
       let projected = task
-      if (!task.archive && (ageDays(now, terminalAt(task)) >= policy.taskDetailDays || bytePressure || countPressure > 0)) {
+      const age = ageDays(now, terminalAt(task))
+      const detailExpires = policy.taskDetailDays !== undefined && age >= policy.taskDetailDays
+      const historyExpires = policy.archiveDays !== undefined && age >= policy.archiveDays
+      if (!task.archive && (detailExpires || historyExpires || bytePressure || countPressure > 0)) {
         const retained = Object.keys(task.reports).filter(id => pins.has(id))
         projected = structuredClone(task)
         const transition = applyRetentionCommand(projected, { type: 'task.archive', commandId: 'retention-preview', source: { kind: 'runtime', id: 'servant-retention' },
@@ -202,12 +206,12 @@ export class RetentionService {
         totals.estimatedReclaimedBytes += reclaimed
       }
       if (!projected.archive) continue
-      for (const item of projected.archive.sessions) if (item.state !== 'archived' && item.state !== 'absent') {
+      if (taskRetentionEnabled) for (const item of projected.archive.sessions) if (item.state !== 'archived' && item.state !== 'absent') {
         plan.nativeCleanup.push({ taskId: task.id, purgeId: projected.archive.purgeId, sessionId: item.sessionId })
         if (item.state === 'blocked') plan.blocked.push({ id: item.sessionId, kind: 'native', bytes: item.retainedBytes ?? 0, reasons: [item.reason ?? 'native-retirement'] })
       }
       const pinned = Object.keys(projected.reports).some(id => pins.has(id))
-      const expires = ageDays(now, terminalAt(task)) >= policy.archiveDays || countPressure > 0 || bytePressure
+      const expires = historyExpires || countPressure > 0 || bytePressure
       if (pinned) plan.blocked.push({ id: task.id, kind: 'task', bytes: jsonBytes(projected), reasons: ['knowledge-evidence'] })
       else if (expires) {
         const reclaimed = Math.max(0, jsonBytes(projected) - 256)
@@ -219,19 +223,22 @@ export class RetentionService {
     for (const record of skills) {
       if (scope && !sameScope(record.scope, scope)) continue
       const eligible = record.versions.filter(version => isUnusedHistorical(record, version))
-      const excess = Math.max(0, eligible.length - policy.maxFullSkillVersions)
-      const prune = eligible.filter((version, index) => index < excess || ageDays(now, version.createdAt) >= policy.skillHistoryDays)
+      const excess = policy.maxFullSkillVersions === undefined ? 0 : Math.max(0, eligible.length - policy.maxFullSkillVersions)
+      const prune = eligible.filter((version, index) => index < excess || policy.skillHistoryDays !== undefined && ageDays(now, version.createdAt) >= policy.skillHistoryDays)
       const prunedVersions = new Set(prune.map(version => version.version))
       const historicalBodies = record.versions.filter(version => version.version !== record.activeVersion && version.status !== 'active'
         && !version.bodyRetiredAt && version.uses.every(use => archivedTaskIds.includes(use.taskId)) && !prunedVersions.has(version.version))
-      const bodyExcess = Math.max(0, historicalBodies.length - policy.maxFullSkillVersions)
-      const retireBodies = historicalBodies.filter((version, index) => index < bodyExcess || ageDays(now, version.createdAt) >= policy.skillHistoryDays)
-      const archiveUse = record.versions.some(version => version.uses.some(use => archivedTaskIds.includes(use.taskId)))
-      const receiptExcess = Object.keys(record.receipts).length > policy.maxSkillReceipts
+      const bodyExcess = policy.maxFullSkillVersions === undefined ? 0 : Math.max(0, historicalBodies.length - policy.maxFullSkillVersions)
+      const retireBodies = historicalBodies.filter((version, index) => index < bodyExcess || policy.skillHistoryDays !== undefined && ageDays(now, version.createdAt) >= policy.skillHistoryDays)
+      const compactHistory = policy.skillHistoryDays !== undefined || policy.maxFullSkillVersions !== undefined
+      const archiveUse = compactHistory && record.versions.some(version => version.uses.some(use => archivedTaskIds.includes(use.taskId)))
+      const receiptExcess = policy.maxSkillReceipts !== undefined && Object.keys(record.receipts).length > policy.maxSkillReceipts
       if (prune.length || retireBodies.length || archiveUse || receiptExcess) {
         const estimate = prune.reduce((sum, version) => sum + jsonBytes(version), 0) + retireBodies.reduce((sum, version) => sum + jsonBytes(version.body), 0)
         plan.compactSkills.push({ skillId: record.skillId, scope: record.scope, expectedRevision: record.revision,
-          pruneVersions: prune.map(version => version.version), retireBodies: retireBodies.map(version => version.version), archivedTaskIds, maxReceipts: policy.maxSkillReceipts, estimatedReclaimedBytes: estimate })
+          pruneVersions: prune.map(version => version.version), retireBodies: retireBodies.map(version => version.version),
+          archivedTaskIds: compactHistory ? archivedTaskIds : [],
+          ...(policy.maxSkillReceipts === undefined ? {} : { maxReceipts: policy.maxSkillReceipts }), estimatedReclaimedBytes: estimate })
         totals.estimatedReclaimedBytes += estimate
       }
       if (bytePressure) {
@@ -259,7 +266,7 @@ export class RetentionService {
       if (fact?.sizeBytes !== undefined) totals.foregroundSessionBytes += fact.sizeBytes
       else if (fact || !this.options.nativeSessions) totals.foregroundSizeUnknown += 1
     }
-    totals.overBudgetBytes = Math.max(0, totals.servantBytes - totals.estimatedReclaimedBytes - policy.maxServantBytes)
+    totals.overBudgetBytes = policy.maxServantBytes === undefined ? 0 : Math.max(0, totals.servantBytes - totals.estimatedReclaimedBytes - policy.maxServantBytes)
     this.previews.set(plan.previewId, structuredClone(plan))
     while (this.previews.size > 4) this.previews.delete(this.previews.keys().next().value!)
     return plan
@@ -295,14 +302,3 @@ function isUnusedHistorical(record: SkillRecord, version: SkillVersion): boolean
 }
 function isTombstone(value: unknown): value is TaskTombstone { return !!value && typeof value === 'object' && 'kind' in value && value.kind === 'task-tombstone' }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
-function validatePolicy(policy: RetentionPolicy): void {
-  const bounds: Record<keyof RetentionPolicy, [number, number]> = {
-    taskDetailDays: [0, 3650], archiveDays: [0, 36500], maxArchives: [1, 100000], maxServantBytes: [1024, 1024 ** 4],
-    skillHistoryDays: [0, 3650], maxFullSkillVersions: [0, 1000], maxSkillReceipts: [1, 10000],
-  }
-  for (const [key, [minimum, maximum]] of Object.entries(bounds) as Array<[keyof RetentionPolicy, [number, number]]>) {
-    const value = policy[key]
-    if (!Number.isInteger(value) || value < minimum || value > maximum) throw new Error(`Invalid retention setting: ${key}.`)
-  }
-  if (policy.archiveDays < policy.taskDetailDays) throw new Error('Archive retention cannot be shorter than Task detail retention.')
-}

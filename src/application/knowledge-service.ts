@@ -388,7 +388,7 @@ export class KnowledgeService {
     const key = skillKey(input.scope, input.skillId)
     const record = await this.loadRequired(input.skillId, input.scope)
     if (record.revision !== input.expectedRevision) return { status: 'stale', reclaimedBytes: 0 }
-    if (!Number.isInteger(input.maxReceipts) || input.maxReceipts < 1) throw new KnowledgeError('rejected', 'Retention requires a positive receipt budget.')
+    if (input.maxReceipts !== undefined && (!Number.isInteger(input.maxReceipts) || input.maxReceipts < 1)) throw new KnowledgeError('rejected', 'Retention requires a positive receipt budget when set.')
     const beforeJson = JSON.stringify(record)
     const before = jsonBytes(record)
     const latest = record.versions.at(-1)!.version
@@ -433,8 +433,10 @@ export class KnowledgeService {
       if (archivedUses.length) version.archivedUses = archivedUses
       if (archivedFeedback.length) version.archivedFeedback = archivedFeedback
     }
-    const receipts = Object.entries(record.receipts).sort(([, left], [, right]) => right.revision - left.revision)
-    record.receipts = Object.fromEntries(receipts.slice(0, input.maxReceipts))
+    if (input.maxReceipts !== undefined) {
+      const receipts = Object.entries(record.receipts).sort(([, left], [, right]) => right.revision - left.revision)
+      record.receipts = Object.fromEntries(receipts.slice(0, input.maxReceipts))
+    }
     if (JSON.stringify(record) === beforeJson) return { status: 'unchanged', reclaimedBytes: 0 }
     record.revision += 1
     await this.store.set(key, record)
