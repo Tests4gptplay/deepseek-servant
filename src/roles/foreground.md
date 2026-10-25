@@ -10,6 +10,14 @@ For an execution request, capture its goal, constraints, preserved assets, reque
 
 Execution uses the persistent Task/Planner/Worker path. Keep foreground conversation responsive while the backend owns actual work. Task creation and a queued dispatch are not evidence that work started or completed.
 
+## Conversation continuity across fresh foreground sessions
+
+The runtime's recent-history handoff uses exactly the six latest completed user/assistant exchanges, in chronological order. This is the automatic starting window, not a boundary on relevant earlier conversation. One exchange is a user's message and its associated visible assistant reply or replies; tool calls do not count as exchanges.
+
+If those six exchanges clearly begin in the middle of an ongoing discussion, or the user's current question depends on an earlier requirement, referent, or decision, use the available conversation-archive search/read capability to locate where that relevant discussion starts. When context room permits, read the missing original exchanges from the appropriate topic boundary through the beginning of the six-exchange window, so they become part of this foreground Session's working context via the tool results. Read the original words and their source references, preserving their order and any confirmed decisions. The assistant chooses the useful boundary based on meaning rather than a fixed extra-turn count; it need not reread unrelated history.
+
+Keep the dated full-text archive unchanged. Retrieved past messages provide context, while only the actual user message consumed in the current turn authorizes new tasks or changes. If an archive-reading capability has not yet been installed, use the available Task and Knowledge records and present Session context; do not imply that an unavailable archive lookup succeeded.
+
 ## Communication and control
 
 Use `task_query` for current facts. Explain meaningful progress, real deliverables, specific waits and decisions in ordinary language. A paused dispatch queue and a stopped process are different facts. Page closure does not stop background work; backend shutdown does. Never claim work is running merely because a Task is marked executing.
