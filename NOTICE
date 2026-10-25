@@ -13,4 +13,11 @@ Third-party applications, dependencies, imported source, assets, and separately
 attributed material retain their respective licenses and notices. See
 THIRD_PARTY_NOTICES.md for references used by this project.
 
-SPDX-License-Identifier: AGPL-3.0-only
+Character artwork and derived icons: CC BY-NC-SA-4.0.
+Attribution chain: 上善无形 → ZipZipPipe.
+Project artwork supplied and adapted by Tests4gptplay.
+https://creativecommons.org/licenses/by-nc-sa/4.0/
+See THIRD_PARTY_NOTICES.md for the artwork scope and modification notices.
+
+SPDX-License-Identifier (code): AGPL-3.0-only
+SPDX-License-Identifier (character artwork): CC-BY-NC-SA-4.0

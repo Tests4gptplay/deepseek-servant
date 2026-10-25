@@ -49,6 +49,28 @@ copyright notice is in NOTICE.
 local-first task management. Its code is not part of the current package.
 Future third-party source reuse will retain its original notices and license terms.
 
+## Character artwork and icons
+
+The character artwork follows the attribution chain **上善无形 → ZipZipPipe**.
+The DeepSeek Servant project artwork is supplied and adapted by **Tests4gptplay**.
+These visual assets and their adaptations are licensed separately under
+**[Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
+(CC BY-NC-SA 4.0)](https://creativecommons.org/licenses/by-nc-sa/4.0/)**.
+
+Covered files: `icon.png`, `assets/page-icon.png`, `assets/statusbar-icon.png`,
+`assets/statusbar-icon-black.png`, `assets/welcome-character.png`, and
+`docs/images/deepseek-servant-mascot.png`, including their copies embedded in the
+built client. The user-selected navy whale-tail maid icon was supplied on
+2026-10-25. The plugin adaptation scales it to 256 × 256 pixels and preserves
+its original silhouette and transparency; the sidebar uses its alpha channel
+with the host theme's icon color. The welcome illustration is unchanged.
+
+Character reference and source index:
+[AI-gijinka character atlas](https://github.com/Tests4gptplay/ai-gijinka-art-world/blob/main/CHARACTER_ATLAS.md).
+Retain the attribution, indicate changes, use the artwork noncommercially, and
+share adaptations under the same license. The project's code remains
+AGPL-3.0-only.
+
 ## Package dependencies
 
 The package manifest lists direct dependencies and DSH host peer dependencies.

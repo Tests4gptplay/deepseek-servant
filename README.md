@@ -8,11 +8,11 @@
 
 **设计逻辑源自 [Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness)。** DeepSeek Servant 延续 CAH 以目标为中心的 Agent 工作闭环：理解需求、制定计划、执行工作、评价成果、调整方法、跨会话接续、故障恢复与技能积累。Servant 将这套持续工作机制整合到 DeepSeek Harness 运行环境，复用宿主的模型、工具、Session、作业与 Skill 能力。
 
-**当前版本：** `0.1.0-alpha.22` · **适配宿主：** DSH `0.2.1-rc.2` · **项目形态：** 独立安装的社区插件
+**当前版本：** `0.1.0-alpha.24` · **适配宿主：** DSH `0.2.1-rc.2` · **项目形态：** 独立安装的社区插件
 
 ## 核心能力
 
-- **独立助理入口：** 左侧导航的专属页面使用鲸鱼女仆头饰图标：图标跟随侧栏文字颜色，适配浅色、深色和自定义皮肤，插件列表保留独立的角色图标；前台交流和后台任务分离，助理可选择自己的工作区。
+- **独立助理入口：** 左侧导航的专属页面使用用户选定的鲸尾女仆图标：图标跟随侧栏文字颜色，适配浅色、深色和自定义皮肤，插件列表保留独立的角色图标；前台交流和后台任务分离，助理可选择自己的工作区。
 - **模型与设置：** 输入框底部直接选择前台模型和思考强度；页面齿轮与全局设置中的 DeepSeek Servant 入口共用设置和经验；可选择已有工作区，或为 DeepSeek Servant 指定独立的自定义文件夹，不改变 DSH 默认工作区及其他会话。后台模型使用同一选择器。默认 `Auto` 跟随 DSH 主对话框当前的模型选择，已开始的后台任务保持原配置。设置最下方预留实验性功能区域。
 - **持续 Agent 工作：** Foreground 理解目标，Planner 制定计划并评价成果，Worker 执行具体工作，Helper 处理明确的运行故障。按任务需要调用对应角色。
 - **任务接续与恢复：** 持久保存目标、计划、工作前沿、执行归属及结果；支持周期评审、Worker 正常换代、进度续作和后端重启后的状态恢复。
@@ -54,7 +54,7 @@ npm pack --ignore-scripts
 将生成的插件包安装到指定 DSH profile：
 
 ```sh
-dsh plugin --profile <profile> add ./deepseek-servant-0.1.0-alpha.22.tgz --ignore-scripts
+dsh plugin --profile <profile> add ./deepseek-servant-0.1.0-alpha.24.tgz --ignore-scripts
 ```
 
 建议先选择独立的 DSH profile 验证。模型提供者、工具权限与凭据使用宿主已有配置。
@@ -80,4 +80,8 @@ dsh plugin --profile <profile> add ./deepseek-servant-0.1.0-alpha.22.tgz --ignor
 
 DeepSeek Servant 由 [Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness) 的 Agent 设计体系延伸而来，并通过 DeepSeek Harness 的原生能力实现持续任务执行。
 
-本项目沿用 CAH 的 **[GNU AGPL v3.0 only（AGPL-3.0-only）](LICENSE)** 许可证。项目版权声明见 [NOTICE](NOTICE)，第三方依赖及相应许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+项目代码沿用 CAH 的 **[GNU AGPL v3.0 only（AGPL-3.0-only）](LICENSE)** 许可证。
+
+角色美术与衍生图标单独采用 **[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/)**，保留署名链 **上善无形 → ZipZipPipe**；本项目的图标与页面素材由 Tests4gptplay 提供并适配。再利用这些美术素材时请保留署名、注明修改，并遵守非商业性使用及相同方式共享条款。
+
+项目版权声明见 [NOTICE](NOTICE)，美术范围、来源与第三方依赖许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
