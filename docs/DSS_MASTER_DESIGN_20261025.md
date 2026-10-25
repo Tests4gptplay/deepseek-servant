@@ -53,6 +53,28 @@
 - Worker 原生 `progress` 原轮保存；`continue` 同 Agent/Session；`handoff` 保存 Reply/Checkpoint、换 Agent/Session。Worker 自主判断何时需要新上下文，**不加入 CAH 约 10 分钟软换代规则**。
 - 已确定的每累计 **5 个有效 continue/handoff 工作段**进行 Planner 周期性评审；Worker 真正 complete/failed 立即评审；progress 不计段。先确认完整 Root Goal 覆盖与 Note 无尚待分解的必要需求，才允许 Root Task 最终 complete。
 
+## D.1 Scheduler Worker 并发席位：UI 配置与 Planner 实时容量提示（2026-10-25 新增确认）
+
+这不是网络端口，也不是操作系统物理线程，而是 DSS Scheduler 的 **Worker Agent 并发执行席位数**，对应当前 `src/host.ts` 的 `Config.workerSeats`、`src/runtime/scheduler.ts` 的 `Scheduler.workerSeats`。**现有代码默认 2，Host 配置接受 1～32 的整数；运行时 Scheduler 当前只读且主要通过插件启动时的 Config 注入，前台 UI 暂时只有席位总数显示，没有设置控件。**
+
+**正式升级要求：**
+
+1. 在 DSS 现有「设置」页面添加清晰的小型 **「Worker 并发席位」数字设置**，默认 **2**，沿用目前有效的 **1～32** 配置范围。输入校验、实际保存值、有效运行值、界面显示值必须统一，不能只有一个装饰性输入框。
+2. 由用户手动决定并发上限；Planner **只获得当前并发信息，不自动修改上限**。这是执行调度的最大并发 Worker 数量，而不是 Planner 可以创建的 Child 总量，仍可分解超过席位数的有意义 Child，并由 Scheduler 排队。没有待执行 Child 时，不需要占满席位或为此空转模型。
+3. 最好在运行时立即应用配置变更，**不要求重启插件**：调高后主动触发调度检查；调低后已有 Worker 正常执行到原有完成/交接边界，不强制停止已经启动的 Agent，仅不再准入超出新上限的后续 Worker。设置需要持久化在原有 DSS `deepseek_servant` Domain；与已有 Host `workerSeats` 配置要明确迁移/优先级，不能出现 UI 显示 4、Scheduler 实际仍 2 的双真相。
+4. **每一次新的 Planner 规划和评审 Agent/Action 首条机器输入**，由宿主直接注入当时的并发快照，不靠 Planner 猜测，例如：
+   ```text
+   [Scheduler / Worker capacity — runtime supplied]
+   maxWorkerSeats: 4
+   occupiedWorkerSeats: 2
+   availableWorkerSeats: 2
+   ```
+   读取 Scheduler 的**真实有效配置**和当前全局已占席位/待绑定派发预留；空闲数按 `max(0, maxWorkerSeats - occupiedWorkerSeats)` 计算，不得仅按本 Task 的 Worker 数计算。该信息是规划时的快照，其他任务可能在推理期间改变负载；最终是否可以派发仍由 Scheduler 根据实时 Owner、资源声明、Child 依赖与重叠写域判断。
+5. 如果 Planner 在**同一超长未完规划动作**中 handoff 给下一代，新 Planner 也重新取得最新容量快照；工作区更换/用户在 UI 调整席位也不应使现有 Child/Task 消失。普通 Worker 不需要占用额外的模型推理轮询容量。
+6. 统计口径要与 Scheduler 真正的 Worker inference slot admission 相符：运行中的 Worker 和已正式保留、即将绑定的派发应计入占用；等待 Job 的物理资源/文件排他仍应单独依据现有 `resources/writeScopes` 规则判断。**并发席位不等价于可并行使用多个 GPU 或重叠文件写入权限。**
+
+**必须验收：** 首次安装无历史配置显示 2；1/4/32 等合法值可保存并重开保留；0/33/小数不被接受；配置变化确实改变调度结果而非仅 UI；Planner 的两次相邻规划/评审准确看到**不同的最新配置和占用快照**；多任务同时存在时全局席位计算正确；降低上限不终止已有 Worker；不要为了提示容量而启动单独 AI。
+
 ## E. 异常恢复（没有 Helper）
 
 DSH 原生 `agent/error`、Agent abnormal-idle、Session/Job 真实状态进入程序观察/对账。只是执行时间长、正常 Job 没输出、普通工具错误，不意味着 Agent 已死亡。
@@ -93,7 +115,7 @@ Root Task 全部验收后，Planner 写最后的验收与实际产物引用并�
 ## H. 现状、缺口和实施边界
 
 - **已实现于本次仓库更新的范围**：容量统计 DTO、读 Domain Keys 的 API、存储变更后自动刷新 UI、对旧聚合 Task 的分类、六行×两列的简洁布局、中英文文案与保留既有折叠式清理控制。没有改变真实数据存储位置和现有运行时清理行为。
-- **尚待实现**：前台每轮新 Session 与按日完整原文，固定六轮自动装载/历史搜索；Planner/Worker 独立 Domain Keys 与自主读写；增量 Plan/未完成规划中途 handoff；完全去除 Helper 及同角色异常重启；任务终态 records.md 写入/封口/自动精确清理；Native Session 物理清理兼容等。这些是相互配套的下一阶段任务，不能当作本次 UI 已经实施。
+- **尚待实现**：设置页 Worker 并发席位（默认 2，可配置 1～32）持久化与运行时更新、Planner 每次规划/评审时获得真实并发容量快照；前台每轮新 Session 与按日完整原文，固定六轮自动装载/历史搜索；Planner/Worker 独立 Domain Keys 与自主读写；增量 Plan/未完成规划中途 handoff；完全去除 Helper 及同角色异常重启；任务终态 records.md 写入/封口/自动精确清理；Native Session 物理清理兼容等。这些是相互配套的下一阶段任务，不能当作本次 UI 已经实施。
 - 旧版 DSH `storageDomain` 对版本与 schema 有严格校验，未来迁移需要保持旧记录可读，不可直接提高版本导致宿主无法打开；原生 DSH Storage Domain 不是普通 Agent Workspace，日常直接读写应通过 DSS 的 Domain-bound 受控原生工具，不进行“复制回去覆盖”的中转操作。
 
 ## I. 详细审查与先前讨论原文索引
