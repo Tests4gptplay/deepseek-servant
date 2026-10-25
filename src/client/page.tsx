@@ -125,7 +125,7 @@ function ServantSettingsContent({ snapshot, models, actions, t }: {
         {tab === 'settings' ? <div className={css.settingsColumn}>
           <Settings value={value} busy={snapshot.pending.includes('configure')} onSave={actions.onConfigure} t={t}
             models={models} onRefreshModels={actions.onRefreshModels} onPickDirectory={actions.onPickDirectory} />
-          <RetentionPanel preview={snapshot.retention} outcome={snapshot.lastCleanup} busy={snapshot.pending.includes('retention')}
+          <RetentionPanel stats={snapshot.storageStats} preview={snapshot.retention} outcome={snapshot.lastCleanup} busy={snapshot.pending.includes('retention')}
             recordStorage={value.recordStorage} moving={snapshot.pending.includes('moveRecords')} onMoveRecords={actions.onMoveRecords}
             onPickDirectory={actions.onPickDirectory} onRetention={actions.onRetention} onOpenRecords={actions.onOpenRecords} t={t} />
           <section className={css.experimental} aria-labelledby={`${id}-experimental`}>

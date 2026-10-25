@@ -84,8 +84,9 @@ export class ServantApi {
       }
       case 'knowledge': return this.knowledge(raw)
       case 'retention': {
-        const input = z.strictObject({ action: z.enum(['preview', 'sweep', 'configure']), previewId: z.string().optional(),
+        const input = z.strictObject({ action: z.enum(['stats', 'preview', 'sweep', 'configure']), previewId: z.string().optional(),
           expectedRevision: z.int().nonnegative().optional(), policy: z.record(z.string(), z.number()).optional() }).parse(raw)
+        if (input.action === 'stats') return this.options.retention.stats()
         if (input.action === 'preview') return this.options.retention.preview()
         if (input.action === 'sweep') return this.options.retention.sweep({ previewId: input.previewId })
         if (!input.policy) throw new Error('清理策略不能为空。')
