@@ -89,7 +89,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     }),
   })
   assistants = new AssistantService({ store, defaults: { name: 'DeepSeek Servant', presetId: config.presetId,
-    foreground: config.foreground, background: config.background }, resolveWorkspace: id => workspace.resolve(id), onChanged: changed,
+    foreground: config.foreground, background: config.background }, resolveWorkspace: (id, directory) => workspace.resolve(id, directory), onChanged: changed,
     runtime: {
       prepareConfiguration: previous => supervisor.releaseForegroundIfIdle(previous),
       send: async (assistant, text, messageId, source = 'user') => (await supervisor.ensureForeground(assistant)).send(text, messageId, 'followup', source),

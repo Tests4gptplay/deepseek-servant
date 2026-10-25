@@ -3,8 +3,11 @@ import { z } from 'zod'
 export const Id = z.string().min(1).max(240).regex(/^(?!__proto__$|prototype$|constructor$)[A-Za-z0-9_.:@/-]+$/)
 export const Text = z.string().min(1).max(32_000)
 export const ModelRouteSchema = z.strictObject({ provider: z.string().max(200).optional(), model: z.string().max(200).optional(), reasoningEffort: z.string().max(100).optional() })
-export const SettingsSchema = z.strictObject({ name: z.string().min(1).max(120), workspaceId: Id.optional(), presetId: Id,
+export const SettingsSchema = z.strictObject({ name: z.string().min(1).max(120), workspaceId: Id.optional(),
+  workspaceDirectory: z.string().trim().min(1).max(4000).optional(), presetId: Id,
   foreground: ModelRouteSchema, background: ModelRouteSchema })
+  .refine(settings => settings.workspaceId === undefined || settings.workspaceDirectory === undefined,
+    { message: 'Select a registered workspace or a custom directory, not both.' })
 export const ArtifactSchema = z.strictObject({ id: Id, path: z.string().min(1).max(4000), description: Text,
   version: z.string().max(500).optional(), sha256: z.string().regex(/^[a-f0-9]{64}$/i).optional(), resultId: Id.optional() })
 export const GoalSchema = z.strictObject({ request: Text, objective: Text, constraints: z.array(Text).max(100),

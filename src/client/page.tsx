@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import {
   Button, IconSparkleRegular, IconSettingsOutlineRegular, Input, Menu, Modal, SegmentedControl, StateDot, Toast,
 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -25,6 +25,7 @@ type Tab = 'conversation' | 'tasks'
 export interface ServantInjected {
   hooks: { servant: HostObservable<ServantSnapshot>; models: HostObservable<ServantModels> }
   onRefreshModels: () => Promise<void>
+  onPickDirectory?: () => Promise<string | null>
   onRefresh: ServantSource['refresh']
   onSend: ServantSource['send']
   onConfigure: ServantSource['configure']
@@ -47,7 +48,6 @@ export function ServantPage(props: ServantPageProps) {
   const snapshot = props.useServant(value => value)
   const [tab, setTab] = useState<Tab>('conversation')
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [settingsTab, setSettingsTab] = useState<'settings' | 'knowledge'>('settings')
   const models = props.useModels(value => value)
   const value = snapshot.value
   return <section className={css.page} aria-label={t('title')}>
@@ -85,23 +85,51 @@ export function ServantPage(props: ServantPageProps) {
     </div>}
     {value && <Modal open={settingsOpen} onClose={() => setSettingsOpen(false)} title={t('settings.open')} closeLabel={t('settings.close')}
       className={css.settingsModal} contentClassName={css.settingsModalContent}>
-      <div className={css.settingsSurface}>
-        <SegmentedControl id="servant-settings-tabs" label={t('settings.open')} value={settingsTab} onChange={setSettingsTab}
-          options={(['settings', 'knowledge'] as const).map(value => ({ value, label: t(`tabs.${value}`) }))} />
-        <div id={`servant-settings-tabs-${settingsTab}-panel`} role="tabpanel" aria-labelledby={`servant-settings-tabs-${settingsTab}`} className={css.settingsBody}>
-          {settingsTab === 'settings' ? <div className={css.settingsColumn}>
-            <Settings value={value} busy={snapshot.pending.includes('configure')} onSave={props.onConfigure} t={t}
-              models={models} onRefreshModels={props.onRefreshModels} />
-            <RetentionPanel preview={snapshot.retention} outcome={snapshot.lastCleanup} busy={snapshot.pending.includes('retention')} onRetention={props.onRetention} t={t} />
-            <section className={css.experimental} aria-labelledby="servant-experimental-title">
-              <h3 id="servant-experimental-title">{t('experimental.title')}</h3>
-              <p className={css.muted}>{t('experimental.placeholder')}</p>
-            </section>
-          </div> : <Knowledge value={value} pending={snapshot.pending} onKnowledge={props.onKnowledge} t={t} />}
-        </div>
-      </div>
+      <ServantSettingsContent snapshot={snapshot} models={models} actions={props} t={t} />
     </Modal>}
   </section>
+}
+
+export type ServantSettingsProps = InjectFace<ServantInjected> & PropsLocale<'dsh.servant'>
+
+/** Both entry points use the same observable and configuration actions. */
+export function ServantSettingsPage(props: ServantSettingsProps) {
+  const snapshot = props.useServant(value => value)
+  const models = props.useModels(value => value)
+  return <section className={css.globalSettings} aria-label={props.t('settings.open')}>
+    <h2>{props.t('panel')}</h2>
+    <ServantSettingsContent snapshot={snapshot} models={models} actions={props} t={props.t} />
+  </section>
+}
+
+function ServantSettingsContent({ snapshot, models, actions, t }: {
+  snapshot: ServantSnapshot; models: ServantModels; actions: ServantActions; t: Translate
+}) {
+  const [tab, setTab] = useState<'settings' | 'knowledge'>('settings')
+  const id = useId()
+  const value = snapshot.value
+  return <div className={css.settingsSurface}>
+    {snapshot.status === 'error' && <div className={css.notice} role="alert">
+      <p className={css.errorDetail}>{snapshot.error}</p>
+      <Button size="sm" onClick={() => { void actions.onRefresh() }}>{t('runtime.retry')}</Button>
+    </div>}
+    {!value && snapshot.status === 'loading' && <div className={css.empty} role="status" aria-label={t('runtime.loading')}><StateDot state="ongoing" size={26} /></div>}
+    {value && <>
+      <SegmentedControl id={id} label={t('settings.open')} value={tab} onChange={setTab}
+        options={(['settings', 'knowledge'] as const).map(value => ({ value, label: t(`tabs.${value}`) }))} />
+      <div id={`${id}-${tab}-panel`} role="tabpanel" aria-labelledby={`${id}-${tab}`} className={css.settingsBody}>
+        {tab === 'settings' ? <div className={css.settingsColumn}>
+          <Settings value={value} busy={snapshot.pending.includes('configure')} onSave={actions.onConfigure} t={t}
+            models={models} onRefreshModels={actions.onRefreshModels} onPickDirectory={actions.onPickDirectory} />
+          <RetentionPanel preview={snapshot.retention} outcome={snapshot.lastCleanup} busy={snapshot.pending.includes('retention')} onRetention={actions.onRetention} t={t} />
+          <section className={css.experimental} aria-labelledby={`${id}-experimental`}>
+            <h3 id={`${id}-experimental`}>{t('experimental.title')}</h3>
+            <p className={css.muted}>{t('experimental.placeholder')}</p>
+          </section>
+        </div> : <Knowledge value={value} pending={snapshot.pending} onKnowledge={actions.onKnowledge} t={t} />}
+      </div>
+    </>}
+  </div>
 }
 
 function Conversation({ value, busy, onSend, models, modelBusy, onModelChange, onRefreshModels, t }: {
@@ -321,11 +349,15 @@ function SkillEditor({ record, version, busy, onSave, onClose, t }: { record: Sk
   </form>
 }
 
-function Settings({ value, busy, onSave, models, onRefreshModels, t }: {
-  value: ServantView; busy: boolean; onSave: ServantSource['configure']; models: ServantModels; onRefreshModels(): Promise<void>; t: Translate
+function Settings({ value, busy, onSave, models, onRefreshModels, onPickDirectory, t }: {
+  value: ServantView; busy: boolean; onSave: ServantSource['configure']; models: ServantModels; onRefreshModels(): Promise<void>
+  onPickDirectory?: () => Promise<string | null>; t: Translate
 }) {
   const [settings, setSettings] = useState<AssistantSettings>(() => structuredClone(value.assistant.settings))
   const [workspaceOpen, setWorkspaceOpen] = useState(false)
+  const [picking, setPicking] = useState(false)
+  const [directoryError, setDirectoryError] = useState<string>()
+  const customWorkspace = settings.workspaceDirectory !== undefined
   const [revision, setRevision] = useState(value.assistant.revision)
   const [baseline, setBaseline] = useState(JSON.stringify(value.assistant.settings))
   const dirty = JSON.stringify(settings) !== baseline
@@ -340,24 +372,49 @@ function Settings({ value, busy, onSave, models, onRefreshModels, t }: {
   }, [value.assistant.revision, value.assistant.settings, revision, baseline, dirty])
   return <form className={css.settings} onSubmit={event => { event.preventDefault(); const submitted = JSON.stringify(settings); void onSave(revision, settings).then(ok => { if (ok) setBaseline(submitted) }) }}>
     <Field label={t('settings.name')}><Input required value={settings.name} onChange={event => { setSettings({ ...settings, name: event.target.value }) }} /></Field>
-    <Field label={t('settings.workspace')}><Menu open={workspaceOpen} portal selectedId={settings.workspaceId ?? 'default'}
-      anchor={<Button variant="outline" onClick={() => { setWorkspaceOpen(!workspaceOpen) }}>{selectedWorkspace?.title ?? t('settings.defaultWorkspace')}</Button>}
-      items={[{ id: 'default', label: t('settings.defaultWorkspace') }, ...value.workspaces.map(workspace => ({ id: workspace.id, label: workspace.title || workspace.directory }))]}
-      onSelect={id => { setSettings({ ...settings, workspaceId: id === 'default' ? undefined : id }); setWorkspaceOpen(false) }} onClose={() => { setWorkspaceOpen(false) }} />
+    <ControlField label={t('settings.workspace')}><Menu open={workspaceOpen} portal className={css.menuAnchor} selectedId={customWorkspace ? 'custom' : settings.workspaceId ?? 'default'}
+      anchor={<Button type="button" variant="outline" disabled={busy || picking} aria-label={t('settings.workspace')} aria-expanded={workspaceOpen} aria-haspopup="menu"
+        onClick={() => { setWorkspaceOpen(!workspaceOpen) }}>{customWorkspace ? t('settings.customWorkspace') : selectedWorkspace?.title ?? t('settings.defaultWorkspace')}</Button>}
+      items={[{ id: 'default', label: t('settings.defaultWorkspace') }, ...value.workspaces.map(workspace => ({ id: workspace.id, label: workspace.title || workspace.directory })),
+        { type: 'separator', id: 'custom-divider' }, { id: 'custom', label: t('settings.customWorkspace') }]}
+      onSelect={id => {
+        setSettings({ ...settings, workspaceId: id === 'default' || id === 'custom' ? undefined : id,
+          workspaceDirectory: id === 'custom' ? settings.workspaceDirectory ?? value.assistant.workspace.directory : undefined })
+        setDirectoryError(undefined); setWorkspaceOpen(false)
+      }} onClose={() => { setWorkspaceOpen(false) }} />
+      {customWorkspace && <div className={css.customWorkspace}>
+        <label className={css.directoryField}><span>{t('settings.customDirectory')}</span>
+          <Input required value={settings.workspaceDirectory ?? ''} disabled={busy || picking} maxLength={4000}
+            placeholder={t('settings.directoryPlaceholder')} onChange={event => { setSettings({ ...settings, workspaceDirectory: event.target.value }); setDirectoryError(undefined) }} />
+        </label>
+        {onPickDirectory && <Button type="button" variant="outline" disabled={busy || picking} onClick={() => {
+          setPicking(true); setDirectoryError(undefined)
+          void onPickDirectory().then(directory => {
+            if (directory !== null) setSettings(current => ({ ...current, workspaceId: undefined, workspaceDirectory: directory }))
+          }).catch(error => { setDirectoryError(error instanceof Error ? error.message : String(error)) }).finally(() => { setPicking(false) })
+        }}>{t(picking ? 'settings.directoryPicking' : 'settings.browseDirectory')}</Button>}
+        <p className={css.muted}>{t('settings.customWorkspaceHint')}</p>
+        {directoryError && <p className={css.errorDetail} role="alert">{directoryError}</p>}
+      </div>}
       <p className={css.muted}>{t('settings.workspaceHint')}</p><span className={css.muted}>{t('settings.currentDirectory')}</span><code>{value.assistant.workspace.directory}</code>
-    </Field>
+    </ControlField>
     <Field label={t('settings.preset')}><Input required value={settings.presetId} onChange={event => { setSettings({ ...settings, presetId: event.target.value }) }} /></Field>
-    <Field label={t('settings.background')}><ModelPicker value={settings.background} models={models}
+    <ControlField label={t('settings.background')}><ModelPicker value={settings.background} models={models}
       onChange={route => setSettings({ ...settings, background: route })} onRefresh={onRefreshModels} disabled={busy} label={t('settings.background')} t={t} />
       <p className={css.muted}>{t('model.autoHint')}</p>
-    </Field>
+    </ControlField>
     <p className={css.muted}>{t('settings.modelHint')}</p>
-    <div className={css.actions}><Button type="submit" variant="primary" disabled={busy || !dirty}>{t('settings.save')}</Button>{dirty && <><Button disabled={busy} onClick={() => { setSettings(structuredClone(value.assistant.settings)); setBaseline(JSON.stringify(value.assistant.settings)); setRevision(value.assistant.revision) }}>{t('tasks.discard')}</Button><span className={css.muted}>{t('settings.changed')}</span></>}</div>
+    <div className={css.actions}><Button type="submit" variant="primary" disabled={busy || picking || !dirty || (customWorkspace && !settings.workspaceDirectory?.trim())}>{t('settings.save')}</Button>{dirty && <><Button type="button" disabled={busy || picking} onClick={() => { setDirectoryError(undefined); setSettings(structuredClone(value.assistant.settings)); setBaseline(JSON.stringify(value.assistant.settings)); setRevision(value.assistant.revision) }}>{t('tasks.discard')}</Button><span className={css.muted}>{t('settings.changed')}</span></>}</div>
   </form>
 }
 
 function Empty({ title, detail }: { title: string, detail: string }) { return <div className={css.empty}><IconSparkleRegular size={28} /><h2>{title}</h2><p>{detail}</p></div> }
 function Section({ title, children }: { title: string, children: ReactNode }) { return <section className={css.section}><h3>{title}</h3>{children}</section> }
+// A compound menu is not a labelable form input: wrapping it in a label makes
+// clicks on its hint/blank space activate the trigger again after dismissal.
+function ControlField({ label, children }: { label: string, children: ReactNode }) {
+  return <div className={css.field} role="group" aria-label={label}><span>{label}</span>{children}</div>
+}
 function Field({ label, children }: { label: string, children: ReactNode }) { return <label className={css.field}><span>{label}</span>{children}</label> }
 function lines(text: string): string[] { return text.split('\n').map(line => line.trim()).filter(Boolean) }
 

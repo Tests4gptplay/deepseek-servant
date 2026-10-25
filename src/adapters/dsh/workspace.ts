@@ -11,8 +11,15 @@ export class DshWorkspaceAdapter {
     return this.ctx.workspaceRegistry.list().map(workspace => ({ id: workspace.id, directory: workspace.path, title: workspace.title }))
   }
 
-  async resolve(selectedId?: string): Promise<WorkspaceBinding> {
+  async resolve(selectedId?: string, customDirectory?: string): Promise<WorkspaceBinding> {
     const registry = this.ctx.workspaceRegistry
+    if (customDirectory !== undefined) {
+      if (selectedId !== undefined) throw new Error('Select a registered workspace or a custom directory, not both.')
+      // Native creation validates an existing absolute directory and reuses its
+      // canonical identity. It does not select it or change the host default.
+      const selected = await registry.create(customDirectory.trim())
+      return { id: selected.id, directory: selected.path }
+    }
     if (selectedId !== undefined && selectedId.length > 0) {
       const selected = registry.get(WorkspaceId(selectedId))
       if (selected === undefined) throw new Error(`The selected Servant workspace no longer exists: ${selectedId}`)

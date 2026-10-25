@@ -4,6 +4,8 @@ import type { WorkspaceBinding, ModelRoute, RuntimeProfile, Delivery } from './t
 export interface AssistantSettings {
   name: string
   workspaceId?: string
+  /** An explicit directory for Servant only; never changes the host default. */
+  workspaceDirectory?: string
   presetId: string
   foreground: ModelRoute
   background: ModelRoute

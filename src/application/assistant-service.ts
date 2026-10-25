@@ -20,7 +20,7 @@ export interface AssistantRecoveryFailure { assistantId: string; messageId: stri
 export interface AssistantServiceOptions {
   store: StoragePort
   runtime: AssistantRuntimePort
-  resolveWorkspace(id?: string): Promise<WorkspaceBinding>
+  resolveWorkspace(id?: string, directory?: string): Promise<WorkspaceBinding>
   defaults: AssistantSettings
   onChanged?(assistant: Assistant): void
   onRecoveryError?(failure: AssistantRecoveryFailure): void
@@ -92,7 +92,7 @@ export class AssistantService {
       if (concurrent) return this.normalize(concurrent)
       const now = this.now()
       const sessionId = `servant-foreground-${randomUUID()}`
-      const workspace = await this.options.resolveWorkspace(this.options.defaults.workspaceId)
+      const workspace = await this.options.resolveWorkspace(this.options.defaults.workspaceId, this.options.defaults.workspaceDirectory)
       const value: Assistant = {
         schemaVersion: 1, id, revision: 1, sessionId, priorSessionIds: [], sessionWorkspaces: { [sessionId]: workspace },
         settings: jsonSnapshot(this.options.defaults),
@@ -111,7 +111,7 @@ export class AssistantService {
       const assistant = this.normalize(stored)
       if (assistant.revision !== change.expectedRevision) throw new Error('助理设置已经变化，请刷新后再保存。')
       const settings = jsonSnapshot(change.settings)
-      const workspace = await this.options.resolveWorkspace(settings.workspaceId)
+      const workspace = await this.options.resolveWorkspace(settings.workspaceId, settings.workspaceDirectory)
       const rotate = workspace.id !== assistant.workspace.id || workspace.directory !== assistant.workspace.directory
         || routeIdentity(settings) !== routeIdentity(assistant.settings)
       if (rotate) {

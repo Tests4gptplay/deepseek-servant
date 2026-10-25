@@ -8,7 +8,7 @@ import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types
 import { createServantModels, type NativeModelDirectories, type NativeModelSessions } from './client/models.js'
 import type { ServantView } from './contracts/views.js'
 import { createServantNotices, createServantSource, type ServantClientApi } from './client/source.js'
-import { ServantNoticeOverlay, ServantPage, ServantSidebarIcon, type ServantInjected, type ServantNoticeInjected } from './client/page.js'
+import { ServantNoticeOverlay, ServantPage, ServantSettingsPage, ServantSidebarIcon, type ServantInjected, type ServantNoticeInjected } from './client/page.js'
 import { en, NS, zh } from './client/locales.js'
 
 declare const __SERVANT_CLIENT_CSS__: string
@@ -71,16 +71,30 @@ export function apply(ctx: Context): void {
     try { await call('openArtifact', { taskId, artifactId }) }
     catch (error) { notices.show({ kind: 'error', key: 'failed', detail: error instanceof Error ? error.message : String(error) }) }
   }
+  const directoryPicker = (globalThis as typeof globalThis & {
+    __DSH_DIRECTORY_PICKER__?: { pick(): Promise<string | null> }
+  }).__DSH_DIRECTORY_PICKER__
+  const injectPage = (): ServantInjected => ({
+    hooks: { servant: source.source, models: models.source },
+    onRefreshModels: models.refresh,
+    onPickDirectory: directoryPicker ? () => directoryPicker.pick() : undefined,
+    onRefresh: source.refresh, onSend: source.send, onConfigure: source.configure,
+    onControl: source.control, onPriority: source.priority, onReconcile: source.reconcile, onAnswer: source.answer, onRevise: source.revise,
+    onKnowledge: source.knowledge, onRetention: source.retention, onOpenArtifact,
+  })
   ctx.slots.inject('main', () => ctx.slots.register({
-    name: 'main', key: PANEL_ID, locale: NS,
-    inject: (): ServantInjected => ({
-      hooks: { servant: source.source, models: models.source },
-      onRefreshModels: models.refresh,
-      onRefresh: source.refresh, onSend: source.send, onConfigure: source.configure,
-      onControl: source.control, onPriority: source.priority, onReconcile: source.reconcile, onAnswer: source.answer, onRevise: source.revise,
-      onKnowledge: source.knowledge, onRetention: source.retention, onOpenArtifact,
-    }),
+    name: 'main', key: PANEL_ID, locale: NS, inject: injectPage,
   }, ServantPage))
+  // Native settings.section is a public slot. Only its small registration
+  // contract is needed here; data and actions are identical to the gear entry.
+  const settingsSlots = ctx.slots as unknown as {
+    inject(name: 'settings.section', register: () => unknown): void
+    register(options: { name: 'settings.section'; id: string; order: number; locale: typeof NS; label(): string; inject: typeof injectPage },
+      component: typeof ServantSettingsPage): unknown
+  }
+  settingsSlots.inject('settings.section', () => settingsSlots.register({
+    name: 'settings.section', id: 'deepseek-servant', order: 70, locale: NS, label: () => t('panel'), inject: injectPage,
+  }, ServantSettingsPage))
   ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
     name: 'sidebar.panellist', id: PANEL_ID, order: 20, locale: NS, label: () => t('panel'),
   }, ServantSidebarIcon))

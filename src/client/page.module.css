@@ -165,3 +165,12 @@
 .experimental { border-top: 0.5px solid var(--dsw-alias-border-l3); padding-top: 20px; }
 .experimental h3 { margin: 0 0 8px; font: var(--dsw-font-s-strong-14); }
 .experimental p { margin: 0; }
+
+.globalSettings { width: 100%; min-width: 0; color: var(--dsw-alias-label-primary); }
+.globalSettings > h2 { margin: 0 0 24px; font: var(--dsw-font-l-20); }
+.customWorkspace { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; min-width: 0; }
+.directoryField { display: flex; flex-direction: column; gap: 8px; flex: 1 1 280px; min-width: 0; }
+.customWorkspace > p { flex-basis: 100%; margin: 0; }
+
+/* Keep outside whitespace outside the native Menu anchor hit area. */
+.menuAnchor { width: fit-content; max-width: 100%; }

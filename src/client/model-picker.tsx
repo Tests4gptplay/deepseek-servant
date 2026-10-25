@@ -63,7 +63,7 @@ export function ModelPicker({ value, models, onChange, onRefresh, disabled, labe
     else next = routes.get(id)
     if (next) { onChange(next); setOpen(false) }
   }
-  return <Menu open={open} portal side={composer ? 'top' : 'bottom'} align={composer ? 'end' : 'start'}
+  return <Menu open={open} portal className={css.menuAnchor} side={composer ? 'top' : 'bottom'} align={composer ? 'end' : 'start'}
     listClassName={css.modelMenu} items={items} selectedId={selectedId} onSelect={choose} onClose={() => setOpen(false)}
     anchor={<Button type="button" variant={composer ? 'ghost' : 'outline'} disabled={disabled} aria-label={label}
       aria-expanded={open} aria-haspopup="menu" title={auto ? t('model.autoHint') : selectedGroup?.name}
