@@ -110,7 +110,9 @@
 .retention { margin-top: 32px; padding-block: 24px; border-top: 0.5px solid var(--dsw-alias-border-l3); }
 .retention > p { margin-block: 12px; }
 .retentionStats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 24px; margin-block: 20px; font: var(--dsw-font-xs-13); }
-.retentionStats > div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.retentionStats > dl { display: grid; align-content: start; gap: 12px; margin: 0; }
+.retentionStats > dl > div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.retentionTotal { grid-column: 1 / -1; }
 .retentionStats dt { color: var(--dsw-alias-label-secondary); }
 .retentionStats dd { margin: 0; white-space: nowrap; }
 .retention summary { cursor: pointer; font-weight: 500; }

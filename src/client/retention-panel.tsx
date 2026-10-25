@@ -23,14 +23,25 @@ export function RetentionPanel({ preview, outcome, busy, recordStorage, moving, 
     {recordStorage && <RecordLocation storage={recordStorage} busy={moving || busy} moving={moving} onMove={onMoveRecords} onOpen={onOpenRecords} onPickDirectory={onPickDirectory} t={t} />}
     {!preview && busy && <div className={css.empty}><StateDot state="ongoing" /></div>}
     {preview && <>
-      <dl className={css.retentionStats}>
+      <div className={css.retentionStats}>
+        <dl className={css.retentionTotal}>
+          <div><dt>{t('retention.servantBytes')}</dt><dd>{bytes(preview.totals.servantBytes)}</dd></div>
+        </dl>
         {([
-          ['retention.servantBytes', bytes(preview.totals.servantBytes)], ['retention.taskBytes', bytes(preview.totals.taskBytes)],
-          ['retention.skillBytes', bytes(preview.totals.knowledgeBytes)], ['retention.assistantBytes', bytes(preview.totals.assistantBytes)],
-          ['retention.identityBytes', bytes(preview.totals.tombstoneBytes)], ['retention.nativeBytes', bytes(preview.totals.nativeSessionBytes)],
-          ['retention.foregroundBytes', bytes(preview.totals.foregroundSessionBytes)],
-        ] as Array<[ServantLocaleKey, string]>).map(([key, value]) => <div key={key}><dt>{t(key)}</dt><dd>{value}</dd></div>)}
-      </dl>
+          [
+            ['retention.skillBytes', bytes(preview.totals.knowledgeBytes)],
+            ['retention.assistantBytes', bytes(preview.totals.assistantBytes)],
+            ['retention.identityBytes', bytes(preview.totals.tombstoneBytes)],
+            ['retention.foregroundBytes', bytes(preview.totals.foregroundSessionBytes)],
+          ],
+          [
+            ['retention.taskBytes', bytes(preview.totals.taskBytes)],
+            ['retention.nativeBytes', bytes(preview.totals.nativeSessionBytes)],
+          ],
+        ] as Array<Array<[ServantLocaleKey, string]>>).map(group => <dl key={group[0][0]}>
+          {group.map(([key, value]) => <div key={key}><dt>{t(key)}</dt><dd>{value}</dd></div>)}
+        </dl>)}
+      </div>
       <p>{t('retention.plan', { archive: preview.archiveTasks.length, remove: preview.deleteArchives.length, skills: preview.compactSkills.length, bytes: bytes(preview.totals.estimatedReclaimedBytes) })}</p>
       <p className={css.muted}>{t('retention.protected', { count: preview.blocked.length, bytes: bytes(preview.blocked.filter(item => item.kind !== 'native').reduce((sum, item) => sum + item.bytes, 0)) })}</p>
       {preview.totals.overBudgetBytes > 0 && <p className={css.notice}>{t('retention.overBudget', { bytes: bytes(preview.totals.overBudgetBytes) })}</p>}
