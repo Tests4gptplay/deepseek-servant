@@ -4,7 +4,8 @@ import { mkdir, readFile } from 'node:fs/promises'
 await mkdir('lib', { recursive: true })
 const roles = ['foreground', 'planner', 'worker', 'helper']
 const roleTexts = Object.fromEntries(await Promise.all(roles.map(async name => [name, await readFile(`src/roles/${name}.md`, 'utf8')])))
-const icon = `data:image/png;base64,${(await readFile('icon.png')).toString('base64')}`
+// Page artwork stays independent of the plugin-list icon.
+const pageIcon = `data:image/png;base64,${(await readFile('assets/page-icon.png')).toString('base64')}`
 const statusIcon = `data:image/png;base64,${(await readFile('assets/statusbar-icon.png')).toString('base64')}`
 await build({
   entryPoints: ['src/host.ts'], outfile: 'lib/host.js', bundle: true,
@@ -19,7 +20,7 @@ const clientOptions = {
   external: ['@deepseek-ai/*', 'react', 'react/*', 'react-dom', 'react-dom/*'],
   define: {
     __SERVANT_STATUS_ICON_DATA_URI__: JSON.stringify(statusIcon),
-    __SERVANT_ICON_DATA_URI__: JSON.stringify(icon),
+    __SERVANT_ICON_DATA_URI__: JSON.stringify(pageIcon),
   },
   banner: { js: 'window.__ModuleLoader__.load({ id: "deepseek-servant", factory: (require) => { var module = { exports: {} }; var exports = module.exports;' },
   footer: { js: 'return module.exports; } });' },
