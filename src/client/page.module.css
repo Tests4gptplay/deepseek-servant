@@ -28,7 +28,7 @@
 .identity h1 { overflow-wrap: anywhere; }
 .identity p { margin-top: 4px; color: var(--dsw-alias-label-secondary); font: var(--dsw-font-xs-13); }
 .avatar { display: block; flex: none; width: 44px; height: 44px; object-fit: contain; background: transparent; }
-.welcomeIcon { display: block; flex: none; width: 64px; height: 64px; object-fit: contain; background: transparent; }
+.welcomeIcon { display: block; flex: none; width: auto; max-width: 100%; height: clamp(220px, 34vh, 360px); object-fit: contain; border-radius: 0; background: transparent; }
 .headerStatus { flex: none; }
 .status { gap: 6px; white-space: nowrap; font: var(--dsw-font-xs-13); }
 .navigation { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 0 clamp(24px, 4vw, 48px) 20px; }
@@ -42,7 +42,7 @@
 .empty p, .welcome p { max-width: 480px; color: var(--dsw-alias-label-secondary); }
 .conversation { display: flex; flex: 1; flex-direction: column; width: 100%; min-width: 0; min-height: 480px; }
 .messages { flex: 1; overflow: auto; min-height: 120px; padding: 8px 8px 24px; }
-.welcome { min-height: 280px; }
+.welcome { min-height: 280px; padding-block: 24px; }
 .message { max-width: 92%; margin-bottom: 24px; padding-right: 20px; }
 .messageAuthor { color: var(--dsw-alias-label-secondary); font: var(--dsw-font-xs-strong-13); margin-bottom: 6px; }
 .messageText { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.75; }
