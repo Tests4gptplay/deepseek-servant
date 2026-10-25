@@ -6,7 +6,28 @@
 
 设置页的“Servant 记录存储位置”显示当前目录，支持输入已有文件夹的完整路径或使用“选择文件夹”。选择后点击“迁移并应用”才提交；“打开文件夹”始终打开已经生效的目录，而不是尚未提交的输入。
 
-迁移先等待在途记录写入，将插件自有的 `deepseek_servant.json` 复制到目标目录，经原生 Domain 重新读取核对后提交目录指针，再移除旧文件。期间新增的记录写入排队，随后写入新目录。目标存在同名记录时拒绝覆盖；提交前失败则继续使用原目录。原位置只保留宿主管理的小型 `deepseek_servant_location` 目录指针，重启后仍可找到迁移的记录。若旧副本未能移除，界面显示其位置。
+记录目录下的 deepseek_servant 子文件夹按类别存放：
+
+```text
+记录存储位置/
+  deepseek_servant/
+    layout.json
+    tasks/<任务ID--身份摘要>/record.json
+    assistants/<助理ID--身份摘要>/record.json
+    skills/<技能ID--身份摘要>/record.json
+    knowledge/facts/<事实ID--身份摘要>/record.json
+    knowledge/preferences/<偏好ID--身份摘要>/record.json
+    settings/<设置ID--身份摘要>/record.json
+    backups/deepseek_servant.before-split.json
+```
+
+每个任务和技能都有独立目录。技能的正文、版本、证据及使用记录仍在该技能的 record.json 内作为一条记录原子保存；不同工作区中的同名技能通过身份摘要区分。任务精简后的身份保护记录仍原子替换同一个任务文件，不另拆成一次跨文件提交。每次更新只重写对应记录，继续使用原生 storageDomain 校验和 JSON 后端的持久化写入。
+
+alpha.16 首次加载时，在原位置自动把旧版 deepseek_servant.json 拆分，经原生 Domain 重读核对后切换；原文件完整保存在 backups/deepseek_servant.before-split.json，不再作为活动记录读写。已有自定义记录目录也在原地升级。
+
+更换存储位置时先等待在途写入，复制整个 deepseek_servant 子文件夹（包括备份），落盘并重读核对后提交目录指针，再移除旧目录。新增写入排队，随后写入新位置。目标已有 Servant 记录时拒绝覆盖；提交前失败则继续使用原位置。宿主默认位置只保留小型 deepseek_servant_location 目录指针。若旧副本未能移除，界面显示其位置。
+
+界面的分类大小统计针对当前有效记录内容，不包含迁移备份、JSON 文件封装和文件系统开销；保留策略不会自动删除迁移备份。
 
 该设置不修改任务工作区、成果文件或其他插件的数据。前台和后台的原生 Session 日志是另一套宿主存储：长对话日志不随此目录迁移，界面单独显示 DSH 当前日志位置。不要把插件记录迁移后的大小变化视为原生日志磁盘占用变化。
 
