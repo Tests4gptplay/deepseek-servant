@@ -12,6 +12,7 @@ export interface QueryServiceOptions {
   knowledge: KnowledgeService
   workspaces(): ServantView['workspaces']
   runtime(): ServantView['runtime']
+  recordStorage(): ServantView['recordStorage']
 }
 
 export class QueryService {
@@ -30,7 +31,7 @@ export class QueryService {
       },
       tasks: tasks.filter(task => task.assistantId === assistantId)
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map(taskView),
-      messages, knowledge, workspaces: this.options.workspaces(), runtime: this.options.runtime(),
+      messages, knowledge, workspaces: this.options.workspaces(), runtime: this.options.runtime(), recordStorage: this.options.recordStorage(),
     }
   }
   async task(taskId: string): Promise<TaskView | undefined> {

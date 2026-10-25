@@ -50,6 +50,7 @@ export function apply(ctx: Context): void {
     revise: input => call('revise', input),
     knowledge: input => call('knowledge', input),
     retention: input => call('retention', input),
+    moveRecords: input => call('moveRecords', input),
     subscribeChanged(listener) {
       const events = new EventSource(new URL('api/deepseek-servant/events', document.baseURI))
       events.addEventListener('changed', listener)
@@ -84,7 +85,7 @@ export function apply(ctx: Context): void {
     onPickDirectory: directoryPicker ? () => directoryPicker.pick() : undefined,
     onRefresh: source.refresh, onSend: source.send, onConfigure: source.configure,
     onControl: source.control, onPriority: source.priority, onReconcile: source.reconcile, onAnswer: source.answer, onRevise: source.revise,
-    onKnowledge: source.knowledge, onRetention: source.retention, onOpenArtifact, onOpenRecords,
+    onKnowledge: source.knowledge, onRetention: source.retention, onMoveRecords: source.moveRecords, onOpenArtifact, onOpenRecords,
   })
   ctx.slots.inject('main', () => ctx.slots.register({
     name: 'main', key: PANEL_ID, locale: NS, inject: injectPage,

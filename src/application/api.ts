@@ -18,6 +18,7 @@ export interface ServantApiOptions {
   coordinator: RuntimeCoordinator
   retention: RetentionService
   recordsDirectory(): string
+  moveRecords(directory: string, expectedDirectory: string, signal: AbortSignal): Promise<unknown>
   openPath(path: string, signal: AbortSignal): Promise<unknown>
 }
 const Target = z.strictObject({ taskId: Id, commandId: Id.optional() })
@@ -98,6 +99,10 @@ export class ServantApi {
         if (!execution || execution.physicalState !== 'unknown') throw new Error('此操作只用于需要人工核对的未知旧执行。')
         const commandId = input.commandId ?? `ui-reconcile:${randomUUID()}`
         return this.options.coordinator.attestStopped(input.taskId, input.executionId, input.evidence, commandId)
+      }
+      case 'moveRecords': {
+        const input = z.strictObject({ directory: z.string().trim().min(1).max(4000), expectedDirectory: z.string().min(1).max(4000) }).parse(raw)
+        return this.options.moveRecords(input.directory, input.expectedDirectory, signal)
       }
       case 'openRecords': {
         ScopeTarget.parse(raw)

@@ -36,6 +36,7 @@ export interface ServantInjected {
   onRevise: ServantSource['revise']
   onKnowledge: ServantSource['knowledge']
   onRetention: ServantSource['retention']
+  onMoveRecords: ServantSource['moveRecords']
   onOpenRecords: () => Promise<void>
   onOpenArtifact: (taskId: string, artifactId: string) => Promise<void>
 }
@@ -122,7 +123,9 @@ function ServantSettingsContent({ snapshot, models, actions, t }: {
         {tab === 'settings' ? <div className={css.settingsColumn}>
           <Settings value={value} busy={snapshot.pending.includes('configure')} onSave={actions.onConfigure} t={t}
             models={models} onRefreshModels={actions.onRefreshModels} onPickDirectory={actions.onPickDirectory} />
-          <RetentionPanel preview={snapshot.retention} outcome={snapshot.lastCleanup} busy={snapshot.pending.includes('retention')} onRetention={actions.onRetention} onOpenRecords={actions.onOpenRecords} t={t} />
+          <RetentionPanel preview={snapshot.retention} outcome={snapshot.lastCleanup} busy={snapshot.pending.includes('retention')}
+            recordStorage={value.recordStorage} moving={snapshot.pending.includes('moveRecords')} onMoveRecords={actions.onMoveRecords}
+            onPickDirectory={actions.onPickDirectory} onRetention={actions.onRetention} onOpenRecords={actions.onOpenRecords} t={t} />
           <section className={css.experimental} aria-labelledby={`${id}-experimental`}>
             <h3 id={`${id}-experimental`}>{t('experimental.title')}</h3>
             <p className={css.muted}>{t('experimental.placeholder')}</p>

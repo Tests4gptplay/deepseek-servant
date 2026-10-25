@@ -22,7 +22,7 @@ import type { Assistant } from './contracts/assistant.ts'
 import type { RuntimeProfile } from './contracts/task.ts'
 
 export const name = 'deepseek-servant'
-export const inject = ['storageDomain', 'agents', 'sessions', 'sessionPersistence', 'workspaceRegistry', 'workingDirectory', 'agentPresets']
+export const inject = ['storage', 'storageDomain', 'agents', 'sessions', 'sessionPersistence', 'workspaceRegistry', 'workingDirectory', 'agentPresets']
 export const Config = z.object({ workerSeats: z.int().min(1).max(32).default(2), reviewEvery: z.int().min(1).max(100).default(5),
   presetId: z.string().min(1).default('standard'), foreground: ModelRouteSchema.default({}), background: ModelRouteSchema.default({}),
   retentionIntervalMinutes: z.number().min(1).max(1440).default(60) })
@@ -103,9 +103,14 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   })
   coordinator = new RuntimeCoordinator({ tasks, assistants, knowledge, supervisor, sessions, workerSeats: config.workerSeats, onChanged: changed, onError: reportError })
   const retention = new RetentionService({ store, tasks, knowledge, nativeSessions: sessions, onChanged: changed })
-  const query = new QueryService({ assistants, tasks, knowledge, workspaces: () => workspace.list(), runtime: () => coordinator!.status() })
+  const query = new QueryService({ assistants, tasks, knowledge, workspaces: () => workspace.list(), runtime: () => coordinator!.status(), recordStorage: () => store.storageView() })
   const api = new ServantApi({ assistants, tasks, knowledge, query, coordinator, retention,
     recordsDirectory: () => store.recordsDirectory(),
+    moveRecords: async (directory, expectedDirectory, signal) => {
+      const result = await store.moveRecords(directory, expectedDirectory, signal)
+      changed()
+      return result
+    },
     openPath: async (target, signal) => {
       const controller = ctx.get('sessionController')
       if (!controller?.canOpenWorkspacePath()) throw new Error(`当前宿主没有本地打开文件能力。路径：${target}`)

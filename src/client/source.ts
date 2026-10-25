@@ -18,6 +18,7 @@ export interface ServantClientApi {
   revise(input: { taskId: string, expectedGoalRevision: number, goal: GoalInput }): Promise<unknown>
   knowledge(input: Record<string, unknown>): Promise<unknown>
   retention(input: RetentionRequest): Promise<unknown>
+  moveRecords(input: { directory: string; expectedDirectory: string }): Promise<unknown>
   subscribeChanged(listener: () => void): () => void
   subscribeReset(listener: () => void): () => void
 }
@@ -34,7 +35,7 @@ export interface ServantSnapshot {
 export interface ServantNotice {
   sequence: number
   kind: 'success' | 'error'
-  key: 'sent' | 'settingsSaved' | 'taskUpdated' | 'knowledgeUpdated' | 'retentionUpdated' | 'retentionPolicySaved' | 'failed'
+  key: 'sent' | 'settingsSaved' | 'taskUpdated' | 'knowledgeUpdated' | 'retentionUpdated' | 'retentionPolicySaved' | 'recordsMoved' | 'failed'
   detail?: string
 }
 
@@ -127,6 +128,7 @@ export function createServantSource(api: ServantClientApi, notify: (notice: Omit
     answer: (taskId: string, waitId: string, answer: string) => mutate(`task:${taskId}`, 'taskUpdated', () => api.answer({ taskId, waitId, answer })),
     revise: (taskId: string, expectedGoalRevision: number, goal: GoalInput) => mutate(`task:${taskId}`, 'taskUpdated', () => api.revise({ taskId, expectedGoalRevision, goal })),
     knowledge: (input: Record<string, unknown>) => mutate(`knowledge:${String(input.skillId ?? input.id)}`, 'knowledgeUpdated', () => api.knowledge({ ...input, assistantId: assistantId() })),
+    moveRecords: (directory: string, expectedDirectory: string) => mutate('moveRecords', 'recordsMoved', () => api.moveRecords({ directory, expectedDirectory })),
     retention: (input: RetentionRequest) => mutate('retention', input.action === 'preview' ? undefined : input.action === 'configure' ? 'retentionPolicySaved' : 'retentionUpdated', async () => {
       const result = await api.retention(input)
       if (input.action === 'sweep' && result && typeof result === 'object' && 'remaining' in result) {

@@ -15,7 +15,14 @@ export interface AssistantView {
   workspace: WorkspaceBinding
   pendingInputs: Array<{ messageId: string; error?: string }>
 }
+export interface RecordStorageView {
+  directory: string
+  nativeDirectory?: string
+  /** The move committed, but the old copy could not be removed. */
+  retainedSource?: string
+}
 export interface ServantView {
+  recordStorage: RecordStorageView
   assistant: AssistantView
   tasks: TaskView[]
   messages: ConversationMessage[]

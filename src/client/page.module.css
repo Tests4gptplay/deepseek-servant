@@ -176,4 +176,11 @@
 .menuAnchor { width: fit-content; max-width: 100%; }
 
 .retentionHeader { flex-wrap: wrap; }
-.retentionActions { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.retentionHeader > h2 { margin: 0; font: var(--dsw-font-m-18); }
+.recordLocation { display: flex; flex-direction: column; gap: 10px; margin-block: 20px; padding-bottom: 20px; border-bottom: 0.5px solid var(--dsw-alias-border-l3); font: var(--dsw-font-xs-13); }
+.recordLocation p { margin: 0; }
+.recordLocationRow { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.recordLocationRow .directoryField { flex-basis: 220px; }
+.recordLocationActions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.nativeLogDirectory { color: var(--dsw-alias-label-secondary); }
+.nativeLogDirectory code { display: block; margin-top: 8px; overflow-wrap: anywhere; }

@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { clientRequestSchema } from '@deepseek-ai/dsh-client-connection'
 import { z } from 'zod'
 
-export const servantRemoteMethods = ['view', 'send', 'configure', 'control', 'priority', 'answer', 'revise', 'knowledge', 'readDelivery', 'task', 'openArtifact', 'openRecords', 'retention', 'reconcile'] as const
+export const servantRemoteMethods = ['view', 'send', 'configure', 'control', 'priority', 'answer', 'revise', 'knowledge', 'readDelivery', 'task', 'openArtifact', 'openRecords', 'moveRecords', 'retention', 'reconcile'] as const
 export type ServantRemoteMethod = typeof servantRemoteMethods[number]
 
 export interface ServantRemoteApi {
