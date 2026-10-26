@@ -298,7 +298,8 @@ export function assembleRoleInput(task: Task, execution: ExecutionBinding, actio
       return report && dependency.acceptedAtGoalRevision === task.goal.revision ? [{ childId: id, resultId: report.resultId, summary: clipped(report.summary), artifacts: hotArtifacts(report.artifacts), ref: memoryRef(task.id, 'report', report.resultId) }] : []
     }) } : {}),
     handoff: { ...(restart?.state === 'resolved' ? { recovery: {
-      notice: 'The previous execution failed. The runtime settled its exact owner and jobs, then restarted this same role for the original Task and Child. Resume the saved frontier and retained artifacts; this is not a new user request.',
+      notice: 'Continue the original Task and assignment under the same role from the saved frontier and artifacts. For a host interruption, use the predecessor Session and current operation/artifact state to reconcile unfinished tools and jobs before repeating effects. Resume remaining work automatically; prior success stays complete.',
+      ...(restart.interruption ? { interruption: restart.interruption } : {}),
       incidentId: restart.id, previousExecutionId: restart.executionId,
       errors: restart.errors.slice(-3).map(error => ({ ...error, operation: clipped(error.operation, 500), message: clipped(error.message, 1000) })),
       resolution: restart.resolution ? clipped(restart.resolution, 1500) : undefined, ref: memoryRef(task.id, 'incident', restart.id),

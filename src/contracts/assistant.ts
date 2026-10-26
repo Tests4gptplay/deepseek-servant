@@ -74,7 +74,7 @@ export interface ForegroundCapture {
   messages: ConversationMessage[]
   turns: Array<{ turn: number; at: string; messageIds: string[] }>
   finished: boolean
-  ended?: { reason: string; message?: string; messageIds: string[]; at: string }
+  ended?: { reason: string; interrupted?: boolean; message?: string; messageIds: string[]; at: string }
 }
 export interface ConversationQuery { before?: string; date?: string }
 export interface ConversationMessage { id: string; role: 'user' | 'assistant' | 'system'; text: string; at?: string; source?: string; turn?: number; ref?: string }

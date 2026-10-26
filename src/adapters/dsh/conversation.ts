@@ -64,7 +64,9 @@ export function conversationSnapshot(events: readonly SessionEvent[]): Foregroun
     if (event.type === 'turn/end') {
       assign(event.data.turn)
       finished = event.data.reason.kind === 'completed'
-      ended = { reason: event.data.reason.kind, at: new Date(event.time).toISOString(),
+      const reason = event.data.reason
+      ended = { reason: reason.kind, at: new Date(event.time).toISOString(),
+        ...(reason.kind === 'interrupted' || reason.kind === 'aborted' && ['disposed', 'parent'].includes(reason.reason.kind) ? { interrupted: true } : {}),
         messageIds: messages.filter(message => message.turn === event.data.turn).map(message => message.id),
         ...(event.data.reason.kind === 'error' ? { message: event.data.reason.error.message } : {}) }
       if (finished) turns.push({ turn: event.data.turn, at: new Date(event.time).toISOString(),
@@ -82,6 +84,10 @@ export function conversationSnapshot(events: readonly SessionEvent[]): Foregroun
       if (result?.event === event) append(event.data.message, result.text, event.time, event.data.turn)
     } else {
       const message = deriveEventMessage(event)
+      if (message?.source.kind === 'deepseek-servant-resume') {
+        const original = seen.get(message.source.messageId)
+        if (original && current !== undefined) original.turn = current
+      }
       if (message?.role === 'user' && ['user', 'deepseek-servant'].includes(message.source.kind)) {
         const original = append(message, message.content.filter(block => block.type === 'text').map(block => block.text).join('\n'), event.time, current)
         if (original && current === undefined) unassigned.push(original)

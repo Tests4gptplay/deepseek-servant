@@ -16,7 +16,7 @@ export interface AssistantRuntimePort {
   retire?(assistant: Assistant): Promise<boolean>
   /** Explicit owner-requested conversation deletion stops this foreground only. */
   cancel?(assistant: Assistant): Promise<boolean>
-  resume?(assistant: Assistant): Promise<void>
+  resume?(assistant: Assistant, messageId: string): Promise<void>
   deliver(assistant: Assistant, delivery: Delivery, messageId: string): Promise<void>
   prepareConfiguration?(previous: Assistant, updated: Assistant): Promise<void>
 }
@@ -294,9 +294,8 @@ export class AssistantService {
       const native = (await this.options.runtime.inputs(receipt.sessionId)).get(entry.messageId)
       const text = await this.conversations.journal.fullText(receipt.ref!)
       if (native && (native.source !== source || native.text !== text)) throw new Error('Native input identity differs from its saved original.')
-      if (native?.state === 'claimed' && !native.active) throw new Error('原生回合已领取此消息但未完成消费，原文与现场已保留。')
       const execution = this.execution(assistant, entry)
-      if (native?.state === 'consumed' || native?.state === 'claimed') await this.options.runtime.resume?.(execution)
+      if (native?.state === 'consumed' || native?.state === 'claimed' && native.active) await this.options.runtime.resume?.(execution, entry.messageId)
       else await this.options.runtime.send(execution, text, entry.messageId, source)
       receipt.status = 'sent'; delete receipt.error
     } catch (error) {
@@ -312,7 +311,7 @@ export class AssistantService {
     if (active) {
       const captured = await this.capture(assistant, assistant.sessionId)
       const completed = new Set(captured.turns.flatMap(turn => turn.messageIds))
-      const failed = captured.ended && captured.ended.reason !== 'completed' && captured.ended.messageIds.includes(active.messageId)
+      const failed = captured.ended && !captured.ended.interrupted && captured.ended.reason !== 'completed' && captured.ended.messageIds.includes(active.messageId)
       if ((!captured.finished || !completed.has(active.messageId)) && !failed) {
         if (resume) await this.admit(assistant, active)
         return

@@ -10,6 +10,21 @@ const result = (id: string, content: unknown[], replayState?: unknown) => ({ tur
   message: { id, role: 'assistant', source: { kind: 'model', provider: 'test', model: 'test', replayState }, content } })
 const end = () => event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 9)
 
+test('interrupted foreground continuation completes the original input without exposing recovery prompts', () => {
+  const prefix = [event('turn/start', { turn: 1 }, 0), event('user/message', user, 1),
+    event('turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'disposed' } } }, 2)]
+  assert.equal(conversationSnapshot(prefix).ended?.interrupted, true)
+  const snapshot = conversationSnapshot([...prefix, event('turn/start', { turn: 2 }, 3),
+    event('user/message', { ...user, id: 'recovery', source: { kind: 'deepseek-servant-resume', messageId: user.id } }, 4),
+    event('assistant/message', { ...result('answer', [{ type: 'text', text: 'Continued answer' }]), turn: 2 }, 5),
+    event('turn/end', { turn: 2, reason: { kind: 'completed' } }, 6)])
+  assert.deepEqual(snapshot.messages.map(message => message.text), ['你好', 'Continued answer'])
+  assert.deepEqual(snapshot.turns.map(turn => turn.messageIds), [['human', 'answer']])
+  assert.equal(snapshot.finished, true)
+  assert.equal(conversationSnapshot([event('turn/start', { turn: 1 }, 0), event('user/message', user, 1),
+    event('turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 2)]).ended?.interrupted, undefined)
+})
+
 test('non-completed terminal turns retain consumed identities without adding a completed exchange', () => {
   const snapshot = conversationSnapshot([event('turn/start', { turn: 1 }, 0), event('user/message', user, 1),
     event('turn/end', { turn: 1, reason: { kind: 'error', error: { message: 'Disconnected' } } }, 2)])

@@ -287,18 +287,15 @@ export class RuntimeCoordinator {
       && ['stopped', 'lost'].includes(execution.physicalState) && execution.ownedJobIds.length === 0) return
     const inspection = await this.options.sessions.inspect(execution.sessionId)
     const ownership = await this.options.sessions.probeOwnership(execution.sessionId)
-    if (ownership === 'busy' || inspection.liveAgent) {
-      await this.uncertainExecution(task, execution, 'Another native owner or Session lease is still live; Servant will not take over its tools or jobs.')
+    if (ownership === 'busy' || inspection.liveAgent || inspection.liveJobIds.length) {
+      await this.uncertainExecution(task, execution, 'The native Agent, Session lease or current Job registry still has an owner; retain its execution until it settles.')
       return
     }
     const unsettledJobs = inspection.jobs.filter(job => job.owner === execution.agentId && job.state === 'registered')
     const settledJobs = new Set(inspection.jobs.filter(job => job.owner === execution.agentId && job.state !== 'registered').map(job => job.id))
-    if (execution.ownedJobIds.some(id => !settledJobs.has(id)) || unsettledJobs.length || inspection.unresolvedToolCallIds.length
-      || inspection.exists && !inspection.lifecycleKnown) {
-      await this.uncertainExecution(task, execution, 'Restart left unmatched native tools or job identities. The original OS side effects are not proven stopped. Inspect the actual process/artifact state; do not replay the operation.')
-      return
-    }
-    const closedIdle = inspection.exists && inspection.lifecycleKnown && inspection.lastTurn?.closed
+    const interruptedWork = execution.ownedJobIds.some(id => !settledJobs.has(id)) || unsettledJobs.length > 0
+      || inspection.unresolvedToolCallIds.length > 0 || inspection.exists && !inspection.lifecycleKnown
+    const closedIdle = !interruptedWork && inspection.exists && inspection.lifecycleKnown && inspection.lastTurn?.closed
       && inspection.lastTurn.reason !== 'error' && !inspection.lastTurn.error
       && inspection.queuedInbox.nextTurn.length === 0 && inspection.queuedInbox.nextStep.length === 0
     const lastReport = Object.values(task.reports).filter(report => report.executionId === execution.executionId).at(-1)
@@ -310,15 +307,23 @@ export class RuntimeCoordinator {
       if (action && ['running', 'uncertain'].includes(action.status) && action.kind === 'dispatch') await this.finish(task.id, action, 'Cold native report and closed inbox prove the original dispatch completed admission.')
       return
     }
+    if ((execution.state === 'active' || unfinishedSemantic) && execution.role !== 'helper') {
+      // Save interruption facts before releasing the old runtime claim. This also
+      // survives a second power loss between these two durable writes.
+      await this.command(task.id, { type: 'incident.open', commandId: `cold-incident:${this.ownerId}:${execution.executionId}`, source,
+        executionId: execution.executionId, operation: 'host interruption',
+        message: 'The previous native runtime is absent and its Session lease is available. Continue the same role from saved work; reconcile interrupted effects using the retained Session and artifacts before repeating an operation.',
+        interruption: {
+          sessionId: execution.sessionId, eventCount: inspection.eventCount,
+          pendingToolCallIds: inspection.unresolvedToolCallIds,
+          queuedInputIds: [...inspection.queuedInbox.nextTurn, ...inspection.queuedInbox.nextStep],
+          recordedJobIds: execution.ownedJobIds,
+          jobs: inspection.jobs.filter(job => job.owner === execution.agentId).map(({ id, kind, state }) => ({ id, kind, state })),
+        } })
+    }
     await this.command(task.id, { type: 'execution.observed', commandId: `recovery-absent:${this.ownerId}:${execution.executionId}`, source,
       executionId: execution.executionId, physicalState: 'lost', ownedJobIds: [] })
-    if ((execution.state === 'active' || unfinishedSemantic) && execution.role !== 'helper') {
-      await this.command(task.id, { type: 'incident.open', commandId: `cold-incident:${execution.executionId}`, source,
-        executionId: execution.executionId, operation: inspection.lastTurn?.error ? 'native Agent error' : 'interrupted execution',
-        message: inspection.lastTurn?.error ?? (inspection.exists
-          ? 'The previous runtime ended before finishing its semantic action. Native ownership and tool/job history are settled.'
-          : 'The execution binding was saved before its native Session was created.') })
-    } else {
+    if (execution.state !== 'active' && !unfinishedSemantic) {
       const action = task.pendingActions[execution.actionId]
       if (action?.kind === 'dispatch' && ['running', 'uncertain'].includes(action.status) && lastReport) await this.finish(task.id, action, 'A durable terminal worker report proves dispatch occurred; the old owner is now absent.')
     }

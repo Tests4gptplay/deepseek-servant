@@ -41,7 +41,6 @@ export class Scheduler {
     this.seats = 2
     this.setWorkerSeats(settings.workerSeats ?? 2)
     this.platform = settings.platform
-    if (!Number.isInteger(this.workerSeats) || this.workerSeats < 1) throw new Error('workerSeats must be a positive integer')
   }
 
   canRun(task: Task, action: PendingAction, allTasks: readonly Task[], live: LiveExecutions = new Map()): Admission {
@@ -155,8 +154,8 @@ export class Scheduler {
 function occupiesPhysicalOwner(execution: ExecutionBinding, live: LiveExecutions): boolean {
   const observed = live.get(execution.executionId)
   const state = observed?.state ?? execution.physicalState
-  // `lost` is an observed absent owner, not the mere absence of an in-memory
-  // handle after restart (which must be `unknown` and separately reconciled).
+  // Cold recovery marks an owner lost after checking the native Agent, Session
+  // lease and live Job registry; historical job registrations do not reserve it.
   return (observed?.ownedJobIds ?? execution.ownedJobIds).length > 0 || state !== 'stopped' && state !== 'lost'
 }
 

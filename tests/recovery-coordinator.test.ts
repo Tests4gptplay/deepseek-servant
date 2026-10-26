@@ -11,7 +11,7 @@ async function coldFixture() {
   const worker = await f.bind('dispatch', 'a')
   await f.execute({ type: 'execution.observed', executionId: planner.execution.executionId, physicalState: 'stopped', ownedJobIds: [] })
   const inspection: DshSessionInspection = { exists: true, sessionId: worker.execution.sessionId, liveAgent: false, liveSession: false,
-    lifecycleKnown: true, eventCount: 15, queuedInbox: { nextTurn: [], nextStep: [] }, unresolvedToolCallIds: [], jobs: [],
+    lifecycleKnown: true, liveJobIds: [], eventCount: 15, queuedInbox: { nextTurn: [], nextStep: [] }, unresolvedToolCallIds: [], jobs: [],
     lastTurn: { turn: 1, closed: true, reason: 'completed', toolCallIds: ['saved-report'] } }
   const restored: string[] = [], seen: string[] = [], errors: unknown[] = []
   let inputPresent = false
@@ -52,18 +52,69 @@ test('cold recovery restores the exact reported idle owner and reconciles admitt
   assert.equal(Object.values(task.executions).filter(e => e.role === 'worker').length, 1)
 })
 
-test('cold recovery retains unmatched Job ownership rather than replaying native effects', async () => {
+test('power-loss recovery preserves interrupted tool/job facts and automatically admits the same-role successor', async () => {
   const f = await coldFixture()
   await f.execute({ type: 'execution.observed', executionId: f.worker.execution.executionId, physicalState: 'running', ownedJobIds: ['unmatched-job'] })
+  f.inspection.unresolvedToolCallIds = ['unfinished-call']
+  f.inspection.jobs = [{ id: 'unmatched-job', owner: f.worker.execution.agentId, kind: 'external-operation', state: 'registered' }]
+  f.inspection.lastTurn!.closed = false
   await f.recover()
   const task = await f.get(), old = task.executions[f.worker.execution.executionId]
-  assert.equal(old.physicalState, 'unknown')
-  assert.deepEqual(old.ownedJobIds, ['unmatched-job'])
+  assert.equal(old.physicalState, 'lost')
+  assert.deepEqual(old.ownedJobIds, [])
   assert.deepEqual(f.restored, [])
   const recovery = Object.values(task.pendingActions).find(a => a.kind === 'recover' && a.status === 'pending')!
-  assert.ok(recovery)
+  assert.equal(new Scheduler().canRun(task, recovery, [task], new Map()).allowed, true)
+  const incident = task.incidents[recovery.payload.incidentId!]!
+  assert.deepEqual(incident.interruption?.recordedJobIds, ['unmatched-job'])
+  assert.deepEqual(incident.interruption?.pendingToolCallIds, ['unfinished-call'])
+  assert.equal(incident.interruption?.sessionId, old.sessionId)
+  await f.execute({ type: 'recovery.restart', incidentId: incident.id, evidence: 'Native owner absent; resume with retained interruption evidence.' })
+  const next = await f.bind('dispatch', 'a')
+  assert.equal(next.execution.assignmentVersion, old.assignmentVersion)
+  assert.equal(next.execution.generation, 2)
+  assert.equal((await f.get()).children.a.progressSegments, 0)
+})
+
+test('repeated host interruptions at the same frontier keep automatic recovery, without a configuration handshake', async () => {
+  const f = await coldFixture()
+  f.inspection.lastTurn!.closed = false
+  for (let generation = 1; generation <= 3; generation++) {
+    await f.recover()
+    const task = await f.get()
+    const recovery = Object.values(task.pendingActions).find(a => a.kind === 'recover' && a.status === 'pending')!
+    assert.ok(recovery)
+    assert.equal(new Scheduler().canRun(task, recovery, [task]).allowed, true)
+    assert.equal(Object.values(task.waits).some(wait => wait.kind === 'configuration' && wait.state === 'waiting'), false)
+    await f.execute({ type: 'recovery.restart', incidentId: recovery.payload.incidentId!, evidence: 'Cold native owner is absent.' })
+    const next = await f.bind('dispatch', 'a')
+    assert.equal(next.execution.assignmentVersion, 1)
+    assert.equal(next.execution.generation, generation + 1)
+    assert.equal((await f.get()).children.a.progressSegments, 0)
+  }
+})
+
+test('cold reconciliation preserves explicit user pause and cancellation', async () => {
+  for (const intent of ['pause', 'cancel'] as const) {
+    const f = await coldFixture()
+    assert.equal((await f.execute({ type: 'task.control', intent }, { kind: 'user', id: 'owner' })).status, 'applied')
+    await f.recover()
+    const task = await f.get()
+    for (const action of Object.values(task.pendingActions).filter(action => action.status === 'pending' && action.kind !== 'stop'))
+      assert.equal(new Scheduler().canRun(task, action, [task]).allowed, false)
+    assert.equal(task.control, intent === 'pause' ? 'paused' : 'cancelled')
+  }
+})
+
+test('cold recovery retains an actually live native Job instead of admitting a second owner', async () => {
+  const f = await coldFixture()
+  await f.execute({ type: 'execution.observed', executionId: f.worker.execution.executionId, physicalState: 'running', ownedJobIds: ['live-job'] })
+  f.inspection.liveJobIds = ['live-job']
+  await f.recover()
+  const task = await f.get()
+  assert.equal(task.executions[f.worker.execution.executionId].physicalState, 'unknown')
+  const recovery = Object.values(task.pendingActions).find(a => a.kind === 'recover' && a.status === 'pending')!
   assert.equal(new Scheduler().canRun(task, recovery, [task], new Map()).allowed, false)
-  assert.equal(task.children.a.activeExecutionId, old.executionId)
 })
 
 test('cold recovery recognizes a saved terminal result without creating a replacement Worker', async () => {

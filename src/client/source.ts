@@ -1,5 +1,5 @@
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
-import type { AssistantSettings, ConversationQuery } from '../contracts/assistant.js'
+import type { AssistantSettings, ConversationMessage, ConversationQuery } from '../contracts/assistant.js'
 import type { GoalInput, ModelRoute } from '../contracts/task.js'
 import type { ServantView } from '../contracts/views.js'
 import type { RetentionPolicy, RetentionPreview, RetentionSweepResult, StorageUsageStats } from '../contracts/retention.js'
@@ -66,20 +66,27 @@ export function createServantSource(api: ServantClientApi, notify: (notice: Omit
   let snapshot: ServantSnapshot = { status: 'loading', pending: [], history: { canGoNewer: false } }
   let history: ConversationQuery[] = [{}]
   let historyIndex = 0
+  let historyPages: ConversationMessage[][] = []
   const listeners = new Set<() => void>()
   let epoch = 0
   let disposers: Array<() => void> = []
   let scheduled = false
   const publish = (next: ServantSnapshot) => { snapshot = next; for (const listener of listeners) listener() }
 
-  const refresh = async (): Promise<void> => {
+  const refresh = async (includeStorage = true): Promise<void> => {
     const request = ++epoch
+    const pageIndex = historyIndex
     publish({ ...snapshot, status: 'loading', error: undefined })
     try {
-      const [value, usage] = await Promise.all([api.view({ conversation: history[historyIndex] }), api.retention({ action: 'stats' })])
-      if (!usage || typeof usage !== 'object' || !('totalBytes' in usage)
-        || typeof usage.totalBytes !== 'number') throw new Error('Invalid Servant storage statistics.')
+      const [page, usage] = await Promise.all([api.view({ conversation: history[pageIndex] }),
+        includeStorage ? api.retention({ action: 'stats' }) : snapshot.storageStats])
       if (request === epoch) {
+        historyPages[pageIndex] = page.messages
+        const messages = new Map<string, ConversationMessage>()
+        for (const batch of historyPages.slice(0, pageIndex + 1).reverse()) {
+          for (const message of batch) messages.set(message.ref ?? message.id, message)
+        }
+        const value = { ...page, messages: [...messages.values()] }
         const previous = snapshot.value && new Set(snapshot.value.tasks.filter(task => task.delivery?.status === 'delivered').map(task => task.id + '/' + task.delivery!.id))
         publish({ ...snapshot, status: 'ready', value, storageStats: usage as StorageUsageStats, error: undefined })
         if (previous) for (const task of value.tasks) if (task.delivery?.status === 'delivered' && !previous.has(task.id + '/' + task.delivery.id)) {
@@ -91,6 +98,7 @@ export function createServantSource(api: ServantClientApi, notify: (notice: Omit
     }
   }
   const historyPage = async (action: 'older' | 'newer' | 'latest' | 'date', date?: string): Promise<void> => {
+    const previous = { history, historyIndex, historyPages }
     if (action === 'older') {
       const before = snapshot.value?.conversationBefore
       if (!before || snapshot.status === 'loading') return
@@ -98,9 +106,14 @@ export function createServantSource(api: ServantClientApi, notify: (notice: Omit
     } else if (action === 'newer') {
       if (historyIndex === 0 || snapshot.status === 'loading') return
       historyIndex--
-    } else { history = [action === 'date' && date ? { date } : {}]; historyIndex = 0 }
+    } else { history = [action === 'date' && date ? { date } : {}]; historyIndex = 0; historyPages = [] }
     publish({ ...snapshot, history: { ...history[historyIndex], canGoNewer: historyIndex > 0 } })
-    await refresh()
+    const query = history[historyIndex]
+    await refresh(false)
+    if (snapshot.status === 'error' && history[historyIndex] === query) {
+      history = previous.history; historyIndex = previous.historyIndex; historyPages = previous.historyPages
+      publish({ ...snapshot, history: { ...history[historyIndex], canGoNewer: historyIndex > 0 } })
+    }
   }
   const invalidate = (): void => {
     // One commit can invalidate several projections; a microtask coalesces their reads.
@@ -168,7 +181,7 @@ export function createServantSource(api: ServantClientApi, notify: (notice: Omit
     retention: (input: RetentionRequest) => mutate('retention', input.action === 'preview' ? undefined : input.action === 'configure' ? 'retentionPolicySaved' : 'retentionUpdated', async () => {
       const result = await api.retention(input)
       if (input.action === 'clearConversation') {
-        history = [{}]; historyIndex = 0
+        history = [{}]; historyIndex = 0; historyPages = []
         publish({ ...snapshot, history: { canGoNewer: false } })
       } else if (input.action === 'stats') {
         publish({ ...snapshot, storageStats: result as StorageUsageStats })

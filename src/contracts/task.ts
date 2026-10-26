@@ -112,6 +112,15 @@ export interface ExecutionReport extends ExecutionReportInput {
   commandId: string
   sequence?: number
 }
+/** Durable interruption facts; missing native runtime ownership does not erase prior effects. */
+export interface InterruptionEvidence {
+  sessionId: string
+  eventCount: number
+  pendingToolCallIds: string[]
+  queuedInputIds: string[]
+  recordedJobIds: string[]
+  jobs: Array<{ id: string; kind: string; state: string }>
+}
 export interface Incident {
   id: string
   executionId: string
@@ -122,6 +131,7 @@ export interface Incident {
   frontier?: string
   resolution?: string
   helperExecutionId?: string
+  interruption?: InterruptionEvidence
 }
 export type ActionKind = 'plan' | 'evaluate' | 'dispatch' | 'continue' | 'stop' | 'deliver' | 'learn' | 'feedback' | 'recover' | 'help'
 export interface LearningProposal {
@@ -248,7 +258,7 @@ export type TaskCommand = CommandBase & (
   | { type: 'execution.requestHelp'; kind: 'mechanical' | 'user' | 'configuration' | 'resource'; operation: string; message: string; wait?: WaitSpec }
   | { type: 'execution.observed'; executionId: string; physicalState: PhysicalState; ownedJobIds?: string[] }
   | { type: 'execution.abandon'; executionId: string; evidence: string }
-  | { type: 'incident.open'; executionId: string; operation: string; message: string }
+  | { type: 'incident.open'; executionId: string; operation: string; message: string; interruption?: InterruptionEvidence }
   | { type: 'recovery.restart'; incidentId: string; evidence: string }
   | { type: 'recovery.legacy' }
   | { type: 'action.claim'; actionId: string; ownerId: string }

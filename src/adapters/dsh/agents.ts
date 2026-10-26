@@ -15,6 +15,7 @@ declare module '@deepseek-ai/dsh-llm' {
     /** Durable Servant task input; the message id binds the PendingAction. */
     'deepseek-servant': { kind: 'deepseek-servant' }
     'deepseek-servant-history': { kind: 'deepseek-servant-history' }
+    'deepseek-servant-resume': { kind: 'deepseek-servant-resume'; messageId: string }
   }
 }
 
@@ -156,7 +157,6 @@ export class DshAgentGateway {
         const events = agent.session.snapshotEvents()
         if (events.some(event => isAppendSurfaceEvent(event) && deriveEventMessage(event)?.id === messageId)) return true
         const input = deriveNativeInputs(events, { 'next-turn': agent.inbox.nextTurn, 'next-step': agent.inbox.nextStep }, agent.status === 'running').get(messageId)
-        if (input?.state === 'claimed' && !input.active) throw new Error('Native input belongs to an interrupted claim and requires explicit recovery.')
         return input?.state === 'claimed' && input.active === true
       },
       subscribe: (listener, terminalOnly = false) => {

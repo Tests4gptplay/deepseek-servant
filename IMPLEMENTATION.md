@@ -1,6 +1,6 @@
 # DeepSeek Servant 实现说明
 
-版本：`0.1.0-alpha.37`。架构基线见 [DESIGN.md](https://github.com/Tests4gptplay/deepseek-servant/blob/main/DESIGN.md)，实施与实测记录如下。
+版本：`0.1.0-alpha.39`。架构基线见 [DESIGN.md](https://github.com/Tests4gptplay/deepseek-servant/blob/main/DESIGN.md)，实施与实测记录如下。
 
 **设计来源：**[Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness)，在 DSH 中实现其持续任务、Agent 角色分工、工作接续与知识积累机制。
 
@@ -35,7 +35,7 @@
 
 用户的消息先在 Assistant 保存稳定 messageId 和正文指纹，再进入独立前台 Session。Foreground 理解原消息，用实际已接纳的用户来源提交 GoalContract。通知类消息不能借用早先用户消息生成新的用户授权。
 
-模型无需编造消息编号。服务端从当前原生回合已消费的用户输入绑定来源，自动构造稳定命令身份。前台未消费的消息或交付在关闭后按原生 inbox 记录恢复；已经消费或被原生明确拒绝的输入不盲目重播。用户仍可调整配置或正常发送新的消息。
+模型无需编造消息编号。服务端从当前原生回合已消费的用户输入绑定来源，自动构造稳定命令身份。前台未消费的消息或交付在关闭后按原生 inbox 记录恢复；失活的未消费 claim 使用原消息身份重新接纳。已消费但被宿主中断的输入恢复原 Session，以隐藏的接续消息继续回复，并将完成结果归于原始输入。明确取消与终结错误按原流程收尾。用户仍可调整配置或正常发送新的消息。
 
 `TaskService.submit` 将 Task、命令回执和 `plan` 动作一次提交。RuntimeCoordinator 收到提交事件，在满足用户控制和资源条件后保存 `action.claim`。Supervisor 再保存 execution/session 身份，最后创建原生 Agent、装入所选 preset 和角色能力、注入该动作的稳定输入。没有保存成功就没有原生派发。
 
@@ -175,6 +175,15 @@ dsh plugin --profile <目标profile> add <本地tgz路径> --ignore-scripts
 ### 历史实测环境与当时的后续项目
 
 该轮实测环境为 Linux / DSH 0.2.1-rc.2，覆盖原生文件工具、长任务周期评审、两次正常 Worker 换代、最终交付和清理。当时列出的后续项目包括 Windows Electron、Codex 专有路由、跨天运行、原生 token 阈值压缩及活动 OS 作业的跨代处理。Linux 测试中的 shell 操作受到宿主沙箱限制，Worker 已采用原生文件工具完成相应业务。64 MiB 为当时的记录维护目标，宿主 Session 日志及工作区成果另行计量。
+
+## alpha.39 重启恢复与历史阅读（2026-10-26）
+
+- 冷启动检查当前原生 Agent、Session 租约和 Job 注册表。历史未收尾工具与 Job 保存为 interruption 现场，交给原角色后继续作。多次中断保持 Child、assignmentVersion、工作前沿和有效段计数；用户暂停、取消与实际存活所有者继续生效。
+- 前台失活 claim 和已消费的中断回合均自动恢复；隐藏接续消息关联原始输入及其工具来源，稳定 task_submit 身份维持同一 Task。
+- 用户在聊天中回答等待问题时，task_answer 直接转交当前用户原文，解除对应等待并接续规划；后台通知仍按结果交付处理。
+- 删除 SSE 定时保活与重复席位检查，维持原生事件驱动调度。
+- 历史上翻预加载、消息去重、失败重试和阅读锚点通过源码与真实组件测试；日历复用官方 ui-schedule 设计、官方 UI primitives 与主题变量，支持键盘导航、选择及清空日期。
+- 73 项源码回归通过；实际 React 页面与官方 primitives 的 jsdom 测试通过。独立原生 SDK 场景在前台和 Worker 均执行期间，强制结束宿主及其子进程树；重新启动后保留旧文件，第二代 Worker 完成剩余文件，原 Task 完成 Planner 验收、前台主动交付和 records 封存清理。模型端为受控 SSE，Agent、Session、文件工具和后台 PowerShell Job 为原生实现。
 
 ## alpha.37 升级验收（2026-10-26）
 

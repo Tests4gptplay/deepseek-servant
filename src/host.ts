@@ -23,7 +23,7 @@ import type { Assistant } from './contracts/assistant.ts'
 import type { RuntimeProfile } from './contracts/task.ts'
 
 export const name = 'deepseek-servant'
-export const inject = ['storage', 'storageDomain', 'agents', 'sessions', 'sessionPersistence', 'workspaceRegistry', 'workingDirectory', 'agentPresets']
+export const inject = ['storage', 'storageDomain', 'agents', 'sessions', 'sessionPersistence', 'workspaceRegistry', 'workingDirectory', 'agentPresets', 'jobs']
 export const Config = z.object({ workerSeats: z.int().min(1).max(32).default(2), reviewEvery: z.int().min(1).max(100).default(5),
   presetId: z.string().min(1).default('standard'), foreground: ModelRouteSchema.default({}), background: ModelRouteSchema.default({}) })
 export type Config = z.infer<typeof Config>
@@ -98,7 +98,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       capture: sessionId => sessions.capture(sessionId),
       retire: assistant => supervisor.retireForeground(assistant),
       cancel: assistant => supervisor.cancelForeground(assistant),
-      resume: async assistant => { await supervisor.ensureForeground(assistant) },
+      resume: (assistant, messageId) => supervisor.resumeForeground(assistant, messageId),
       send: async (assistant, text, messageId, source = 'user') => (await supervisor.ensureForeground(assistant)).send(text, messageId, 'followup', source),
       hasInput: (sessionId, messageId) => sessions.hasMessage(sessionId, messageId),
       inputs: sessionId => sessions.inputs(sessionId),

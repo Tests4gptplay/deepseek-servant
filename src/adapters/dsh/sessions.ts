@@ -24,6 +24,7 @@ export interface DshSessionInspection {
   sessionId: string
   liveAgent: boolean
   liveSession: boolean
+  liveJobIds: string[]
   eventCount: number
   sizeBytes?: number
   /** False when the host's native lifecycle projections are unavailable. Never infer an empty inbox. */
@@ -72,7 +73,6 @@ export class DshSessionReader {
 
   async hasMessage(sessionId: string, messageId: string): Promise<boolean> {
     const input = (await this.inputs(sessionId)).get(messageId)
-    if (input?.state === 'claimed' && !input.active) throw new Error('Native input was claimed by an interrupted turn; automatic replay is not established.')
     return input?.state === 'queued' || input?.state === 'consumed' || input?.state === 'claimed' && input.active === true
   }
 
@@ -86,6 +86,7 @@ export class DshSessionReader {
     const stat = await persistence.stat(id)
     const base: DshSessionInspection = { exists: stat !== undefined || live !== undefined, sessionId,
       liveAgent: this.ctx.agents.get(id) !== undefined, liveSession: live !== undefined, eventCount: 0,
+      liveJobIds: this.ctx.jobs.list(id).filter(job => job.owner === id && (job.status === 'running' || job.status === 'stopping')).map(job => job.id),
       ...(stat?.sizeBytes === undefined ? {} : { sizeBytes: stat.sizeBytes }),
       lifecycleKnown: false, queuedInbox: { nextTurn: [], nextStep: [] }, unresolvedToolCallIds: [], jobs: [] }
     if (!base.exists) return base

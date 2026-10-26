@@ -81,13 +81,7 @@ function installRoutes(ctx: Context, api: ServantRemoteApi): () => Promise<void>
           const changed = () => {
             if (!closed) controller.enqueue(encoder.encode(`event: changed\ndata: ${JSON.stringify({ revision })}\n\n`))
           }
-          // This is transport keepalive only; it neither queries tasks nor wakes Agents.
-          const heartbeat = setInterval(() => {
-            if (!closed) controller.enqueue(encoder.encode(': keepalive\n\n'))
-          }, 25_000)
-          heartbeat.unref()
           cleanup = () => {
-            clearInterval(heartbeat)
             subscribers.delete(changed)
             closeStreams.delete(close)
             request.signal.removeEventListener('abort', close)

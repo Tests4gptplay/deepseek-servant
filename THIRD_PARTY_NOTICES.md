@@ -14,6 +14,12 @@ The browser bundle includes the native preset display resolver from
 `@deepseek-ai/dsh-agent-preset-registry/display` under the MIT license below.
 Preset choices and localized descriptions come from the running DSH host.
 
+The history calendar adapts the official `ui-schedule/src/client/DatePicker.tsx`
+and `DatePicker.module.css` calendar grid, keyboard interaction and month arithmetic.
+It uses the host's shared Button, MenuSurface, anchored positioning and dismissal
+primitives, with DSH theme tokens and Servant-localized history controls.
+These adapted sources retain the following DeepSeek MIT license.
+
 The referenced DSH source is licensed as follows:
 
 MIT License

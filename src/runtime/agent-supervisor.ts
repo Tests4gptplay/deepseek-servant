@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { resolveModelRoute } from '../domain/model-route.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { MessageId, freezeMessage } from '@deepseek-ai/dsh-llm'
 import type { Assistant } from '../contracts/assistant.ts'
 import type { ExecutionBinding, PendingAction, PhysicalState, Role, RuntimeProfile, Task } from '../contracts/task.ts'
 import type { TaskService } from '../application/task-service.ts'
@@ -82,6 +83,24 @@ export class AgentSupervisor {
     return work
   }
 
+  /** Resume a cold foreground input on its original native Session and user identity. */
+  async resumeForeground(assistant: Assistant, messageId: string): Promise<void> {
+    const cold = !this.foreground.has(assistant.id) && !this.options.gateway.hasLiveOwner(assistant.sessionId)
+    const handle = await this.ensureForeground(assistant)
+    if (!cold || handle.observe().state !== 'idle' || hasPendingInput(handle)) return
+    const agent = handle.actualAgent
+    const ended = agent.session.snapshotEvents().filter(event => event.type === 'turn/end').at(-1)
+    if (ended?.type !== 'turn/end') return
+    const reason = ended.data.reason
+    if (reason.kind !== 'interrupted' && !(reason.kind === 'aborted' && ['disposed', 'parent'].includes(reason.reason.kind))) return
+    const id = 'servant-resume:' + messageId + ':' + ended.seq
+    if (handle.hasMessage(id)) return
+    agent.followup(freezeMessage({ id: MessageId(id), role: 'user',
+      source: { kind: 'deepseek-servant-resume', messageId },
+      content: [{ type: 'text', text: 'The host interrupted this conversation. Continue the original pending input using the saved conversation and Task state. Reconcile any existing task submission before submitting work again, then finish the reply.' }] }))
+    await agent.ctx.sessions.flush(agent.session)
+  }
+
   /** Settings cannot silently change the environment of an in-flight turn. */
   async releaseForegroundIfIdle(assistant: Pick<Assistant, 'id'>): Promise<void> {
     await this.foregroundOpening.get(assistant.id)
@@ -140,7 +159,7 @@ export class AgentSupervisor {
         const visible = ctx.tools.schemas().map(tool => tool.name).filter(name => unsupervisedTools.has(name))
         if (visible.length) ctx.tools.restrict({ deny: visible })
         installSkillProvider(ctx, agent, this.options.knowledge, { assistantId: assistant.id, workspaceId: assistant.workspace.id })
-        const allowed = new Set(['task_submit', 'task_query', 'task_records', 'task_control', 'task_priority', 'task_revise_goal', 'memory_query', 'conversation_search', 'conversation_read', 'memory_index', 'memory_read', 'memory_search', 'task_origin_read', 'planner_note_read', 'child_reply_read', 'knowledge_query', 'knowledge_preference', 'skill', 'run_code'])
+        const allowed = new Set(['task_submit', 'task_query', 'task_records', 'task_control', 'task_answer', 'task_priority', 'task_revise_goal', 'memory_query', 'conversation_search', 'conversation_read', 'memory_index', 'memory_read', 'memory_search', 'task_origin_read', 'planner_note_read', 'child_reply_read', 'knowledge_query', 'knowledge_preference', 'skill', 'run_code'])
         ctx.tools.restrict({ deny: ctx.tools.schemas().map(tool => tool.name).filter(name => !allowed.has(name)) })
         installExecutionGuard(ctx, agent, (_owner, name) => allowed.has(name))
       },

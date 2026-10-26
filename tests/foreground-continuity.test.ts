@@ -36,7 +36,7 @@ class NativeFixture implements AssistantRuntimePort {
   async inputs(sessionId: string) { return this.evidence.get(sessionId) ?? new Map<string, AssistantInputEvidence>() }
   async capture(sessionId: string) { return structuredClone(this.sessions.get(sessionId) ?? { messages: [], turns: [], finished: false }) }
   async conversation(sessionId: string) { return (await this.capture(sessionId)).messages }
-  async resume(assistant: Assistant) { this.calls.push({ kind: 'resume', sessionId: assistant.sessionId }) }
+  async resume(assistant: Assistant, messageId: string) { this.calls.push({ kind: 'resume', sessionId: assistant.sessionId, id: messageId }) }
   async retire(assistant: Assistant) {
     this.calls.push({ kind: 'retire-check', sessionId: assistant.sessionId })
     if (this.jobs) return false
@@ -74,6 +74,37 @@ test('a failed consumed turn retires after its jobs settle and does not replay b
   assert.equal((await service.conversations.seed('default')).length, 0)
   assert.ok((await service.conversation()).some(message => message.text.includes('Provider disconnected')))
   assert.equal((await service.userInput('default', 'failed-input'))?.text, 'Do the original request')
+})
+
+test('cold foreground recovery resumes consumed interrupted input without retiring or replaying the original', async () => {
+  const { service, native, options } = fixture()
+  await service.sendMessage('default', 'original', 'Continue this work')
+  const current = await service.get()
+  native.sessions.get(current.sessionId)!.ended = {
+    reason: 'aborted', interrupted: true, messageIds: ['original'], at: native.now,
+  }
+  const restarted = new AssistantService(options)
+  assert.deepEqual((await restarted.recoverInputs()).failed, [])
+  assert.equal((await restarted.get()).sessionId, current.sessionId)
+  assert.equal((await restarted.get()).activeMessageId, 'original')
+  assert.equal(native.calls.filter(call => call.kind === 'send').length, 1)
+  assert.deepEqual(native.calls.filter(call => call.kind === 'resume').map(call => call.id), ['original'])
+  assert.equal(native.calls.filter(call => call.kind === 'retired').length, 0)
+  native.finish(current.sessionId, 'Recovered answer')
+  await restarted.advance('default')
+  assert.equal((await restarted.get()).activeMessageId, undefined)
+})
+
+test('an inactive unconsumed foreground claim is readmitted on its original identity after power loss', async () => {
+  const { service, native, options } = fixture()
+  await service.sendMessage('default', 'original', 'Saved original')
+  const current = await service.get()
+  native.evidence.get(current.sessionId)!.set('original', { state: 'claimed', active: false, text: 'Saved original', source: 'user' })
+  const send = native.send.bind(native)
+  native.send = async (...args) => { native.evidence.get(args[0].sessionId)!.delete(args[2]); await send(...args) }
+  assert.deepEqual((await new AssistantService(options).recoverInputs()).failed, [])
+  assert.deepEqual(native.calls.filter(call => call.kind === 'send').map(call => [call.sessionId, call.id]),
+    [[current.sessionId, 'original'], [current.sessionId, 'original']])
 })
 
 test('model settings can repair an admission that never entered the native inbox', async () => {

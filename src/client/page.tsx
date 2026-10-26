@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useId, useRef, useState, type ReactNode } from 'react'
 import {
   Button, IconSparkleRegular, IconSettingsOutlineRegular, Input, Menu, Modal, SegmentedControl, StateDot, Toast,
 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -19,6 +19,7 @@ import type { ServantNotice, ServantSnapshot, ServantSource } from './source.js'
 import type { ServantLocaleKey } from './locales.js'
 import { RetentionPanel } from './retention-panel.js'
 import { ModelPicker } from './model-picker.js'
+import { HistoryDatePicker } from './date-picker.js'
 import { PresetPicker, type ServantPreset } from './preset-picker.js'
 import type { ServantModels } from './models.js'
 import { isAutoModel, resolveModelRoute } from '../domain/model-route.js'
@@ -159,8 +160,11 @@ function Conversation({ value, busy, onSend, models, modelBusy, onModelChange, o
   history: ServantSnapshot['history']; historyBusy: boolean; onHistoryPage: ServantSource['historyPage']
 }) {
   const [draft, setDraft] = useState({ id: crypto.randomUUID(), text: '' })
-  const bottom = useRef<HTMLDivElement>(null)
   const messages = useRef<HTMLDivElement>(null)
+  const followBottom = useRef(true)
+  const previousTop = useRef(0)
+  const prepend = useRef<{ height: number; top: number; first?: string }>()
+  const firstMessage = value.messages[0]?.ref ?? value.messages[0]?.id
   const needsAuto = isAutoModel(value.assistant.settings.foreground)
   const modelReady = !needsAuto || models.current !== null
   const send = async () => {
@@ -168,19 +172,51 @@ function Conversation({ value, busy, onSend, models, modelBusy, onModelChange, o
     const submitted = draft
     if (await onSend(submitted.id, submitted.text, resolveModelRoute(value.assistant.settings.foreground, models.current ?? undefined))) setDraft(current => current.id === submitted.id ? { id: crypto.randomUUID(), text: '' } : current)
   }
-  useEffect(() => {
-    if (history.before) messages.current?.scrollTo({ top: 0 })
-    else bottom.current?.scrollIntoView({ block: 'end' })
-  }, [history.before, history.date, value.messages.at(-1)?.ref ?? value.messages.at(-1)?.id])
+  const loadOlder = () => {
+    const element = messages.current
+    if (!element || historyBusy || prepend.current || !value.conversationBefore) return
+    followBottom.current = false
+    prepend.current = { height: element.scrollHeight, top: element.scrollTop, first: firstMessage }
+    void onHistoryPage('older')
+  }
+  const navigateHistory: ServantSource['historyPage'] = async (action, date) => {
+    prepend.current = undefined
+    followBottom.current = true
+    await onHistoryPage(action, date)
+  }
+  const onScroll = () => {
+    const element = messages.current
+    if (!element) return
+    const upward = element.scrollTop < previousTop.current
+    previousTop.current = element.scrollTop
+    if (prepend.current) prepend.current.top = element.scrollTop
+    followBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight < 48
+    if (upward && element.scrollTop < element.clientHeight / 2) loadOlder()
+  }
+  // Prepending variable-height rows needs a pixel delta before paint to keep the same text under the reader.
+  useLayoutEffect(() => {
+    const element = messages.current
+    if (!element) return
+    if (prepend.current && firstMessage !== prepend.current.first) {
+      element.scrollTop = prepend.current.top + element.scrollHeight - prepend.current.height
+      prepend.current = undefined
+    } else if (followBottom.current) element.scrollTop = element.scrollHeight
+    if (!historyBusy) prepend.current = undefined
+    previousTop.current = element.scrollTop
+  }, [value.messages, historyBusy, firstMessage])
   return <div className={css.conversation}>
     <nav className={css.historyNavigation} aria-label={t('conversation.history')}>
-      <Button size="sm" disabled={historyBusy || !value.conversationBefore} onClick={() => { void onHistoryPage('older') }}>{t('conversation.older')}</Button>
-      {history.canGoNewer && <Button size="sm" disabled={historyBusy} onClick={() => { void onHistoryPage('newer') }}>{t('conversation.newer')}</Button>}
-      <label>{t('conversation.date')}<Input type="date" value={history.date ?? ''} disabled={historyBusy}
-        onChange={event => { void onHistoryPage('date', event.target.value) }} /></label>
-      {(history.before || history.date) && <Button size="sm" disabled={historyBusy} onClick={() => { void onHistoryPage('latest') }}>{t('conversation.latest')}</Button>}
+      <Button size="sm" disabled={historyBusy || !value.conversationBefore} onClick={loadOlder}>{t('conversation.older')}</Button>
+      {history.canGoNewer && <Button size="sm" disabled={historyBusy} onClick={() => { void navigateHistory('newer') }}>{t('conversation.newer')}</Button>}
+      <HistoryDatePicker value={history.date ?? ''} disabled={historyBusy} t={t}
+        onPick={date => { void navigateHistory('date', date) }} />
+      {(history.before || history.date) && <Button size="sm" disabled={historyBusy} onClick={() => { void navigateHistory('latest') }}>{t('conversation.latest')}</Button>}
+      {historyBusy && history.before && <span className={css.muted} role="status">{t('conversation.loadingOlder')}</span>}
     </nav>
-    <div ref={messages} className={css.messages} role="log" aria-live="polite">
+    <div ref={messages} className={css.messages} role="log" aria-live="polite" aria-busy={historyBusy}
+      onScroll={onScroll} onWheel={event => {
+        if (event.deltaY < 0 && event.currentTarget.scrollTop < event.currentTarget.clientHeight / 2) loadOlder()
+      }}>
       {!value.messages.length && history.date && <p className={css.muted}>{t('conversation.noHistory')}</p>}
       {!value.messages.length && !history.date && <div className={css.welcome}><PageIllustration page="conversation" settings={value.assistant.settings} /><h2>{t('conversation.empty')}</h2><p>{t('conversation.hint')}</p></div>}
       {value.messages.map(message => <article key={message.ref ?? message.id} className={`${css.message} ${message.role === 'user' ? css.userMessage : ''}`}>
@@ -190,7 +226,6 @@ function Conversation({ value, busy, onSend, models, modelBusy, onModelChange, o
       </article>)}
       {value.assistant.pendingInputs.length > 0 && <p className={css.muted} role="status">{t('conversation.pending')}</p>}
       {value.assistant.pendingInputs.filter(input => input.error).map(input => <p key={input.messageId} className={css.errorDetail} role="alert">{input.error}</p>)}
-      <div ref={bottom} />
     </div>
     <div className={css.composer}>
       <textarea aria-label={t('conversation.input')} placeholder={t('conversation.placeholder')} value={draft.text}

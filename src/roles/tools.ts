@@ -38,6 +38,15 @@ export function installRoleTools(ctx: Context, agent: Agent, binding: RoleBindin
       if (!isAppendSurfaceEvent(event)) continue
       const admitted = deriveEventMessage(event)
       if (admitted?.role === 'user' && admitted.source.kind === 'user') return admitted
+      if (admitted?.source.kind === 'deepseek-servant-resume') {
+        const originalId = admitted.source.messageId
+        for (let previous = index - 1; previous >= 0; previous--) {
+          const originalEvent = events[previous]!
+          if (!isAppendSurfaceEvent(originalEvent)) continue
+          const original = deriveEventMessage(originalEvent)
+          if (original?.id === originalId && original.role === 'user' && original.source.kind === 'user') return original
+        }
+      }
     }
     return undefined
   }
@@ -175,6 +184,14 @@ export function installRoleTools(ctx: Context, agent: Agent, binding: RoleBindin
         const source = userSource(input.sourceMessageId)
         return options.tasks.execute(task.id, { type: 'task.control', commandId: `intent:${binding.sessionId}:${source.messageId}:${input.intent}:${input.executionId ?? task.id}`,
           source, intent: input.intent, ...(input.executionId ? { executionId: input.executionId } : {}) })
+      })
+    register('task_answer', 'Pass the current user’s reply to a waiting task question and resume its work.',
+      z.strictObject({ taskId: Id, waitId: Id, sourceMessageId: Id.optional() }), async input => {
+        const source = userSource(input.sourceMessageId)
+        const task = await currentTask(input.taskId)
+        const answer = latestUser()!.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
+        return options.tasks.execute(task.id, { type: 'wait.answer', commandId: `answer:${binding.sessionId}:${source.messageId}:${input.waitId}`,
+          source, waitId: input.waitId, answer })
       })
     register('task_priority', 'Set an integer task priority explicitly requested in the current user message. The default is 0; higher values dispatch first without preempting active work.',
       z.strictObject({ taskId: Id, priority: z.int() }), async (input, exec) => {

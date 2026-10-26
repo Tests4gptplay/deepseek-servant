@@ -1,7 +1,7 @@
 import type {
   ActionKind, ActionPayload, ArtifactRef, Child, ChildSpec, CommandReceipt, CommandSource,
   ExecutionBinding, ExecutionReportInput, GoalInput, KernelEnvironment, PendingAction,
-  DecisionRecord, PlannerMemoryInput, Task, TaskCommand, Transition, WaitSpec,
+  DecisionRecord, InterruptionEvidence, PlannerMemoryInput, Task, TaskCommand, Transition, WaitSpec,
 } from '../contracts/task.js'
 import { applyRetentionCommand } from './retention.js'
 
@@ -108,7 +108,7 @@ export function applyTaskCommand(current: Task | undefined, command: TaskCommand
       task.waits[spec.id] = { ...structuredClone(spec), state: 'waiting', createdAt: env.now,
         ...(execution ? { executionId: execution.executionId, childId: execution.childId } : {}), ...(actionId ? { actionId } : {}) }
     }
-    const incident = (executionId: string, operation: string, message: string): void => {
+    const incident = (executionId: string, operation: string, message: string, interruption?: InterruptionEvidence): void => {
       const execution = mustExecution(task, executionId)
       check(execution.role !== 'helper', 'HELPER_RECOVERY_SCOPE', 'A failed Helper must block its original incident; it cannot create a nested recovery goal.')
       text(operation, 'operation'); text(message, 'message')
@@ -121,7 +121,7 @@ export function applyTaskCommand(current: Task | undefined, command: TaskCommand
             : task.decisions.filter(entry => ['plan', 'evaluation', 'checkpoint'].includes(entry.kind ?? '')).at(-1)?.commandId])
         existing = { id, executionId, childId: execution.childId, state: 'open', errors: [], frontier }
         task.incidents[id] = existing
-        const repeated = values(task.incidents).some(entry => entry.id !== id && entry.state === 'resolved'
+        const repeated = !interruption && values(task.incidents).some(entry => entry.id !== id && entry.state === 'resolved'
           && task.executions[entry.executionId]?.role === execution.role && entry.childId === execution.childId
           && task.executions[entry.executionId]?.assignmentVersion === execution.assignmentVersion
           && (entry.frontier === undefined || entry.frontier === frontier)
@@ -135,6 +135,8 @@ export function applyTaskCommand(current: Task | undefined, command: TaskCommand
           task.waits[waitId].incidentId = id
         } else addAction('recover', { incidentId: id, executionId, childId: execution.childId, reason: message })
       }
+      if (interruption) existing.interruption = { ...structuredClone(interruption),
+        recordedJobIds: [...new Set([...(existing.interruption?.recordedJobIds ?? []), ...interruption.recordedJobIds])] }
       if (!existing.errors.some(error => error.operation === operation && error.message === message)) existing.errors.push({ operation, message, at: env.now })
       if (execution.childId && task.children[execution.childId].activeExecutionId === executionId) task.children[execution.childId].status = 'waiting'
       for (const action of values(task.pendingActions)) if (action.kind === 'continue' && action.payload.executionId === executionId && action.status === 'pending') action.status = 'superseded'
@@ -553,7 +555,7 @@ export function applyTaskCommand(current: Task | undefined, command: TaskCommand
         break
       }
 
-      case 'incident.open': requireRuntime(command.source); incident(command.executionId, command.operation, command.message); break
+      case 'incident.open': requireRuntime(command.source); incident(command.executionId, command.operation, command.message, command.interruption); break
 
       case 'execution.abandon': {
         requireRuntime(command.source); text(command.evidence, 'evidence')
