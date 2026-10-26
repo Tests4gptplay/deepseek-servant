@@ -21,6 +21,11 @@ export class CoopFinalizer {
         if (action?.state === 'active') return false
       }
     }
+    // Scheduling may advance before a native reply ends; retain its final transcript before archival.
+    for (const path of snapshot.files.keys()) {
+      if (path.startsWith(prefix) && path.endsWith('/physical-result.json')
+        && (await readJson<{ settled?: boolean }>(this.repo, snapshot, path))?.settled === false) return false
+    }
     const manifestPath = 'dss-coop/records/' + task.id + '/manifest.json'
     const manifest = await readJson<ArchiveManifest>(this.repo, snapshot, manifestPath)
     const paths = [...snapshot.files.keys()].filter(path => path.startsWith(prefix)).sort()

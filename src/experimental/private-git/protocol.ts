@@ -46,7 +46,15 @@ export interface RoleAction {
   id: string; binding: RoleBinding; trigger: string; input: unknown
   state: 'active' | 'closed'; createdAt: string
 }
+export const RoleSignals = {
+  foreground: ['respond', 'handoff_planner'],
+  planner: ['done', 'rework', 'complete', 'handoff', 'wait', 'need_user', 'error'],
+  worker: ['continue', 'complete', 'blocked', 'error'],
+} as const
+export const TurnSignalSchema = z.enum([...RoleSignals.foreground, ...RoleSignals.planner, ...RoleSignals.worker])
+export type TurnSignal = z.infer<typeof TurnSignalSchema>
 export interface RoleOutcome {
+  turn_signal?: TurnSignal
   binding: RoleBinding; kind: 'respond' | 'handoff_planner' | 'plan_ready' | 'wait' | 'result' | 'continue' | 'complete'
   textPath: string; memoryPath?: string; notePath?: string; taskId?: string; question?: string
   prerequisitePaths: string[]; createdAt: string; observedTrigger?: string; resultStatus?: 'done' | 'failed' | 'handoff'
@@ -71,7 +79,8 @@ export const CommandSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('accept'), id: Id, expectedRevision: Revision, review: ReviewSchema, text: Text }),
   z.object({ op: z.literal('entry'), id: Id, kind: z.enum(['memory', 'note', 'reply', 'checkpoint', 'handoff', 'knowledge', 'skill', 'preference']), text: Text }),
   z.object({ op: z.literal('outcome'), id: Id,
-    kind: z.enum(['respond', 'handoff_planner', 'plan_ready', 'wait', 'result', 'continue', 'complete']),
+    turn_signal: TurnSignalSchema.optional(),
+    kind: z.enum(['respond', 'handoff_planner', 'plan_ready', 'wait', 'result', 'continue', 'complete']).optional(),
     text: Text, memory: z.string().optional(), note: z.string().optional(), taskId: Id.optional(),
     question: Text.optional().describe('Planner wait only: a concrete question for this participant’s local user, delivered through their Foreground.'),
     prerequisitePaths: z.array(z.string()).default([]), resultStatus: z.enum(['done', 'failed', 'handoff']).optional() }),

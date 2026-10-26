@@ -9,6 +9,7 @@ import { GitConflictError, GitHubClient, GitHubError, GitHubMembers, inspectPriv
 import { digest, GitJournal, json, readJson, readText, textChanges } from '../src/experimental/private-git/journal.js'
 import { CoopConsumer, type CoopAgentPort, type CoopPhysicalState } from '../src/experimental/private-git/consumer.js'
 import { RoleWriter } from '../src/experimental/private-git/role-writer.js'
+import { isProtocolPath, readOutcome, signalDisposition } from '../src/experimental/private-git/outcome.js'
 import { conversationPage } from '../src/experimental/private-git/conversation.js'
 import { CoopService } from '../src/experimental/private-git/service.js'
 import type { CoopCredentials } from '../src/experimental/private-git/credentials.js'
@@ -536,6 +537,146 @@ test('unchanged idle synchronization creates no native execution and reads no ta
   await service.sync(); await service.sync()
   assert.equal(reads.includes('dss-coop/reference.md'), false)
   assert.equal(target.agents.starts.length, 0)
+})
+
+async function plannedChild(repo: MemoryRepo, target: Instance, signal: 'done' | 'rework' | 'wait' = 'done') {
+  const planner = await root(repo, target)
+  const work = { id: 'part', title: 'Part', direction: 'Bounded work', acceptance: 'Open the artifact', participantId: '1', instanceId: target.cache.instanceId, version: 1 }
+  await write(target, planner, { op: 'root_plan', id: 'rp', expectedRevision: 0, works: [work] })
+  await write(target, planner, { op: 'claim', id: 'claim', workId: work.id, assignmentVersion: 1, scope: 'Same scope' })
+  await write(target, planner, { op: 'participant_plan', id: 'plan', expectedRevision: 0, children: [
+    { id: 'child', workId: work.id, assignmentVersion: 1, title: 'Child', direction: 'Work', acceptance: 'Check', dependencies: [] },
+  ] })
+  await write(target, planner, { op: 'outcome', id: 'out', turn_signal: signal, text: 'Planning finished', prerequisitePaths: [] })
+  await target.tick(2)
+  return planner
+}
+
+test('CAH role signals have explicit routing and remain compatible with committed 0.2.0 outcomes', async () => {
+  for (const signal of ['done', 'rework']) assert.equal(signalDisposition('planner', signal)?.kind, 'plan_ready')
+  assert.equal(signalDisposition('planner', 'handoff')?.kind, 'continue')
+  assert.equal(signalDisposition('planner', 'complete')?.kind, 'complete')
+  for (const signal of ['wait', 'need_user', 'error']) assert.equal(signalDisposition('planner', signal)?.kind, 'wait')
+  assert.equal(signalDisposition('worker', 'continue')?.kind, 'continue')
+  assert.deepEqual(signalDisposition('worker', 'complete'), { kind: 'result', resultStatus: 'done' })
+  for (const signal of ['blocked', 'error']) assert.deepEqual(signalDisposition('worker', signal), { kind: 'result', resultStatus: 'failed' })
+  assert.equal(signalDisposition('worker', 'done'), undefined)
+  const repo = new MemoryRepo(), target = instance(repo)
+  const planner = await root(repo, target)
+  await write(target, planner, { op: 'outcome', id: 'legacy', kind: 'wait', text: 'Legacy result', prerequisitePaths: [] })
+  const legacy = await readJson<RoleOutcome>(repo, await repo.snapshot(), planner.binding.outputPath)
+  delete legacy!.turn_signal
+  await repo.seed([{ path: planner.binding.outputPath, content: json(legacy) }])
+  const value = await readOutcome(repo, await repo.snapshot(), planner.binding)
+  assert.equal(value?.turn_signal, 'wait')
+})
+
+test('the bound protocol body, not prose or a mismatched ID, completes a role', async () => {
+  const repo = new MemoryRepo(), target = instance(repo)
+  await input(repo, target, 'bound', 'Hello'); await target.tick(2)
+  const foreground = target.agents.latest('foreground'), b = foreground.binding
+  for (const binding of [{ ...b, taskId: 'wrong-task' }, { ...b, executionId: 'wrong-execution' }]) {
+    await repo.seed([{ path: b.outputPath, content: json({ binding, turn_signal: 'respond' }) }])
+    assert.equal(await readOutcome(repo, await repo.snapshot(), b), undefined)
+    await target.tick()
+    assert.equal((await readJson<RoleAction>(repo, await repo.snapshot(), actionPath(b)))?.state, 'active')
+  }
+  await repo.seed([{ path: b.outputPath, content: json({ binding: b, text: 'complete respond done' }) }])
+  await target.tick()
+  assert.equal((await readJson<RoleAction>(repo, await repo.snapshot(), actionPath(b)))?.state, 'active')
+  await repo.seed([{ path: b.outputPath, content: json({ binding: b, turn_signal: 'respond' }) }])
+  await target.tick()
+  assert.equal((await readJson<RoleAction>(repo, await repo.snapshot(), actionPath(b)))?.state, 'closed')
+  assert.equal(target.agents.state(b.executionId)?.busy, true, 'native reply ending is not required')
+  target.agents.finish(foreground, 'Final native transcript retained')
+  await target.tick()
+  assert.equal(target.agents.state(b.executionId), undefined)
+  assert.equal(await readText(repo, await repo.snapshot(), executionPath(b) + '/transcript'), 'Final native transcript retained')
+  const restarted = instance(repo); await restarted.tick(2)
+  assert.equal(restarted.agents.starts.length, 0, 'closed Git signal cannot replay after cache loss')
+})
+
+test('Planner done and rework release Workers while the native Planner reply is still open', async () => {
+  for (const signal of ['done', 'rework'] as const) {
+    const repo = new MemoryRepo(), target = instance(repo)
+    const planner = await plannedChild(repo, target, signal)
+    assert.equal(target.agents.state(planner.binding.executionId)?.busy, true)
+    assert.equal(target.agents.latest('worker').binding.childId, 'child')
+    await target.tick(2)
+    assert.equal(target.agents.starts.filter(a => a.binding.role === 'worker').length, 1)
+  }
+})
+
+test('Worker complete, blocked and error each wake Planner once without waiting for native completion', async () => {
+  for (const signal of ['complete', 'blocked', 'error'] as const) {
+    const repo = new MemoryRepo(), target = instance(repo)
+    const planner = await plannedChild(repo, target), worker = target.agents.latest('worker')
+    await write(target, worker, { op: 'outcome', id: 'out', turn_signal: signal, text: 'Artifact or concrete blocker', prerequisitePaths: [] })
+    await target.tick(3)
+    assert.notEqual(target.agents.latest('planner').binding.executionId, planner.binding.executionId)
+    assert.equal(target.agents.starts.filter(a => a.binding.role === 'planner').length, 2)
+    assert.equal(target.agents.state(worker.binding.executionId)?.busy, true)
+    const outcome = await readOutcome(repo, await repo.snapshot(), worker.binding)
+    assert.equal(outcome?.turn_signal, signal)
+    assert.equal(outcome?.resultStatus, signal === 'complete' ? 'done' : 'failed')
+  }
+})
+
+test('Worker continue and Planner handoff advance generations, with physical Worker seats retained until drain', async () => {
+  const repo = new MemoryRepo(), target = instance(repo)
+  target.cache.settings.workerSeats = 1
+  const planner = await plannedChild(repo, target), worker = target.agents.latest('worker')
+  await write(target, worker, { op: 'outcome', id: 'out', turn_signal: 'continue', text: 'Saved bounded progress', prerequisitePaths: [] })
+  await target.tick(2)
+  const next = await readJson<RoleAction>(repo, await repo.snapshot(), actionPath(worker.binding))
+  assert.equal(next?.binding.generation, 2)
+  assert.equal(target.agents.starts.filter(a => a.binding.role === 'worker').length, 1, 'occupied seat is not double-booked')
+  assert.equal(target.agents.latest('planner'), planner, 'continuation does not request acceptance')
+  target.agents.finish(worker); await target.tick()
+  assert.equal(target.agents.latest('worker').binding.generation, 2)
+
+  const otherRepo = new MemoryRepo(), other = instance(otherRepo), current = await root(otherRepo, other)
+  await write(other, current, { op: 'outcome', id: 'out', turn_signal: 'handoff', text: 'Next planning generation', prerequisitePaths: [] })
+  await other.tick(2)
+  assert.equal(other.agents.latest('planner').binding.generation, 2)
+  assert.equal(other.agents.state(current.binding.executionId)?.busy, true)
+})
+
+test('Planner wait does not release untouched pending directions; need_user reaches Foreground once', async () => {
+  const repo = new MemoryRepo(), target = instance(repo)
+  await plannedChild(repo, target, 'wait')
+  assert.equal(target.agents.starts.filter(a => a.binding.role === 'worker').length, 0)
+  const otherRepo = new MemoryRepo(), other = instance(otherRepo), planner = await root(otherRepo, other)
+  await write(other, planner, { op: 'outcome', id: 'out', turn_signal: 'need_user', question: 'Choose the output location.', text: 'Waiting for user input', prerequisitePaths: [] })
+  await other.tick(3)
+  assert.equal(other.agents.starts.filter(a => a.binding.role === 'foreground').length, 2)
+  assert.equal((other.agents.latest('foreground').input as { question: boolean }).question, true)
+})
+
+test('protocol changes are read mechanically without generic Foreground notices; business text stays on demand', async () => {
+  const repo = new MemoryRepo(), target = instance(repo)
+  await input(repo, target, 'protocol', 'Hello'); await target.tick(2)
+  const foreground = target.agents.latest('foreground')
+  target.cache.settings.remoteEnabled = true
+  await repo.seed([{ path: foreground.binding.outputPath, content: json({ binding: foreground.binding, turn_signal: 'respond' }) }])
+  let changes = [{ path: foreground.binding.outputPath, status: 'A', commit: repo.head },
+    { path: 'dss-coop/events/2/receipt.json', status: 'A', commit: repo.head }]
+  Object.defineProperty(repo, 'changes', { value: async () => changes })
+  const reads: string[] = [], originalRead = repo.read.bind(repo)
+  repo.read = async (snapshot, path) => { reads.push(path); return originalRead(snapshot, path) }
+  const service = new CoopService(target.cache, {} as CoopCredentials, new GitHubClient(async () => undefined))
+  Object.defineProperty(service, 'repository', { value: repo }); service.attach(target.consumer)
+  await service.sync(); changes = []
+  target.agents.finish(foreground); await service.sync()
+  assert.ok(reads.includes(foreground.binding.outputPath))
+  assert.equal(target.agents.starts.length, 1)
+  for (const prefix of ['events', 'records', 'origins', 'incidents']) assert.equal(isProtocolPath('dss-coop/' + prefix + '/item'), true)
+  const sourcePath = 'dss-coop/requests/new.md'
+  await repo.seed([{ path: sourcePath, content: 'AI reads this business request deliberately.' }])
+  changes = [{ path: sourcePath, status: 'A', commit: repo.head }]
+  await service.sync(); changes = []; await service.sync()
+  assert.equal(target.agents.starts.length, 2)
+  assert.equal(reads.includes(sourcePath), false)
 })
 
 test('mode modules have no imports from Local business execution or prompts', async () => {

@@ -1,5 +1,6 @@
 import type { CoopStore } from './cache.js'
 import { readIntent } from './intake.js'
+import { legacySignal, readOutcome, signalDisposition } from './outcome.js'
 import { loadPaths } from './repository-paths.js'
 import type { GitChange, GitRepository, GitSnapshot, RoleBinding, UserIntent } from './contracts.js'
 import { digest, GitJournal, json, readJson, readText, textChanges } from './journal.js'
@@ -18,7 +19,7 @@ export class RoleWriter {
   async current(snapshot: GitSnapshot, binding: RoleBinding): Promise<RoleAction> {
     const action = await this.read<RoleAction>(snapshot, actionPath(binding))
     if (!action || action.state !== 'active' || !sameBinding(action.binding, binding)) throw new StaleCoopWrite('This role execution was replaced or ended.')
-    if (await this.repo.read(snapshot, binding.outputPath) !== undefined) throw new StaleCoopWrite('This role already committed its final outcome.')
+    if (await readOutcome(this.repo, snapshot, binding)) throw new StaleCoopWrite('This role already committed its final outcome.')
     if (binding.role !== 'foreground' && !binding.taskId) throw new StaleCoopWrite('Planner and Worker executions need their task assignment.')
     if (binding.taskId) {
       const task = await this.task(snapshot, binding.taskId)
@@ -243,7 +244,7 @@ export class RoleWriter {
       if (!plan) throw new RejectedCoopWrite('No participant plan.'); compare(plan.revision, c.expectedRevision)
       const child = plan.children.find(value => value.id === c.childId)
       const resultPath = taskPath(taskId) + '/executions/' + b.participantId + '/' + c.resultExecutionId + '/outcome.json'
-      const outcome = await this.read<RoleOutcome>(s, resultPath)
+      const outcome = await readOutcome(this.repo, s, resultPath)
       if (!child || !outcome || outcome.kind !== 'result' || outcome.binding.childId !== child.id || outcome.binding.assignmentVersion !== child.assignmentVersion) throw new StaleCoopWrite('Read the exact current child result before reviewing it.')
       const work = (await this.rootPlan(s, taskId)).works.find(value => value.id === child.workId)
       if (outcome.binding.childRevision !== child.revision || work?.version !== child.assignmentVersion || (c.accepted && outcome.resultStatus !== 'done')) throw new StaleCoopWrite('The result does not complete the current child revision.')
@@ -278,15 +279,20 @@ export class RoleWriter {
       return [...textChanges(path, c.text), object(path + '/source.json', { writer: b, kind: c.kind, createdAt: now })]
     }
     if (c.op === 'outcome') {
-      if (b.role === 'foreground' && !['respond', 'handoff_planner'].includes(c.kind)) throw new RejectedCoopWrite('Foreground outcomes are respond or handoff_planner.')
-      if (b.role === 'planner' && !['plan_ready', 'wait', 'continue', 'complete'].includes(c.kind)) throw new RejectedCoopWrite('Choose a Planner outcome.')
-      if (b.role === 'worker' && !['result', 'continue'].includes(c.kind)) throw new RejectedCoopWrite('Choose a Worker outcome.')
-      if (c.kind === 'handoff_planner') {
+      const signal = c.turn_signal ?? legacySignal(b.role, c)
+      const disposition = signal && signalDisposition(b.role, signal)
+      if (!disposition) throw new RejectedCoopWrite('Choose a turn_signal for the bound role.')
+      const kind = disposition.kind
+      if (b.role === 'foreground' && !['respond', 'handoff_planner'].includes(kind)) throw new RejectedCoopWrite('Foreground outcomes are respond or handoff_planner.')
+      if (b.role === 'planner' && !['plan_ready', 'wait', 'continue', 'complete'].includes(kind)) throw new RejectedCoopWrite('Choose a Planner outcome.')
+      if (b.role === 'worker' && !['result', 'continue'].includes(kind)) throw new RejectedCoopWrite('Choose a Worker outcome.')
+      if (kind === 'handoff_planner') {
         if (!c.taskId) throw new RejectedCoopWrite('Choose the task for this handoff.')
         const join = await this.joined(s, b, c.taskId)
         if (join.writer.executionId !== b.executionId) throw new RejectedCoopWrite('Join or create this task from the current user input before handing it to the Planner.')
       }
-      if (c.question && (b.role !== 'planner' || c.kind !== 'wait')) throw new RejectedCoopWrite('A local-user question belongs to a Planner wait outcome.')
+      if (signal === 'need_user' && !c.question) throw new RejectedCoopWrite('Include the question for the local user.')
+      if (c.question && (b.role !== 'planner' || kind !== 'wait')) throw new RejectedCoopWrite('A local-user question belongs to a Planner wait outcome.')
       const refs = [...c.prerequisitePaths]
       if (b.taskId) refs.push(taskPath(b.taskId) + '/contract.json')
       if (c.taskId) refs.push(joinPath(c.taskId, b.participantId, b.instanceId))
@@ -300,9 +306,9 @@ export class RoleWriter {
       const changes = textChanges(textPath, c.text)
       if (c.memory) changes.push(...textChanges(outputRoot + '/memory', c.memory))
       if (c.note) changes.push(...textChanges(outputRoot + '/note', c.note))
-      const outcome: RoleOutcome & { observedTrigger?: string } = { binding: b, kind: c.kind, textPath, taskId: c.taskId ?? b.taskId,
+      const outcome: RoleOutcome & { observedTrigger?: string } = { binding: b, kind, turn_signal: signal, textPath, taskId: c.taskId ?? b.taskId,
         memoryPath: c.memory ? outputRoot + '/memory' : undefined, notePath: c.note ? outputRoot + '/note' : undefined,
-        prerequisitePaths: [...new Set(refs)], resultStatus: c.resultStatus, question: c.question, createdAt: now }
+        prerequisitePaths: [...new Set(refs)], resultStatus: disposition.resultStatus, question: c.question, createdAt: now }
       if (b.role === 'planner' && b.taskId) outcome.observedTrigger = await plannerTrigger(this.repo, s, b.taskId, b.participantId)
       changes.push(object(b.outputPath, outcome))
       if (b.role === 'foreground') {
@@ -323,7 +329,7 @@ export async function plannerTrigger(repo: GitRepository, snapshot: GitSnapshot,
     if (path === prefix + 'contract.json' || path === prefix + 'plan.json'
       || path.endsWith('/join.json') || /\/(proposals|reports)\/[^/]+\.json$/.test(path)) selected.push([path, sha])
     else if (path.startsWith(prefix + 'executions/' + participantId + '/') && path.endsWith('/outcome.json')) {
-      const result = await readJson<RoleOutcome>(repo, snapshot, path)
+      const result = await readOutcome(repo, snapshot, path)
       if (result?.binding.role === 'worker' && result.kind === 'result') selected.push([path, sha])
     }
   }
