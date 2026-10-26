@@ -4,6 +4,7 @@ import type { CoopStore } from './cache.js'
 import type { GitChange, GitChangeNotice, GitRepository, GitSnapshot, RoleBinding, UserIntent } from './contracts.js'
 import { digest, GitJournal, json, readJson, readText, textChanges } from './journal.js'
 import { RoleWriter, plannerTrigger } from './role-writer.js'
+import { readOutcome } from './outcome.js'
 import { actionPath, executionPath, joinPath, participantPath, planPath, sameBinding, StaleCoopWrite, taskPath,
   type ChildState, type Claim, type Join, type LocalGrant, type ParticipantPlan, type RoleAction, type RoleOutcome, type RootTask } from './protocol.js'
 import { CoopFinalizer } from './finalizer.js'
@@ -88,6 +89,23 @@ export class CoopConsumer {
     }
     let changed = false
     const actions = await this.actions(snapshot)
+    // A durable outcome advances scheduling independently of a native reply ending.
+    // Retired native owners drain through their existing events and are reaped here.
+    for (const [key, owned] of cache.entries<{ binding: RoleBinding }>('physical/')) {
+      if (actions.some(action => action.state === 'active' && sameBinding(action.binding, owned.binding))) continue
+      const physical = agents.state(owned.binding.executionId)
+      if (physical?.busy) continue
+      const resultPath = executionPath(owned.binding) + '/physical-result.json'
+      const result = await readJson<{ settled?: boolean }>(repo, snapshot, resultPath)
+      if (result?.settled === false) {
+        await this.options.journal().transact('settle-' + owned.binding.executionId, { resultPath }, async () => [
+          ...(physical ? textChanges(executionPath(owned.binding) + '/transcript', physical.transcript) : []),
+          { path: resultPath, content: json({ ...result, ...(physical ? { jobs: physical.jobs, error: physical.error } : {}), settled: true }) },
+        ])
+      }
+      await agents.release(owned.binding.executionId)
+      await cache.remove(key)
+    }
     this.reportCleanup(await releaseConfirmedActionCaches(cache, actions))
     for (const action of actions.filter(value => value.state === 'closed')) {
       const physical = agents.state(action.binding.executionId)
@@ -114,15 +132,14 @@ export class CoopConsumer {
       await cache.remove('read-error/' + actionPath(action.binding))
       const b = action.binding
       const physical = agents.state(b.executionId)
-      const outcome = await readJson<RoleOutcome>(repo, snapshot, b.outputPath)
-      const validOutcome = outcome && sameBinding(outcome.binding, b)
+      const outcome = await readOutcome(repo, snapshot, b)
+      const validOutcome = !!outcome
       if (validOutcome) {
         await cache.remove('native-error/' + action.id)
-        if (physical?.busy || (physical && !physical.finished)) continue
         if (outcome.kind === 'continue' || (outcome.kind === 'result' && outcome.resultStatus === 'handoff')) {
           await this.replace(action, 'Role handoff', outcome, physical); changed = true
         } else {
-          await this.close(action, physical); changed = true
+          await this.close(action, physical, undefined, outcome); changed = true
         }
         continue
       }
@@ -143,7 +160,7 @@ export class CoopConsumer {
       }
       if (!physical) {
         if (b.role === 'foreground' && actions.some(other => other.binding.role === 'foreground' && other.binding.executionId !== b.executionId && agents.state(other.binding.executionId)?.busy)) continue
-        const activeWorkers = actions.filter(value => value.state === 'active' && value.binding.role === 'worker' && agents.state(value.binding.executionId)?.busy).length
+        const activeWorkers = cache.entries<{ binding: RoleBinding }>('physical/').filter(([, value]) => value.binding.role === 'worker' && agents.state(value.binding.executionId)?.busy).length
         if (b.role === 'worker' && activeWorkers >= cache.settings.workerSeats) continue
         const context = await this.context(snapshot, action)
         if (this.stopping) return
@@ -206,13 +223,13 @@ export class CoopConsumer {
       const trigger = await plannerTrigger(repo, snapshot, task.id, participantId)
       const outcomes: RoleOutcome[] = []
       for (const action of taskActions.filter(value => value.binding.role === 'planner')) {
-        const outcome = await readJson<RoleOutcome>(repo, snapshot, action.binding.outputPath)
+        const outcome = await readOutcome(repo, snapshot, action.binding)
         if (outcome) outcomes.push(outcome)
       }
-      const question = outcomes.filter(outcome => outcome.kind === 'wait' && outcome.question && outcome.observedTrigger === trigger).at(-1)
+      const question = outcomes.filter(outcome => outcome.kind === 'wait' && (outcome.question || outcome.turn_signal === 'error') && outcome.observedTrigger === trigger).at(-1)
       if (question && !foregroundActive && !taskActions.some(action => action.id === 'question-' + question.binding.executionId)) {
         await this.stage({ role: 'foreground', taskId: task.id, actionId: 'question-' + question.binding.executionId, trigger,
-          input: { notification: question.question, question: true, sourceOutcome: question.binding.outputPath }, epoch: join.epoch })
+          input: { notification: question.question ?? 'The Planner reported an error. Read its bound outcome and inform the user.', question: !!question.question, sourceOutcome: question.binding.outputPath }, epoch: join.epoch })
         changed = true
       }
       if (!activePlanner && !outcomes.some(outcome => outcome.observedTrigger === trigger)) {
@@ -223,8 +240,8 @@ export class CoopConsumer {
       const planFile = planPath(task.id, participantId, cache.instanceId)
       const plan = await readJson<ParticipantPlan>(repo, snapshot, planFile)
       if (!plan) continue
-      const planOutcome = await readJson<RoleOutcome>(repo, snapshot, plan.writer.outputPath)
-      if (!planOutcome || !['plan_ready', 'wait'].includes(planOutcome.kind)) continue
+      const planOutcome = await readOutcome(repo, snapshot, plan.writer)
+      if (!planOutcome || planOutcome.kind !== 'plan_ready') continue
       const rootPlan = await this.writer.rootPlan(snapshot, task.id)
       for (const child of plan.children) {
         if (child.state !== 'pending' || stageSeats <= 0 || child.dependencies.some(id => plan.children.find(value => value.id === id)?.state !== 'accepted')) continue
@@ -267,7 +284,7 @@ export class CoopConsumer {
       return changes
     })
   }
-  private async close(action: RoleAction, physical?: CoopPhysicalState, cancelled?: string): Promise<void> {
+  private async close(action: RoleAction, physical?: CoopPhysicalState, cancelled?: string, outcome?: RoleOutcome): Promise<void> {
     const { cache, agents } = this.options, path = actionPath(action.binding)
     if (cancelled && physical) await agents.release(action.binding.executionId, true)
     const closed: RoleAction = { ...action, state: 'closed' }
@@ -276,14 +293,21 @@ export class CoopConsumer {
       const current = await readJson<RoleAction>(this.options.repo, snapshot, path)
       if (!current || !sameBinding(current.binding, action.binding)) return []
       const changes: GitChange[] = [{ path, content: json(closed) }]
+      if (outcome) {
+        const observedTrigger = outcome.observedTrigger ?? (action.binding.role === 'planner' && action.binding.taskId
+          ? await plannerTrigger(this.options.repo, snapshot, action.binding.taskId, action.binding.participantId) : undefined)
+        changes.push({ path: action.binding.outputPath, content: json({ ...outcome, observedTrigger }) })
+      }
       if (physical) {
         changes.push(...textChanges(executionPath(action.binding) + '/transcript', physical.transcript))
-        changes.push({ path: executionPath(action.binding) + '/physical-result.json', content: json({ jobs: physical.jobs, error: physical.error, cancelled }) })
+        changes.push({ path: executionPath(action.binding) + '/physical-result.json', content: json({ jobs: physical.jobs, error: physical.error, cancelled, settled: !physical.busy || !!cancelled }) })
       }
       return changes
     })
-    await agents.release(action.binding.executionId)
-    await cache.remove('physical/' + action.binding.executionId)
+    if (!physical?.busy || cancelled) {
+      await agents.release(action.binding.executionId)
+      await cache.remove('physical/' + action.binding.executionId)
+    }
   }
   private async replace(action: RoleAction, reason: string, outcome?: RoleOutcome, physical?: CoopPhysicalState): Promise<void> {
     const { cache, repo, agents } = this.options, old = action.binding, path = actionPath(old)
@@ -302,10 +326,13 @@ export class CoopConsumer {
       if (!current || !sameBinding(current.binding, old)) throw new StaleCoopWrite('The recovery was superseded.')
       const changes: GitChange[] = [{ path, content: json(next) }, { path: executionPath(next.binding) + '/binding.json', content: json(next.binding) },
         { path: executionPath(old) + '/incident.json', content: json({ reason, previous: old, replacement: next.binding, jobs: physical?.jobs, createdAt: new Date().toISOString() }) }]
-      if (physical) changes.push(...textChanges(executionPath(old) + '/transcript', physical.transcript))
+      if (physical) {
+        changes.push(...textChanges(executionPath(old) + '/transcript', physical.transcript))
+        changes.push({ path: executionPath(old) + '/physical-result.json', content: json({ jobs: physical.jobs, error: physical.error, settled: !physical.busy }) })
+      }
       return changes
     })
-    await agents.release(old.executionId); await cache.remove('physical/' + old.executionId)
+    if (!physical?.busy) { await agents.release(old.executionId); await cache.remove('physical/' + old.executionId) }
   }
   async context(snapshot: GitSnapshot, action: RoleAction): Promise<unknown> {
     const { cache } = this.options, b = action.binding

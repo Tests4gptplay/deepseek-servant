@@ -12,7 +12,7 @@ import { isAbsolute } from 'node:path'
 import { z } from 'zod'
 import type { CoopStore } from './cache.js'
 import type { CoopAgentPort, CoopPhysicalState } from './consumer.js'
-import { CommandSchema, type RoleAction, type RoleOutcome } from './protocol.js'
+import { CommandSchema, RoleSignals, type RoleAction, type RoleOutcome } from './protocol.js'
 import { digest, readJson, readText } from './journal.js'
 import type { RoleWriter } from './role-writer.js'
 import { loadPaths, childDirectories } from './repository-paths.js'
@@ -93,9 +93,14 @@ export class CoopNativeAgents implements CoopAgentPort {
         })
       const allowed = b.role === 'foreground' ? new Set(['root', 'join', 'revise', 'control', 'entry', 'outcome'])
         : b.role === 'worker' ? new Set(['entry', 'outcome']) : new Set(['root_plan', 'proposal', 'claim', 'participant_plan', 'review', 'report', 'accept', 'entry', 'outcome'])
-      const variants = CommandSchema.options.filter(schema => allowed.has(schema.shape.op.value)).map(schema => z.object(Object.fromEntries(Object.entries(schema.shape).filter(([key]) => key !== 'id'))))
+      const variants = CommandSchema.options.filter(schema => allowed.has(schema.shape.op.value)).map(schema => {
+        const outcome = schema.shape.op.value === 'outcome'
+        const shape = Object.fromEntries(Object.entries(schema.shape).filter(([key]) => key !== 'id' && (!outcome || !['kind', 'resultStatus'].includes(key))))
+        if (outcome) shape.turn_signal = z.enum(RoleSignals[b.role]).describe('Final durable signal for this role; write after its semantic work.')
+        return z.object(shape)
+      })
       const operationSchema = z.union([variants[0]!, variants[1]!, ...variants.slice(2)])
-      register('coop_commit', 'Commit this role’s task, plan, claim, review or text record to private Git. End the turn with one outcome containing the reply and useful memory or notes.',
+      register('coop_commit', 'Commit this role’s task, plan, review or text to private Git. Finish with outcome and turn_signal; the Host binds IDs and dispatches the next role.',
         z.object({ operation: operationSchema }), async (value, callId) => {
           const command = CommandSchema.parse({ ...(value.operation as object), id: 'op-' + digest(callId).slice(0, 40) })
           if (command.op === 'outcome') {

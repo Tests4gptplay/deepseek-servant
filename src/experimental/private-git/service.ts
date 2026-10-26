@@ -8,6 +8,7 @@ import { GitHubRepository } from './git-repository.js'
 import { conversationPage } from './conversation.js'
 import { childDirectories, loadPaths } from './repository-paths.js'
 import { readIntent } from './intake.js'
+import { isProtocolPath } from './outcome.js'
 import { releaseScopeCaches, type ConsumedInput, type CacheCleanupResult } from './cache-cleanup.js'
 import { GitJournal, digest, json, readJson, readText, segment, textChanges } from './journal.js'
 
@@ -124,7 +125,7 @@ export class CoopService implements ModeEndpoint {
         if (this.cache.settings.remoteEnabled) {
           let from = this.cache.get<string>('watch-head')
           if (from === undefined) from = (await readJson<{ head: string }>(this.repository, snapshot, 'dss-coop/instances/' + this.cache.instanceId + '/watch.json'))?.head ?? ''
-          const changes = await this.repository.changes(snapshot, from, this.cache.instanceId)
+          const changes = (await this.repository.changes(snapshot, from, this.cache.instanceId)).filter(change => !isProtocolPath(change.path))
           if (changes.length) {
             await this.consumer?.notifyChanges?.({ from, to: snapshot.head, changes })
             await this.cache.put('watch-head', snapshot.head)

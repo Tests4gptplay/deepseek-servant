@@ -1,10 +1,12 @@
 # DeepSeek Servant 实现说明
 
-版本：`0.2.0`。双模式架构见 [DESIGN.md](DESIGN.md)，协作操作见 [PRIVATE_GIT.md](PRIVATE_GIT.md)，Local 已接受运行记录见[alpha.39 验收](docs/acceptance-20261026.md)。
+版本：`0.2.1`。双模式架构见 [DESIGN.md](DESIGN.md)，协作操作见 [PRIVATE_GIT.md](PRIVATE_GIT.md)，Local 已接受运行记录见[alpha.39 验收](docs/acceptance-20261026.md)。
 
-## 0.2.0 DSS-cah
+## 0.2.1 DSS-cah
 
-Host 使用独立 bare partial clone 增量 fetch，只列出选定目录的路径、A/M/D 状态、提交和父提交。自身写入带实例 trailer，避免触发自己的通知循环。变更通知与已消费游标在同一 Git 提交保存，冷启动从 Git 恢复调度。语义判断和正文读取交给 AI 的 `coop_changes` / `coop_read`；UI 打开时按需读取展示页。
+Host 使用独立 bare partial clone 增量 fetch，检测选定目录的路径、A/M/D 状态、提交和父提交。Consumer 读取相关任务的绑定、计划、控制及结果正文，按当前执行的 `turn_signal` 派发；普通业务文档才生成 Foreground 变更通知，由 AI 使用 `coop_changes` / `coop_read` 按需读取。自身写入带实例 trailer，内部协议路径不触发通用通知。变更通知与已消费游标在同一 Git 提交保存，冷启动从 Git 恢复调度；UI 打开时按需读取展示页。
+
+完成信号参考 CAH `local_bridge/planner_runtime.py` 的 `observe_semantic_turn` / `planner_runtime_tick` 及 `docs/task-cell/WORKER.md`、`PLANNER.md`。DSS 的 `outcome.ts` 将角色信号转为内部状态，精确匹配当前 action 的任务、执行及输出路径。`coop_commit` 自动注入绑定，新工具参数只显示当前角色的信号。Consumer 在 Git 确认后推进角色，不以原生 turn/end 作为前提；仍在收尾的原生执行由现有事件回收，并在归档前保存记录。旧版 kind/resultStatus 结果继续兼容。
 
 Git 操作使用显式 GIT_DIR，缓存目录与任何上级工程隔离。写入在临时索引构造，仅比较受影响的读写路径；无关远端更新直接保留并合入。GitHub API 用于核对账户、实际私有性、权限与成员；凭据复用 DSH Credentials、环境及已有 CLI 登录。
 
