@@ -176,11 +176,13 @@ export class TaskArchiveStore {
     const index = (await this.index(manifest.taskId))!
     await this.storage.set(indexKey(manifest.taskId), { ...index, cleanedAt: this.now() })
   }
-  async resumeCleanup(): Promise<void> {
+  async resumeCleanup(report: (error: unknown) => void = error => console.error('deepseek-servant cleanup', error)): Promise<void> {
     for (const index of await this.list()) if (index.tombstone && !index.cleanedAt) {
-      const manifest = await this.manifest(index.taskId)
-      if (!manifest || manifest.stage !== 'ended') throw new Error('Cleanup requires its sealed records.')
-      await this.finishCleanup(manifest)
+      try {
+        const manifest = await this.manifest(index.taskId)
+        if (!manifest || manifest.stage !== 'ended') throw new Error('Cleanup requires its sealed records: ' + index.taskId)
+        await this.finishCleanup(manifest)
+      } catch (error) { report(error) }
     }
   }
   async markDeliveryRead(id: string): Promise<void> {

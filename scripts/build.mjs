@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 await mkdir('lib', { recursive: true })
 const roles = ['foreground', 'planner', 'worker']
 const roleTexts = Object.fromEntries(await Promise.all(roles.map(async name => [name, await readFile(`src/roles/${name}.md`, 'utf8')])))
+const coopRoleTexts = Object.fromEntries(await Promise.all(roles.map(async name => [name, await readFile(`src/experimental/private-git/prompts/${name}.md`, 'utf8')])))
 // Page artwork stays independent of the plugin-list icon.
 const pageIcon = `data:image/png;base64,${(await readFile('assets/page-icon.png')).toString('base64')}`
 const welcomeCharacter = `data:image/png;base64,${(await readFile('assets/welcome-character.png')).toString('base64')}`
@@ -13,7 +14,7 @@ const statusIcon = `data:image/png;base64,${(await readFile('assets/statusbar-ic
 await build({
   entryPoints: ['src/host.ts'], outfile: 'lib/host.js', bundle: true,
   format: 'esm', platform: 'node', target: 'node22', sourcemap: false,
-  packages: 'external', define: { __SERVANT_ROLE_TEXTS__: JSON.stringify(roleTexts) },
+  packages: 'external', define: { __SERVANT_ROLE_TEXTS__: JSON.stringify(roleTexts), __COOP_ROLE_TEXTS__: JSON.stringify(coopRoleTexts) },
 })
 const clientOptions = {
   entryPoints: ['src/client.tsx'], outfile: 'lib/client.js', bundle: true,

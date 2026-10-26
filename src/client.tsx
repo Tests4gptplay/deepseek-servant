@@ -12,18 +12,22 @@ import { observeServantSidebarVisibility, type SidebarSessions, type SidebarWork
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ServantView } from './contracts/views.js'
 import { createServantNotices, createServantSource, type ServantClientApi } from './client/source.js'
-import { ServantNoticeOverlay, ServantPage, ServantSettingsPage, ServantSidebarIcon, type ServantInjected, type ServantNoticeInjected } from './client/page.js'
+import { ServantNoticeOverlay, ServantSidebarIcon, type ServantInjected, type ServantNoticeInjected } from './client/page.js'
 import { en, NS, zh } from './client/locales.js'
+import { ModeClient } from './mode-router/client.js'
+import { ModePage, ModeSettingsPage, type ModeInjected } from './mode-router/page.js'
+import { MODE_NS, modeEn, modeZh } from './mode-router/locales.js'
 
 declare const __SERVANT_CLIENT_CSS__: string
 
 export const name = 'deepseek-servant-client'
-export const inject = ['slots', 'locale', 'connection', 'sessions', 'workspaces', 'modelDirectories', 'remote', 'remote.agentPresets']
+export const inject = ['slots', 'locale', 'connection', 'sessions', 'workspaces', 'modelDirectories', 'remote', 'remote.agentPresets', 'remote.credentials']
 const PANEL_ID = 'deepseek-servant' as MainPanelId
 
 /** Native DSH page; all background execution remains owned by the Host bundle. */
 export function apply(ctx: Context): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'servant.client.locales')
+  ctx.effect(() => ctx.locale.register(MODE_NS, { zh: modeZh, en: modeEn }), 'servant.client.modeLocales')
   ctx.effect(() => {
     const style = document.createElement('style')
     style.dataset.deepseekServant = 'client'
@@ -42,7 +46,7 @@ export function apply(ctx: Context): void {
   const connection = installedConnection as unknown as ConnectionHandle
   const notices = createServantNotices()
   const call = async (method: string, params: Record<string, unknown>): Promise<unknown> => {
-    const result = await connection.rpc.call('/api', `deepseek-servant/${method}`, params)
+    const result = await connection.rpc.call('/api', 'deepseek-servant-mode/call', { mode: 'LOCAL', method, params })
     if (!result.ok) throw new Error(result.error.message)
     return result.value
   }
@@ -71,6 +75,18 @@ export function apply(ctx: Context): void {
     },
     subscribeReset: listener => ctx.on('connection/reset', listener),
   }
+  const modeRpc = async (method: string, params: Record<string, unknown>): Promise<unknown> => {
+    const result = await connection.rpc.call('/api', 'deepseek-servant-mode/' + method, params)
+    if (!result.ok) throw new Error(result.error.message)
+    return result.value
+  }
+  const modeClient = new ModeClient(modeRpc, listener => {
+    const events = new EventSource(new URL('api/deepseek-servant-mode/events', document.baseURI))
+    events.addEventListener('changed', listener); events.addEventListener('open', listener)
+    const reset = ctx.on('connection/reset', listener)
+    return () => { events.close(); reset() }
+  })
+  ctx.effect(() => () => modeClient.dispose(), 'servant.client.modes')
   const source = createServantSource(api, notices.show)
   const models = createServantModels(ctx.get('sessions', true) as unknown as NativeModelSessions,
     ctx.get('modelDirectories', true) as unknown as NativeModelDirectories, async () => {
@@ -99,7 +115,8 @@ export function apply(ctx: Context): void {
   const directoryPicker = (globalThis as typeof globalThis & {
     __DSH_DIRECTORY_PICKER__?: { pick(): Promise<string | null> }
   }).__DSH_DIRECTORY_PICKER__
-  const injectPage = (): ServantInjected => ({
+  const injectPage = (): ServantInjected & ModeInjected => ({
+    modeClient, modeText: ctx.locale.bind(MODE_NS),
     hooks: { servant: source.source, models: models.source },
     onRefreshModels: models.refresh, onLoadPresets,
     onPickDirectory: directoryPicker ? () => directoryPicker.pick() : undefined,
@@ -109,17 +126,17 @@ export function apply(ctx: Context): void {
   })
   ctx.slots.inject('main', () => ctx.slots.register({
     name: 'main', key: PANEL_ID, locale: NS, inject: injectPage,
-  }, ServantPage))
+  }, ModePage))
   // Native settings.section is a public slot. Only its small registration
   // contract is needed here; data and actions are identical to the gear entry.
   const settingsSlots = ctx.slots as unknown as {
     inject(name: 'settings.section', register: () => unknown): void
     register(options: { name: 'settings.section'; id: string; order: number; locale: typeof NS; label(): string; inject: typeof injectPage },
-      component: typeof ServantSettingsPage): unknown
+      component: typeof ModeSettingsPage): unknown
   }
   settingsSlots.inject('settings.section', () => settingsSlots.register({
     name: 'settings.section', id: 'deepseek-servant', order: 70, locale: NS, label: () => t('panel'), inject: injectPage,
-  }, ServantSettingsPage))
+  }, ModeSettingsPage))
   ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
     name: 'sidebar.panellist', id: PANEL_ID, order: 20, locale: NS, label: () => t('panel'),
     inject: () => ({ hooks: { servant: source.source }, onReadDeliveries: source.readDeliveries }),

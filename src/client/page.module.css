@@ -199,7 +199,12 @@
 .cleanupActions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 12px; width: 100%; }
 .cleanupActions > button { min-width: 88px; flex-shrink: 0; }
 
-.settingsSurface { color: var(--dsw-alias-label-primary); font: var(--dsw-font-s-14); }
+.settingsSurface { min-width: 0; color: var(--dsw-alias-label-primary); font: var(--dsw-font-s-14); }
+.settingsSurface h2 { margin: 0 0 12px; font: var(--dsw-font-m-18); }
+.settingsSurface h3, .settingsSurface h4 { margin: 0 0 8px; font: var(--dsw-font-s-strong-14); }
+.settingsSurface p { margin: 0; line-height: 1.6; }
+.settingsSurface code { font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.settingsSurface .settingsHint { margin-bottom: 16px; }
 .settingsSurface, .settingsSurface * { box-sizing: border-box; }
 .settingsBody { padding-top: 20px; }
 .settingsSurface .settings, .settingsSurface .settingsColumn { max-width: none; }
@@ -221,7 +226,7 @@
 .illustrationOption input:focus-visible { outline: 2px solid var(--dsw-focus-ring-color); outline-offset: 3px; }
 .illustrationOption input:disabled { cursor: wait; opacity: 0.6; }
 
-.globalSettings { width: 100%; min-width: 0; color: var(--dsw-alias-label-primary); }
+.globalSettings { width: 100%; min-width: 0; box-sizing: border-box; padding: 24px; color: var(--dsw-alias-label-primary); font: var(--dsw-font-s-14); }
 .globalSettings > h2 { margin: 0 0 24px; font: var(--dsw-font-l-20); }
 .customWorkspace { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; min-width: 0; }
 .directoryField { display: flex; flex-direction: column; gap: 8px; flex: 1 1 280px; min-width: 0; }

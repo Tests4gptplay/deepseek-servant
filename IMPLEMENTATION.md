@@ -1,6 +1,24 @@
 # DeepSeek Servant 实现说明
 
-版本：`0.1.0-alpha.39`。当前架构见 [DESIGN.md](DESIGN.md)，最新完整结果见[alpha.39 验收](docs/acceptance-20261026.md)。本文先说明当前实现，再按版本保留运行记录。
+版本：`0.2.0`。双模式架构见 [DESIGN.md](DESIGN.md)，协作操作见 [PRIVATE_GIT.md](PRIVATE_GIT.md)，Local 已接受运行记录见[alpha.39 验收](docs/acceptance-20261026.md)。
+
+## 0.2.0 DSS-cah
+
+Host 使用独立 bare partial clone 增量 fetch，只列出选定目录的路径、A/M/D 状态、提交和父提交。自身写入带实例 trailer，避免触发自己的通知循环。变更通知与已消费游标在同一 Git 提交保存，冷启动从 Git 恢复调度。语义判断和正文读取交给 AI 的 `coop_changes` / `coop_read`；UI 打开时按需读取展示页。
+
+Git 操作使用显式 GIT_DIR，缓存目录与任何上级工程隔离。写入在临时索引构造，仅比较受影响的读写路径；无关远端更新直接保留并合入。GitHub API 用于核对账户、实际私有性、权限与成员；凭据复用 DSH Credentials、环境及已有 CLI 登录。
+
+## alpha.41 稳定性修复
+
+单条损坏记录、任务或协作原文分别报告，健康数据继续可读写；损坏原件保留，修复后沿正常操作恢复。目录派生标记损坏时先备份原字节再重建。模型设置修正和重新连接可恢复原有失败任务，旧连接和界面响应按当前上下文收束。任务列表提供完整分页，席位、记录策略及标识长度按实际数据表示能力处理。
+
+## alpha.40 独立协作实现
+
+`src/mode-router` 只路由新输入与界面选择；`src/experimental/private-git` 独立拥有设置、Git I/O、角色提示、状态机、调度、原生 Agent、页面和封存。GitJournal 以稳定回执和非强推 CAS 提交；Consumer 读取不可变提交后兑现动作，NativeAgents 使用实际 Session、工具操作身份和 Jobs。用户主动参与与当前指派共同决定本机工作范围。
+
+协作使用 `deepseek_servant_coop` 原生 Domain。GitHub 凭据来自原生 Credentials、环境或已登录 CLI；完整协作记录写入专用私库。原生存储键采用路径安全摘要，保留逻辑键用于投影与恢复。协议参数错误转为可读证据，网络失败保持待提交草稿。当前代码的协作验收见[alpha.40 开发验收](docs/acceptance-private-git-20261026.md)。
+
+下文保留 Local 的实现与历次运行记录。
 
 **设计来源：**[Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness)，在 DSH 中实现其持续任务、Agent 角色分工、工作接续与知识积累机制。
 

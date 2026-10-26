@@ -47,7 +47,7 @@ export class RuntimeCoordinator {
   async start(): Promise<void> {
     if (this.running) return
     this.unsubscribe = this.options.tasks.subscribe(() => this.wake())
-    await this.options.tasks.archives.resumeCleanup()
+    await this.options.tasks.archives.resumeCleanup(error => this.reportError(error))
     await this.recover()
     this.running = true
     this.wake()
@@ -88,11 +88,13 @@ export class RuntimeCoordinator {
       }
     }
     for (const task of snapshot) if (['completed', 'cancelled'].includes(task.phase)) {
-      if (await this.options.tasks.cleanupCompleted(task.id)) {
-        for (const key of this.failed.keys()) if (key.startsWith(task.id + '/')) this.failed.delete(key)
-        await this.options.afterCleanup?.()
-        this.options.onChanged?.()
-      }
+      try {
+        if (await this.options.tasks.cleanupCompleted(task.id)) {
+          for (const key of this.failed.keys()) if (key.startsWith(task.id + '/')) this.failed.delete(key)
+          await this.options.afterCleanup?.()
+          this.options.onChanged?.()
+        }
+      } catch (error) { this.reportError(error) }
     }
     const candidates = snapshot.flatMap(task => Object.values(task.pendingActions).filter(action => action.status === 'pending').map(action => ({ task, action })))
       .sort((a, b) => priority[a.action.kind] - priority[b.action.kind] || b.task.priority - a.task.priority || a.action.createdAt.localeCompare(b.action.createdAt))

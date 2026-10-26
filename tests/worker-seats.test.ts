@@ -9,16 +9,16 @@ test('T38/T43/T44: persisted global seats migrate Host configuration and apply l
   const store = new MemoryStorage(), scheduler = new Scheduler(7)
   const settings = await RuntimeSettingsService.open(store, 7, value => scheduler.setWorkerSeats(value.workerSeats))
   assert.equal(settings.get().workerSeats, 7)
-  for (const seats of [1, 4, 32]) {
+  for (const seats of [1, 4, 32, 65]) {
     await settings.configure(settings.get().revision, seats)
     assert.equal(scheduler.workerSeats, seats)
     assert.equal((await RuntimeSettingsService.open(store, 2)).get().workerSeats, seats)
   }
-  for (const invalid of [0, 33, 1.5, NaN]) await assert.rejects(settings.configure(settings.get().revision, invalid))
+  for (const invalid of [0, -1, 1.5, NaN, Number.MAX_SAFE_INTEGER + 1]) await assert.rejects(settings.configure(settings.get().revision, invalid))
   await assert.rejects(settings.configure(1, 4), /changed/)
   store.fail = key => key === 'settings/runtime'
   await assert.rejects(settings.configure(settings.get().revision, 4))
-  assert.equal(scheduler.workerSeats, 32)
+  assert.equal(scheduler.workerSeats, 65)
 })
 
 test('T39/T40/T42: global capacity includes saved claims, preserves running owners when lowered, ignores idle jobs as inference', async () => {

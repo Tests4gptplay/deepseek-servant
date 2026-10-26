@@ -34,7 +34,7 @@ export class QueryService {
       tasks: [...new Map([...tasks, ...await this.options.tasks.history()].map(task => [task.id, task])).values()].filter(task => task.assistantId === assistantId)
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map(taskView),
       runtimeSettings: this.options.runtimeSettings(),
-      messages: page.messages, ...(page.before ? { conversationBefore: page.before } : {}), knowledge, workspaces: this.options.workspaces(), runtime: this.options.runtime(), recordStorage: this.options.recordStorage(),
+      messages: page.messages, ...(page.before ? { conversationBefore: page.before } : {}), knowledge, workspaces: this.options.workspaces(), runtime: this.options.runtime(), recordStorage: { ...this.options.recordStorage(), issues: [...(this.options.recordStorage().issues ?? []), ...this.options.tasks.store.problems.values()] },
     }
   }
   async task(taskId: string): Promise<TaskView | undefined> {

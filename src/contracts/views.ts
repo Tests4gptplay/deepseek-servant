@@ -18,6 +18,7 @@ export interface AssistantView {
 export interface RecordStorageView {
   directory: string
   nativeDirectory?: string
+  issues?: string[]
   /** The move committed, but the old copy could not be removed. */
   retainedSource?: string
 }

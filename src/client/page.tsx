@@ -51,7 +51,8 @@ export interface ServantInjected {
   onOpenArtifact: (taskId: string, artifactId: string) => Promise<void>
 }
 
-export type ServantPageProps = PropsRuntime<'main'> & InjectFace<ServantInjected> & PropsLocale<'dsh.servant'>
+export interface ServantSettingsExtension { experimentalSettings?: ReactNode }
+export type ServantPageProps = PropsRuntime<'main'> & InjectFace<ServantInjected> & PropsLocale<'dsh.servant'> & ServantSettingsExtension
 type ServantActions = Omit<ServantInjected, 'hooks'>
 
 /** The independent assistant page presents actual Host records and Session messages. */
@@ -102,12 +103,21 @@ export function ServantPage(props: ServantPageProps) {
     </div>}
     {value && <Modal open={settingsOpen} onClose={() => setSettingsOpen(false)} title={t('settings.open')} closeLabel={t('settings.close')}
       className={css.settingsModal} contentClassName={css.settingsModalContent}>
-      <ServantSettingsContent snapshot={snapshot} models={models} actions={props} t={t} />
+      <ServantSettingsContent snapshot={snapshot} models={models} actions={props} t={t} experimentalSettings={props.experimentalSettings} />
     </Modal>}
   </section>
 }
 
-export type ServantSettingsProps = InjectFace<ServantInjected> & PropsLocale<'dsh.servant'>
+export type ServantSettingsProps = InjectFace<ServantInjected> & PropsLocale<'dsh.servant'> & ServantSettingsExtension
+
+export function ServantSettingsDialog(props: ServantSettingsProps & { open: boolean; onClose(): void }) {
+  const snapshot = props.useServant(value => value)
+  const models = props.useModels(value => value)
+  return <Modal open={props.open} onClose={props.onClose} title={props.t('settings.open')} closeLabel={props.t('settings.close')}
+    className={css.settingsModal} contentClassName={css.settingsModalContent}>
+    <ServantSettingsContent snapshot={snapshot} models={models} actions={props} t={props.t} experimentalSettings={props.experimentalSettings} />
+  </Modal>
+}
 
 /** Both entry points use the same observable and configuration actions. */
 export function ServantSettingsPage(props: ServantSettingsProps) {
@@ -115,13 +125,13 @@ export function ServantSettingsPage(props: ServantSettingsProps) {
   const models = props.useModels(value => value)
   return <section className={css.globalSettings} aria-label={props.t('settings.open')}>
     <h2>{props.t('panel')}</h2>
-    <ServantSettingsContent snapshot={snapshot} models={models} actions={props} t={props.t} />
+    <ServantSettingsContent snapshot={snapshot} models={models} actions={props} t={props.t} experimentalSettings={props.experimentalSettings} />
   </section>
 }
 
-function ServantSettingsContent({ snapshot, models, actions, t }: {
+function ServantSettingsContent({ snapshot, models, actions, t, experimentalSettings }: {
   snapshot: ServantSnapshot; models: ServantModels; actions: ServantActions; t: Translate
-}) {
+} & ServantSettingsExtension) {
   const [tab, setTab] = useState<'settings' | 'knowledge'>('settings')
   const id = useId()
   const value = snapshot.value
@@ -139,12 +149,14 @@ function ServantSettingsContent({ snapshot, models, actions, t }: {
           <Settings value={value} busy={snapshot.pending.includes('configure')} onSave={actions.onConfigure} t={t}
             models={models} onRefreshModels={actions.onRefreshModels} onLoadPresets={actions.onLoadPresets} onPickDirectory={actions.onPickDirectory} />
           <WorkerSeatsSettings value={value} busy={snapshot.pending.includes('configureRuntime')} onSave={actions.onConfigureRuntime} t={t} />
+          {snapshot.storageError && <p className={css.errorDetail} role="alert">{snapshot.storageError}</p>}
           <RetentionPanel stats={snapshot.storageStats} preview={snapshot.retention} outcome={snapshot.lastCleanup} busy={snapshot.pending.includes('retention')}
             recordStorage={value.recordStorage} moving={snapshot.pending.includes('moveRecords')} onMoveRecords={actions.onMoveRecords}
             onPickDirectory={actions.onPickDirectory} onRetention={actions.onRetention} onOpenRecords={actions.onOpenRecords} t={t} />
           <section className={css.experimental} aria-labelledby={`${id}-experimental`}>
             <h3 id={`${id}-experimental`}>{t('experimental.title')}</h3>
             <div className={css.experimentalGroups}>
+              {experimentalSettings}
               <IllustrationSettings value={value} busy={snapshot.pending.includes('configure')} onSave={actions.onConfigure} t={t} />
             </div>
           </section>
@@ -423,9 +435,9 @@ function SkillEditor({ record, version, busy, onSave, onClose, t }: { record: Sk
 function WorkerSeatsSettings({ value, busy, onSave, t }: { value: ServantView; busy: boolean; onSave: ServantSource['configureRuntime']; t: Translate }) {
   const [seats, setSeats] = useState(String(value.runtime.workerSeats))
   useEffect(() => { setSeats(String(value.runtime.workerSeats)) }, [value.runtimeSettings.revision, value.runtime.workerSeats])
-  const number = Number(seats), valid = Number.isInteger(number) && number >= 1 && number <= 32
+  const number = Number(seats), valid = Number.isSafeInteger(number) && number >= 1
   return <form className={css.settings} onSubmit={event => { event.preventDefault(); if (valid) void onSave(value.runtimeSettings.revision, number) }}>
-    <Field label={t('settings.workerSeats')}><Input type="number" min={1} max={32} step={1} required value={seats}
+    <Field label={t('settings.workerSeats')}><Input type="number" min={1} step={1} required value={seats}
       disabled={busy} onChange={event => setSeats(event.target.value)} /></Field>
     <div className={css.actions}><Button type="submit" disabled={busy || !valid || number === value.runtime.workerSeats}>{t('settings.save')}</Button></div>
   </form>

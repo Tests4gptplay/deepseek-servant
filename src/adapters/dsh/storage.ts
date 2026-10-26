@@ -21,7 +21,7 @@ const locationDomain = defineDomain({ name: 'deepseek_servant_location', version
 const DATA_FOLDER = 'deepseek_servant'
 const LEGACY_FILE = 'deepseek_servant.json'
 type Records = Domain<typeof servantDomain>
-interface OpenRecords { domain: Records; close(): Promise<void> }
+interface OpenRecords { domain: Records; files?: RecordFilesBackend; close(): Promise<void> }
 
 /** One durable Task or skill record remains the atomic commit boundary. */
 export class DshStorageAdapter implements StoragePort {
@@ -106,7 +106,7 @@ export class DshStorageAdapter implements StoragePort {
   }
   storageView(): RecordStorageView {
     const nativeRoot = (this.ctx.get('sessionPersistence') as unknown as { root?: unknown } | undefined)?.root
-    return { directory: this.directory,
+    return { directory: this.directory, issues: this.records.files?.problems(),
       ...(typeof nativeRoot === 'string' && path.isAbsolute(nativeRoot) ? { nativeDirectory: nativeRoot } : {}),
       ...(this.retainedSource ? { retainedSource: this.retainedSource } : {}) }
   }
@@ -117,6 +117,7 @@ export class DshStorageAdapter implements StoragePort {
       signal.throwIfAborted()
       if (expectedDirectory !== this.directory) throw new Error('记录目录已变化，请刷新后重试。')
       if (!path.isAbsolute(directory)) throw new Error('请输入文件夹的完整绝对路径。')
+      await this.refreshRecords()
       await this.prepareRecords(true)
       await mkdir(directory, { recursive: true })
       const destination = await realpath(directory)
@@ -162,6 +163,8 @@ export class DshStorageAdapter implements StoragePort {
 
   get<T>(key: string): Promise<T | undefined> {
     return this.serial(async () => {
+      await this.refreshRecords()
+      this.records.files?.assertReadable(key)
       const record = this.records.domain.table('records').get(key)
       if (record === undefined) return undefined
       if (record.key !== key) throw new Error('Servant storage key mismatch: ' + key)
@@ -170,10 +173,11 @@ export class DshStorageAdapter implements StoragePort {
   }
   set<T>(key: string, value: T): Promise<void> {
     const record = storedEnvelope.parse({ key, value: structuredClone(value) })
-    return this.serial(async () => { await this.prepareRecords(); await this.records.domain.table('records').put(key, record) })
+    return this.serial(async () => { await this.refreshRecords(); this.records.files?.assertReadable(key); await this.prepareRecords(); await this.records.domain.table('records').put(key, record) })
   }
   list<T>(prefix: string): Promise<Array<{ key: string; value: T }>> {
     return this.serial(async () => {
+      await this.refreshRecords()
       const records: Array<{ key: string; value: T }> = []
       for (const [key, record] of this.records.domain.table('records').entries()) {
         if (record.key !== key) throw new Error('Servant storage key mismatch: ' + key)
@@ -182,8 +186,15 @@ export class DshStorageAdapter implements StoragePort {
       return records
     })
   }
-  delete(key: string): Promise<void> { return this.serial(async () => { await this.prepareRecords(); await this.records.domain.table('records').delete(key) }) }
+  delete(key: string): Promise<void> { return this.serial(async () => { await this.refreshRecords(); this.records.files?.assertReadable(key); await this.prepareRecords(); await this.records.domain.table('records').delete(key) }) }
   close(): Promise<void> { return this.serial(async () => { await this.records.close(); await this.location.close() }) }
+  private async refreshRecords(): Promise<void> {
+    if (!await this.records.files?.retryFaults()) return
+    const next = await openTree(this.ctx, path.join(this.directory, DATA_FOLDER))
+    const previous = this.records
+    this.records = next
+    await previous.close()
+  }
   private async prepareRecords(repairMissingFiles = false): Promise<void> {
     const tree = path.join(this.directory, DATA_FOLDER)
     const recreated = await ensureRecordTree(tree)
@@ -220,7 +231,8 @@ async function openBackend(ctx: Context, backend: Pick<JsonStorageBackend, 'kv' 
 }
 async function openTree(ctx: Context, tree: string): Promise<OpenRecords> {
   await ensureRecordTree(tree)
-  return openBackend(ctx, new RecordFilesBackend(tree))
+  const files = new RecordFilesBackend(tree)
+  return { ...await openBackend(ctx, files), files }
 }
 async function createTree(tree: string): Promise<void> {
   await mkdir(tree)

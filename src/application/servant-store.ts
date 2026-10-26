@@ -9,6 +9,7 @@ import { isSeparatedTask, TaskRecords, type PreparedTask } from './task-records.
 export class ServantStore {
   readonly journal: RecordJournal
   readonly records: TaskRecords
+  readonly problems = new Map<string, string>()
   private readonly queues = new Map<string, Promise<unknown>>()
   constructor(readonly storage: StoragePort) {
     this.journal = new RecordJournal(storage)
@@ -81,7 +82,17 @@ export class ServantStore {
     const ids = new Set(rows.filter(({ value }) => !isTaskTombstone(value)).map(({ key }) => key.slice(5)))
     for (const { value } of stages) if (value?.schemaVersion === 1 && value.root?.id) ids.add(value.root.id)
     const tasks: Task[] = []
-    for (const id of ids) { const task = await this.getTask(id); if (task) tasks.push(task) }
+    for (const id of ids) {
+      try {
+        const task = await this.getTask(id)
+        this.problems.delete(id)
+        if (task) tasks.push(task)
+      } catch (error) {
+        const message = id + ': ' + (error instanceof Error ? error.message : String(error))
+        if (this.problems.get(id) !== message) console.error('deepseek-servant task', message)
+        this.problems.set(id, message)
+      }
+    }
     return tasks
   }
 

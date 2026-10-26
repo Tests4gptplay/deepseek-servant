@@ -35,6 +35,7 @@ export interface ServantSnapshot {
   history: ConversationQuery & { canGoNewer: boolean }
   retention?: RetentionPreview
   storageStats?: StorageUsageStats
+  storageError?: string
   lastCleanup?: Pick<RetentionSweepResult, 'reclaimedServantBytes' | 'nativeReclaimedBytes' | 'finishedAt' | 'nativeLogsRetained' | 'skipped'>
 }
 
@@ -71,7 +72,7 @@ export function createServantSource(api: ServantClientApi, notify: (notice: Omit
   let epoch = 0
   let disposers: Array<() => void> = []
   let scheduled = false
-  const publish = (next: ServantSnapshot) => { snapshot = next; for (const listener of listeners) listener() }
+  const publish = (next: ServantSnapshot) => { snapshot = next; for (const listener of listeners) { try { listener() } catch (error) { console.error('deepseek-servant observer', error) } } }
 
   const refresh = async (includeStorage = true): Promise<void> => {
     const request = ++epoch
@@ -79,7 +80,8 @@ export function createServantSource(api: ServantClientApi, notify: (notice: Omit
     publish({ ...snapshot, status: 'loading', error: undefined })
     try {
       const [page, usage] = await Promise.all([api.view({ conversation: history[pageIndex] }),
-        includeStorage ? api.retention({ action: 'stats' }) : snapshot.storageStats])
+        includeStorage ? api.retention({ action: 'stats' }).then(value => ({ value, error: undefined as string | undefined }),
+          error => ({ value: snapshot.storageStats, error: errorMessage(error) })) : { value: snapshot.storageStats, error: snapshot.storageError }])
       if (request === epoch) {
         historyPages[pageIndex] = page.messages
         const messages = new Map<string, ConversationMessage>()
@@ -88,7 +90,7 @@ export function createServantSource(api: ServantClientApi, notify: (notice: Omit
         }
         const value = { ...page, messages: [...messages.values()] }
         const previous = snapshot.value && new Set(snapshot.value.tasks.filter(task => task.delivery?.status === 'delivered').map(task => task.id + '/' + task.delivery!.id))
-        publish({ ...snapshot, status: 'ready', value, storageStats: usage as StorageUsageStats, error: undefined })
+        publish({ ...snapshot, status: 'ready', value, storageStats: usage.value as StorageUsageStats, storageError: usage.error, error: undefined })
         if (previous) for (const task of value.tasks) if (task.delivery?.status === 'delivered' && !previous.has(task.id + '/' + task.delivery.id)) {
           notify({ kind: 'success', key: 'completed', detail: task.goal.objective })
         }

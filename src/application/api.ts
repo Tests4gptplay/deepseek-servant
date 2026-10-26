@@ -49,7 +49,7 @@ export class ServantApi {
         return this.options.assistants.sendMessage(input.assistantId, input.messageId, input.text, input.autoModel)
       }
       case 'configureRuntime': {
-        const input = z.strictObject({ expectedRevision: z.int().positive(), workerSeats: z.int().min(1).max(32) }).parse(raw)
+        const input = z.strictObject({ expectedRevision: z.int().positive(), workerSeats: z.int().positive() }).parse(raw)
         return this.options.runtimeSettings.configure(input.expectedRevision, input.workerSeats)
       }
       case 'configure': {

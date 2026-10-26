@@ -14,8 +14,8 @@ export interface RetentionPolicy {
 }
 export const defaultRetentionPolicy: RetentionPolicy = {}
 export const retentionPolicyBounds: Record<keyof RetentionPolicy, readonly [number, number]> = {
-  taskDetailDays: [0, 3650], archiveDays: [0, 36500], maxArchives: [1, 100000], maxServantBytes: [1024, 1024 ** 4],
-  skillHistoryDays: [0, 3650], maxFullSkillVersions: [0, 1000], maxSkillReceipts: [1, 10000],
+  taskDetailDays: [0, Number.MAX_SAFE_INTEGER], archiveDays: [0, Number.MAX_SAFE_INTEGER], maxArchives: [0, Number.MAX_SAFE_INTEGER], maxServantBytes: [0, Number.MAX_SAFE_INTEGER],
+  skillHistoryDays: [0, Number.MAX_SAFE_INTEGER], maxFullSkillVersions: [0, Number.MAX_SAFE_INTEGER], maxSkillReceipts: [0, Number.MAX_SAFE_INTEGER],
 }
 export const retentionPolicyKeys = Object.keys(retentionPolicyBounds) as Array<keyof RetentionPolicy>
 export function hasRetentionLimits(policy: RetentionPolicy): boolean {
@@ -31,11 +31,8 @@ export function parseRetentionPolicy(value: unknown): RetentionPolicy {
     if (!Object.hasOwn(raw, key)) continue
     const number = raw[key]
     const [minimum, maximum] = retentionPolicyBounds[key]
-    if (typeof number !== 'number' || !Number.isInteger(number) || number < minimum || number > maximum) throw new Error('Invalid retention setting: ' + key)
+    if (typeof number !== 'number' || !Number.isSafeInteger(number) || number < minimum || number > maximum) throw new Error('Invalid retention setting: ' + key)
     policy[key] = number
-  }
-  if (policy.archiveDays !== undefined && policy.taskDetailDays !== undefined && policy.archiveDays < policy.taskDetailDays) {
-    throw new Error('Archive retention cannot be shorter than Task detail retention.')
   }
   return policy
 }
