@@ -1,6 +1,16 @@
 # DeepSeek Servant 实现说明
 
-版本：`0.1.0-alpha.40`。双模式架构见 [DESIGN.md](DESIGN.md)，协作操作见 [PRIVATE_GIT.md](PRIVATE_GIT.md)，Local 已接受运行记录见[alpha.39 验收](docs/acceptance-20261026.md)。
+版本：`0.2.0`。双模式架构见 [DESIGN.md](DESIGN.md)，协作操作见 [PRIVATE_GIT.md](PRIVATE_GIT.md)，Local 已接受运行记录见[alpha.39 验收](docs/acceptance-20261026.md)。
+
+## 0.2.0 DSS-cah
+
+Host 使用独立 bare partial clone 增量 fetch，只列出选定目录的路径、A/M/D 状态、提交和父提交。自身写入带实例 trailer，避免触发自己的通知循环。变更通知与已消费游标在同一 Git 提交保存，冷启动从 Git 恢复调度。语义判断和正文读取交给 AI 的 `coop_changes` / `coop_read`；UI 打开时按需读取展示页。
+
+Git 操作使用显式 GIT_DIR，缓存目录与任何上级工程隔离。写入在临时索引构造，仅比较受影响的读写路径；无关远端更新直接保留并合入。GitHub API 用于核对账户、实际私有性、权限与成员；凭据复用 DSH Credentials、环境及已有 CLI 登录。
+
+## alpha.41 稳定性修复
+
+单条损坏记录、任务或协作原文分别报告，健康数据继续可读写；损坏原件保留，修复后沿正常操作恢复。目录派生标记损坏时先备份原字节再重建。模型设置修正和重新连接可恢复原有失败任务，旧连接和界面响应按当前上下文收束。任务列表提供完整分页，席位、记录策略及标识长度按实际数据表示能力处理。
 
 ## alpha.40 独立协作实现
 

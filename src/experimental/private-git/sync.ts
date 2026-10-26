@@ -30,7 +30,7 @@ export class CoopSync {
     } finally { this.running = false }
     if (this.stopped) return
     if (this.again && !this.failures) { this.again = false; this.request() }
-    else if (this.consumer.hasWork()) {
+    else if (this.consumer.hasWork() || this.service.cache.settings.remoteEnabled && this.service.cache.connection()) {
       this.again = false
       this.timer = setTimeout(() => { this.timer = undefined; void this.run() }, delay)
       this.timer.unref?.()

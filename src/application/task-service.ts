@@ -76,7 +76,19 @@ export class TaskService {
   async get(taskId: string): Promise<Task | undefined> { return await this.store.getTask(taskId) ?? await this.archives.task(taskId) }
   async history(includeHidden = false): Promise<Task[]> {
     const rows = (await this.archives.list()).filter(row => row.tombstone && (includeHidden || !row.hidden))
-    return (await Promise.all(rows.map(row => this.archives.task(row.taskId)))).filter((task): task is Task => !!task)
+    const tasks: Task[] = []
+    for (const row of rows) {
+      try {
+        const task = await this.archives.task(row.taskId)
+        this.store.problems.delete(row.taskId)
+        if (task) tasks.push(task)
+      } catch (error) {
+        const message = row.taskId + ': ' + (error instanceof Error ? error.message : String(error))
+        if (this.store.problems.get(row.taskId) !== message) this.options.onNotificationError?.(error)
+        this.store.problems.set(row.taskId, message)
+      }
+    }
+    return tasks
   }
   async exportRecords(taskId: string): Promise<{ path: string; sha256: string; bytes: number }> {
     const task = await this.get(taskId)

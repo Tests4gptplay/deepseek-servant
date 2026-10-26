@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-export const Id = z.string().min(1).max(240).regex(/^(?!__proto__$|prototype$|constructor$)[A-Za-z0-9_.:@/-]+$/)
+export const Id = z.string().min(1).regex(/^(?!__proto__$|prototype$|constructor$)[^\0\r\n]+$/u)
 export const Text = z.string().min(1)
 export const ModelRouteSchema = z.strictObject({ provider: z.string().optional(), model: z.string().optional(), reasoningEffort: z.string().optional() })
 export const SettingsSchema = z.strictObject({ name: z.string().min(1), userName: z.string().optional(), workspaceId: Id.optional(),

@@ -1,9 +1,11 @@
 import type { CoopStore } from './cache.js'
+import { readIntent } from './intake.js'
+import { loadPaths } from './repository-paths.js'
 import type { GitChange, GitRepository, GitSnapshot, RoleBinding, UserIntent } from './contracts.js'
 import { digest, GitJournal, json, readJson, readText, textChanges } from './journal.js'
 import {
   actionPath, CommandSchema, executionPath, joinPath, participantPath, planPath, sameBinding, RejectedCoopWrite, StaleCoopWrite, taskPath,
-  type Claim, type CoopCommand, type Join, type LocalGrant, type ParticipantPlan, type RoleAction, type RoleOutcome, type RootPlan, type RootTask,
+  type Claim, type CoopCommand, type Join, type ParticipantPlan, type RoleAction, type RoleOutcome, type RootPlan, type RootTask,
 } from './protocol.js'
 
 const bRoleRequiresActiveTask = (binding: RoleBinding): boolean => binding.role !== 'foreground' || !!binding.sourceIntentId
@@ -13,15 +15,11 @@ interface RoleDraft { id: string; kind: 'transaction'; createdAt: string; state:
 export class RoleWriter {
   constructor(readonly repo: GitRepository, readonly journal: GitJournal, readonly cache: CoopStore) {}
   async read<T>(snapshot: GitSnapshot, path: string): Promise<T | undefined> { return readJson<T>(this.repo, snapshot, path) }
-  async proof(path: string, content: string): Promise<void> { await this.cache.put('proof/' + path, digest(content)) }
-  async proven(snapshot: GitSnapshot, path: string): Promise<boolean> {
-    const content = await this.repo.read(snapshot, path)
-    return content !== undefined && this.cache.get<string>('proof/' + path) === digest(content)
-  }
   async current(snapshot: GitSnapshot, binding: RoleBinding): Promise<RoleAction> {
     const action = await this.read<RoleAction>(snapshot, actionPath(binding))
     if (!action || action.state !== 'active' || !sameBinding(action.binding, binding)) throw new StaleCoopWrite('This role execution was replaced or ended.')
-    if (snapshot.files.has(binding.outputPath)) throw new StaleCoopWrite('This role already committed its final outcome.')
+    if (await this.repo.read(snapshot, binding.outputPath) !== undefined) throw new StaleCoopWrite('This role already committed its final outcome.')
+    if (binding.role !== 'foreground' && !binding.taskId) throw new StaleCoopWrite('Planner and Worker executions need their task assignment.')
     if (binding.taskId) {
       const task = await this.task(snapshot, binding.taskId)
       const join = await this.read<Join>(snapshot, joinPath(task.id, binding.participantId, binding.instanceId))
@@ -48,19 +46,28 @@ export class RoleWriter {
   async rootPlan(snapshot: GitSnapshot, taskId: string): Promise<RootPlan> {
     return await this.read<RootPlan>(snapshot, taskPath(taskId) + '/plan.json') ?? { revision: 0, works: [] }
   }
-  private async source(snapshot: GitSnapshot, b: RoleBinding): Promise<UserIntent> {
-    if (b.role !== 'foreground' || !b.sourceIntentId) throw new RejectedCoopWrite('This operation needs the current local user input.')
-    const local = this.cache.get<UserIntent>('user-source/' + b.sourceIntentId)
-    const path = 'dss-coop/intents/' + b.participantId + '/' + b.sourceIntentId + '.json'
-    const remote = await this.read<UserIntent & { textPath: string }>(snapshot, path)
-    if (!local || !remote || local.participantId !== b.participantId || local.instanceId !== b.instanceId
-      || remote.instanceId !== b.instanceId || await readText(this.repo, snapshot, remote.textPath) !== local.text) throw new RejectedCoopWrite('No matching genuine local input is bound to this execution.')
-    return local
+  private async source(snapshot: GitSnapshot, b: RoleBinding, source: { sourcePath?: string; sourceRevision?: string }): Promise<UserIntent> {
+    if (b.role !== 'foreground') throw new RejectedCoopWrite('Task intake belongs to the Foreground.')
+    if (b.sourceIntentId) {
+      const input = await readIntent(this.repo, snapshot, b.participantId, b.sourceIntentId)
+      if (!input || input.participantId !== b.participantId || input.instanceId !== b.instanceId) throw new RejectedCoopWrite('The committed input belongs to another instance.')
+      return input
+    }
+    const action = await this.read<RoleAction>(snapshot, actionPath(b))
+    let input = action?.input as { original?: unknown; gitChanges?: unknown } | undefined
+    while (input?.original) input = input.original as typeof input
+    const notification = input?.gitChanges
+    if (!notification) throw new RejectedCoopWrite('This execution has no task input or Git-change notification.')
+    const at = source.sourceRevision && this.repo.at ? await this.repo.at(source.sourceRevision) : snapshot
+    const text = source.sourcePath ? await this.repo.read(at, source.sourcePath) : json(notification)
+    if (text === undefined) throw new RejectedCoopWrite('The source was deleted; use its parent commit from coop_changes.')
+    return { id: 'remote-' + digest((source.sourcePath ?? b.actionId) + ':' + digest(text)).slice(0, 40),
+      participantId: b.participantId, instanceId: b.instanceId, text, createdAt: action!.createdAt }
   }
   private async joined(snapshot: GitSnapshot, b: RoleBinding, taskId: string): Promise<Join> {
     const path = joinPath(taskId, b.participantId, b.instanceId)
     const join = await this.read<Join>(snapshot, path)
-    if (!join || join.state !== 'active' || !await this.proven(snapshot, path)) throw new RejectedCoopWrite('This instance has not accepted participation in that task.')
+    if (!join || join.state !== 'active') throw new RejectedCoopWrite('This instance has not accepted participation in that task.')
     return join
   }
   async execute(binding: RoleBinding, input: unknown): Promise<{ commit: string; replay: boolean; refs: string[] }> {
@@ -77,7 +84,6 @@ export class RoleWriter {
         await this.current(snapshot, binding)
         const changes = await this.build(snapshot, binding, command, draft.createdAt)
         refs = changes.filter(change => change.content !== null && !change.path.includes('/parts/')).map(change => change.path)
-        for (const change of changes) if (change.content !== null) await this.proof(change.path, change.content)
         return changes
       })
       await this.cache.remove(key)
@@ -121,24 +127,23 @@ export class RoleWriter {
     const participant = b.taskId ? participantPath(b.taskId, b.participantId) + '/instances/' + b.instanceId : undefined
     const entry = executionPath(b) + '/entries/' + c.id
     if (c.op === 'root') {
-      const source = await this.source(s, b)
+      const source = await this.source(s, b, c)
       const id = 'task-' + source.id
-      if (s.files.has(taskPath(id) + '/contract.json')) throw new StaleCoopWrite('A task already exists for this input: ' + id)
+      if (await this.repo.read(s, taskPath(id) + '/contract.json') !== undefined || await this.repo.read(s, 'dss-coop/history/' + id + '.json') !== undefined) throw new StaleCoopWrite('A task already exists for this input: ' + id)
       const goalPath = 'dss-coop/origins/' + id + '/goal/1'
       const task: RootTask = { id, title: c.title, originatingParticipantId: b.participantId, coordinatorParticipantId: b.participantId,
         originIntentId: source.id, originPath: 'dss-coop/origins/' + id + '/request', goalPath,
-        revision: 1, goalRevision: 1, epoch: 1, status: 'active', createdAt: now, updatedAt: now }
+        revision: 1, goalRevision: 1, epoch: 1, status: 'active', createdAt: now, updatedAt: now, sourcePath: c.sourcePath, sourceRevision: c.sourceRevision }
       const join: Join = { taskId: id, participantId: b.participantId, instanceId: b.instanceId,
         sourceIntentId: source.id, sourceHash: digest(source.text), scope: c.goal, capabilities: '', revision: 1, epoch: 1,
         state: 'active', goalRevision: 1, writer: b }
       const path = joinPath(id, b.participantId, b.instanceId)
-      await this.cache.put('grant/' + id, { taskId: id, joinPath: path, joinHash: digest(json(join)), sourceIntentId: source.id } satisfies LocalGrant)
       return [...textChanges(task.originPath, source.text), ...textChanges(goalPath, c.goal),
         ...textChanges(taskPath(id) + '/initial-plan', c.initialPlan), object(taskPath(id) + '/contract.json', task),
         object(taskPath(id) + '/plan.json', { revision: 0, works: [] }), object(path, join)]
     }
     if (c.op === 'join') {
-      const source = await this.source(s, b)
+      const source = await this.source(s, b, c)
       const task = await this.task(s, c.taskId)
       if (!['active', 'waiting'].includes(task.status)) throw new RejectedCoopWrite('Choose an active collaboration task.')
       const path = joinPath(task.id, b.participantId, b.instanceId)
@@ -146,11 +151,10 @@ export class RoleWriter {
       const join: Join = { taskId: task.id, participantId: b.participantId, instanceId: b.instanceId, sourceIntentId: source.id,
         sourceHash: digest(source.text), scope: c.scope, capabilities: c.capabilities, revision: (previous?.revision ?? 0) + 1,
         epoch: (previous?.epoch ?? 0) + 1, state: 'active', goalRevision: task.goalRevision, writer: b }
-      await this.cache.put('grant/' + task.id, { taskId: task.id, joinPath: path, joinHash: digest(json(join)), sourceIntentId: source.id } satisfies LocalGrant)
       return [object(path, join), ...textChanges(entry, source.text)]
     }
     if (c.op === 'control' || c.op === 'revise') {
-      const source = await this.source(s, b)
+      const source = await this.source(s, b, c)
       const task = await this.task(s, c.taskId)
       if (c.op === 'revise') {
         if (task.originatingParticipantId !== b.participantId) throw new RejectedCoopWrite('Only the originating user revises this goal.')
@@ -160,7 +164,6 @@ export class RoleWriter {
         const path = joinPath(task.id, b.participantId, b.instanceId), previous = await this.joined(s, b, task.id)
         const join: Join = { ...previous, goalRevision: revision, revision: previous.revision + 1, epoch: previous.epoch + 1,
           sourceIntentId: source.id, sourceHash: digest(source.text), scope: c.goal, writer: b }
-        await this.cache.put('grant/' + task.id, { taskId: task.id, joinPath: path, joinHash: digest(json(join)), sourceIntentId: source.id } satisfies LocalGrant)
         return [...textChanges(goalPath, c.goal), object(path, join), object(taskPath(task.id) + '/contract.json', { ...task, goalPath, goalRevision: revision, revision: task.revision + 1, updatedAt: now })]
       }
       if (c.state === 'cancel') {
@@ -170,12 +173,10 @@ export class RoleWriter {
       }
       const path = joinPath(task.id, b.participantId, b.instanceId)
       const previous = await this.read<Join>(s, path)
-      if (!previous || !await this.proven(s, path)) throw new RejectedCoopWrite('This instance has no participation to change.')
+      if (!previous) throw new RejectedCoopWrite('This instance has no participation to change.')
       compare(previous.revision, c.expectedRevision)
       const join: Join = { ...previous, revision: previous.revision + 1, epoch: previous.epoch + 1,
         state: c.state === 'resume' ? 'active' : c.state === 'pause' ? 'paused' : 'left', writer: b }
-      const grant = this.cache.get<LocalGrant>('grant/' + task.id)!
-      await this.cache.put('grant/' + task.id, { ...grant, joinHash: digest(json(join)) })
       return [object(path, join)]
     }
     if (c.op === 'root_plan') {
@@ -226,7 +227,7 @@ export class RoleWriter {
       for (const child of c.children) {
         const claimFile = participant + '/claims/' + child.workId + '.json'
         const claim = await this.read<Claim>(s, claimFile), work = plan.works.find(value => value.id === child.workId)
-        if (!claim || !await this.proven(s, claimFile) || claim.assignmentVersion !== child.assignmentVersion
+        if (!claim || claim.assignmentVersion !== child.assignmentVersion
           || !work || work.version !== child.assignmentVersion) throw new RejectedCoopWrite('Accept the current assignment before planning its workers.')
       }
       const children = c.children.map(child => {
@@ -243,8 +244,7 @@ export class RoleWriter {
       const child = plan.children.find(value => value.id === c.childId)
       const resultPath = taskPath(taskId) + '/executions/' + b.participantId + '/' + c.resultExecutionId + '/outcome.json'
       const outcome = await this.read<RoleOutcome>(s, resultPath)
-      if (!child || !outcome || outcome.kind !== 'result' || outcome.binding.childId !== child.id || outcome.binding.assignmentVersion !== child.assignmentVersion
-        || !await this.proven(s, resultPath)) throw new StaleCoopWrite('Read the exact current child result before reviewing it.')
+      if (!child || !outcome || outcome.kind !== 'result' || outcome.binding.childId !== child.id || outcome.binding.assignmentVersion !== child.assignmentVersion) throw new StaleCoopWrite('Read the exact current child result before reviewing it.')
       const work = (await this.rootPlan(s, taskId)).works.find(value => value.id === child.workId)
       if (outcome.binding.childRevision !== child.revision || work?.version !== child.assignmentVersion || (c.accepted && outcome.resultStatus !== 'done')) throw new StaleCoopWrite('The result does not complete the current child revision.')
       const workerAction = await this.read<RoleAction>(s, actionPath(outcome.binding))
@@ -281,7 +281,6 @@ export class RoleWriter {
       if (b.role === 'foreground' && !['respond', 'handoff_planner'].includes(c.kind)) throw new RejectedCoopWrite('Foreground outcomes are respond or handoff_planner.')
       if (b.role === 'planner' && !['plan_ready', 'wait', 'continue', 'complete'].includes(c.kind)) throw new RejectedCoopWrite('Choose a Planner outcome.')
       if (b.role === 'worker' && !['result', 'continue'].includes(c.kind)) throw new RejectedCoopWrite('Choose a Worker outcome.')
-      if (b.role === 'planner' && (!c.memory || !c.note)) throw new RejectedCoopWrite('Include the Planner memory and plan note in its final commit.')
       if (c.kind === 'handoff_planner') {
         if (!c.taskId) throw new RejectedCoopWrite('Choose the task for this handoff.')
         const join = await this.joined(s, b, c.taskId)
@@ -292,7 +291,7 @@ export class RoleWriter {
       if (b.taskId) refs.push(taskPath(b.taskId) + '/contract.json')
       if (c.taskId) refs.push(joinPath(c.taskId, b.participantId, b.instanceId))
       for (const path of refs) {
-        if (!s.files.has(path)) throw new RejectedCoopWrite('Commit the prerequisite before its outcome: ' + path)
+        if (await this.repo.read(s, path) === undefined) throw new RejectedCoopWrite('Commit the prerequisite before its outcome: ' + path)
         if (path.endsWith('/manifest.json')) await readText(this.repo, s, path.slice(0, -'/manifest.json'.length))
       }
       const outputRoot = executionPath(b) + '/output'
@@ -317,6 +316,7 @@ export class RoleWriter {
 
 export async function plannerTrigger(repo: GitRepository, snapshot: GitSnapshot, taskId: string, participantId: string): Promise<string> {
   const prefix = taskPath(taskId) + '/'
+  await loadPaths(repo, snapshot, prefix)
   const selected: Array<[string, string]> = []
   for (const [path, sha] of snapshot.files) {
     if (!path.startsWith(prefix)) continue

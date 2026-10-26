@@ -48,6 +48,18 @@ test('the actual conversational answer resolves its question and admits current-
   assert.equal(new Scheduler().canRun(task, plan, [task]).allowed, true)
 })
 
+test('foreground task discovery pages beyond the first fifty tasks', async () => {
+  const f = await fixture(), sample = await f.get()
+  const tasks = Array.from({ length: 57 }, (_, index) => ({ ...sample, id: 'task-' + index }))
+  const call = toolsFor([], { tasks: { list: async () => tasks } } as unknown as RoleToolsOptions)
+  const first = await call('task_query', {})
+  assert.equal(first.tasks.length, 50)
+  assert.equal(first.total, 57)
+  const rest = await call('task_query', { cursor: first.nextCursor })
+  assert.equal(rest.tasks.length, 7)
+  assert.equal(rest.nextCursor, undefined)
+})
+
 test('background notifications cannot supply user answers from prior conversation', async () => {
   const call = toolsFor([event('turn/start', { turn: 1 }), user('old', 'Earlier request'), event('turn/end', { turn: 1, reason: { kind: 'completed' } }),
     event('turn/start', { turn: 2 }), user('notification', 'Task finished', 'deepseek-servant')], {} as RoleToolsOptions)

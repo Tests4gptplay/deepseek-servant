@@ -26,12 +26,12 @@ export async function installModeHost(ctx: Context, local: ModeEndpoint): Promis
   const coop = (): Promise<CoopService> => pendingCoop ??= (async () => {
     const cache = await CoopCache.open(ctx)
     const credentials = new CoopCredentials(ctx, () => cache.settings.tokenRef)
-    const service = new CoopService(cache, credentials, new GitHubClient(() => credentials.resolve()))
+    const service = new CoopService(cache, credentials, new GitHubClient(() => credentials.resolve()), () => ctx.get('agentDefaultModel')?.currentSelection())
     service.subscribe(events.changed)
     installCoopRuntime(ctx, service)
     return service
   })().catch(error => { pendingCoop = undefined; throw error })
-  if (selection.global.get().coopActivated) await coop()
+  if (selection.global.get().coopActivated) void coop().catch(error => { console.error('deepseek-servant Coop startup', error); events.changed() })
   const router = new ModeRouter({
     read: () => selection.global.get().activeMode,
     write: async activeMode => { await selection.global.set({ activeMode, coopActivated: selection.global.get().coopActivated || activeMode === 'PRIVATE_GIT_EXPERIMENTAL' }); events.changed() },

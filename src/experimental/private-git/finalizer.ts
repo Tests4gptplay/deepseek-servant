@@ -1,4 +1,5 @@
 import type { CoopStore } from './cache.js'
+import { loadPaths } from './repository-paths.js'
 import type { GitChange, GitRepository, GitSnapshot } from './contracts.js'
 import { digest, GitJournal, json, readJson, readText, textChanges } from './journal.js'
 import { taskPath, type RoleAction, type RootTask } from './protocol.js'
@@ -13,6 +14,7 @@ export class CoopFinalizer {
   constructor(private readonly repo: GitRepository, private readonly journal: GitJournal, private readonly cache: CoopStore) {}
   async finalize(snapshot: GitSnapshot, task: RootTask): Promise<boolean> {
     const prefix = taskPath(task.id) + '/'
+    await loadPaths(this.repo, snapshot, prefix)
     for (const path of snapshot.files.keys()) {
       if (path.startsWith(prefix) && path.includes('/actions/') && path.endsWith('.json')) {
         const action = await readJson<RoleAction>(this.repo, snapshot, path)

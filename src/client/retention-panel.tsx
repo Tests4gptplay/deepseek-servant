@@ -105,6 +105,7 @@ function RecordLocation({ storage, busy, moving, onMove, onOpen, onPickDirectory
       </div>
     </div>
     <p className={css.muted}>{t('retention.directoryHint')}</p>
+    {storage.issues?.map(issue => <p key={issue} role="alert" className={css.errorDetail}>{issue}</p>)}
     {dirty && <>
       <p className={css.muted}>{t('retention.activeDirectory')} <code>{storage.directory}</code></p>
       <div className={css.recordLocationActions}>
@@ -146,7 +147,7 @@ function RetentionPolicyEditor({ preview, busy, onRetention, t }: { preview: Ret
   }}>
     <p className={css.retentionPolicyHint}>{t('retention.policyHint')}</p>
     {fields.map(field => <label key={field.key} className={css.field}><span>{t(field.label)}</span><Input type="number" disabled={disabled}
-      step={field.scale ? 'any' : 1} min={retentionPolicyBounds[field.key][0] / (field.scale ?? 1)} max={retentionPolicyBounds[field.key][1] / (field.scale ?? 1)}
+      step={field.scale ? 'any' : 1} min={retentionPolicyBounds[field.key][0] / (field.scale ?? 1)}
       value={policy[field.key] === undefined ? '' : policy[field.key]! / (field.scale ?? 1)} onChange={event => {
         const value = event.target.value
         setPolicy(current => { const next = { ...current }; if (value === '') delete next[field.key]; else next[field.key] = Number(value) * (field.scale ?? 1); return next })

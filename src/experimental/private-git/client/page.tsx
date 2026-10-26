@@ -9,15 +9,14 @@ export interface CoopControls {
   preset(value: string, onChange: (value: string) => void, disabled: boolean): ReactNode
   pickDirectory?: () => Promise<string | null>
 }
-export function CoopPage({ client, t, settingsOnly, controls }: { client: ModeClient; t: ModeText; settingsOnly?: boolean; controls?: CoopControls }) {
+export function CoopPage({ client, t, settingsOnly, controls, onOpenSettings }: { client: ModeClient; t: ModeText; settingsOnly?: boolean; controls?: CoopControls; onOpenSettings?: () => void }) {
   const { view } = useSyncExternalStore(client.subscribe, client.snapshot)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [text, setText] = useState('')
-  const [open, setOpen] = useState(!!settingsOnly || !view?.connection)
+  useEffect(() => { void client.loadCoop() }, [client])
   const [settings, setSettings] = useState<CoopSettings | undefined>(view?.settings)
-  const [token, setToken] = useState('')
   const [login, setLogin] = useState('')
   const [confirm, setConfirm] = useState('')
   const [older, setOlder] = useState<CoopView['messages']>([])
@@ -25,7 +24,7 @@ export function CoopPage({ client, t, settingsOnly, controls }: { client: ModeCl
   const [members, setMembers] = useState<CoopCollaborator[]>([])
   const [invitations, setInvitations] = useState<CoopInvitation[]>([])
   const prefix = useId()
-  const connectionKey = view?.connection?.repository.id + '/' + view?.connection?.identity.id
+  const connectionKey = view?.connection?.repository.id + '/' + view?.connection?.identity.id + '/' + view?.settings.repositoryDirectory
   useEffect(() => { setOlder([]); setBefore(undefined) }, [connectionKey])
   const savedSettings = JSON.stringify(view?.settings)
   useEffect(() => { if (view?.settings) setSettings(view.settings) }, [savedSettings])
@@ -36,8 +35,8 @@ export function CoopPage({ client, t, settingsOnly, controls }: { client: ModeCl
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
     finally { await client.refresh(); setBusy(false) }
   }
-  const field = (key: keyof CoopSettings, label: string, type = 'text') => <label className={css.field} htmlFor={prefix + key}>{label}
-    <input id={prefix + key} type={type} min={type === 'number' ? 1 : undefined} max={type === 'number' ? 32 : undefined}
+  const field = (key: Exclude<keyof CoopSettings, 'remoteEnabled'>, label: string, type = 'text') => <label className={css.field} htmlFor={prefix + key}>{label}
+    <input id={prefix + key} type={type} min={type === 'number' ? 1 : undefined}
       value={settings[key] ?? ''} disabled={busy} onChange={event => setSettings({ ...settings, [key]: type === 'number' ? Number(event.target.value) : event.target.value })} />
   </label>
   const refreshMembers = async () => {
@@ -50,13 +49,13 @@ export function CoopPage({ client, t, settingsOnly, controls }: { client: ModeCl
     if (result.state === 'COMMITTED_PENDING_READ') setNotice(t('readPending'))
     if (result.state === 'PENDING_UNCOMMITTED') setNotice(t('pending') + (result.error ? ': ' + result.error : ''))
   }
-  return <section className={css.page} aria-label={t('title')}>
-    <header className={css.heading}><div><h1>{t('title')}</h1><p>{t('subtitle')}</p></div>
+  return <section className={settingsOnly ? css.page + ' ' + css.embedded : css.page} aria-label={t('title')}>
+    {!settingsOnly && <header className={css.heading}><div><h1>{t('title')}</h1><p>{t('subtitle')}</p></div>
       <div className={css.actions}><span>{t(view.status)}</span>
         <button disabled={busy || !view.connection} onClick={() => void run(() => client.call('sync'))}>{t('refresh')}</button>
-        {!settingsOnly && <button aria-expanded={open} onClick={() => setOpen(!open)}>{t('settings')}</button>}
+        <button onClick={onOpenSettings}>{t('settings')}</button>
       </div>
-    </header>
+    </header>}
     {view.connection && <div className={css.meta}>
       <span>{t('account')}: {view.connection.identity.login}</span>
       <span>{view.connection.repository.fullName}</span>
@@ -64,31 +63,24 @@ export function CoopPage({ client, t, settingsOnly, controls }: { client: ModeCl
     </div>}
     {(error || view.error) && <p className={css.notice} role="alert">{error || view.error} <button disabled={busy} onClick={() => void run(() => client.call('retryNative'))}>{t('retry')}</button></p>}
     {notice && <p className={css.notice} role="status">{notice}</p>}
-    {(open || settingsOnly) && <section className={css.card} aria-label={t('settings')}>
-      <h2>{t('settings')}</h2><div className={css.grid}>
-        {field('ownerRepo', t('repository'))}<div>{field('workspace', t('workspace'))}{controls?.pickDirectory && <button disabled={busy} onClick={() => void run(async () => { const workspace = await controls.pickDirectory!(); if (workspace) setSettings({ ...settings, workspace }) })}>{t('pickDirectory')}</button>}</div>
+    {settingsOnly && <section className={css.card} aria-label={t('settings')}>
+      <div className={css.grid}>
+        {field('ownerRepo', t('repository'))}{field('repositoryDirectory', t('repositoryDirectory'))}<div>{field('workspace', t('workspace'))}{controls?.pickDirectory && <button disabled={busy} onClick={() => void run(async () => { const workspace = await controls.pickDirectory!(); if (workspace) setSettings({ ...settings, workspace }) })}>{t('pickDirectory')}</button>}</div>
         {field('workerSeats', t('seats'), 'number')}
         {controls ? <><div className={css.field}>{t('preset')}{controls.preset(settings.presetId, presetId => setSettings({ ...settings, presetId }), busy)}</div>
           <div className={css.field}>{t('model')}{controls.model(settings, value => setSettings({ ...settings, provider: value.provider, model: value.model, reasoningEffort: value.reasoningEffort }), busy)}</div></>
           : <>{field('presetId', t('preset'))}{field('provider', t('provider'))}{field('model', t('model'))}{field('reasoningEffort', t('effort'))}</>}
-      </div><div className={css.actions}>
+      </div><label className={css.hint}><input type="checkbox" checked={settings.remoteEnabled} disabled={busy} onChange={event => setSettings({ ...settings, remoteEnabled: event.target.checked })} /> {t('remoteEnabled')}</label><p className={css.hint}>{t('remoteHint')}</p><div className={css.actions}>
         <button disabled={busy} onClick={() => void run(() => client.call('configure', settings), t('saved'))}>{t('save')}</button>
         <button disabled={busy || !settings.ownerRepo.trim()} onClick={() => void run(async () => { await client.call('configure', settings); await client.call('connect') })}>{t('connect')}</button>
       </div>
-      <div className={css.grid}>
-        {field('tokenRef', t('credentialRef'))}
-        <label className={css.field} htmlFor={prefix + 'token'}>{t('token')}<input id={prefix + 'token'} type="password" autoComplete="new-password"
-          value={token} disabled={busy} onChange={event => setToken(event.target.value)} /></label>
-      </div>
-      <p className={css.hint}>{t('tokenHint')}</p>
-      <p className={css.hint}>{t(view.credential.configured ? 'credentialConfigured' : 'credentialMissing')}{view.credential.source ? ' · ' + view.credential.source : ''}</p>
-      <button disabled={busy || !token.trim() || !view.credential.writable} onClick={() => void run(async () => {
-        await client.call('configure', settings); await client.saveCredential(settings.tokenRef, token); setToken('')
-      }, t('credentialSaved'))}>{t('saveCredential')}</button>
-      {view.connection && <section className={css.members}>
+      <p className={css.hint}>{t('authHint')}</p>
+      <p className={css.hint}>{t(view.connection || view.credential.configured ? 'credentialConfigured' : 'credentialMissing')}{view.credential.source ? ' · ' + view.credential.source : ''}</p>
+      <section className={css.members}>
         <h2>{t('members')}</h2><p className={css.hint}>{t('membersHint')}</p>
-        <button disabled={busy} onClick={() => void run(refreshMembers)}>{t('refreshMembers')}</button>
-        {view.connection.repository.permissions.admin && <div className={css.actions}>
+        {!view.connection && <p className={css.hint}>{t('connectForMembers')}</p>}
+        <button disabled={busy || !view.connection} onClick={() => void run(refreshMembers)}>{t('refreshMembers')}</button>
+        {view.connection?.repository.permissions.admin && <div className={css.actions}>
           <label>{t('username')} <input value={login} disabled={busy} autoComplete="off" onChange={event => { setLogin(event.target.value); setConfirm('') }} /></label>
           {confirm !== 'invite' ? <button disabled={busy || !login.trim()} onClick={() => setConfirm('invite')}>{t('invite')}</button> : <>
             <button disabled={busy} onClick={() => void run(async () => {
@@ -104,7 +96,7 @@ export function CoopPage({ client, t, settingsOnly, controls }: { client: ModeCl
               ? <><button disabled={busy} onClick={() => void run(async () => { await client.call('removeCollaborator', { login: member.login }); setConfirm(''); await refreshMembers() })}>{t('confirmRemove')}</button><button onClick={() => setConfirm('')}>{t('cancel')}</button></>
               : <button disabled={busy} onClick={() => setConfirm('remove-' + member.id)}>{t('remove')}</button>)}
           </li>)}</ul>
-      </section>}
+      </section>
     </section>}
     {view.pending.length > 0 && <section className={css.card}><h2>{t('pending')}</h2><ul>{view.pending.map(draft => <li key={draft.id}>{draft.createdAt} · {draft.error ?? draft.state}</li>)}</ul></section>}
     {!settingsOnly && <>

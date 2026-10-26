@@ -5,7 +5,7 @@ import { GitConflictError } from './github.js'
 export const digest = (text: string): string => createHash('sha256').update(text).digest('hex')
 export const json = (value: unknown): string => JSON.stringify(value, null, 2) + '\n'
 export function segment(id: string): string {
-  if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error('Invalid record identity.')
+  if (!/^(?!\.{1,2}$|__proto__$|prototype$|constructor$)[^/\\\0\r\n]+$/u.test(id)) throw new Error('Invalid record identity.')
   return id
 }
 export interface TextManifest { version: 1; sha256: string; characters: number; chunks: string[] }
@@ -30,7 +30,7 @@ export async function readText(repo: GitRepository, snapshot: GitSnapshot, path:
   if (!manifest || manifest.version !== 1) throw new Error('Missing text manifest: ' + path)
   const parts: string[] = []
   for (const chunk of manifest.chunks) {
-    if (!chunk.startsWith(path + '/parts/') || chunk.includes('..') || chunk.includes('\\')) throw new Error('Invalid text chunk reference: ' + chunk)
+    if (!chunk.startsWith(path + '/parts/') || chunk.split('/').some(part => part === '.' || part === '..') || chunk.includes('\\')) throw new Error('Invalid text chunk reference: ' + chunk)
     const text = await repo.read(snapshot, chunk)
     if (text === undefined) throw new Error('Missing text chunk: ' + chunk)
     parts.push(text)

@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import type { RoleBinding } from './contracts.js'
 
-export const Id = z.string().regex(/^[A-Za-z0-9_-]+$/).max(120)
+export const Id = z.string().min(1).regex(/^(?!\.{1,2}$|__proto__$|prototype$|constructor$)[^/\\\0\r\n]+$/u)
 export const Text = z.string().min(1)
 export const Revision = z.int().nonnegative()
 export const ReviewSchema = z.object({
@@ -29,6 +29,7 @@ export interface RootTask {
   revision: number; goalRevision: number; epoch: number
   status: 'active' | 'waiting' | 'accepted' | 'cancelled'
   createdAt: string; updatedAt: string
+  sourcePath?: string; sourceRevision?: string
 }
 export interface RootPlan { revision: number; works: Work[] }
 export interface Join {
@@ -51,11 +52,15 @@ export interface RoleOutcome {
   prerequisitePaths: string[]; createdAt: string; observedTrigger?: string; resultStatus?: 'done' | 'failed' | 'handoff'
 }
 export interface LocalGrant { taskId: string; joinPath: string; joinHash: string; sourceIntentId: string }
+const SourceFields = {
+  sourcePath: z.string().optional().describe('For a Git-change notification: the source document you read for this decision.'),
+  sourceRevision: z.string().optional().describe('Commit id for that source; use the parent commit to read a deleted document.'),
+}
 export const CommandSchema = z.discriminatedUnion('op', [
-  z.object({ op: z.literal('root'), id: Id, title: Text, goal: Text, initialPlan: Text }),
-  z.object({ op: z.literal('join'), id: Id, taskId: Id, scope: Text, capabilities: z.string().default('') }),
-  z.object({ op: z.literal('revise'), id: Id, taskId: Id, expectedRevision: Revision, goal: Text }),
-  z.object({ op: z.literal('control'), id: Id, taskId: Id, expectedRevision: Revision, state: z.enum(['pause', 'resume', 'leave', 'cancel']) }),
+  z.object({ op: z.literal('root'), id: Id, ...SourceFields, title: Text, goal: Text, initialPlan: Text }),
+  z.object({ op: z.literal('join'), id: Id, ...SourceFields, taskId: Id, scope: Text, capabilities: z.string().default('') }),
+  z.object({ op: z.literal('revise'), id: Id, ...SourceFields, taskId: Id, expectedRevision: Revision, goal: Text }),
+  z.object({ op: z.literal('control'), id: Id, ...SourceFields, taskId: Id, expectedRevision: Revision, state: z.enum(['pause', 'resume', 'leave', 'cancel']) }),
   z.object({ op: z.literal('root_plan'), id: Id, expectedRevision: Revision, works: z.array(WorkSchema) }),
   z.object({ op: z.literal('proposal'), id: Id, text: Text }),
   z.object({ op: z.literal('claim'), id: Id, workId: Id, assignmentVersion: z.int().positive(), scope: Text }),

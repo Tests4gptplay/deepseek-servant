@@ -461,7 +461,7 @@ function stableJson(value: unknown): string {
     .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`).join(',')}}`
   return JSON.stringify(value)
 }
-function validId(value: string): boolean { return typeof value === 'string' && /^[a-z0-9][a-z0-9-]{0,79}$/.test(value) }
+function validId(value: string): boolean { return typeof value === 'string' && /^[a-z0-9][a-z0-9-]*$/.test(value) }
 function required(value: string, label: string): void {
   if (typeof value !== 'string' || !value.trim()) throw new KnowledgeError('rejected', `${label} is required.`)
 }
@@ -474,7 +474,7 @@ function sameScope(a: KnowledgeScope, b: KnowledgeScope): boolean { return a.ass
 function scopeKey(scope: KnowledgeScope): string { return `${encodeURIComponent(scope.assistantId)}/${encodeURIComponent(scope.workspaceId)}` }
 function knowledgeKey(type: string, scope: KnowledgeScope, id: string): string {
   validateScope(scope)
-  if (!validId(id)) throw new KnowledgeError('rejected', 'Knowledge ids must be lowercase kebab-case, at most 80 characters.')
+  if (!validId(id)) throw new KnowledgeError('rejected', 'Knowledge ids must be lowercase kebab-case.')
   return `${ROOT}${type}/${scopeKey(scope)}/${id}`
 }
 function skillKey(scope: KnowledgeScope, id: string): string { return knowledgeKey('skills', scope, id) }

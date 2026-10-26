@@ -19,20 +19,26 @@ export function repositoryPath(ownerRepo: string): string {
 
 /** Secrets exist only inside one operation; no credential is returned or cached. */
 export class GitHubClient {
+  private requests = new AbortController()
   constructor(private readonly tokenSource: TokenSource, private readonly fetcher: GitHubFetch = fetch) {}
+  cancel(): void { this.requests.abort(); this.requests = new AbortController() }
   async session<T>(operation: (session: GitHubSession) => Promise<T>): Promise<T> {
+    const signal = this.requests.signal
     const token = await this.tokenSource()
+    signal.throwIfAborted()
     if (!token?.value) throw new GitHubError(401, 'Configure GitHub credentials or sign in with GitHub CLI.')
     const request = async <R>(method: string, path: string, body?: unknown): Promise<R> => {
+      signal.throwIfAborted()
       if (!path.startsWith('/') || path.startsWith('//') || path.includes('://')) throw new Error('Invalid GitHub API path.')
       let response: Response
       try {
         response = await this.fetcher('https://api.github.com' + path, {
-          method, headers: { Accept: 'application/vnd.github+json', Authorization: 'Bearer ' + token.value,
+          method, signal, headers: { Accept: 'application/vnd.github+json', Authorization: 'Bearer ' + token.value,
             'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'DeepSeek-Servant-Coop', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         })
       } catch (error) {
+        signal.throwIfAborted()
         throw new GitHubError(0, (error instanceof Error ? error.message : 'GitHub network request failed.').split(token.value).join('[redacted]'))
       }
       if (!response.ok) {
@@ -41,7 +47,9 @@ export class GitHubClient {
         const seconds = Number(response.headers.get('retry-after')) || (response.headers.get('x-ratelimit-remaining') === '0' ? Math.max(1, Number(response.headers.get('x-ratelimit-reset')) - Math.floor(Date.now() / 1000)) : 0)
         throw new GitHubError(response.status, 'GitHub ' + response.status + ': ' + message, seconds > 0 ? seconds : undefined)
       }
-      return (response.status === 204 ? undefined : await response.json()) as R
+      const result = response.status === 204 ? undefined : await response.json()
+      signal.throwIfAborted()
+      return result as R
     }
     return operation({ request })
   }

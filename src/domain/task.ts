@@ -730,7 +730,7 @@ export function applyTaskCommand(current: Task | undefined, command: TaskCommand
 }
 
 function text(value: unknown, label: string): asserts value is string { check(typeof value === 'string' && value.trim().length > 0, 'INVALID_INPUT', `${label} must be a nonempty string.`) }
-function validId(value: unknown, label: string): asserts value is string { text(value, label); check(value.length <= 512 && !['__proto__', 'prototype', 'constructor'].includes(value) && !/[\0\r\n]/.test(value), 'INVALID_ID', `${label} is not a valid record identity.`) }
+function validId(value: unknown, label: string): asserts value is string { text(value, label); check(!['__proto__', 'prototype', 'constructor'].includes(value) && !/[\0\r\n]/.test(value), 'INVALID_ID', `${label} is not a valid record identity.`) }
 function strings(value: unknown, label: string): asserts value is string[] { check(Array.isArray(value) && value.every(v => typeof v === 'string'), 'INVALID_INPUT', `${label} must be a string array.`) }
 function validSource(source: CommandSource): void { check(source && ['user', 'runtime', 'agent'].includes(source.kind), 'INVALID_SOURCE', 'A trusted command source is required.'); text(source.id, 'source.id'); if (source.kind === 'agent') { validId(source.executionId, 'source.executionId'); check(['foreground', 'planner', 'worker', 'helper'].includes(source.role), 'INVALID_ROLE', 'Unknown role.') } }
 function requireIntent(source: CommandSource, task?: Task): void { check(source.kind === 'user' || (source.kind === 'agent' && source.role === 'foreground' && (!task || task.foregroundEvaluator === source.id)), 'INTENT_ONLY', 'This operation requires the user or the task-associated foreground.') }

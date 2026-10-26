@@ -66,7 +66,7 @@ export function installRoleTools(ctx: Context, agent: Agent, binding: RoleBindin
   }
   if (binding.role === 'foreground') {
     register('conversation_search', 'Search dated original conversations; returns excerpts, message identities and exact references.',
-      z.strictObject({ query: z.string().min(1).max(500), cursor: z.int().nonnegative().optional(), limit: z.int().min(1).max(50).optional() }),
+      z.strictObject({ query: z.string().min(1), cursor: z.int().nonnegative().optional(), limit: z.int().min(1).max(50).optional() }),
       input => options.assistants.conversations.search(binding.assistantId, input.query, input.cursor, input.limit))
     register('conversation_read', 'Read original conversation text from an exact reference, with a continuation cursor.',
       z.strictObject({ ref: z.string().min(1), cursor: z.int().nonnegative().optional(), limit: z.int().min(1).max(262144).optional() }),
@@ -95,10 +95,16 @@ export function installRoleTools(ctx: Context, agent: Agent, binding: RoleBindin
     return receipt
   }
 
-  register('task_query', 'Read durable task facts. Query is not permission to dispatch work.', z.strictObject({ taskId: Id.optional() }), async input => {
-    if (binding.role === 'foreground' && !input.taskId) return (await options.tasks.list()).filter(task => task.assistantId === binding.assistantId)
-      .sort((a, b) => Number(['completed', 'cancelled'].includes(a.phase)) - Number(['completed', 'cancelled'].includes(b.phase)) || b.updatedAt.localeCompare(a.updatedAt))
-      .slice(0, 50).map(taskSummary)
+  register('task_query', 'Read a task by taskId, or page this assistant’s task summaries. Follow nextCursor to reach all tasks.', z.strictObject({
+    taskId: Id.optional(), cursor: z.int().nonnegative().optional().describe('Task-list cursor; omitted starts at zero.'),
+    limit: z.int().min(1).max(100).optional().describe('Tasks per page; default 50.'),
+  }), async input => {
+    if (binding.role === 'foreground' && !input.taskId) {
+      const tasks = (await options.tasks.list()).filter(task => task.assistantId === binding.assistantId)
+        .sort((a, b) => Number(['completed', 'cancelled'].includes(a.phase)) - Number(['completed', 'cancelled'].includes(b.phase)) || b.updatedAt.localeCompare(a.updatedAt))
+      const start = input.cursor ?? 0, end = Math.min(tasks.length, start + (input.limit ?? 50))
+      return { tasks: tasks.slice(start, end).map(taskSummary), total: tasks.length, ...(end < tasks.length ? { nextCursor: end } : {}) }
+    }
     const task = await currentTask(input.taskId)
     if (binding.role === 'foreground') return taskSummary(task)
     const execution = task.executions[binding.executionId!]
@@ -106,7 +112,7 @@ export function installRoleTools(ctx: Context, agent: Agent, binding: RoleBindin
     return { ...assembleRoleInput(task, execution, task.pendingActions[execution.actionId]!), directRecords: await records.context(task, execution) }
   })
   register('memory_query', 'Read referenced task history pages. Large pages return JSON text fragments with a continuation cursor.',
-    z.strictObject({ taskId: Id.optional(), ref: z.string().min(1).max(2000), offset: z.int().nonnegative().optional(), limit: z.int().min(1).max(50).optional(), characterOffset: z.int().nonnegative().optional() }),
+    z.strictObject({ taskId: Id.optional(), ref: z.string().min(1), offset: z.int().nonnegative().optional(), limit: z.int().min(1).max(50).optional(), characterOffset: z.int().nonnegative().optional() }),
     async input => options.memoryQuery((await currentTask(input.taskId)).id, input, binding.executionId))
   register('memory_read', 'Read an exact saved record as text pages, including original requirements, decisions and Child replies.',
     z.strictObject({ ref: z.string().min(1).describe('Exact dss-record reference from memory_search or the current context.'),

@@ -17,7 +17,8 @@ export interface SidebarWorkspaces {
 }
 
 const roles = ['foreground', 'planner', 'worker', 'helper'] as const
-const servantRowSelector = roles.map(role => `[role="treeitem"][data-row-key^="session:servant-${role}-"]`).join(', ')
+const servantSessionPrefixes = [...roles.map(role => 'servant-' + role + '-'), 'dss-coop-']
+const servantRowSelector = servantSessionPrefixes.map(prefix => `[role="treeitem"][data-row-key^="session:${prefix}"]`).join(', ')
 export const servantSessionRowsCss = servantRowSelector + ' { display: none !important; }'
 const emptyUngroupedCss = 'div:has(> [role="treeitem"][data-row-key="workspace:"]) { display: none !important; }'
 // The native archive filter can leave only Servant rows visible while the full
@@ -31,7 +32,7 @@ export const emptyVisibleServantGroupCss =
 
 /** Only the reserved physical Session identities minted by Servant. */
 export function isServantSession(id: string): boolean {
-  return roles.some(role => id.startsWith('servant-' + role + '-'))
+  return servantSessionPrefixes.some(prefix => id.startsWith(prefix))
 }
 
 /** Use complete native membership, not the first five rendered rows or expansion state. */

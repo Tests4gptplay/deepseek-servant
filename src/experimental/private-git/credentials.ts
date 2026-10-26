@@ -19,7 +19,11 @@ export class CoopCredentials {
     const credentials = this.ctx.get('credentials')
     const native = await credentials?.resolve(ref)
     if (native) return native
-    const environment = process.env[this.reference()]
+    if (this.reference() !== 'GITHUB_TOKEN') {
+      const shared = await credentials?.resolve(credentialRef('GITHUB_TOKEN'))
+      if (shared) return shared
+    }
+    const environment = process.env[this.reference()] || process.env.GH_TOKEN || process.env.GITHUB_TOKEN
     if (environment) return { value: environment, source: 'environment' }
     const value = await this.cli()
     return value ? { value, source: 'GitHub CLI' } : undefined
@@ -27,8 +31,12 @@ export class CoopCredentials {
   async describe(): Promise<{ configured: boolean; source?: string; writable: boolean }> {
     const credentials = this.ctx.get('credentials')
     const info = await credentials?.describe(credentialRef(this.reference()))
+    if (info?.configured) return info
+    const shared = this.reference() !== 'GITHUB_TOKEN' ? await credentials?.describe(credentialRef('GITHUB_TOKEN')) : undefined
+    if (shared?.configured) return shared
+    const environment = process.env[this.reference()] || process.env.GH_TOKEN || process.env.GITHUB_TOKEN
     // View rendering never launches gh. A successful explicit connection supplies
     // the CLI account state separately from the credential-store status.
-    return info ?? { configured: Boolean(process.env[this.reference()]), source: process.env[this.reference()] ? 'environment' : undefined, writable: false }
+    return { configured: Boolean(environment), source: environment ? 'environment' : undefined, writable: info?.writable ?? false }
   }
 }

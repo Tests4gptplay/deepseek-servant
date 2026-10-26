@@ -7,9 +7,9 @@ import type { ServantModels } from './models.ts'
 import css from './page.module.css'
 
 type Translate = PropsLocale<'dsh.servant'>['t']
-export function ModelPicker({ value, models, onChange, onRefresh, disabled, label, composer, followModel, t }: {
+export function ModelPicker({ value, models, onChange, onRefresh, disabled, label, composer, followModel, autoHint, t }: {
   value: ModelRoute; models: ServantModels; onChange(value: ModelRoute): void; onRefresh(): Promise<void>
-  disabled?: boolean; label: string; composer?: boolean; followModel?: ModelRoute; t: Translate
+  disabled?: boolean; label: string; composer?: boolean; followModel?: ModelRoute; autoHint?: string; t: Translate
 }) {
   const [open, setOpen] = useState(false)
   const homePane = composer ? 'root' : 'model'
@@ -34,7 +34,7 @@ export function ModelPicker({ value, models, onChange, onRefresh, disabled, labe
       for (const choice of selectedModel?.reasoning?.efforts ?? []) items.push({ id: 'effort:' + choice.id, label: choice.name })
     } else {
       if (!composer) {
-        items.push({ id: 'auto', label: <span className={css.modelOption}><span>Auto</span><small>{t('model.autoHint')}</small></span> })
+        items.push({ id: 'auto', label: <span className={css.modelOption}><span>Auto</span><small>{(autoHint ?? t('model.autoHint'))}</small></span> })
         if (!auto && selectedModel?.reasoning) items.push({ id: 'effort', label: <span className={css.modelMenuRow}><span>{t('model.effort')}</span><span>{effortName ?? t('model.providerDefault')}</span></span> })
         items.push({ type: 'separator', id: 'model-options-divider' })
       }
@@ -71,7 +71,7 @@ export function ModelPicker({ value, models, onChange, onRefresh, disabled, labe
   return <Menu open={open} portal className={css.menuAnchor} side={composer ? 'top' : 'bottom'} align={composer ? 'end' : 'start'}
     listClassName={css.modelMenu} items={items} selectedId={selectedId} onSelect={choose} onClose={() => setOpen(false)}
     anchor={<Button type="button" variant={composer ? 'ghost' : 'outline'} disabled={disabled} aria-label={label}
-      aria-expanded={open} aria-haspopup="menu" title={auto ? t('model.autoHint') : selectedGroup?.name}
+      aria-expanded={open} aria-haspopup="menu" title={auto ? (autoHint ?? t('model.autoHint')) : selectedGroup?.name}
       className={css.modelTrigger} onClick={() => { setPane(homePane); setOpen(!open) }}>
       <span>{caption || t('model.loading')}</span><IconChevronDownOutlineRegular size={14} />
     </Button>} />

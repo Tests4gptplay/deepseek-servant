@@ -84,6 +84,22 @@ test('a failed preload retains the reading window and retries the same cursor on
   assert.deepEqual(ids(source), ['older', 'latest'])
 })
 
+test('failed storage statistics do not hide a valid conversation and retry on normal refresh', async () => {
+  let failing = true
+  const source = createServantSource({
+    view: async () => page(['healthy']),
+    retention: async () => { if (failing) throw new Error('statistics unavailable'); return { totalBytes: 42 } },
+  } as ServantClientApi, () => {})
+  await source.refresh()
+  assert.equal(source.source.getSnapshot().status, 'ready')
+  assert.deepEqual(ids(source), ['healthy'])
+  assert.equal(source.source.getSnapshot().storageError, 'statistics unavailable')
+  failing = false
+  await source.refresh()
+  assert.equal(source.source.getSnapshot().storageStats?.totalBytes, 42)
+  assert.equal(source.source.getSnapshot().storageError, undefined)
+})
+
 test('calendar uses ISO local dates and clamps month changes through leap years and year boundaries', () => {
   assert.deepEqual(viewOf('2026-10-26'), { year: 2026, month: 9, day: 26 })
   assert.equal(daysIn({ year: 2024, month: 1 }), 29)

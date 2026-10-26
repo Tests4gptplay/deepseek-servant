@@ -15,7 +15,7 @@ export class Scheduler {
   private seats: number
   get workerSeats(): number { return this.seats }
   setWorkerSeats(value: number): void {
-    if (!Number.isInteger(value) || value < 1 || value > 32) throw new Error('workerSeats must be an integer from 1 to 32')
+    if (!Number.isSafeInteger(value) || value < 1) throw new Error('workerSeats must be a positive safe integer')
     this.seats = value
   }
   capacity(tasks: readonly Task[], live: LiveExecutions = new Map(), except?: { taskId: string; actionId: string; executionId?: string }): WorkerCapacity {

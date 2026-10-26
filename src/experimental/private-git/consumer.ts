@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto'
+import { childDirectories, loadPaths } from './repository-paths.js'
 import type { CoopStore } from './cache.js'
-import type { GitChange, GitRepository, GitSnapshot, RoleBinding, UserIntent } from './contracts.js'
+import type { GitChange, GitChangeNotice, GitRepository, GitSnapshot, RoleBinding, UserIntent } from './contracts.js'
 import { digest, GitJournal, json, readJson, readText, textChanges } from './journal.js'
 import { RoleWriter, plannerTrigger } from './role-writer.js'
 import { actionPath, executionPath, joinPath, participantPath, planPath, sameBinding, StaleCoopWrite, taskPath,
   type ChildState, type Claim, type Join, type LocalGrant, type ParticipantPlan, type RoleAction, type RoleOutcome, type RootTask } from './protocol.js'
 import { CoopFinalizer } from './finalizer.js'
-import { conversationPaths, conversationHeader, conversationText } from './conversation.js'
+import { recordReadError } from './conversation.js'
+import { releaseConfirmedActionCaches, releaseInputCaches, releaseArchivedTaskCaches, type CacheCleanupResult } from './cache-cleanup.js'
 
 export interface CoopPhysicalState {
   busy: boolean
@@ -29,6 +31,13 @@ export interface CoopEngineOptions {
 export class CoopConsumer {
   private writerValue?: { participant: string; value: RoleWriter }
   private stopping = false
+  private cleanupError?: string
+  private reportCleanup(result: CacheCleanupResult): void {
+    if (!result.failed.length) return
+    const message = JSON.stringify({ count: result.failed.length, first: result.failed.slice(0, 5) })
+    if (message !== this.cleanupError) console.error('deepseek-servant cache cleanup', message)
+    this.cleanupError = message
+  }
   constructor(private readonly options: CoopEngineOptions) {}
   get writer(): RoleWriter {
     const participant = this.options.cache.connection()?.identity.id.toString()
@@ -42,30 +51,72 @@ export class CoopConsumer {
     const actions: RoleAction[] = []
     for (const path of snapshot.files.keys()) {
       if (!path.includes(suffix) || !path.endsWith('.json')) continue
+      try {
       const action = await readJson<RoleAction>(this.options.repo, snapshot, path)
-      const transition = cache.get<RoleAction>('transition/' + path)
-      if (action && transition && json(action) === json(transition)) {
-        await cache.put('admission/' + path, digest(json(action)))
-        await cache.remove('transition/' + path)
-      }
       if (action?.binding && action.binding.participantId === participant && action.binding.instanceId === cache.instanceId
-        && actionPath(action.binding) === path && cache.get<string>('admission/' + path) === digest(json(action))) actions.push(action)
+        && actionPath(action.binding) === path) actions.push(action)
+      } catch (error) { await recordReadError(cache, path, error) }
     }
     return actions
+  }
+  async notifyChanges(notice: GitChangeNotice): Promise<void> {
+    if (!notice.changes.length) return
+    const id = 'git-' + digest(json(notice.changes.map(change => [change.commit, change.path, change.status]))).slice(0, 40)
+    await this.stage({ role: 'foreground', actionId: id, trigger: notice.to, epoch: 0,
+      input: { gitChanges: { from: notice.from, to: notice.to, count: notice.changes.length, preview: notice.changes.slice(0, 100) } } })
+    this.options.wake()
   }
   async consume(snapshot: GitSnapshot): Promise<void> {
     if (this.stopping) return
     const { cache, repo, agents } = this.options
     const participantId = cache.connection()!.identity.id.toString()
+    await loadPaths(repo, snapshot, 'dss-coop/foreground/actions/' + participantId + '/' + cache.instanceId + '/')
+    await loadPaths(repo, snapshot, 'dss-coop/intents/' + participantId + '/')
+    const grants: LocalGrant[] = []
+    for (const directory of await childDirectories(repo, snapshot, 'dss-coop/tasks/')) {
+      const taskId = directory.slice('dss-coop/tasks/'.length, -1)
+      const path = joinPath(taskId, participantId, cache.instanceId)
+      const joined = await readJson<Join>(repo, snapshot, path)
+      if (!joined || joined.participantId !== participantId || joined.instanceId !== cache.instanceId) continue
+      const grant = { taskId, joinPath: path, joinHash: '', sourceIntentId: joined.sourceIntentId }
+      grants.push(grant)
+      await cache.put('grant/' + taskId, grant) // Rebuildable cursor for cleanup, not authority.
+      await loadPaths(repo, snapshot, directory)
+    }
+    for (const [, old] of cache.entries<LocalGrant>('grant/')) {
+      if (!grants.some(grant => grant.taskId === old.taskId)) this.reportCleanup(await releaseArchivedTaskCaches(cache, old.taskId))
+    }
     let changed = false
     const actions = await this.actions(snapshot)
+    this.reportCleanup(await releaseConfirmedActionCaches(cache, actions))
+    for (const action of actions.filter(value => value.state === 'closed')) {
+      const physical = agents.state(action.binding.executionId)
+      if (physical?.busy || (physical && !physical.finished)) continue
+      try {
+        await agents.release(action.binding.executionId)
+        await cache.remove('physical/' + action.binding.executionId)
+        this.reportCleanup(await releaseInputCaches(cache, action.binding))
+        if (action.binding.sourceIntentId) {
+          const inputPath = 'dss-coop/intents/' + participantId + '/' + action.binding.sourceIntentId + '.json'
+          await this.options.journal().transact('consume-' + action.id, { path: inputPath }, async head => {
+            const input = await repo.read(head, inputPath)
+            if (input === undefined) return []
+            return [{ path: 'dss-coop/inputs/' + participantId + '/' + action.binding.sourceIntentId + '.json', content: input }, { path: inputPath, content: null }]
+          })
+        }
+      } catch (error) {
+        this.reportCleanup({ removed: 0, failed: [{ key: actionPath(action.binding), message: error instanceof Error ? error.message : String(error) }] })
+      }
+    }
     for (const action of actions.filter(value => value.state === 'active')) {
+      if (this.stopping) return
+      try {
+      await cache.remove('read-error/' + actionPath(action.binding))
       const b = action.binding
       const physical = agents.state(b.executionId)
       const outcome = await readJson<RoleOutcome>(repo, snapshot, b.outputPath)
-      const validOutcome = outcome && sameBinding(outcome.binding, b) && await this.writer.proven(snapshot, b.outputPath)
+      const validOutcome = outcome && sameBinding(outcome.binding, b)
       if (validOutcome) {
-        await this.validateOutcome(snapshot, outcome)
         await cache.remove('native-error/' + action.id)
         if (physical?.busy || (physical && !physical.finished)) continue
         if (outcome.kind === 'continue' || (outcome.kind === 'result' && outcome.resultStatus === 'handoff')) {
@@ -91,21 +142,24 @@ export class CoopConsumer {
         continue
       }
       if (!physical) {
+        if (b.role === 'foreground' && actions.some(other => other.binding.role === 'foreground' && other.binding.executionId !== b.executionId && agents.state(other.binding.executionId)?.busy)) continue
         const activeWorkers = actions.filter(value => value.state === 'active' && value.binding.role === 'worker' && agents.state(value.binding.executionId)?.busy).length
         if (b.role === 'worker' && activeWorkers >= cache.settings.workerSeats) continue
         const context = await this.context(snapshot, action)
+        if (this.stopping) return
         await cache.put('physical/' + b.executionId, { actionId: action.id, binding: b })
+        if (this.stopping) return
         await agents.start(action, context, this.writer, this.options.wake)
       }
+      } catch (error) { await recordReadError(cache, actionPath(action.binding), error) }
     }
     // A new input becomes runnable only through a separately committed action and a later snapshot.
     const foregroundActive = actions.some(action => action.state === 'active' && action.binding.role === 'foreground')
     if (!foregroundActive) {
-      for (const [, input] of cache.entries<UserIntent>('user-source/').sort(([, a], [, b]) => a.createdAt.localeCompare(b.createdAt))) {
-        if (input.participantId !== participantId || input.instanceId !== cache.instanceId) continue
-        const path = 'dss-coop/intents/' + participantId + '/' + input.id + '.json'
-        const confirmed = await readJson<UserIntent & { textPath: string }>(repo, snapshot, path)
-        if (!confirmed || confirmed.instanceId !== cache.instanceId || await readText(repo, snapshot, confirmed.textPath) !== input.text) continue
+      const prefix = 'dss-coop/intents/' + participantId + '/'
+      for (const path of [...snapshot.files.keys()].filter(path => path.startsWith(prefix) && path.endsWith('.json')).sort()) {
+        const input = await readJson<Omit<UserIntent, 'text'>>(repo, snapshot, path)
+        if (!input || input.participantId !== participantId || input.instanceId !== cache.instanceId) continue
         const actionId = 'input-' + input.id
         if (actions.some(action => action.id === actionId)) continue
         await this.stage({ role: 'foreground', actionId, sourceIntentId: input.id, trigger: snapshot.files.get(path)!, input: { sourcePath: path }, epoch: 0 })
@@ -114,22 +168,21 @@ export class CoopConsumer {
     }
     let stageSeats = cache.settings.workerSeats - actions.filter(value => value.state === 'active' && value.binding.role === 'worker').length
     let pendingTasks = 0
-    for (const [, grant] of cache.entries<LocalGrant>('grant/')) {
+    for (const grant of grants) {
+      if (this.stopping) return
+      try {
+      await cache.remove('read-error/' + taskPath(grant.taskId) + '/contract.json')
       const task = await readJson<RootTask>(repo, snapshot, taskPath(grant.taskId) + '/contract.json')
       if (!task) {
         const history = await readJson<{ manifestPath: string }>(repo, snapshot, 'dss-coop/history/' + grant.taskId + '.json')
-        if (history && snapshot.files.has(history.manifestPath)) {
-          await cache.remove('grant/' + grant.taskId)
-          for (const [key] of cache.entries('')) if (key.includes(taskPath(grant.taskId) + '/')) await cache.remove(key)
+        if (history && await repo.read(snapshot, history.manifestPath) !== undefined) {
+          this.reportCleanup(await releaseArchivedTaskCaches(cache, grant.taskId))
         }
         continue
       }
       const join = await readJson<Join>(repo, snapshot, grant.joinPath)
-      if (!join || !await this.writer.proven(snapshot, grant.joinPath) || join.instanceId !== cache.instanceId || join.participantId !== participantId) continue
-      const source = cache.get<UserIntent>('user-source/' + join.sourceIntentId)
-      if (!source || source.instanceId !== cache.instanceId || digest(source.text) !== join.sourceHash) continue
-      const foregroundOutcome = await readJson<RoleOutcome>(repo, snapshot, join.writer.outputPath)
-      if (!foregroundOutcome || !await this.writer.proven(snapshot, join.writer.outputPath) || !sameBinding(foregroundOutcome.binding, join.writer)) continue
+      if (!join || join.instanceId !== cache.instanceId || join.participantId !== participantId) continue
+
       if (join.state !== 'active') continue
       const taskActions = actions.filter(action => action.binding.taskId === task.id)
       const activePlanner = taskActions.some(action => action.state === 'active' && action.binding.role === 'planner')
@@ -154,7 +207,7 @@ export class CoopConsumer {
       const outcomes: RoleOutcome[] = []
       for (const action of taskActions.filter(value => value.binding.role === 'planner')) {
         const outcome = await readJson<RoleOutcome>(repo, snapshot, action.binding.outputPath)
-        if (outcome && await this.writer.proven(snapshot, action.binding.outputPath)) outcomes.push(outcome)
+        if (outcome) outcomes.push(outcome)
       }
       const question = outcomes.filter(outcome => outcome.kind === 'wait' && outcome.question && outcome.observedTrigger === trigger).at(-1)
       if (question && !foregroundActive && !taskActions.some(action => action.id === 'question-' + question.binding.executionId)) {
@@ -169,17 +222,16 @@ export class CoopConsumer {
       }
       const planFile = planPath(task.id, participantId, cache.instanceId)
       const plan = await readJson<ParticipantPlan>(repo, snapshot, planFile)
-      if (!plan || !await this.writer.proven(snapshot, planFile)) continue
+      if (!plan) continue
       const planOutcome = await readJson<RoleOutcome>(repo, snapshot, plan.writer.outputPath)
-      if (!planOutcome || !await this.writer.proven(snapshot, plan.writer.outputPath) || !['plan_ready', 'wait'].includes(planOutcome.kind)) continue
-      await this.validateOutcome(snapshot, planOutcome)
+      if (!planOutcome || !['plan_ready', 'wait'].includes(planOutcome.kind)) continue
       const rootPlan = await this.writer.rootPlan(snapshot, task.id)
       for (const child of plan.children) {
         if (child.state !== 'pending' || stageSeats <= 0 || child.dependencies.some(id => plan.children.find(value => value.id === id)?.state !== 'accepted')) continue
         const work = rootPlan.works.find(value => value.id === child.workId)
         const claimFile = participantPath(task.id, participantId) + '/instances/' + cache.instanceId + '/claims/' + child.workId + '.json'
         const claim = await readJson<Claim>(repo, snapshot, claimFile)
-        if (!work || !claim || !await this.writer.proven(snapshot, claimFile) || claim.joinRevision !== join.revision || work.version !== child.assignmentVersion
+        if (!work || !claim || claim.joinRevision !== join.revision || work.version !== child.assignmentVersion
           || claim.assignmentVersion !== work.version || work.participantId !== participantId || work.instanceId !== cache.instanceId || join.goalRevision !== task.goalRevision) continue
         const actionId = 'work-' + digest(task.id + ':' + child.id + ':' + child.revision + ':' + work.version + ':' + join.epoch).slice(0, 36)
         if (taskActions.some(action => action.id === actionId)) continue
@@ -188,15 +240,10 @@ export class CoopConsumer {
           childId: child.id, childRevision: child.revision, assignmentVersion: work.version })
         stageSeats--; changed = true
       }
+      } catch (error) { pendingTasks++; await recordReadError(cache, taskPath(grant.taskId) + '/contract.json', error) }
     }
     await cache.put('pending-tasks', pendingTasks)
     if (changed) this.options.wake()
-  }
-  private async validateOutcome(snapshot: GitSnapshot, outcome: RoleOutcome): Promise<void> {
-    for (const ref of outcome.prerequisitePaths) if (!snapshot.files.has(ref)) throw new Error('The outcome is missing its prerequisite: ' + ref)
-    await readText(this.options.repo, snapshot, outcome.textPath)
-    if (outcome.memoryPath) await readText(this.options.repo, snapshot, outcome.memoryPath)
-    if (outcome.notePath) await readText(this.options.repo, snapshot, outcome.notePath)
   }
   private async stage(input: Pick<RoleBinding, 'role' | 'taskId' | 'childId' | 'childRevision' | 'assignmentVersion' | 'sourceIntentId' | 'epoch'> & {
     actionId: string; trigger: string; input: unknown
@@ -213,9 +260,11 @@ export class CoopConsumer {
     const pending = cache.get<RoleAction>('staged/' + path) ?? action
     await cache.put('staged/' + path, pending)
     await this.options.journal().transact('dispatch-' + digest(path).slice(0, 40), { path }, async snapshot => {
-      if (snapshot.files.has(path)) throw new Error('The action path is already occupied.')
-      await cache.put('admission/' + path, digest(json(pending)))
-      return [{ path, content: json(pending) }, { path: executionPath(pending.binding) + '/binding.json', content: json(pending.binding) }]
+      if (await this.options.repo.read(snapshot, path) !== undefined) return []
+      const changes = [{ path, content: json(pending) }, { path: executionPath(pending.binding) + '/binding.json', content: json(pending.binding) }]
+      const notice = (input.input as { gitChanges?: { to: string } }).gitChanges
+      if (notice) changes.push({ path: 'dss-coop/instances/' + cache.instanceId + '/watch.json', content: json({ head: notice.to }) })
+      return changes
     })
   }
   private async close(action: RoleAction, physical?: CoopPhysicalState, cancelled?: string): Promise<void> {
@@ -233,7 +282,6 @@ export class CoopConsumer {
       }
       return changes
     })
-    await cache.put('admission/' + path, digest(json(closed)))
     await agents.release(action.binding.executionId)
     await cache.remove('physical/' + action.binding.executionId)
   }
@@ -257,42 +305,18 @@ export class CoopConsumer {
       if (physical) changes.push(...textChanges(executionPath(old) + '/transcript', physical.transcript))
       return changes
     })
-    await cache.put('admission/' + path, digest(json(next)))
     await agents.release(old.executionId); await cache.remove('physical/' + old.executionId)
   }
   async context(snapshot: GitSnapshot, action: RoleAction): Promise<unknown> {
-    const { cache, repo } = this.options, b = action.binding
-    const base = { binding: b, confirmedHead: snapshot.head, input: action.input, capacity: { workerSeats: cache.settings.workerSeats } }
-    if (b.role === 'foreground') {
-      if (!b.sourceIntentId && b.taskId) {
-        const task = await this.writer.task(snapshot, b.taskId)
-        const records = [...snapshot.files.keys()].filter(path => path.startsWith(taskPath(task.id) + '/') && (path.endsWith('/acceptance.json') || path.includes('/reports/')))
-        return { ...base, notification: true, task, originalRequest: await readText(repo, snapshot, task.originPath), records,
-          instructions: (action.input as { question?: boolean }).question
-            ? 'Present the Planner question from input.notification to the local user using a respond outcome. Wait for an actual local reply before changing participation or the task.'
-            : 'Deliver the confirmed result and useful artifact references using a respond outcome. This notification grants no new user intent.' }
-      }
-      const source = cache.get<UserIntent>('user-source/' + b.sourceIntentId)!
-      const history: unknown[] = [], tasks: unknown[] = []
-      let rounds = 0
-      for (const path of conversationPaths(snapshot, b.participantId)) {
-        const entry = await conversationHeader(repo, cache, snapshot, path)
-        if (!entry || entry.createdAt >= source.createdAt) continue
-        history.unshift(await conversationText(repo, cache, snapshot, entry))
-        if (entry.role === 'user' && ++rounds === 6) break
-      }
-      for (const path of snapshot.files.keys()) if (/^dss-coop\/tasks\/[^/]+\/contract.json$/.test(path)) {
-        const task = await readJson<RootTask>(repo, snapshot, path)
-        if (task && ['active', 'waiting'].includes(task.status)) tasks.push(task)
-      }
-      return { ...base, actualLocalUserInput: source.text, recentConversation: history, activeTasks: tasks }
-    }
-    const task = await this.writer.task(snapshot, b.taskId!)
-    const join = await readJson<Join>(repo, snapshot, joinPath(task.id, b.participantId, b.instanceId))
-    const plan = await readJson<ParticipantPlan>(repo, snapshot, planPath(task.id, b.participantId, b.instanceId))
-    const refs = [...snapshot.files.keys()].filter(path => path.startsWith(taskPath(task.id) + '/') && (path.endsWith('/outcome.json') || /\/(reports|proposals)\/[^/]+\.json$/.test(path)))
-    return { ...base, task, originalRequest: await readText(repo, snapshot, task.originPath), goal: await readText(repo, snapshot, task.goalPath),
-      localParticipation: join, rootPlan: await this.writer.rootPlan(snapshot, task.id), participantPlan: plan, recordRefs: refs.slice(-80), recordCount: refs.length, recordPrefix: taskPath(task.id) + '/' }
+    const { cache } = this.options, b = action.binding
+    // Pass references, not prefetched documents. Each role chooses the relevant text through coop_read.
+    return { binding: b, confirmedHead: snapshot.head, input: action.input, capacity: { workerSeats: cache.settings.workerSeats },
+      inputPath: b.sourceIntentId ? 'dss-coop/intents/' + b.participantId + '/' + b.sourceIntentId + '.json' : undefined,
+      conversationPrefix: 'dss-coop/conversations/' + b.participantId + '/',
+      tasksPrefix: 'dss-coop/tasks/',
+      taskPath: b.taskId ? taskPath(b.taskId) + '/contract.json' : undefined,
+      participationPath: b.taskId ? joinPath(b.taskId, b.participantId, b.instanceId) : undefined,
+      planPath: b.taskId ? planPath(b.taskId, b.participantId, b.instanceId) : undefined }
   }
   async retryNative(): Promise<void> {
     for (const [key] of this.options.cache.entries('native-error/')) await this.options.cache.remove(key)

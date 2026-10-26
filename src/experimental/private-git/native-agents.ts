@@ -15,6 +15,7 @@ import type { CoopAgentPort, CoopPhysicalState } from './consumer.js'
 import { CommandSchema, type RoleAction, type RoleOutcome } from './protocol.js'
 import { digest, readJson, readText } from './journal.js'
 import type { RoleWriter } from './role-writer.js'
+import { loadPaths, childDirectories } from './repository-paths.js'
 
 declare const __COOP_ROLE_TEXTS__: Record<string, string>
 declare module '@deepseek-ai/dsh-llm' {
@@ -29,9 +30,11 @@ const parameters = (schema: z.ZodType): Record<string, unknown> => {
 /** Independent native Agent composition; never imports or acquires a Local runtime. */
 export class CoopNativeAgents implements CoopAgentPort {
   private owned = new Map<string, Owned>()
+  private stopping = false
   constructor(private readonly ctx: Context, private readonly cache: CoopStore) {}
   async start(action: RoleAction, input: unknown, writer: RoleWriter, wake: () => void): Promise<void> {
     const b = action.binding
+    if (this.stopping) return
     if (this.owned.has(b.executionId)) return
     const settings = this.cache.settings
     if (!settings.workspace || !isAbsolute(settings.workspace)) throw new Error('Choose an absolute working directory in Private Git settings before running agents.')
@@ -64,11 +67,13 @@ export class CoopNativeAgents implements CoopAgentPort {
         })
       }
       register('coop_read', 'Read Git-confirmed collaboration records or list record references. Paged text returns the next offset.',
-        z.object({ path: z.string().default('dss-coop/'), offset: z.int().nonnegative().default(0), limit: z.int().min(1).max(65536).default(12000),
+        z.object({ path: z.string().default('dss-coop/'), revision: z.string().optional().describe('Read this commit instead of the latest; use a deletion notification’s parent commit for its former content.'), offset: z.int().nonnegative().default(0), limit: z.int().min(1).max(65536).default(12000),
           textRecord: z.boolean().default(false).describe('Read a chunked text record by its directory, using its manifest.') }),
         async value => {
-          const snapshot = await writer.repo.snapshot()
+          const snapshot = value.revision && writer.repo.at ? await writer.repo.at(value.revision) : await writer.repo.snapshot()
           if (value.path.endsWith('/') && !value.textRecord) {
+            if (value.path === 'dss-coop/') return { commit: snapshot.head, directories: await childDirectories(writer.repo, snapshot, value.path) }
+            await loadPaths(writer.repo, snapshot, value.path)
             const paths = [...snapshot.files.keys()].filter(path => path.startsWith(value.path)).sort()
             const pageSize = Math.min(value.limit, 100)
             return { commit: snapshot.head, paths: paths.slice(value.offset, value.offset + pageSize), nextOffset: value.offset + pageSize < paths.length ? value.offset + pageSize : null }
@@ -78,11 +83,19 @@ export class CoopNativeAgents implements CoopAgentPort {
           const end = value.offset + value.limit
           return { commit: snapshot.head, text: text.slice(value.offset, end), nextOffset: end < text.length ? end : null, characters: text.length }
         })
+      register('coop_changes', 'List added, modified and deleted paths from a Git-change notification. Returns commit and parent references for on-demand reading.',
+        z.object({ from: z.string().default(''), to: z.string().optional(), offset: z.int().nonnegative().default(0), limit: z.int().min(1).max(100).default(100) }),
+        async value => {
+          const snapshot = value.to && writer.repo.at ? await writer.repo.at(value.to) : await writer.repo.snapshot()
+          const changes = await writer.repo.changes?.(snapshot, value.from, b.instanceId) ?? []
+          return { from: value.from, to: snapshot.head, changes: changes.slice(value.offset, value.offset + value.limit),
+            nextOffset: value.offset + value.limit < changes.length ? value.offset + value.limit : null, count: changes.length }
+        })
       const allowed = b.role === 'foreground' ? new Set(['root', 'join', 'revise', 'control', 'entry', 'outcome'])
         : b.role === 'worker' ? new Set(['entry', 'outcome']) : new Set(['root_plan', 'proposal', 'claim', 'participant_plan', 'review', 'report', 'accept', 'entry', 'outcome'])
       const variants = CommandSchema.options.filter(schema => allowed.has(schema.shape.op.value)).map(schema => z.object(Object.fromEntries(Object.entries(schema.shape).filter(([key]) => key !== 'id'))))
       const operationSchema = z.union([variants[0]!, variants[1]!, ...variants.slice(2)])
-      register('coop_commit', 'Commit this role’s task, plan, claim, review or text record to private Git. End the turn with one outcome containing the complete reply and required memory/note.',
+      register('coop_commit', 'Commit this role’s task, plan, claim, review or text record to private Git. End the turn with one outcome containing the reply and useful memory or notes.',
         z.object({ operation: operationSchema }), async (value, callId) => {
           const command = CommandSchema.parse({ ...(value.operation as object), id: 'op-' + digest(callId).slice(0, 40) })
           if (command.op === 'outcome') {
@@ -102,7 +115,7 @@ export class CoopNativeAgents implements CoopAgentPort {
       }, { prepend: true })
       scope.on('agent/error', event => { if (event.agent === agent && owner) { owner.error = errorChain(event.error); wake() } })
       scope.on('session/event', (session, event) => { if (session.id === agent.id && event.type === 'turn/end') wake() })
-      scope.on('agent/status', () => wake())
+      scope.on('agent/status', event => { if (event.agent === agent) wake() })
       const nativeJobs = scope.get('jobs')
       if (nativeJobs) scope.effect(() => nativeJobs.events.subscribe({ owner: agent.id }, event => {
         if (event.type !== 'output' && event.job.owner === agent.id) wake()
@@ -113,8 +126,9 @@ export class CoopNativeAgents implements CoopAgentPort {
         list: async options => {
           options.signal?.throwIfAborted()
           const snapshot = await writer.repo.snapshot(), candidates = []
+          await loadPaths(writer.repo, snapshot, 'dss-coop/knowledge/' + b.participantId + '/skill/')
           for (const path of snapshot.files.keys()) {
-            if (!path.startsWith('dss-coop/knowledge/' + b.participantId + '/skill/') || !path.endsWith('/source.json') || !await writer.proven(snapshot, path) || !await writer.proven(snapshot, path.slice(0, -'/source.json'.length) + '/manifest.json')) continue
+            if (!path.startsWith('dss-coop/knowledge/' + b.participantId + '/skill/') || !path.endsWith('/source.json')) continue
             const textPath = path.slice(0, -'/source.json'.length), body = await readText(writer.repo, snapshot, textPath)
             candidates.push({ name: 'coop-' + digest(textPath).slice(0, 16), description: body.split('\n').find(line => line.trim())?.slice(0, 180) || 'Coop skill',
               invocation: { modelInvocable: true, userInvocable: true }, source: 'runtime', provider: 'deepseek-servant-coop', rank: 250,
@@ -126,7 +140,6 @@ export class CoopNativeAgents implements CoopAgentPort {
           options.signal?.throwIfAborted()
           const locator = candidate.locator as { textPath: string; manifestSha: string }
           const snapshot = await writer.repo.snapshot()
-          if (snapshot.files.get(locator.textPath + '/manifest.json') !== locator.manifestSha) return undefined
           return { name: candidate.name, description: candidate.description, invocation: candidate.invocation, source: candidate.source, provider: candidate.provider,
             content: await readText(writer.repo, snapshot, locator.textPath), resourceBase: candidate.resourceBase }
         },
@@ -135,6 +148,7 @@ export class CoopNativeAgents implements CoopAgentPort {
     const resume = !!await this.ctx.get('sessionPersistence')?.stat(id)
     const handle = resume ? await this.ctx.agents.resume({ resumeSessionId: id, agentOptions: options, setup })
       : await this.ctx.agents.create({ sessionId: id, agentOptions: options, meta: { cwd: settings.workspace, ...(preset ? { agentPreset: preset.id } : {}) }, setup })
+    if (this.stopping) { await handle.dispose(); return }
     owner = { action, handle, closed: false }
     this.owned.set(b.executionId, owner)
     try {
@@ -166,5 +180,5 @@ export class CoopNativeAgents implements CoopAgentPort {
     await owner.handle.dispose()
     this.owned.delete(executionId)
   }
-  async dispose(): Promise<void> { await Promise.all([...this.owned.keys()].map(id => this.release(id, true))) }
+  async dispose(): Promise<void> { this.stopping = true; await Promise.all([...this.owned.keys()].map(id => this.release(id, true))) }
 }

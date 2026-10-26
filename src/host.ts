@@ -24,8 +24,8 @@ import type { Assistant } from './contracts/assistant.ts'
 import type { RuntimeProfile } from './contracts/task.ts'
 
 export const name = 'deepseek-servant'
-export const inject = ['storage', 'storageDomain', 'agents', 'sessions', 'sessionPersistence', 'workspaceRegistry', 'workingDirectory', 'agentPresets', 'jobs']
-export const Config = z.object({ workerSeats: z.int().min(1).max(32).default(2), reviewEvery: z.int().min(1).max(100).default(5),
+export const inject = ['storage', 'storageDomain', 'agents', 'sessions', 'sessionPersistence', 'workspaceRegistry', 'workingDirectory', 'agentPresets', 'jobs', 'credentials', 'agentDefaultModel']
+export const Config = z.object({ workerSeats: z.int().positive().default(2), reviewEvery: z.int().positive().default(5),
   presetId: z.string().min(1).default('standard'), foreground: ModelRouteSchema.default({}), background: ModelRouteSchema.default({}) })
 export type Config = z.infer<typeof Config>
 

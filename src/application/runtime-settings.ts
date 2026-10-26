@@ -3,7 +3,7 @@ import type { StoragePort } from '../contracts/ports.js'
 export interface RuntimeSettings { schemaVersion: 1; revision: number; workerSeats: number }
 export const RUNTIME_SETTINGS_KEY = 'settings/runtime'
 export function validWorkerSeats(value: number): void {
-  if (!Number.isInteger(value) || value < 1 || value > 32) throw new Error('Worker seats must be an integer from 1 to 32.')
+  if (!Number.isSafeInteger(value) || value < 1) throw new Error('Worker seats must be a positive safe integer.')
 }
 
 /** Global DSS settings. A saved UI value takes precedence over the Host migration default. */

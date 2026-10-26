@@ -25,6 +25,39 @@ test('existing and future Servant role rows hide without matching ordinary conve
   for (const id of ['ordinary-session', 'DeepSeek Servant', 'servant-project-notes', 'foreground-123']) assert.equal(isServantSession(id), false)
 })
 
+test('Private Git native sessions follow the same display-only hiding as Local roles', () => {
+  const coop = 'dss-coop-4188900b-b29b-432c-b331-d7b80f82bf2d'
+  assert.equal(isServantSession(coop), true)
+  assert.ok(servantSessionRowsCss.includes('data-row-key^="session:dss-coop-"'))
+  const onlyServant = sessions([foreground, coop])
+  const before = structuredClone(onlyServant)
+  assert.equal(servantOnlyUngrouped(onlyServant, workspaces), true)
+  assert.deepEqual(onlyServant, before)
+  assert.equal(servantOnlyUngrouped(sessions([coop, 'ordinary']), workspaces), false)
+  for (const id of ['dss-cooperation-notes', 'ordinary-dss-coop-123', 'dss-coop']) assert.equal(isServantSession(id), false)
+})
+
+test('native row selectors hide Local and Coop without hiding ordinary or overflow groups', async () => {
+  const { JSDOM } = await import('jsdom')
+  const row = (id: string) => `<div role="treeitem" data-row-key="session:${id}">${id}</div>`
+  const group = (id: string, content: string) => `<div id="${id}"><div role="treeitem" data-row-key="workspace:" aria-expanded="true">Ungrouped</div>${content}</div>`
+  const dom = new JSDOM('<!doctype html><style>' + servantSessionRowsCss + '\n' + emptyVisibleServantGroupCss + '</style>'
+    + group('coop', row('dss-coop-test')) + group('local', row(foreground))
+    + group('mixed', row('dss-coop-mixed') + row('ordinary'))
+    + group('overflow', row('dss-coop-more') + '<button data-row-key="overflow:">Show more</button>'))
+  try {
+    const document = dom.window.document
+    const display = (selector: string) => dom.window.getComputedStyle(document.querySelector(selector)!).display
+    assert.equal(display('[data-row-key="session:dss-coop-test"]'), 'none')
+    assert.equal(display('[data-row-key="session:' + foreground + '"]'), 'none')
+    assert.equal(display('#coop'), 'none')
+    assert.equal(display('#local'), 'none')
+    assert.notEqual(display('[data-row-key="session:ordinary"]'), 'none')
+    assert.notEqual(display('#mixed'), 'none')
+    assert.notEqual(display('#overflow'), 'none')
+  } finally { dom.window.close() }
+})
+
 test('only the Servant-only Ungrouped bucket hides; complete ordinary membership is preserved', () => {
   assert.equal(servantOnlyUngrouped(sessions([foreground]), workspaces), true)
   assert.equal(servantOnlyUngrouped(sessions([]), workspaces), false)

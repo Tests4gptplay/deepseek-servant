@@ -21,7 +21,7 @@ import { MODE_NS, modeEn, modeZh } from './mode-router/locales.js'
 declare const __SERVANT_CLIENT_CSS__: string
 
 export const name = 'deepseek-servant-client'
-export const inject = ['slots', 'locale', 'connection', 'sessions', 'workspaces', 'modelDirectories', 'remote', 'remote.agentPresets']
+export const inject = ['slots', 'locale', 'connection', 'sessions', 'workspaces', 'modelDirectories', 'remote', 'remote.agentPresets', 'remote.credentials']
 const PANEL_ID = 'deepseek-servant' as MainPanelId
 
 /** Native DSH page; all background execution remains owned by the Host bundle. */
@@ -80,13 +80,7 @@ export function apply(ctx: Context): void {
     if (!result.ok) throw new Error(result.error.message)
     return result.value
   }
-  const credentials = (ctx.get('remote', true) as unknown as {
-    credentials: { set(ref: string, value: string): Promise<{ ok: boolean; error?: { message: string } }> }
-  }).credentials
-  const modeClient = new ModeClient(modeRpc, async (ref, value) => {
-    const result = await credentials.set(ref, value)
-    if (!result.ok) throw new Error(result.error?.message ?? 'Could not save credential.')
-  }, listener => {
+  const modeClient = new ModeClient(modeRpc, listener => {
     const events = new EventSource(new URL('api/deepseek-servant-mode/events', document.baseURI))
     events.addEventListener('changed', listener); events.addEventListener('open', listener)
     const reset = ctx.on('connection/reset', listener)

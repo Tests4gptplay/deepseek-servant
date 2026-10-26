@@ -1,7 +1,14 @@
-.shell { display:flex; flex-direction:column; height:100%; min-height:0; color:var(--dsw-alias-label-primary); background:var(--dsw-alias-bg-base); }
-.bar { display:flex; align-items:center; flex-wrap:wrap; gap:10px; padding:10px 20px; border-bottom:1px solid var(--dsw-alias-border-l3); font:var(--dsw-font-xs-13); }
-.bar label { display:flex; align-items:center; gap:8px; }
-.bar select,.bar button { font:inherit; color:inherit; background:var(--dsw-alias-bg-layer-1); border:1px solid var(--dsw-alias-border-l3); border-radius:var(--dsw-radius-sm); padding:6px 10px; }
-.bar p { margin:0; color:var(--dsw-alias-label-secondary); }
-.content { flex:1; min-height:0; overflow:auto; }
-.error { color:var(--dsw-alias-label-primary); padding:10px 20px; overflow-wrap:anywhere; }
+.shell { min-width:0; height:100%; overflow:auto; color:var(--dsw-alias-label-primary); }
+.experimental { min-width:0; display:grid; gap:14px; padding:16px; border:1px solid var(--dsw-alias-border-l3); border-radius:var(--dsw-radius-md); background:var(--dsw-alias-bg-layer-1); }
+.heading { display:flex; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; gap:16px; }
+.heading > div { flex:1 1 240px; min-width:0; }
+.heading h4 { margin:0 0 6px; font:var(--dsw-font-s-strong-14); }
+.heading p,.hint { color:var(--dsw-alias-label-secondary); font:var(--dsw-font-xs-13); line-height:1.6; }
+.toggle { display:flex; align-items:center; gap:8px; cursor:pointer; }
+.toggle input { width:18px; height:18px; margin:0; }
+.warning { padding:14px 16px; border:2px solid currentColor; border-inline-start-width:5px; border-radius:var(--dsw-radius-sm); line-height:1.65; }
+.warning strong { display:block; margin-bottom:6px; font:var(--dsw-font-s-strong-14); }
+.configure,.error button { width:fit-content; padding:8px 14px; font:inherit; color:inherit; background:var(--dsw-alias-bg-base); border:1px solid var(--dsw-alias-border-l2); border-radius:var(--dsw-radius-sm); cursor:pointer; }
+.configure:hover { background:var(--dsw-alias-interactive-bg-hover); }
+.configure:focus-visible,.toggle input:focus-visible { outline:2px solid var(--dsw-focus-ring-color); outline-offset:2px; }
+.error { overflow-wrap:anywhere; }

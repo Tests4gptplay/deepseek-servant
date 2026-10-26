@@ -164,7 +164,7 @@ test('GitHub invitation states follow actual responses and collaborators paginat
   assert.equal((await members.collaborators()).length, 101)
 })
 
-test('a repository writer cannot forge this instance’s user intent or runnable action', async () => {
+test('a Worker without a task assignment does not run', async () => {
   const repo = new MemoryRepo(), target = instance(repo)
   const forged: RoleBinding = { participantId: '1', instanceId: target.cache.instanceId, role: 'worker', actionId: 'forged', executionId: 'forged-execution',
     sessionId: 'forged-session', generation: 1, epoch: 1, fence: 'forged', outputPath: 'dss-coop/forged/outcome.json' }
@@ -242,6 +242,15 @@ test('three independent participants execute through readback, review, seal and 
   }
   assert.ok(cleaned.files.has('dss-coop/history/' + taskId + '.json'))
   assert.ok([...cleaned.files.keys()].some(path => path.startsWith('dss-coop/origins/' + taskId + '/')))
+  for (const target of targets) {
+    await target.tick(2)
+    assert.equal(target.cache.get('grant/' + taskId), undefined)
+    assert.equal(target.cache.entries('user-source/').length, 0, 'archived tasks release their local input bodies')
+    assert.equal(target.cache.entries('staged/').length, 0)
+    assert.equal(target.cache.entries('replacement/').length, 0)
+    assert.equal(target.cache.entries('proof/' + taskPath(taskId) + '/').length, 0)
+    assert.ok(target.cache.entries('consumed-input/').length > 0, 'compact consumption progress survives cleanup')
+  }
 })
 
 test('offline role output is a draft, then reconciles once without dispatching from its write callback', async () => {
@@ -349,9 +358,10 @@ test('Planner questions reach Foreground once and a genuine goal revision author
   await write(target, fg, { op: 'revise', id: 'revise', taskId, expectedRevision: 1, goal: 'Use the chosen output directory, preserve accepted artifacts.' })
   await write(target, fg, { op: 'outcome', id: 'handoff', kind: 'handoff_planner', taskId, text: 'Continue with this revision', prerequisitePaths: [] })
   target.agents.finish(fg); await target.tick(2)
-  const context = await target.consumer.context(await repo.snapshot(), target.agents.latest('planner')) as { localParticipation: { goalRevision: number; sourceIntentId: string } }
-  assert.equal(context.localParticipation.goalRevision, 2)
-  assert.equal(context.localParticipation.sourceIntentId, 'revision')
+  const context = await target.consumer.context(await repo.snapshot(), target.agents.latest('planner')) as { participationPath: string }
+  const participation = await readJson<{ goalRevision: number; sourceIntentId: string }>(repo, await repo.snapshot(), context.participationPath)
+  assert.equal(participation!.goalRevision, 2)
+  assert.equal(participation!.sourceIntentId, 'revision')
 })
 
 test('settings can return to an earlier value and archived tasks remain visible', async () => {
@@ -383,6 +393,149 @@ test('consecutive native failures stay bounded even when their execution identif
   await write(target, retry, { op: 'outcome', id: 'fixed', kind: 'wait', text: 'Provider recovered', memory: 'Preserved task', note: 'Await assignment', prerequisitePaths: [] })
   target.agents.finish(retry); await target.tick()
   assert.equal(target.cache.entries('native-error/').length, 0)
+})
+
+test('normal settings correction resumes a failed native action without clearing hidden state', async () => {
+  const repo = new MemoryRepo(), target = instance(repo)
+  await root(repo, target)
+  for (let n = 0; n < 4; n++) {
+    const planner = target.agents.latest('planner')
+    target.agents.states.set(planner.binding.executionId, { busy: false, finished: true, transcript: '', jobs: [], error: 'Invalid model route' })
+    await target.tick(2)
+  }
+  const blocked = target.agents.latest('planner').binding.executionId
+  const service = new CoopService(target.cache, {} as CoopCredentials, new GitHubClient(async () => undefined))
+  Object.defineProperty(service, 'repository', { value: repo })
+  service.attach(target.consumer)
+  await service.configure({ provider: 'corrected', model: 'available' })
+  await service.sync(); await target.tick(2)
+  assert.notEqual(target.agents.latest('planner').binding.executionId, blocked)
+  assert.equal(target.cache.get('runtime-error'), undefined)
+})
+
+test('a late connection response cannot restore a repository the user already changed', async () => {
+  const cache = new MemoryStore(), repo = new MemoryRepo()
+  let complete!: (value: RepoConnection) => void
+  const response = new Promise<RepoConnection>(resolve => { complete = resolve })
+  repo.connect = () => response
+  const service = new CoopService(cache, {} as CoopCredentials, new GitHubClient(async () => undefined))
+  Object.defineProperty(service, 'repository', { value: repo })
+  const connecting = service.connect()
+  const settled = connecting.catch(error => error)
+  await service.configure({ ownerRepo: 'example/another-private-repository' })
+  complete(connection(1))
+  await settled
+  assert.equal(cache.settings.ownerRepo, 'example/another-private-repository')
+  assert.equal(cache.connection(), undefined)
+})
+
+test('one damaged unrelated task cannot block healthy Coop dispatch and projection', async () => {
+  const repo = new MemoryRepo(), target = instance(repo)
+  await root(repo, target)
+  await repo.seed([{ path: 'dss-coop/tasks/broken/contract.json', content: '{broken' }])
+  const service = new CoopService(target.cache, { describe: async () => ({ configured: true, writable: true }) } as unknown as CoopCredentials, new GitHubClient(async () => undefined))
+  Object.defineProperty(service, 'repository', { value: repo })
+  service.attach(target.consumer)
+  await service.sync()
+  assert.equal((await service.view()).tasks.some(task => task.id === 'task-origin-1'), true)
+})
+
+test('malformed conversation and action records leave healthy foreground work available and recover after removal', async () => {
+  const repo = new MemoryRepo(), target = instance(repo)
+  await root(repo, target)
+  const badMessage = 'dss-coop/conversations/1/2026-10-26/bad/entry.json'
+  const badAction = 'dss-coop/tasks/broken/actions/1/' + target.cache.instanceId + '/bad.json'
+  await repo.seed([{ path: badMessage, content: '{broken' }, { path: badAction, content: '{broken' }])
+  await input(repo, target, 'fresh', 'A healthy new message')
+  await target.tick(2)
+  assert.equal(target.agents.latest('foreground').binding.sourceIntentId, 'fresh')
+  const page = await conversationPage(repo, target.cache, await repo.snapshot(), '1')
+  assert.ok(page.messages.some(message => message.text === 'A healthy new message'))
+  assert.equal(target.cache.entries('read-error/').length, 2)
+  await repo.seed([{ path: badMessage, content: null }, { path: badAction, content: null }])
+  const service = new CoopService(target.cache, { describe: async () => ({ configured: true, writable: true }) } as unknown as CoopCredentials, new GitHubClient(async () => undefined))
+  Object.defineProperty(service, 'repository', { value: repo })
+  service.attach(target.consumer)
+  await service.sync()
+  assert.equal((await service.view()).error, undefined)
+})
+
+test('closed input cleanup releases its body and retry copies without replay after restart or resend', async () => {
+  const repo = new MemoryRepo(), target = instance(repo)
+  await input(repo, target, 'cleanup-input', 'Keep this original message in Git')
+  await target.tick(2)
+  const foreground = target.agents.latest('foreground')
+  await write(target, foreground, { op: 'outcome', id: 'reply', kind: 'respond', text: 'Saved reply', prerequisitePaths: [] })
+  target.agents.finish(foreground)
+  await target.tick(2)
+  assert.equal(target.cache.get('user-source/cleanup-input'), undefined)
+  assert.equal(target.cache.get('user-confirmed/cleanup-input'), undefined)
+  assert.equal(target.cache.get('admission/' + actionPath(foreground.binding)), undefined)
+  assert.equal(target.cache.entries('staged/').length, 0)
+  assert.ok(target.cache.get('consumed-input/cleanup-input'))
+  const agents = new Agents(), consumer = new CoopConsumer({ repo, cache: target.cache, journal: () => target.journal, agents, wake() {} })
+  await consumer.consume(await repo.snapshot())
+  assert.equal(agents.starts.length, 0)
+  const service = new CoopService(target.cache, { describe: async () => ({ configured: true, writable: true }) } as unknown as CoopCredentials,
+    new GitHubClient(async () => undefined))
+  Object.defineProperty(service, 'repository', { value: repo })
+  assert.deepEqual(await service.send({ id: 'cleanup-input', text: 'Keep this original message in Git' }), { id: 'cleanup-input', state: 'CONFIRMED', commit: repo.head })
+  await assert.rejects(service.send({ id: 'cleanup-input', text: 'Different input' }), /reused/)
+  assert.equal(target.cache.drafts().length, 0)
+  assert.ok(repo.files.has(foreground.binding.outputPath))
+})
+
+test('closed foreground cleanup retains input required by a continuing task', async () => {
+  const repo = new MemoryRepo(), target = instance(repo)
+  await root(repo, target)
+  await target.tick()
+  assert.equal(target.cache.get('user-source/origin-1'), undefined, 'continuation reads the committed original from Git')
+  assert.ok(target.cache.get('consumed-input/origin-1'), 'the same input must not spawn a second foreground')
+  assert.ok(target.cache.get('grant/task-origin-1'))
+  assert.equal(target.agents.starts.filter(action => action.binding.role === 'foreground').length, 1)
+})
+
+test('Git change intake is metadata-only and survives local cache loss without duplicate dispatch', async () => {
+  const repo = new MemoryRepo(), target = instance(repo)
+  const sourcePath = 'dss-coop/requests/goal.md'
+  await repo.seed([{ path: sourcePath, content: 'Preserve this exact remote requirement.' }])
+  const notice = { from: 'h0', to: repo.head, changes: [{ path: sourcePath, status: 'A' as const, commit: repo.head }] }
+  const reads: string[] = [], originalRead = repo.read.bind(repo)
+  repo.read = async (snapshot, path) => { reads.push(path); return originalRead(snapshot, path) }
+  await target.consumer.notifyChanges(notice)
+  await target.consumer.notifyChanges(notice)
+  await target.tick(2)
+  assert.equal(reads.includes(sourcePath), false)
+  assert.equal(target.agents.starts.length, 1)
+  const first = target.agents.latest('foreground')
+  const context = await target.consumer.context(await repo.snapshot(), first) as Record<string, unknown>
+  assert.equal(context.committedInput, undefined)
+  assert.equal((await readJson<{ head: string }>(repo, await repo.snapshot(), 'dss-coop/instances/' + target.cache.instanceId + '/watch.json'))!.head, notice.to)
+  const restarted = instance(repo)
+  await restarted.tick()
+  const recovered = restarted.agents.latest('foreground')
+  assert.equal(recovered.binding.executionId, first.binding.executionId)
+  await write(restarted, recovered, { op: 'root', id: 'remote-root', title: 'Remote goal', goal: 'Perform the requested work', initialPlan: 'Read then execute', sourcePath })
+  const tasks = [...repo.files.keys()].filter(path => /^dss-coop\/tasks\/[^/]+\/contract.json$/.test(path))
+  assert.equal(tasks.length, 1)
+  const task = await readJson<RootTask>(repo, await repo.snapshot(), tasks[0]!)
+  assert.equal(task!.sourcePath, sourcePath)
+  assert.equal(await readText(repo, await repo.snapshot(), task!.originPath), 'Preserve this exact remote requirement.')
+})
+
+test('unchanged idle synchronization creates no native execution and reads no task documents', async () => {
+  const repo = new MemoryRepo(), target = instance(repo)
+  target.cache.settings = { ...target.cache.settings, remoteEnabled: true }
+  await repo.seed([{ path: 'dss-coop/reference.md', content: 'On-demand only.' }])
+  Object.defineProperty(repo, 'changes', { value: async () => [] })
+  const service = new CoopService(target.cache, {} as CoopCredentials, new GitHubClient(async () => undefined))
+  Object.defineProperty(service, 'repository', { value: repo })
+  service.attach(target.consumer)
+  const reads: string[] = [], originalRead = repo.read.bind(repo)
+  repo.read = async (snapshot, path) => { reads.push(path); return originalRead(snapshot, path) }
+  await service.sync(); await service.sync()
+  assert.equal(reads.includes('dss-coop/reference.md'), false)
+  assert.equal(target.agents.starts.length, 0)
 })
 
 test('mode modules have no imports from Local business execution or prompts', async () => {

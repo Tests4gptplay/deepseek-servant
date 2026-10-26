@@ -1,5 +1,7 @@
 node_modules
-lib/
+lib/*
+!lib/host.js
+!lib/client.js
 *.tgz
 .validation/
 coverage/
