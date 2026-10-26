@@ -1,8 +1,16 @@
 # 记录、归档与清理
 
-当前实现：`0.1.0-alpha.39`。使用入口见[使用指南](docs/USAGE.md)，本次完整封存与清理结果见[验收记录](docs/acceptance-20261026.md)。
+当前实现：`0.1.0-alpha.40`。使用入口见[使用指南](docs/USAGE.md)。
 
-## 同一原生存储域
+## Private Git 模式
+
+本机 `deepseek_servant_coop` 原生 Domain 保存独立设置、草稿、Git 投影与物理执行归属；完整协作原文、需求、计划、结果与 records 保存在用户所选私库的 `dss-coop/` 下。原生 Session 和工作文件保留在各自宿主。
+
+协作任务先完成前台交付及在途动作收束，再提交完整封存清单，独立读回核对后以另一提交清理该任务的活动目录。历史入口、完整档案、需求、对话和知识保留。具体位置与操作见 [Private Git 指南](PRIVATE_GIT.md)。
+
+以下保留 Local 的存储与清理规则；其已接受运行结果见[alpha.39 验收记录](docs/acceptance-20261026.md)。
+
+## Local 原生存储域
 
 完整对话、原始任务需求、Planner Memory、Planner Note 各版本、Child Reply、Task 运行状态、知识和 records 档案均保存在 deepseek_servant 原生 storageDomain。原文使用分段内容和稳定引用保存；角色按引用分页读取，长期记录不受热上下文的条数与长度限制。
 

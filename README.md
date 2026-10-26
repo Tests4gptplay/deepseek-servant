@@ -8,9 +8,11 @@
 
 **设计逻辑源自 [Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness)。** DeepSeek Servant 延续 CAH 以目标为中心的 Agent 工作闭环：理解需求、制定计划、执行工作、评价成果、调整方法、跨会话接续、故障恢复与技能积累。Servant 将这套持续工作机制整合到 DeepSeek Harness 运行环境，复用宿主的模型、工具、Session、作业与 Skill 能力。
 
-**当前版本：** `0.1.0-alpha.39` · **适配宿主：** DSH `0.2.1-rc.3` · **项目形态：** 独立安装的社区插件
+**当前版本：** `0.1.0-alpha.40` · **适配宿主：** DSH `0.2.1-rc.3` · **项目形态：** 独立安装的社区插件
 
 ## 核心能力
+
+- **独立双模式：** Local 延续现有持续任务体验；Private Git 实验模式让各参与者使用自己的前台、Planner 和 Worker，通过私有 Git 记录共同推进任务。两个模式使用独立设置与运行状态，页面切换后既有任务继续运行。
 
 - **对话呈现：** 聊天区展示用户消息与 AI 最终答复；用户居右、助理居左，统一使用透明样式。设置支持助理名称和可留空的用户名称。
 
@@ -26,6 +28,8 @@
 - **前台长对话：** 每次交互使用新的物理 Session，带入最近六次完整用户交互；更早的原文按日期保存并可检索。向上滚动提前加载更早消息，保持当前阅读位置；日期筛选使用跟随 DSH 主题的日历。后台完成通知独立保存，侧栏显示原生绿色完成标记。可单独清理前台对话，后台任务继续运行。
 
 ## 已完成的运行验证
+
+`alpha.40` 完成 88 项源码回归覆盖，以及 Windows / DSH `0.2.1-rc.3` 原生协作运行：两代 Worker 保留并续写产物、原生 Job 收尾、Planner 验收、前台交付与 Git 封存清理；实际进程树中断后的同任务接续也已完成。该场景使用受控模型及 Git API 对端，实际执行由原生 DSH 服务完成。详见[协作开发验收](docs/acceptance-private-git-20261026.md)。
 
 `alpha.39` 已通过 73 项源码回归及实际页面组件测试。当前宿主经 `codex-local/gpt-6-astra` 完成连续 **1860.2037818 秒（31 分钟）**的原生静默 Job，退出码 **0**，随后完成 Planner 验收、前台主动交付、完整 records 封存与临时状态清理。详见[alpha.39 验收记录](docs/acceptance-20261026.md)。
 
@@ -45,18 +49,20 @@
 
 `TaskService / TaskKernel` 管理持久化任务事实与确定性状态变更；`RuntimeCoordinator / AgentSupervisor` 负责派发、运行所有权与接续；`KnowledgeService` 管理知识及技能版本。
 
-运行时复用 DSH 的 `storageDomain`、Agent、Session、tools、jobs、工作区和原生技能能力。当前模式由单个 DSH 实例负责任务调度和持久记录，后续可扩展由多个实例共同协作的执行模式。
+运行时复用 DSH 的 `storageDomain`、Agent、Session、tools、jobs、工作区和原生技能能力。Local 持有自己的持续任务链；独立 Private Git 模式以 Git-first 提交、确认消费和角色结果绑定协调多个参与实例。
 
-## 实验性跨设备协作方向
+## Private Git 实验协作
 
-计划提供可选的 GitHub 协作模式：由用户在插件界面配置授权 Token 和协作仓库，让不同设备或平台上的 DeepSeek Harness 实例共享目标、任务进度和执行成果，使用各自的原生后台 Agent 完成工作与接续。GitHub 承担跨实例状态交换，实际工具操作仍由参与实例的 DSH 宿主执行。该模式以独立实验功能推进，现有单实例任务能力保持可用。
+在顶部选择“Private Git · 实验”，配置专用私有仓库、原生凭据、模型、工作目录及本实例席位。每个用户从自己的前台发起目标或主动协助；Planner 提案、指派、认领、执行、成果评审与交付通过已确认 Git 记录衔接。成员邀请与状态查询、离线草稿、并发冲突重算、Worker 换代、原文分页及封存清理均已接入。
+
+操作步骤和数据位置见 [Private Git 使用说明](PRIVATE_GIT.md)。
 
 ## 安装与使用
 
-当前为已验收的私有开发候选 `alpha.39`。通过 DSH Desktop 的“插件 → 添加插件”安装候选包，或使用原生命令：
+当前为私有开发候选 `alpha.40`。通过 DSH Desktop 的“插件 → 添加插件”安装候选包，或使用原生命令：
 
 ```sh
-dsh plugin --profile desktop add "<deepseek-servant-0.1.0-alpha.39.tgz 的完整路径>" --ignore-scripts
+dsh plugin --profile desktop add "<deepseek-servant-0.1.0-alpha.40.tgz 的完整路径>" --ignore-scripts
 ```
 
 模型提供者、工具权限和凭据沿用 DSH 配置。进入侧栏 DeepSeek Servant，选择前台模型与工作区即可开始；后台 `Auto` 跟随本页前台模型，Worker 席位默认 2，可在设置中调整。
@@ -74,6 +80,7 @@ dsh plugin --profile desktop add "<deepseek-servant-0.1.0-alpha.39.tgz 的完整
 
 - [当前架构](DESIGN.md)
 - [版本与验收摘要](CHANGELOG.md)
+- [alpha.40 协作开发验收](docs/acceptance-private-git-20261026.md)
 - [alpha.39 验收记录](docs/acceptance-20261026.md)
 - [实现与验证记录](IMPLEMENTATION.md)
 - [数据保留与清理](RETENTION.md)
@@ -81,7 +88,7 @@ dsh plugin --profile desktop add "<deepseek-servant-0.1.0-alpha.39.tgz 的完整
 
 ## 设计
 
-[统一设计基线](docs/DSS_MASTER_DESIGN_20261025.md) 已同步 alpha.39 实施进度，并保留后续 GitHub 实验功能方案。早期架构与旧 Helper 契约保留在[历史资料](docs/history/architecture-20261024.md)。
+[统一设计基线](docs/DSS_MASTER_DESIGN_20261025.md) 保留 alpha.39 已接受行为；alpha.40 协作按 [temp / DSS-git](https://github.com/Tests4gptplay/temp/tree/b44fd5ec2e23045d8ea4822bc5942466228ce12a/DSS-git) 的独立模式设计实现。早期架构与旧 Helper 契约保留在[历史资料](docs/history/architecture-20261024.md)。
 
 ## 来源与开源许可
 

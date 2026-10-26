@@ -1,6 +1,8 @@
 # DeepSeek Servant 使用指南
 
-对应版本：`0.1.0-alpha.39`。安装入口见[安装指南](INSTALLATION.md)。
+对应版本：`0.1.0-alpha.40`。安装入口见[安装指南](INSTALLATION.md)。顶部可选择 Local 或 Private Git · 实验；切换后已开始的后台任务继续运行。Private Git 的连接、协助与记录操作见[独立协作指南](../PRIVATE_GIT.md)。
+
+以下为 Local 模式使用方法。
 
 ## 1. 选择模型与工作区
 
@@ -52,4 +54,4 @@
 - “清理已结束任务”收起历史入口并释放相应临时状态，完整 records 继续可读。
 - 页面插画可在“实验性 → 页面插画”开关右下角人物或互换两页素材；助理名称和用户名称在设置中保存。
 
-详细存储与清理规则见[记录、归档与清理](../RETENTION.md)。后续 GitHub 实验设计见[统一设计基线](DSS_MASTER_DESIGN_20261025.md)。
+详细存储与清理规则见[记录、归档与清理](../RETENTION.md)。Private Git 实验模式见[协作指南](../PRIVATE_GIT.md)。

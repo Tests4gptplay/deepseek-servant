@@ -1,6 +1,14 @@
 # DeepSeek Servant 实现说明
 
-版本：`0.1.0-alpha.39`。当前架构见 [DESIGN.md](DESIGN.md)，最新完整结果见[alpha.39 验收](docs/acceptance-20261026.md)。本文先说明当前实现，再按版本保留运行记录。
+版本：`0.1.0-alpha.40`。双模式架构见 [DESIGN.md](DESIGN.md)，协作操作见 [PRIVATE_GIT.md](PRIVATE_GIT.md)，Local 已接受运行记录见[alpha.39 验收](docs/acceptance-20261026.md)。
+
+## alpha.40 独立协作实现
+
+`src/mode-router` 只路由新输入与界面选择；`src/experimental/private-git` 独立拥有设置、Git I/O、角色提示、状态机、调度、原生 Agent、页面和封存。GitJournal 以稳定回执和非强推 CAS 提交；Consumer 读取不可变提交后兑现动作，NativeAgents 使用实际 Session、工具操作身份和 Jobs。用户主动参与与当前指派共同决定本机工作范围。
+
+协作使用 `deepseek_servant_coop` 原生 Domain。GitHub 凭据来自原生 Credentials、环境或已登录 CLI；完整协作记录写入专用私库。原生存储键采用路径安全摘要，保留逻辑键用于投影与恢复。协议参数错误转为可读证据，网络失败保持待提交草稿。当前代码的协作验收见[alpha.40 开发验收](docs/acceptance-private-git-20261026.md)。
+
+下文保留 Local 的实现与历次运行记录。
 
 **设计来源：**[Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness)，在 DSH 中实现其持续任务、Agent 角色分工、工作接续与知识积累机制。
 

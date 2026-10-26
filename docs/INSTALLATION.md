@@ -1,6 +1,6 @@
 # 安装、升级与开发构建
 
-当前代码与已验收候选版本：`0.1.0-alpha.39`。当前仓库用于私有开发同步，固定版本发布与插件市场发布另行安排。
+当前开发候选：`0.1.0-alpha.40`，包含独立 Private Git 实验模式。当前仓库用于私有开发，固定版本发布与插件市场发布另行安排。
 
 ## 1. 环境
 
@@ -8,9 +8,9 @@
 - Node.js 按包内声明使用 `^22.19.0 || >=24.0.0`；开发测试建议 Node.js 24。
 - 模型提供者、工具权限、preset 和凭据由 DSH 配置。Servant 使用宿主已有的原生能力。
 
-## 2. 安装已有 alpha.39 候选
+## 2. 安装 alpha.40 开发候选
 
-使用 DSH 原生插件管理入口安装 `deepseek-servant-0.1.0-alpha.39.tgz`。在 Desktop 的“插件 → 添加插件”中输入包的完整路径，安装并启用；命令行等价操作为：
+使用 DSH 原生插件管理入口安装 `deepseek-servant-0.1.0-alpha.40.tgz`。在 Desktop 的“插件 → 添加插件”中输入包的完整路径，安装并启用；命令行等价操作为：
 
 ```sh
 dsh plugin --profile desktop add "<候选 tgz 的完整路径>" --ignore-scripts
@@ -18,13 +18,13 @@ dsh plugin --profile desktop add "<候选 tgz 的完整路径>" --ignore-scripts
 
 Web profile 使用同一原生命令，将 `desktop` 换成实际 profile 名，例如 `web`。操作更新指定 profile；已有配置、Domain 和记录目录继续使用。安装后进入侧栏 DeepSeek Servant，按[使用指南](USAGE.md)选择模型和工作区。
 
-已验收包的大小、SHA-256 及原始代码提交见[验收记录](acceptance-20261026.md#安装包与保存)。本次文档整理保留该包原文件；包内文档对应其构建时的提交，仓库文档继续随源码维护。
+候选包附带 SHA-256 与包内容核对结果，协作运行记录见[alpha.40 开发验收](acceptance-private-git-20261026.md)。已有 alpha.39 包及其[验收记录](acceptance-20261026.md#安装包与保存)继续保留。
 
 ## 3. 固定版本来源约定
 
 正式版本沿用 DSH 原生 GitHub 来源：Desktop“插件 → 添加插件”使用发行说明给出的 `github:Tests4gptplay/deepseek-servant#<固定版本>`；Web 使用 `dsh plugin --profile web add '<同一固定来源>'`。固定来源和可安装产物在该次发布时一起确定。
 
-本次私有 Git 同步保存 alpha.39 实现及文档，使用上节已验收候选进行安装。
+alpha.40 当前以开发候选包交付，安装时指定该次交付的包路径；正式固定版本来源随发布提供。
 
 ## 4. 从源码进行开发构建
 
@@ -50,4 +50,4 @@ npm pack --ignore-scripts
 | `npm run test:history-ui` | React 页面、官方组件、历史阅读位置和日历交互 |
 | `node tests/run-model-route.mjs` | 模型路由与选择器初始状态的专项开发检查 |
 
-以上均为显式开发命令。文档整理复用 alpha.39 已通过的验证，只核对文档、引用、版本一致性与 Git 变更范围。原生故障接续及 31 分钟静默作业的实测见[验收记录](acceptance-20261026.md)。
+以上均为显式开发命令。alpha.40 的源码与原生协作结果见[开发验收](acceptance-private-git-20261026.md)；Local 的原生恢复及 31 分钟静默作业继续沿用[alpha.39 验收记录](acceptance-20261026.md)。

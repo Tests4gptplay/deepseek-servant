@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { installModeHost } from './mode-router/host.js'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
 import { z } from 'zod'
 import { DshStorageAdapter } from './adapters/dsh/storage.ts'
@@ -140,6 +141,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     await store.close()
     listeners.clear()
   }, 'servant.host.ownership')
+  await installModeHost(ctx, { call: (method, params, signal) => api.call(method, params, signal ?? new AbortController().signal) })
   await coordinator.start()
   const admissions = await assistants.recoverInputs()
   if (admissions.failed.length) coordinator.reportError(new Error(`${admissions.failed.length} 条前台消息等待修复后重新接纳。`))

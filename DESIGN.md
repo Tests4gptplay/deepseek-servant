@@ -1,6 +1,14 @@
 # DeepSeek Servant 当前架构
 
-对应版本：`0.1.0-alpha.39`，更新于 2026-10-26。本文描述当前代码；运行证据见[实现与验证记录](IMPLEMENTATION.md)和[alpha.39 验收](docs/acceptance-20261026.md)。早期方案保留在[历史架构](docs/history/architecture-20261024.md)，后续 GitHub 功能见[实验性设计](docs/DSS_MASTER_DESIGN_20261025.md)。
+对应版本：`0.1.0-alpha.40`，更新于 2026-10-26。运行证据见[实现与验证记录](IMPLEMENTATION.md)、[alpha.40 协作验收](docs/acceptance-private-git-20261026.md)和[alpha.39 Local 验收](docs/acceptance-20261026.md)。早期方案保留在[历史架构](docs/history/architecture-20261024.md)。
+
+## 双模式边界
+
+`ModeRouter` 路由新输入与页面选择，持久保存当前模式；已启用的两个运行时独立存续。Local 保留原业务模块、提示与 `deepseek_servant` Domain。Private Git 独立位于 `src/experimental/private-git`，拥有自己的设置、提示、原生 Session、Consumer、GitJournal、同步器及 `deepseek_servant_coop` Domain。
+
+协作链为：本机真实用户输入 → Git 提交与独立读回 → 前台及 Planner → 当前指派认领 → 本参与者 Worker → 结果提交与读回 → Planner 评审 → 前台交付 → 完整封存 → 单独清理提交。操作说明与设计依据见 [PRIVATE_GIT.md](PRIVATE_GIT.md)。
+
+以下章节描述保留的 Local 实现。
 
 ## 1. 结构与责任
 
@@ -79,7 +87,7 @@ Task 保存当前机器状态和记录引用；完整需求、Planner Memory、N
 
 ## 7. 存储、交付和清理
 
-所有 DSS 自有状态位于既有 `deepseek_servant` storageDomain。逻辑键包括 `assistant/`、`conversations/`、`knowledge/`、`task-origin/`、`task:`、`planner-memory/`、`planner-note/`、`worker-reply/`、`execution/`、`recovery/`、`records/`、`record-archive/` 和 `task-history/`。
+Local 模式自有状态位于既有 `deepseek_servant` storageDomain。逻辑键包括 `assistant/`、`conversations/`、`knowledge/`、`task-origin/`、`task:`、`planner-memory/`、`planner-note/`、`worker-reply/`、`execution/`、`recovery/`、`records/`、`record-archive/` 和 `task-history/`。
 
 完成顺序：**Planner 接受 → 封存完整 records → 唤醒前台交付 → 运行所有者与动作收束 → 封存最终状态 → 保存永久身份 → 精确清理临时键，Task 热状态最后删除。**
 
@@ -89,4 +97,4 @@ Task 保存当前机器状态和记录引用；完整需求、Planner Memory、N
 
 KnowledgeService 将实际接受结果和纠正关联到事实、偏好及 SkillVersion；原生 Skill provider 提供当前作用域的可用技能。实际加载与结果反馈按执行和结果身份关联，已有用户技能沿用 DSH 的管理方式。
 
-可选 GitHub 工具集成与跨设备状态协作继续作为后续实验设计，保留远端新增的默认关闭、原生凭据、原生 Approval 及复用上游实现等要求。具体方案与进度见[统一设计基线](docs/DSS_MASTER_DESIGN_20261025.md)。
+Private Git 协作通过独立模式扩展上述产品能力，默认页面仍选择 Local；协作配置、凭据、角色与 Git 事实按 [DSS-git 设计](https://github.com/Tests4gptplay/temp/tree/b44fd5ec2e23045d8ea4822bc5942466228ce12a/DSS-git) 运行。

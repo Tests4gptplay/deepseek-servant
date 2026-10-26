@@ -1,0 +1,7 @@
+.shell { display:flex; flex-direction:column; height:100%; min-height:0; color:var(--dsw-alias-label-primary); background:var(--dsw-alias-bg-base); }
+.bar { display:flex; align-items:center; flex-wrap:wrap; gap:10px; padding:10px 20px; border-bottom:1px solid var(--dsw-alias-border-l3); font:var(--dsw-font-xs-13); }
+.bar label { display:flex; align-items:center; gap:8px; }
+.bar select,.bar button { font:inherit; color:inherit; background:var(--dsw-alias-bg-layer-1); border:1px solid var(--dsw-alias-border-l3); border-radius:var(--dsw-radius-sm); padding:6px 10px; }
+.bar p { margin:0; color:var(--dsw-alias-label-secondary); }
+.content { flex:1; min-height:0; overflow:auto; }
+.error { color:var(--dsw-alias-label-primary); padding:10px 20px; overflow-wrap:anywhere; }
