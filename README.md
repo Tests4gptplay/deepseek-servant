@@ -20,14 +20,16 @@
 - **模型与设置：** 输入框底部直接选择前台模型和思考强度；页面齿轮与全局设置中的 DeepSeek Servant 入口共用设置和经验；可选择已有工作区，或为 DeepSeek Servant 指定独立的自定义文件夹，不改变 DSH 默认工作区及其他会话。设置中的后台模型默认使用 `Auto`，跟随本页前台模型及思考强度，也可单独指定后台模型。已开始的后台任务保持创建时的配置。设置最下方预留实验性功能区域。
 - **持续 Agent 工作：** Foreground 理解目标，Planner 分阶段制定计划并评价成果，Worker 执行具体工作。故障保存完整现场，由同一角色的新执行接续；既有 Helper 历史保持可读。
 - **任务接续与恢复：** 持久保存目标、计划、工作前沿、执行归属及结果；支持周期评审、Worker 正常换代与进度续作。宿主重启或异常退出后，后台按原角色、原任务接续，前台自动继续未完成回复；保留中断现场、既有成果与用户暂停、取消状态。
-- **并行与任务控制：** Worker 席位默认 2，设置范围 1–32，即时保存并影响后续调度；降低席位时让当前执行自然结束。支持依赖协调、优先级、暂停、继续、取消和用户即时调整目标。
+- **并行与任务控制：** Worker 席位默认 2，设置范围 1–32，即时保存并影响后续调度；降低席位时让当前执行自然结束。支持依赖协调、优先级、暂停、继续、取消和用户即时调整目标；聊天中的实际答复可解除对应任务等待并继续工作。
 - **技能积累：** 从有证据的实际结果提炼可复用方法，接入 DSH 原生 Skill 系统，追踪适用范围、版本、实际加载和后续反馈。
 - **工作记忆管理：** 完整需求、Planner Memory、Note 版本和 Child Reply 保存在同一原生 Domain，按引用读取原文。任务完成后先封存 records、唤醒前台交付，再释放临时运行记录；records 长期保留，可导出 Markdown。历史入口与旧技能的维护策略支持导入、导出和重置。
 - **前台长对话：** 每次交互使用新的物理 Session，带入最近六次完整用户交互；更早的原文按日期保存并可检索。向上滚动提前加载更早消息，保持当前阅读位置；日期筛选使用跟随 DSH 主题的日历。后台完成通知独立保存，侧栏显示原生绿色完成标记。可单独清理前台对话，后台任务继续运行。
 
 ## 已完成的运行验证
 
-`alpha.39` 已通过 73 项源码回归及实际页面组件测试。在隔离的 Windows / DSH 0.2.1-rc.3 原生宿主中，强制终止执行中的进程树后，同一 Task 的第二代 Worker 继续原分配、保留先前文件并完成剩余成果；前台继续原消息，随后完成交付、档案封存与临时记录清理。该场景使用受控模型响应。
+`alpha.39` 已通过 73 项源码回归及实际页面组件测试。当前宿主经 `codex-local/gpt-6-astra` 完成连续 **1860.2037818 秒（31 分钟）**的原生静默 Job，退出码 **0**，随后完成 Planner 验收、前台主动交付、完整 records 封存与临时状态清理。详见[alpha.39 验收记录](docs/acceptance-20261026.md)。
+
+在隔离的 Windows / DSH 0.2.1-rc.3 原生宿主中，强制终止执行中的进程树后，同一 Task 的第二代 Worker 继续原分配、保留先前文件并完成剩余成果；前台继续原消息，随后完成交付、档案封存与临时记录清理。该场景使用受控模型响应。
 
 `alpha.37` 已在隔离的 **Windows / DSH 0.2.1-rc.3** 中完成原生 Agent、Session、文件工具与存储 Domain 的集成运行：16 个工作报告、5/10/15 段周期评审、两次 Worker 换代、原生错误后的同角色接续、前台完成留言、完整 records 封存与临时清理。重启后完整档案可读，Worker 席位设置和记录目录迁移通过原生接口保存与应用。该轮使用受控模型响应验证程序链路。
 
@@ -35,7 +37,7 @@
 
 长任务验证处理了 **16 批、64 条合成事件**，包括 **3 次周期评审、2 次正常 Worker 换代**、跨代历史回查和最终独立核对。32 行最终账本与 16 批累计快照均与预先保存的独立答案一致；任务完成后执行了正式清理，成果文件哈希保持一致。
 
-更多实测过程、运行条件及清理结果见 [实现与验证记录](IMPLEMENTATION.md)。
+更多实测过程、运行条件及清理结果见[实现与验证记录](IMPLEMENTATION.md)；历次候选与整理范围见[版本摘要](CHANGELOG.md)。
 
 ## 架构
 
@@ -49,45 +51,39 @@
 
 计划提供可选的 GitHub 协作模式：由用户在插件界面配置授权 Token 和协作仓库，让不同设备或平台上的 DeepSeek Harness 实例共享目标、任务进度和执行成果，使用各自的原生后台 Agent 完成工作与接续。GitHub 承担跨实例状态交换，实际工具操作仍由参与实例的 DSH 宿主执行。该模式以独立实验功能推进，现有单实例任务能力保持可用。
 
-## 构建与安装
+## 安装与使用
 
-正式版本通过 DSH Desktop 的“插件 → 添加插件”安装，使用对应 Release 提供的固定 GitHub 来源。此升级候选可用下方构建命令生成安装包，再通过 DSH 原生插件安装命令装入独立 profile。
-
-在兼容的 Node.js / npm 环境中，从仓库根目录执行：
+当前为已验收的私有开发候选 `alpha.39`。通过 DSH Desktop 的“插件 → 添加插件”安装候选包，或使用原生命令：
 
 ```sh
-npm ci --ignore-scripts
-npm run typecheck
-npm run build
-npm pack --ignore-scripts
+dsh plugin --profile desktop add "<deepseek-servant-0.1.0-alpha.39.tgz 的完整路径>" --ignore-scripts
 ```
 
-将生成的插件包安装到指定 DSH profile：
+模型提供者、工具权限和凭据沿用 DSH 配置。进入侧栏 DeepSeek Servant，选择前台模型与工作区即可开始；后台 `Auto` 跟随本页前台模型，Worker 席位默认 2，可在设置中调整。
 
-```sh
-dsh plugin --profile <profile> add ./deepseek-servant-0.1.0-alpha.39.tgz --ignore-scripts
-```
-
-建议先选择独立的 DSH profile 验证。模型提供者、工具权限与凭据使用宿主已有配置。
+- [安装、升级与开发构建](docs/INSTALLATION.md)：候选安装、固定 GitHub 来源约定和显式开发命令。
+- [使用指南](docs/USAGE.md)：任务提交与修订、聊天答复、并发控制、历史阅读、重启接续和记录管理。
 
 ## 兼容性与数据存储
 
-**已验证宿主版本：** 当前升级使用 Windows / DSH `0.2.1-rc.3` 原生 SDK profile；此前功能基线使用 Linux / DSH `0.2.1-rc.2`。插件从宿主获取 DSH 组件，按实际接口运行，无 DSH 版本号硬性准入限制。已确认的 Desktop UI 与侧栏修复继续保留；本次没有重新操作用户浏览器。
+**已验证宿主版本：** 当前升级使用 Windows / DSH `0.2.1-rc.3` 原生 SDK profile；此前功能基线使用 Linux / DSH `0.2.1-rc.2`。插件从宿主获取 DSH 组件，按实际接口运行，无 DSH 版本号硬性准入限制。已确认的 Desktop UI、侧栏行为和美术资源继续保留。
 
 任务、助理、知识、完整对话与 records 档案通过原生 `storageDomain` 保存。在“Servant 记录管理”中可迁移整个记录目录；迁移完成后立即使用新位置，不改变任务工作区。大小统计分为六项长期记录与六项临时记录，按 Domain 实际内容计量。DSH 原生 Session 日志使用宿主单独配置的存储位置。详见 [数据保留与清理](RETENTION.md)。
 
 ## 开发文档
 
-- [开发顶层架构](https://github.com/Tests4gptplay/deepseek-servant/blob/main/DESIGN.md)
+- [当前架构](DESIGN.md)
+- [版本与验收摘要](CHANGELOG.md)
+- [alpha.39 验收记录](docs/acceptance-20261026.md)
 - [实现与验证记录](IMPLEMENTATION.md)
 - [数据保留与清理](RETENTION.md)
 - [第三方版权声明](THIRD_PARTY_NOTICES.md)
 
 ## 设计
 
-[DeepSeek Servant 统一架构与已确认设计基线](docs/DSS_MASTER_DESIGN_20261025.md) 保留前台、记忆、后台角色、异常恢复、records 留档与记录管理 UI 的已确认设计决策；当前实现见上述能力及实现记录。
+[统一设计基线](docs/DSS_MASTER_DESIGN_20261025.md) 已同步 alpha.39 实施进度，并保留后续 GitHub 实验功能方案。早期架构与旧 Helper 契约保留在[历史资料](docs/history/architecture-20261024.md)。
 
-来源与开源许可
+## 来源与开源许可
 
 DeepSeek Servant 由 [Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness) 的 Agent 设计体系延伸而来，并通过 DeepSeek Harness 的原生能力实现持续任务执行。
 

@@ -2,8 +2,9 @@
 
 ## DeepSeek Harness
 
-deepseek-servant integrates with the published DeepSeek Harness packages at version
-`0.2.1-rc.2`. The exact reference source is
+deepseek-servant uses DeepSeek Harness runtime services and external host peers.
+The development API reference is `0.2.1-rc.2`; alpha.39 was exercised on the
+Windows `0.2.1-rc.3` host. The exact earlier reference source is
 [deepseek-ai/deepseek-harness, dsh-v0.2.1-rc.2](https://github.com/deepseek-ai/deepseek-harness/tree/687f282e8625c6b8d11ff58211a90524be2e4317).
 
 The native browser module registration pattern follows the DSH client build

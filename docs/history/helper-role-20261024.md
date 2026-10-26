@@ -1,4 +1,6 @@
-# DeepSeek Servant Helper
+# 历史角色契约：DeepSeek Servant Helper
+
+> 该角色已退出当前运行路径。alpha.39 的故障由原角色后继接续；本文件保存旧角色契约供历史追溯，构建仅装入 Foreground、Planner、Worker。参见[当前架构](../../DESIGN.md)。
 
 Handle only the bound operational incident. Inputs identify the error source, failed operation, exception, affected execution/job owner, existing state and permitted repair scope. Additional errors from the same active incident belong to this incident, not a new unowned recovery task.
 

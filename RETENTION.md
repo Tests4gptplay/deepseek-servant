@@ -1,5 +1,7 @@
 # 记录、归档与清理
 
+当前实现：`0.1.0-alpha.39`。使用入口见[使用指南](docs/USAGE.md)，本次完整封存与清理结果见[验收记录](docs/acceptance-20261026.md)。
+
 ## 同一原生存储域
 
 完整对话、原始任务需求、Planner Memory、Planner Note 各版本、Child Reply、Task 运行状态、知识和 records 档案均保存在 deepseek_servant 原生 storageDomain。原文使用分段内容和稳定引用保存；角色按引用分页读取，长期记录不受热上下文的条数与长度限制。

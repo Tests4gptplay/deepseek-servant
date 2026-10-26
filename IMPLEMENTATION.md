@@ -1,6 +1,6 @@
 # DeepSeek Servant 实现说明
 
-版本：`0.1.0-alpha.39`。架构基线见 [DESIGN.md](https://github.com/Tests4gptplay/deepseek-servant/blob/main/DESIGN.md)，实施与实测记录如下。
+版本：`0.1.0-alpha.39`。当前架构见 [DESIGN.md](DESIGN.md)，最新完整结果见[alpha.39 验收](docs/acceptance-20261026.md)。本文先说明当前实现，再按版本保留运行记录。
 
 **设计来源：**[Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness)，在 DSH 中实现其持续任务、Agent 角色分工、工作接续与知识积累机制。
 
@@ -25,11 +25,11 @@
 | 任务权威 | `application/task-service.ts`、`servant-store.ts`、`domain/task.ts` | 唯一任务写入口、命令去重、纯状态转换、同记录提交动作 |
 | 运行协调 | `runtime/coordinator.ts`、`scheduler.ts` | 依赖、席位、写域、等待、派发、恢复与本地幂等兑现 |
 | 实际所有权 | `runtime/agent-supervisor.ts` | 创建/持有/停止/释放确切 Agent，观察其模型回合和精确作业 |
-| 外置任务记忆 | `runtime/context-assembler.ts`、Task 数据契约 | 当前目标、正式计划、规划记录、工作前沿与按需引用 |
+| 工作原文与上下文 | `application/record-journal.ts`、`task-records.ts`、`task-record-access.ts`、`runtime/context-assembler.ts` | 同域独立原文、当前机器状态、工作前沿与作用域分页读取 |
 | 知识与技能 | `application/knowledge-service.ts`、`adapters/dsh/skills.ts` | 候选、验证、版本、真实加载和结果反馈，发布原生 scoped provider |
 | 角色工具 | `roles/tools.ts`、前台及后台角色契约 | 实际 Agent 绑定的能力；Planner 判断方法和质量，代码检验身份和状态 |
 | 读取与界面 | `application/query-service.ts`、`client.tsx`、`client/` | 原生独立页面、对话、任务、产物、知识、设置与清理操作 |
-| 保留与清理 | `application/retention-service.ts`、`domain/retention.ts` | 完整 records 封存、自动临时清理、历史入口与技能维护、真实大小统计 |
+| 封存与清理 | `application/task-archive-store.ts`、`retention-service.ts`、`storage-usage.ts`、`domain/retention.ts` | 完整 records、精确临时清理、历史入口与技能维护、实际容量统计 |
 
 ## 正常任务调用链
 
@@ -41,7 +41,7 @@
 
 Planner 用 `planning.commit` 保存正式 Plan 和子任务。Worker 席位默认两个，可在设置页保存为 1–32，已有 Host 配置用于初始化。持久设置立即影响后续调度与新 Planner 的容量快照；降低席位不停止当前所有者。该配置独立于 DSH 的全局模型并发限制。每个 Worker 仍由其原生 Agent 串行处理自己的模型回合。Worker `execution_report` 通过 executionId、assignmentVersion 和 resultId 核对，不让正常并发报告竞争一个旧 Task revision。
 
-终结报告关闭该 Worker 的业务能力。报告工具是原生独占工具，持久成功后结束当前模型回合，同批后续业务工具由执行归属检查拒绝。实际 Agent 如仍有本机 jobs，则继续保有其物理归属；业务结果和作业退出分别记录。
+终结报告关闭该 Worker 的业务能力，持久成功后通过原生 `concludeTurn` 结束当前模型回合；后续业务提交按有效执行归属处理。实际 Agent 如仍有本机 jobs，则继续保有其物理归属；业务结果和作业退出分别记录。
 
 Planner 读取实际产物和证据后，通过 `planning.decide` 接受、返工或继续。代码只检查当前目标、计划、子任务结果及动作条件，不代替 Planner 判断质量。完整交付需当前计划全部验收，随后由持久 `deliver` 动作交给前台，并保存稳定通知标识。
 
@@ -49,7 +49,7 @@ Planner 读取实际产物和证据后，通过 `planning.decide` 接受、返�
 
 ## 原生能力与权限边界
 
-角色工具从宿主的真实 Agent 对象和绑定记录获得身份；模型参数不能指定自己的角色或执行所有权。用户回答和未知执行的人工核对入口只在已认证 Client API 中提供。
+角色工具从宿主的真实 Agent 对象和绑定记录获得身份；模型参数不能指定自己的角色或执行所有权。用户可从已认证 Client 回答等待问题，也可在当前聊天中答复，由 `task_answer` 绑定实际消息身份并转交原文。未知执行的人工核对仍由已认证 Client API 提供。
 
 普通角色沿用所选 preset 的模型和本机工具。会在 Servant 所有权之外另起 Agent 的 `subagent`、`subagent_fork`、`workflow`，以及单独排程工具，暂不允许绕过本插件的协调器。已有全局工具通过原生限制隐藏；作用域工具在原生执行前入口拒绝。需要并行工作时，由正式 Plan 产生可跟踪的 Child 和 Worker。
 
@@ -63,7 +63,7 @@ Client 使用 DSH 原生模块加载器格式和共享组件，不另装一套�
 
 权威顺序是当前用户目标、正式 Plan、已保存工作事实和评价。原始要求及其修订记录可回查；旧计划或可变 Note 不能覆盖当前目标。Planner 的结构化记录包含选择、返工理由、失败方法、假设变化和恢复依据。`planning.checkpoint` 可以保存有意义的规划进度，且不触发派发；Plan Note 自己带 revision，并在同一次 Task 提交记录其修改或采用理由。
 
-Worker checkpoint 保存已完成部分、失败方法/观察/证据、剩余工作、下一动作与下一读取位置。同一 Child 的工作、评审、恢复记录从同一权威 Task 聚合导出，不再维护另一份会分叉的长文件。新 Worker 通过这些记录继续同一个业务子任务。
+Worker checkpoint 保存已完成部分、失败方法/观察/证据、剩余工作、下一动作与下一读取位置。同一 Child 的工作、评审、恢复原文由同一 Domain 的分离记录保存，TaskService 组装当前事实及引用。新 Worker 通过这些记录继续同一个业务子任务。
 
 ContextAssembler 为角色提供有限的当前工作输入，近期工作、失败及已回答等待默认各 6 条、Planner 热子任务摘要最多 24 条、作用域事实最多 24 条。省略的内容附有精确引用；`memory_query` 只分页读取本地已保存的记录，每页最多 50 条。Worker 只能读取自己的工作、相关依赖和恢复记录。用户回答包含问题、答案、恢复条件和确切原所有者；同一 waitId 再次使用也不会覆盖先前回答快照。角色输入不会复制全部聊天或所有任务历史，原生 Skill 正文仍由宿主按需加载。
 
@@ -79,17 +79,17 @@ ContextAssembler 为角色提供有限的当前工作输入，近期工作、失
 
 `continue` 仍在原 Worker 中续作；`handoff` 才请求新的 Worker 上下文。正常换代不伪装成失败或返工，也不重建已接受成果。正在运行的作业仍属于旧 Agent，不能保存 jobId 后销毁旧 Agent并宣称迁移成功。
 
-默认每 5 个已保存工作段触发 Planner 周期评审，计数跨 generation 保留。`handoff` 正好落在评审点时，先由新的 Planner 判断实际进展和方法，`continue` 决策才允许后继派发。暂停、目标修订及相同任务规格的重规划不能绕过已经到期的评审。这个计数不是 token 门槛或原生模型回合数；本插件没有为此增加一套历史压缩器或固定时间轮换器。
+默认每 5 个有效 `continue/handoff` 工作段触发 Planner 周期评审，计数跨 generation 保留；`progress` 不计段，`complete/failed` 立即评价。`handoff` 正好落在评审点时，先由新的 Planner 判断实际进展和方法，`continue` 决策才允许后继派发。暂停、目标修订及相同任务规格的重规划不能绕过已经到期的评审。这个计数不是 token 门槛或原生模型回合数；本插件没有为此增加一套历史压缩器或固定时间轮换器。
 
 Worker 报告可以先于原派发动作的完成回执到达。原派发仍为 running 时，新派发会被去重规则暂时合并；原动作完成或恢复核对结束后，协调器再次检查已保存的派发条件，使正常后继继续兑现。这里沿用现有事件与动作通道。
 
 ## 恢复与失败
 
-恢复先读取本地 Task 与原生 Session，再决定是否取得执行所有权。只有最后原生回合正常结束、inbox 为空、其准确报告存在且没有未结工具/作业的 Worker，才可重建同一个空闲所有者。旧 jobId 不表示 OS 作业已恢复；未知物理副作用不会自动重放。
+恢复读取保存的 Task、原生 Session、当前租约、Agent 和运行中的 Job。仍有实际所有者时保留其归属；原生回合已经正常结束、Inbox 为空且报告和作业状态收束的 Worker，可恢复同一个空闲 execution/session。
 
-保存了派发 claim 但尚无 execution binding，说明还未进入原生创建阶段，可重新排队。已经绑定但原生 Session 不存在，采用明确缺席证据退休旧身份，并从保存工作前沿建立新动作。Planner 或 Helper 的旧语义动作必须明确收敛，不能用 idle 当作业务成功，也不能遗留一个永远阻塞新 Planner 的旧身份。
+保存了派发 claim 但尚无 execution binding 的动作可重新排队。原运行已经消失时，保存未收尾工具、排队输入与旧 Job 等 `interruption` 现场，退休失活身份，从原工作前沿建立同角色后继。历史中断记录随恢复输入交给后继核对 Session 与实际产物，恢复本身可直接推进。
 
-异常先保存确切事故，再等待原所有者、作业和 Inbox 收束。随后创建同角色的新 generation，保留 Child、assignmentVersion、累计段数与工作前沿；保存过的最终结果直接进入评价。普通工具报错继续由原执行处理，相同故障反复出现时进入可说明原因的配置等待。既有 Helper 历史可读，恢复链使用原角色。
+同角色新 generation 保留 Child、assignmentVersion、有效段计数与工作前沿；保存过的最终结果直接进入评价。普通工具报错继续由原执行处理。相同配置故障且没有新进展时进入具体等待，宿主中断独立处理。既有 Helper 历史可读，当前运行角色为 Foreground、Planner 和 Worker。
 
 后台动作失败会保存明确等待或不确定状态，并向界面暴露原因；没有无上限自动重试、定时催模型继续或后台测试守护程序。持续推进来自已提交结果、作业事件、用户输入和满足等待条件后的动作。
 
@@ -103,22 +103,9 @@ DSH 原生 Session 日志保存在宿主配置的目录。页面按 Domain 实�
 
 ## 构建与安装
 
-以下命令从本仓库根目录执行，使用与目标 DSH 版本兼容的 Node.js 和依赖。
+统一入口见[安装、升级与开发构建](docs/INSTALLATION.md)。Node 版本、候选安装、固定 GitHub 来源约定及按改动选择的开发检查在该文档维护；包版本与依赖以 `package.json` / `package-lock.json` 为准。运行包采用明确白名单，历史文档和开发测试保留在源码库。
 
-```sh
-npm ci --ignore-scripts
-npm run typecheck
-npm run build
-npm pack --ignore-scripts
-```
-
-将生成的本地 `.tgz` 安装到选定 DSH profile 时，使用宿主原生插件安装入口。命令行形式为：
-
-```sh
-dsh plugin --profile <目标profile> add <本地tgz路径> --ignore-scripts
-```
-
-安装将更新指定的 DSH profile。建议先使用隔离 profile 验证；模型提供者和凭据继续由 DSH 配置管理。
+本次私有仓库整理仅维护文档及停用文件，复用已验收的 alpha.39 运行代码和候选包。
 
 ## 历史版本验证结果
 
@@ -176,14 +163,16 @@ dsh plugin --profile <目标profile> add <本地tgz路径> --ignore-scripts
 
 该轮实测环境为 Linux / DSH 0.2.1-rc.2，覆盖原生文件工具、长任务周期评审、两次正常 Worker 换代、最终交付和清理。当时列出的后续项目包括 Windows Electron、Codex 专有路由、跨天运行、原生 token 阈值压缩及活动 OS 作业的跨代处理。Linux 测试中的 shell 操作受到宿主沙箱限制，Worker 已采用原生文件工具完成相应业务。64 MiB 为当时的记录维护目标，宿主 Session 日志及工作区成果另行计量。
 
-## alpha.39 重启恢复与历史阅读（2026-10-26）
+## alpha.39 恢复、历史阅读与长作业验收（2026-10-26）
 
-- 冷启动检查当前原生 Agent、Session 租约和 Job 注册表。历史未收尾工具与 Job 保存为 interruption 现场，交给原角色后继续作。多次中断保持 Child、assignmentVersion、工作前沿和有效段计数；用户暂停、取消与实际存活所有者继续生效。
+- 冷启动检查当前原生 Agent、Session 租约和 Job 注册表。历史未收尾工具与 Job 保存为 interruption 现场，交给原角色后继继续工作。多次中断保持 Child、assignmentVersion、工作前沿和有效段计数；用户暂停、取消与实际存活所有者继续生效。
 - 前台失活 claim 和已消费的中断回合均自动恢复；隐藏接续消息关联原始输入及其工具来源，稳定 task_submit 身份维持同一 Task。
 - 用户在聊天中回答等待问题时，task_answer 直接转交当前用户原文，解除对应等待并接续规划；后台通知仍按结果交付处理。
 - 删除 SSE 定时保活与重复席位检查，维持原生事件驱动调度。
 - 历史上翻预加载、消息去重、失败重试和阅读锚点通过源码与真实组件测试；日历复用官方 ui-schedule 设计、官方 UI primitives 与主题变量，支持键盘导航、选择及清空日期。
 - 73 项源码回归通过；实际 React 页面与官方 primitives 的 jsdom 测试通过。独立原生 SDK 场景在前台和 Worker 均执行期间，强制结束宿主及其子进程树；重新启动后保留旧文件，第二代 Worker 完成剩余文件，原 Task 完成 Planner 验收、前台主动交付和 records 封存清理。模型端为受控 SSE，Agent、Session、文件工具和后台 PowerShell Job 为原生实现。
+- 当前宿主由真实对话入口经 `codex-local/gpt-6-astra` 路由完成原生静默 Job：持续 **1860.2037818 秒**、退出码 **0**，同一 Worker 持有同一 Job 直到完成。Planner 接受成果后前台主动交付，档案封存，临时 Task 清理，Jobs 列表为空。
+- 候选包已通过原生插件管理器安装并应用；完整时间、执行身份、包清单与 SHA-256 见[alpha.39 验收记录](docs/acceptance-20261026.md)。
 
 ## alpha.37 升级验收（2026-10-26）
 
@@ -205,7 +194,7 @@ dsh plugin --profile <目标profile> add <本地tgz路径> --ignore-scripts
 | 原生配置及迁移 | 新安装默认席位 2；实际 API 保存 3，重启读取 3，再保存 1、4、32，Scheduler 即时一致；迁移整个 records 目录后 probe 数据保持 |
 | Domain 统计 | 迁移后逐键求和 1,675,454 字节，与服务统计一致；长期加临时等于总量，临时为 0，原生 Session 日志另存 |
 
-隔离驱动的 `continue`、`restart` 命令均退出 0。长任务初次检查把最终 complete 也计入有效接续段，产生 15/16 的断言差异；仅修正验证脚本，随后直接读取已完成档案继续验收，未重跑任务或改动产物。Jobs/未知副作用、跨日期记录及错误重试边界由针对性源码回归覆盖；本轮原生场景没有另跑 30 分钟静默 OS 作业或 Codex 专有路由。已被用户接受的 Desktop 外观、透明插画、设置和 alpha.36 侧栏隐藏规则直接继承，不重新操作浏览器。
+隔离驱动的 `continue`、`restart` 命令均退出 0。长任务初次检查把最终 complete 也计入有效接续段，产生 15/16 的断言差异；仅修正验证脚本，随后直接读取已完成档案继续验收，未重跑任务或改动产物。Jobs/未知副作用、跨日期记录及错误重试边界由针对性源码回归覆盖。此处保留 alpha.37 当时的覆盖范围；后续 Codex 路由的 31 分钟原生静默作业已在 alpha.39 完成。已被用户接受的 Desktop 外观、透明插画、设置和 alpha.36 侧栏隐藏规则继续沿用。
 
 ### 首轮上下文比较
 

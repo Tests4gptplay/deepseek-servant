@@ -3,11 +3,11 @@
 日期：2026-10-25（Asia/Tokyo）
 存放位置：本项目 `docs/DSS_MASTER_DESIGN_20261025.md`，与插件源码和 UI 同一仓库。
 性质：**截至本日用户已确认的整体方案**，避免前台/Task/Memory/故障清理/UI 设计散落在多个聊天与设计文件中。原始详细审计仍留在私人 `Tests4gptplay/temp/DSS/`，下文有链接。
-特别说明：文档里的“目标”不是“已经上线”。此提交只实现【记录容量 UI/只读存储计量】；其余大规模生命周期和独立存储机制均属后续实现工作，不能宣称已交付。
+当前进度更新于 2026-10-26：alpha.39 已落实下述前台、工作原文、同角色恢复、records 封存与 Worker 席位设计。具体实现见[当前架构](../DESIGN.md)，运行证据见[验收记录](acceptance-20261026.md)。I 节的 GitHub 集成保留为后续实验设计。
 
 ## A. 产品定位和职责
 
-目标是长期存在、能自主完成复杂任务并与用户自然持续聊天的 Servant，而非本地命令工具的薄包装。
+提供长期存在、能自主完成复杂任务并与用户自然持续聊天的 Servant。
 
 主要角色：
 - **Foreground**：唯一持续面对用户的助手身份，承接真实用户需求、对话、任务更新与交付。物理 Agent/Session 按完成的一轮对话替换，用户视觉上仍是连续的同一位助理。
@@ -19,7 +19,7 @@
 
 **所有 DSS 自有内部状态、永久历史与任务期间临时记忆均位于既有 DSH `storageDomain` 的 `deepseek_servant` Domain 内。** 不迁移到用户 Workspace、不引入第二套数据库，也没有“复制出来修改再复制回去”流程。
 
-`deepseek_servant` 下的 `records` KV 表可按不同逻辑 Key 管理原文与元数据。以下是最终计划的 Key 家族示意，非已经存在的物理目录：
+`deepseek_servant` 下的 `records` KV 表可按不同逻辑 Key 管理原文与元数据。以下是当前逻辑 Key 家族，斜杠表示键前缀；实际文件布局由原生存储适配器管理：
 
 | 永久记录 | 任务运行期记录 |
 | --- | --- |
@@ -27,7 +27,7 @@
 | `conversations/<assistantId>/<date>/...`：逐日完整聊天原文 | `planner-memory/<taskId>/...`：规划、评审、跨代语义历史 |
 | `knowledge/skills|facts|preferences/...`：技能、事实、偏好 | `planner-note/<taskId>/...`：未来阶段、暂缓原因与前沿 |
 | `task-origin/<taskId>`：原始需求与修订来源 | `worker-reply/<taskId>/<childId>/...`：阶段进展、证据、Checkpoint |
-| `records/<taskId>/...`：完整 `records.md` 逻辑档案 | `execution/<taskId>/...`：调度、Job、handoff 与回执 |
+| `records/<taskId>/...`、`record-archive/<taskId>/...`：完整档案与原引用映射 | `execution/<taskId>/...`：调度、Job、handoff 与回执 |
 | `task-history/<taskId>`：最小历史索引及身份保护 | `recovery/<taskId>/...`：异常和同角色恢复 |
 
 单个长期文档可按日期、Entry、分片、索引分别落在 **同一个 Domain** 中；永久内容不设任意总长度或条目数量上限，模型单次读取则按游标、时间、Key 和精确引用分页。Schema 单次输入限制不得导致永久截断。
@@ -55,9 +55,9 @@
 
 ## D.1 Scheduler Worker 并发席位：UI 配置与 Planner 实时容量提示（2026-10-25 新增确认）
 
-这不是网络端口，也不是操作系统物理线程，而是 DSS Scheduler 的 **Worker Agent 并发执行席位数**，对应当前 `src/host.ts` 的 `Config.workerSeats`、`src/runtime/scheduler.ts` 的 `Scheduler.workerSeats`。**现有代码默认 2，Host 配置接受 1～32 的整数；运行时 Scheduler 当前只读且主要通过插件启动时的 Config 注入，前台 UI 暂时只有席位总数显示，没有设置控件。**
+这不是网络端口，也不是操作系统物理线程，而是 DSS Scheduler 的 **Worker Agent 并发执行席位数**，对应当前 `src/host.ts` 的 `Config.workerSeats`、`src/runtime/scheduler.ts` 的 `Scheduler.workerSeats`。**alpha.39 设置页已提供 1–32 的席位设置，默认 2；Domain 持久值立即应用于 Scheduler，Host 配置用于初始化。每次新 Planner 动作均收到最新全局容量快照。**
 
-**正式升级要求：**
+**已落实的设计要求：**
 
 1. 在 DSS 现有「设置」页面添加清晰的小型 **「Worker 并发席位」数字设置**，默认 **2**，沿用目前有效的 **1～32** 配置范围。输入校验、实际保存值、有效运行值、界面显示值必须统一，不能只有一个装饰性输入框。
 2. 由用户手动决定并发上限；Planner **只获得当前并发信息，不自动修改上限**。这是执行调度的最大并发 Worker 数量，而不是 Planner 可以创建的 Child 总量，仍可分解超过席位数的有意义 Child，并由 Scheduler 排队。没有待执行 Child 时，不需要占满席位或为此空转模型。
@@ -73,25 +73,25 @@
 5. 如果 Planner 在**同一超长未完规划动作**中 handoff 给下一代，新 Planner 也重新取得最新容量快照；工作区更换/用户在 UI 调整席位也不应使现有 Child/Task 消失。普通 Worker 不需要占用额外的模型推理轮询容量。
 6. 统计口径要与 Scheduler 真正的 Worker inference slot admission 相符：运行中的 Worker 和已正式保留、即将绑定的派发应计入占用；等待 Job 的物理资源/文件排他仍应单独依据现有 `resources/writeScopes` 规则判断。**并发席位不等价于可并行使用多个 GPU 或重叠文件写入权限。**
 
-**必须验收：** 首次安装无历史配置显示 2；1/4/32 等合法值可保存并重开保留；0/33/小数不被接受；配置变化确实改变调度结果而非仅 UI；Planner 的两次相邻规划/评审准确看到**不同的最新配置和占用快照**；多任务同时存在时全局席位计算正确；降低上限不终止已有 Worker；不要为了提示容量而启动单独 AI。
+**对应验收项（已完成）：** 首次安装无历史配置显示 2；1/4/32 等合法值可保存并重开保留；0/33/小数不被接受；配置变化确实改变调度结果而非仅 UI；Planner 的两次相邻规划/评审准确看到**不同的最新配置和占用快照**；多任务同时存在时全局席位计算正确；降低上限不终止已有 Worker；不要为了提示容量而启动单独 AI。
 
 ## E. 异常恢复（没有 Helper）
 
 DSH 原生 `agent/error`、Agent abnormal-idle、Session/Job 真实状态进入程序观察/对账。只是执行时间长、正常 Job 没输出、普通工具错误，不意味着 Agent 已死亡。
 
-异常明确且原执行者已失效、旧 Job 与可能产生的副作用已经核对时，程序记录 `ErrorRecord`、旧代身份、错误、进度和结果引用，再创建**同角色**新 Agent/Session：
+冷启动根据当前 Agent、Session 租约和存活 Job 确定实际归属。原执行者已失效时，程序保存旧代身份、错误、进度、结果引用及 `interruption` 现场，再创建**同角色**新 Agent/Session。历史未收尾工具和旧 Job 由原角色结合 Session 与产物核对后续作，不使恢复者永久停在人工确认入口：
 - Planner 出错 → 新 Planner 接续原计划/原评审 Action；
 - Worker 出错 → 新 Worker 接续**原 Child 与分配版本**。
 
-新 Agent 首次机器输入必须表明它是前代错误重启、给出原始错误、最新 Memory/Reply/Note、已完成成果、未知副作用与 `next_reads`；绝不伪造原代成功，更不能重跑已经成功的外部操作。相同配置错误无有效新进展时不得无限重启消耗 Token，具体依赖交给 Foreground 明确提示。监控和简单调度状态修复完全是宿主程序动作，**不启动 Helper 或额外模型巡检**。
+新 Agent 首次机器输入必须表明它是前代错误重启、给出原始错误、最新 Memory/Reply/Note、已完成成果、未知副作用与 `next_reads`；绝不伪造原代成功，更不能重跑已经成功的外部操作。相同配置错误无有效新进展时保存具体配置等待；用户在聊天中的答复可通过 `task_answer` 继续对应工作。宿主重启、崩溃和断电中断独立处理，不累计成重复配置故障。监控和简单调度状态修复完全是宿主程序动作，**不启动 Helper 或额外模型巡检**。
 
 ## F. 任务完成后的 records.md 和程序清理
 
-Root Task 全部验收后，Planner 写最后的验收与实际产物引用并提交语义 `complete`；程序立即生成**包含原文来源**的完整 `records.md` 逻辑档案并保存于同 Domain `records/<taskId>/...`，回读校验哈希和 sealed manifest。只有核验完成，程序才自动删除该 Task 的临时 Task/Plan/Planner Memory/Note/Worker Reply/Checkpoint/执行交接/故障等待等 Key，并释放实际 Planner/Worker Agent/Session 运行态、Job 与资源占用。原始 Foreground 需求、逐日聊天、持久 Knowledge、已验收项目和完整 records 档案必须保留。
+Root Task 全部验收后，Planner 写最后的验收与实际产物引用并提交语义 `complete`；程序立即生成**包含原文来源**的完整 `records.md` 逻辑档案并保存于同 Domain `records/<taskId>/...`，回读校验哈希和 sealed manifest。封存后先唤醒 Foreground 交付；实际 Agent、Job 与待处理动作收束后，程序封存最终状态、保存永久身份，再自动删除该 Task 的临时 Task/Plan/Planner Memory/Note/Worker Reply/Checkpoint/执行交接/故障等待等 Key，Task 热状态最后删除。原始 Foreground 需求、逐日聊天、持久 Knowledge、已验收项目和完整 records 档案必须保留。
 
 不让 AI 执行固定删除命令；程序调用 StoragePort 的精确 Key 删除。归档失败保留源记录并反馈具体故障；半途停止从回执继续清剩余项，不重新执行用户业务。工程实体输出保留在原 Workspace；用户需要时从 Domain 导出物理 `records.md` 副本，但这不是归档唯一权威。DSH 的原生 Session 日志清理须单独按 DSH 官方能力处理，不擅自视其 archive = 实际磁盘删除。
 
-## G. 记录容量 UI（本次落实代码）
+## G. 记录容量 UI
 
 **只计 `deepseek_servant` Domain 的实际记录正文容量。** 不加 DSH 原生前后台 Session 日志、不加用户工程文件。
 
@@ -112,11 +112,12 @@ Root Task 全部验收后，Planner 写最后的验收与实际产物引用并�
 
 表内数值是展示布局示例，真实 UI 从 Domain 的当前 Keys 读出并自动更新。旧版 `task:<id>` JSON 里尚未抽离的 `decisions`、`plannerNote`、`reports`、`executions` 等，统计程序按原 JSON 字段长度分摊到对应栏目，**整体只计一次**；旧 Task 剩余部分归“活动任务 / Plan”。左列＋右列＝顶部总量。折叠的旧清理设置仍可手动使用，但不在默认表格下重复展示大段说明或原生 Session 日志。
 
-## H. 现状、缺口和实施边界
+## H. alpha.39 实施进度
 
-- **已实现于本次仓库更新的范围**：容量统计 DTO、读 Domain Keys 的 API、存储变更后自动刷新 UI、对旧聚合 Task 的分类、六行×两列的简洁布局、中英文文案与保留既有折叠式清理控制。没有改变真实数据存储位置和现有运行时清理行为。
-- **尚待实现**：设置页 Worker 并发席位（默认 2，可配置 1～32）持久化与运行时更新、Planner 每次规划/评审时获得真实并发容量快照；前台每轮新 Session 与按日完整原文，固定六轮自动装载/历史搜索；Planner/Worker 独立 Domain Keys 与自主读写；增量 Plan/未完成规划中途 handoff；完全去除 Helper 及同角色异常重启；任务终态 records.md 写入/封口/自动精确清理；Native Session 物理清理兼容等。这些是相互配套的下一阶段任务，不能当作本次 UI 已经实施。
-- 旧版 DSH `storageDomain` 对版本与 schema 有严格校验，未来迁移需要保持旧记录可读，不可直接提高版本导致宿主无法打开；原生 DSH Storage Domain 不是普通 Agent Workspace，日常直接读写应通过 DSS 的 Domain-bound 受控原生工具，不进行“复制回去覆盖”的中转操作。
+- **前台与 UI**：完成每轮新 Session、最近六次完整交互、按日原文与检索、上翻预加载、阅读锚点、主题日历和六行两列容量统计。
+- **任务与运行**：完成独立 Memory / Note / Reply、增量 Plan、Planner 未完动作 handoff、Worker 周期评审与正常换代、同角色故障及通用冷启动恢复、席位持久设置和实时容量快照。
+- **记录与清理**：完成统一 Domain 内的原文迁移、完整 records 封存、前台交付、精确临时清理及中断清理接续。DSH 原生 Session 日志沿用宿主的独立存储管理，当前 UI 提供位置入口。
+- **兼容与保留**：旧内嵌 Task 按稳定身份迁入分离记录，既有 Helper 历史可读；已接受美术、界面、配置和产物保留。原生验证与 31 分钟静默作业见[alpha.39 验收](acceptance-20261026.md)。
 
 ## I. GitHub 实验性集成：复用 dsh-github，用户在 DSS 设置中配置 Token（2026-10-25）
 
