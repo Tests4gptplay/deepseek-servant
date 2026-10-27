@@ -1,7 +1,7 @@
 # DeepSeek Servant
 
 <p align="center">
-  <img src="docs/images/deepseek-servant-mascot.png" alt="DeepSeek Servant 招牌角色全身图" width="420">
+  <img src="docs/images/deepseek-servant-maids-duo.webp" alt="DeepSeek Servant 短裙与长裙女仆角色设计">
 </p>
 
 基于 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai/deepseek-harness) 的自主 AI 助理与多 Agent 协作插件。围绕持久目标进行规划、执行、成果评价、方法调整、任务接续和技能积累。
