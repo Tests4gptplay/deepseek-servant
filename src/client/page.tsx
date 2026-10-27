@@ -51,7 +51,7 @@ export interface ServantInjected {
   onOpenArtifact: (taskId: string, artifactId: string) => Promise<void>
 }
 
-export interface ServantSettingsExtension { experimentalSettings?: ReactNode }
+export interface ServantSettingsExtension { experimentalSettings?: ReactNode; modeSelector?: ReactNode }
 export type ServantPageProps = PropsRuntime<'main'> & InjectFace<ServantInjected> & PropsLocale<'dsh.servant'> & ServantSettingsExtension
 type ServantActions = Omit<ServantInjected, 'hooks'>
 
@@ -78,8 +78,10 @@ export function ServantPage(props: ServantPageProps) {
       </div>
     </header>
     <div className={css.navigation}>
-      <SegmentedControl id="servant-tabs" label={t('tabs.label')} value={tab} onChange={setTab}
+      <div className={css.navigationControls}><SegmentedControl id="servant-tabs" label={t('tabs.label')} value={tab} onChange={setTab}
         options={(['conversation', 'tasks'] as const).map(value => ({ value, label: t(`tabs.${value}`) }))} />
+        {props.modeSelector}
+      </div>
       {value && <div className={css.workspaceSummary}>
         <span>{value.workspaces.find(workspace => workspace.id === value.assistant.workspace.id)?.title ?? value.assistant.workspace.directory}</span>
         <span>{t('runtime.seats', { count: value.runtime.workerSeats })}</span>
@@ -287,11 +289,11 @@ function TaskDetails({ task, busy, actions, onBack, t }: { task: TaskView, busy:
     <h2>{task.goal.objective}</h2>
     {ended && <Button size="sm" variant="outline" disabled={busy} onClick={() => { void actions.onExportRecords(task.id) }}>{t('tasks.exportRecords')}</Button>}
     {!ended && <div className={css.actions}>
-      <Button size="sm" variant="outline" disabled={busy} onClick={() => { void actions.onControl(task.id, task.control === 'paused' ? 'resume' : 'pause') }}>{t(task.control === 'paused' ? 'tasks.resume' : 'tasks.pause')}</Button>
-      <Button size="sm" disabled={busy} onClick={() => { setEditing(true) }}>{t('tasks.edit')}</Button>
-      <Button size="sm" disabled={busy} onClick={() => { void actions.onControl(task.id, 'cancel') }}>{t('tasks.cancel')}</Button>
+      <Button size="sm" variant="outline" disabled={busy || !!task.remote && !task.remote.canControl} onClick={() => { void actions.onControl(task.id, task.control === 'paused' ? 'resume' : 'pause') }}>{t(task.control === 'paused' ? 'tasks.resume' : 'tasks.pause')}</Button>
+      <Button size="sm" disabled={busy || !!task.remote && !task.remote.canRevise} onClick={() => { setEditing(true) }}>{t('tasks.edit')}</Button>
+      <Button size="sm" disabled={busy || !!task.remote && !task.remote.canCancel} onClick={() => { void actions.onControl(task.id, 'cancel') }}>{t('tasks.cancel')}</Button>
     </div>}
-    {!ended && <PriorityEditor key={`${task.id}:${task.priority}`} task={task} busy={busy} onSave={actions.onPriority} t={t} />}
+    {!ended && !task.remote && <PriorityEditor key={`${task.id}:${task.priority}`} task={task} busy={busy} onSave={actions.onPriority} t={t} />}
     {editing && <GoalEditor task={task} busy={busy} onSave={actions.onRevise} onClose={() => { setEditing(false) }} t={t} />}
     {task.control !== 'running' && executions.length > 0 && <p className={css.notice}>{t('tasks.runningAfterPause')}</p>}
     {task.uncertainActionCount > 0 && <p className={css.notice}>{t('tasks.uncertainActions', { count: task.uncertainActionCount })}</p>}
@@ -311,6 +313,8 @@ function TaskDetails({ task, busy, actions, onBack, t }: { task: TaskView, busy:
     </div>)}</Section>}
     <Section title={t('tasks.deliverables')}>
       {task.delivery && <p>{task.delivery.summary}</p>}
+      {task.remote && <a className={css.artifact} href={task.remote.recordsUrl} target="_blank" rel="noreferrer">DSS-cah · {t('tasks.exportRecords')}</a>}
+      {task.remote?.statusUrl && <a className={css.artifact} href={task.remote.statusUrl} target="_blank" rel="noreferrer">DSS-cah · {t('tasks.execution')}</a>}
       {!uniqueArtifacts.length && <p className={css.muted}>{t('tasks.noArtifacts')}</p>}
       {uniqueArtifacts.map(artifact => <button key={artifact.id} type="button" className={css.artifact} onClick={() => { void actions.onOpenArtifact(task.id, artifact.id) }}>
         <span>{artifact.description || t('tasks.openArtifact')}</span><code>{artifact.path}</code>

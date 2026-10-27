@@ -4,6 +4,7 @@ import { clientRequestSchema } from '@deepseek-ai/dsh-client-connection'
 import { z } from 'zod'
 import { ModeRouter, modes, type ModeEndpoint } from './mode-router.js'
 import { ModeEvents } from './events.js'
+import { SharedForeground } from './shared-foreground.js'
 import { installCoopRuntime } from '../experimental/private-git/runtime.js'
 import { CoopCache } from '../experimental/private-git/cache.js'
 import { CoopCredentials } from '../experimental/private-git/credentials.js'
@@ -36,10 +37,11 @@ export async function installModeHost(ctx: Context, local: ModeEndpoint): Promis
     read: () => selection.global.get().activeMode,
     write: async activeMode => { await selection.global.set({ activeMode, coopActivated: selection.global.get().coopActivated || activeMode === 'PRIVATE_GIT_EXPERIMENTAL' }); events.changed() },
   }, { LOCAL: local, PRIVATE_GIT_EXPERIMENTAL: { call: async (...args) => (await coop()).call(...args) } })
+  const shared = new SharedForeground(local, coop, () => router.current(), () => selection.global.get().coopActivated)
   ctx.provide('deepseekServantModes', { router, coop })
   const fiber = ctx.inject(['connection'], scope => {
     scope.effect(() => scope.connection.fetch.register({ path: '/api/deepseek-servant-mode/events', methods: ['GET'], requestBody: 'buffered', fetch: async request => events.response(request) }), 'servant.modes.events')
-    for (const method of ['selection', 'select', 'call']) scope.effect(() => scope.connection.fetch.register({
+    for (const method of ['selection', 'select', 'call', 'shared']) scope.effect(() => scope.connection.fetch.register({
       path: '/api/deepseek-servant-mode/' + method, methods: ['POST'], requestBody: 'buffered',
       fetch: async request => {
         const envelope = clientRequestSchema.safeParse(await request.json().catch(() => undefined))
@@ -51,6 +53,7 @@ export async function installModeHost(ctx: Context, local: ModeEndpoint): Promis
           let value: unknown
           if (method === 'selection') value = { activeMode: router.current() }
           else if (method === 'select') value = { activeMode: await router.select(selectSchema.parse(message.payload).mode) }
+          else if (method === 'shared') { const input = callSchema.omit({ mode: true }).parse(message.payload); value = await shared.call(input.method, input.params, request.signal) }
           else { const input = callSchema.parse(message.payload); value = await router.call(input.mode, input.method, input.params, request.signal) }
           return respond({ ok: true, value })
         } catch (error) {

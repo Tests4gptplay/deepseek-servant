@@ -1,6 +1,14 @@
 # DeepSeek Servant 实现说明
 
-版本：`0.2.2`。双模式架构见 [DESIGN.md](DESIGN.md)，协作操作见 [PRIVATE_GIT.md](PRIVATE_GIT.md)，Local 已接受运行记录见[alpha.39 验收](docs/acceptance-20261026.md)。
+版本：`0.2.3`。双模式架构见 [DESIGN.md](DESIGN.md)，协作操作见 [PRIVATE_GIT.md](PRIVATE_GIT.md)，Local 已接受运行记录见[alpha.39 验收](docs/acceptance-20261026.md)。
+
+## 0.2.3 共用前台与工作随记
+
+`SharedForeground` 位于组合层，合并 Local / Git 的对话与任务显示，将新输入交给所选后台。模式菜单保留当前页面和输入草稿；Git 前台沿用输入框模型与前台工作区，任务仍通过独立 Coop Consumer 执行。
+
+`foreground-memory.ts` 共用两份文档的用途与维护约定。Local 通过原生记录存储保存，Git 通过受角色绑定的 `foreground_memory` 操作更新当前 Markdown；空文本删除。安装角色工具时只提供用途、路径与按需读取方法，不加载文档正文。List 的 7 天提醒、30 天确认与 Cache 清理由前台在普通对话轮次执行，无额外定时唤醒。
+
+`repository-guide.ts` 管理所选目录 README 的独立区段，保留自有文案；仅内容版本或仓库范围变化时发布。README 与助手随记属于协议路径，内部更新不触发业务任务通知。
 
 ## 0.2.2 角色记录与远端状态
 

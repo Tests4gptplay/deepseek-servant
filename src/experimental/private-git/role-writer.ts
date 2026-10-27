@@ -6,7 +6,7 @@ import { loadPaths } from './repository-paths.js'
 import type { GitChange, GitRepository, GitSnapshot, RoleBinding, UserIntent } from './contracts.js'
 import { digest, GitJournal, json, readJson, readText, textChanges } from './journal.js'
 import {
-  actionPath, CommandSchema, executionPath, joinPath, participantPath, planPath, sameBinding, roleCommandSchema, RejectedCoopWrite, StaleCoopWrite, taskPath,
+  actionPath, CommandSchema, foregroundMemoryPath, executionPath, joinPath, participantPath, planPath, sameBinding, roleCommandSchema, RejectedCoopWrite, StaleCoopWrite, taskPath,
   type Claim, type CoopCommand, type Join, type ParticipantPlan, type RoleAction, type RoleOutcome, type RootPlan, type RootTask,
 } from './protocol.js'
 
@@ -93,7 +93,7 @@ export class RoleWriter {
         }
         const changes = await this.build(snapshot, binding, command, draft.createdAt)
         // AI-authored text and semantic operation records are append-only.
-        if (command.op !== 'entry' && command.op !== 'outcome') changes.push({
+        if (command.op !== 'entry' && command.op !== 'outcome' && command.op !== 'foreground_memory') changes.push({
           path: executionPath(binding) + '/entries/' + command.id + '/operation.json',
           content: json({ writer: binding, command, createdAt: draft.createdAt }),
         })
@@ -176,6 +176,10 @@ export class RoleWriter {
     const root = b.taskId ? taskPath(b.taskId) : undefined
     const participant = b.taskId ? participantPath(b.taskId, b.participantId) + '/instances/' + b.instanceId : undefined
     const entry = executionPath(b) + '/entries/' + c.id
+    if (c.op === 'foreground_memory') {
+      requireRole('foreground')
+      return [{ path: foregroundMemoryPath(b, c.document), content: c.text || null }]
+    }
     if (c.op === 'root') {
       const source = await this.source(s, b, c)
       const id = 'task-' + source.id

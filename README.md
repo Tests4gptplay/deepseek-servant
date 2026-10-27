@@ -8,11 +8,11 @@
 
 **设计逻辑源自 [Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness)。** DeepSeek Servant 延续 CAH 以目标为中心的 Agent 工作闭环：理解需求、制定计划、执行工作、评价成果、调整方法、跨会话接续、故障恢复与技能积累。Servant 将这套持续工作机制整合到 DeepSeek Harness 运行环境，复用宿主的模型、工具、Session、作业与 Skill 能力。
 
-**当前版本：** `0.2.2` · **适配宿主：** DSH `0.2.1-rc.3` · **项目形态：** 独立安装的社区插件
+**当前版本：** `0.2.3` · **测试宿主：** DSH `0.2.1-rc.3` · **项目形态：** 独立安装的社区插件
 
 ## 核心能力
 
-- **独立双模式：** 标准模式延续现有持续任务体验；DSS-cah 实验模式让各参与者使用自己的前台、Planner 和 Worker，通过私有 Git 记录共同推进任务。两个模式使用独立设置与运行状态，页面切换后既有任务继续运行。
+- **共用界面、双模式后台：** “对话 / 任务”旁的菜单显示当前 `local` 或 `DSS-cah`。切换后继续在原对话框交流，由前台理解需求并决定何时投递后台任务；两种后台各自执行，既有任务继续运行，历史与任务在原界面查看。
 
 - **对话呈现：** 聊天区展示用户消息与 AI 最终答复；用户居右、助理居左，统一使用透明样式。设置支持助理名称和可留空的用户名称。
 
@@ -26,6 +26,8 @@
 - **技能积累：** 从有证据的实际结果提炼可复用方法，接入 DSH 原生 Skill 系统，追踪适用范围、版本、实际加载和后续反馈。
 - **工作记忆管理：** 完整需求、Planner Memory、Note 版本和 Child Reply 保存在同一原生 Domain，按引用读取原文。任务完成后先封存 records、唤醒前台交付，再释放临时运行记录；records 长期保留，可导出 Markdown。历史入口与旧技能的维护策略支持导入、导出和重置。
 - **前台长对话：** 每次交互使用新的物理 Session，带入最近六次完整用户交互；更早的原文按日期保存并可检索。向上滚动提前加载更早消息，保持当前阅读位置；日期筛选使用跟随 DSH 主题的日历。后台完成通知独立保存，侧栏显示原生绿色完成标记。可单独清理前台对话，后台任务继续运行。
+
+前台提供按需读取的 **Foreground_List / Foreground_Cache**：List 维护重要交代、原话与证据索引，完成项及时清理；前台交流时每 7 天至多提醒一次未推进事项，30 天搁置后询问用户，确认后刷新状态。Cache 可每轮重写和删减，不设字数上限；结束、完成及陈旧内容及时释放。自动上下文只提供用途与读取入口。
 
 ## 已完成的运行验证
 
@@ -59,10 +61,10 @@
 
 ## 安装与使用
 
-在 DSH Desktop 的“插件 → 添加插件”中输入固定来源 `github:Tests4gptplay/deepseek-servant#v0.2.2`，安装并启用。Web profile 使用：
+在 DSH Desktop 的“插件 → 添加插件”中输入固定来源 `github:Tests4gptplay/deepseek-servant#v0.2.3`，安装并启用。Web profile 使用：
 
 ```sh
-dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.2.2'
+dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.2.3'
 ```
 
 模型提供者、工具权限和凭据沿用 DSH 配置。进入侧栏 DeepSeek Servant，选择前台模型与工作区即可开始；后台 `Auto` 跟随本页前台模型，Worker 席位默认 2，可在设置中调整。

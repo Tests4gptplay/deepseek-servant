@@ -15,6 +15,7 @@ import type { RoleBinding } from '../runtime/agent-supervisor.ts'
 import { assembleRoleInput, memoryRef } from '../runtime/context-assembler.ts'
 import type { Task } from '../contracts/task.ts'
 import { rolePrompt } from './prompts.ts'
+import { ForegroundDocument, foregroundMemoryGuide } from '../contracts/foreground-memory.js'
 
 export interface RoleToolsOptions {
   assistants: AssistantService
@@ -65,6 +66,16 @@ export function installRoleTools(ctx: Context, agent: Agent, binding: RoleBindin
     })
   }
   if (binding.role === 'foreground') {
+    const prefix = 'foreground-memory/' + encodeURIComponent(binding.assistantId) + '/'
+    ctx.systemPrompt.section({ name: 'deepseek-servant:foreground-memory', order: 103, interpolate: false,
+      text: foregroundMemoryGuide(prefix + 'Foreground_List', prefix + 'Foreground_Cache',
+        'Use foreground_memory with action=read on demand. action=replace rewrites the whole document; action=clear removes its current contents.') })
+    register('foreground_memory', 'Read or rewrite the Foreground’s important-assignment index or editable conversation scratch space.',
+      z.discriminatedUnion('action', [
+        z.object({ action: z.literal('read'), document: ForegroundDocument }),
+        z.object({ action: z.literal('replace'), document: ForegroundDocument, text: z.string().describe('Complete replacement text; rewrite and remove stale material rather than append a transcript. Empty text clears the document.') }),
+        z.object({ action: z.literal('clear'), document: ForegroundDocument }),
+      ]), input => options.assistants.foregroundMemory(binding.assistantId, input.document, input.action === 'read' ? undefined : input.action === 'clear' ? '' : input.text))
     register('conversation_search', 'Search dated original conversations; returns excerpts, message identities and exact references.',
       z.strictObject({ query: z.string().min(1), cursor: z.int().nonnegative().optional(), limit: z.int().min(1).max(50).optional() }),
       input => options.assistants.conversations.search(binding.assistantId, input.query, input.cursor, input.limit))

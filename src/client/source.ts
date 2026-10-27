@@ -88,7 +88,7 @@ export function createServantSource(api: ServantClientApi, notify: (notice: Omit
         for (const batch of historyPages.slice(0, pageIndex + 1).reverse()) {
           for (const message of batch) messages.set(message.ref ?? message.id, message)
         }
-        const value = { ...page, messages: [...messages.values()] }
+        const value = { ...page, messages: [...messages.values()].sort((a, b) => (a.at ?? '').localeCompare(b.at ?? '')) }
         const previous = snapshot.value && new Set(snapshot.value.tasks.filter(task => task.delivery?.status === 'delivered').map(task => task.id + '/' + task.delivery!.id))
         publish({ ...snapshot, status: 'ready', value, storageStats: usage.value as StorageUsageStats, storageError: usage.error, error: undefined })
         if (previous) for (const task of value.tasks) if (task.delivery?.status === 'delivered' && !previous.has(task.id + '/' + task.delivery.id)) {
@@ -131,7 +131,7 @@ export function createServantSource(api: ServantClientApi, notify: (notice: Omit
       if (result && typeof result === 'object' && 'status' in result && (result.status === 'stale' || result.status === 'rejected')) {
         throw new Error('reason' in result && typeof result.reason === 'string' ? result.reason : result.status)
       }
-      if (notice) notify({ kind: 'success', key: notice })
+      if (notice) notify({ kind: 'success', key: result && typeof result === 'object' && 'status' in result && result.status === 'queued' ? 'sent' : notice })
       await refresh()
       return true
     } catch (error) {

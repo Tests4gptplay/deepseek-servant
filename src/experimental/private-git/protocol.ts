@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { RoleBinding } from './contracts.js'
+import { ForegroundDocument, type ForegroundDocumentName } from '../../contracts/foreground-memory.js'
 
 export const Id = z.string().min(1).regex(/^(?!\.{1,2}$|__proto__$|prototype$|constructor$)[^/\\\0\r\n]+$/u)
 export const Text = z.string().min(1)
@@ -65,7 +66,9 @@ const SourceFields = {
   sourcePath: z.string().optional().describe('For a Git-change notification: the source document you read for this decision.'),
   sourceRevision: z.string().optional().describe('Commit id for that source; use the parent commit to read a deleted document.'),
 }
+export const foregroundMemoryPath = (b: Pick<RoleBinding, 'participantId' | 'instanceId'>, name: ForegroundDocumentName) => 'dss-coop/assistants/' + Id.parse(b.participantId) + '/' + Id.parse(b.instanceId) + '/' + name + '.md'
 export const CommandSchema = z.discriminatedUnion('op', [
+  z.object({ op: z.literal('foreground_memory'), id: Id, document: ForegroundDocument, text: z.string().describe('Complete replacement text. Empty text deletes the current document. No size quota; actively rewrite and release stale cache material.') }),
   z.object({ op: z.literal('root'), id: Id, ...SourceFields, title: Text, goal: Text, initialPlan: Text }),
   z.object({ op: z.literal('join'), id: Id, ...SourceFields, taskId: Id, scope: Text, capabilities: z.string().default('') }),
   z.object({ op: z.literal('revise'), id: Id, ...SourceFields, taskId: Id, expectedRevision: Revision, goal: Text }),
@@ -97,7 +100,7 @@ export const RoleEntries = {
 } as const
 /** The installed schema exposes only the current role's own record responsibilities. */
 export function roleCommandSchema(role: RoleBinding['role']) {
-  const allowed = role === 'foreground' ? new Set(['root', 'join', 'revise', 'control', 'entry', 'outcome'])
+  const allowed = role === 'foreground' ? new Set(['root', 'join', 'revise', 'control', 'foreground_memory', 'entry', 'outcome'])
     : role === 'worker' ? new Set(['entry', 'outcome']) : new Set(['root_plan', 'proposal', 'claim', 'participant_plan', 'review', 'report', 'accept', 'entry', 'outcome'])
   const variants = CommandSchema.options.filter(schema => allowed.has(schema.shape.op.value)).map(schema => {
     const outcome = schema.shape.op.value === 'outcome'

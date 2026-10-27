@@ -69,4 +69,4 @@ export async function recordPublished(repo: GitRepository, snapshot: GitSnapshot
 
 /** Protocol changes are consumed by the Host; business-source notices go to Foreground. */
 export const isProtocolPath = (path: string): boolean =>
-  /^dss-coop\/(?:tasks|foreground|intents|inputs|instances|participants|assistants|conversations|history|records|origins|events|incidents|status)\//.test(path)
+  path === 'dss-coop/README.md' || /^dss-coop\/(?:tasks|foreground|intents|inputs|instances|participants|assistants|conversations|history|records|origins|events|incidents|status)\//.test(path)
