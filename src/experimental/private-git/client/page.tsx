@@ -67,6 +67,11 @@ export function CoopPage({ client, t, settingsOnly, controls, onOpenSettings }: 
       <div className={css.grid}>
         {field('ownerRepo', t('repository'))}{field('repositoryDirectory', t('repositoryDirectory'))}<div>{field('workspace', t('workspace'))}{controls?.pickDirectory && <button disabled={busy} onClick={() => void run(async () => { const workspace = await controls.pickDirectory!(); if (workspace) setSettings({ ...settings, workspace }) })}>{t('pickDirectory')}</button>}</div>
         {field('workerSeats', t('seats'), 'number')}
+        <label className={css.field} htmlFor={prefix + 'credentialSource'}>{t('credentialSource')}
+          <select id={prefix + 'credentialSource'} value={settings.credentialSource} disabled={busy} onChange={event => setSettings({ ...settings, credentialSource: event.target.value as CoopSettings['credentialSource'] })}>
+            <option value="auto">{t('credentialAuto')}</option><option value="github-cli">GitHub CLI</option>
+          </select>
+        </label>
         {controls ? <><div className={css.field}>{t('preset')}{controls.preset(settings.presetId, presetId => setSettings({ ...settings, presetId }), busy)}</div>
           <div className={css.field}>{t('model')}{controls.model(settings, value => setSettings({ ...settings, provider: value.provider, model: value.model, reasoningEffort: value.reasoningEffort }), busy)}</div></>
           : <>{field('presetId', t('preset'))}{field('provider', t('provider'))}{field('model', t('model'))}{field('reasoningEffort', t('effort'))}</>}

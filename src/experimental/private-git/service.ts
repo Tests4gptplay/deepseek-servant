@@ -96,7 +96,7 @@ export class CoopService implements ModeEndpoint {
     const moving = settings.ownerRepo !== this.cache.settings.ownerRepo || settings.repositoryDirectory !== this.cache.settings.repositoryDirectory
     if (moving && (this.cache.drafts().length || this.cache.entries('physical/').length || (this.cache.get<number>('pending-tasks') ?? 0) > 0)) throw new Error('Finish or cancel this repository’s pending work before changing repositories.')
     ++this.generation
-    if (moving || settings.tokenRef !== this.cache.settings.tokenRef) { this.client.cancel(); this.repository.cancel?.() }
+    if (moving || settings.tokenRef !== this.cache.settings.tokenRef || settings.credentialSource !== this.cache.settings.credentialSource) { this.client.cancel(); this.repository.cancel?.() }
     if (moving) {
       await this.syncing?.catch(() => {})
       await this.repository.releaseCache?.()

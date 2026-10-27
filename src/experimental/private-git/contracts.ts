@@ -1,9 +1,17 @@
 import { z } from 'zod'
+import { posix } from 'node:path'
+
+/** UI paths are relative to the repository; root aliases share one stored value. */
+export const RepositoryDirectorySchema = z.string().trim().default('dss-coop')
+  .transform(value => posix.normalize(value.replace(/\\/g, '/')).replace(/^\/+|\/+$/g, ''))
+  .transform(value => value === '.' ? '' : value)
+  .refine(value => !/[\0\r\n]/.test(value) && value !== '..' && !value.startsWith('../'), 'Use a directory inside the Git repository.')
 
 export const CoopSettingsSchema = z.object({
   ownerRepo: z.string().default(''),
   tokenRef: z.string().min(1).default('GITHUB_TOKEN'),
-  repositoryDirectory: z.string().trim().default('dss-coop').refine(value => value.length > 0 && !/[\\\0\r\n]/.test(value) && value.split('/').every(part => !!part && part !== '.' && part !== '..'), 'Use a relative Git folder without dot segments.'),
+  credentialSource: z.enum(['auto', 'github-cli']).default('auto'),
+  repositoryDirectory: RepositoryDirectorySchema,
   remoteEnabled: z.boolean().default(false),
   workerSeats: z.int().positive().default(2),
   workspace: z.string().default(''),

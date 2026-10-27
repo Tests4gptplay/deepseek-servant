@@ -26,7 +26,7 @@ export async function installModeHost(ctx: Context, local: ModeEndpoint): Promis
   let pendingCoop: Promise<CoopService> | undefined
   const coop = (): Promise<CoopService> => pendingCoop ??= (async () => {
     const cache = await CoopCache.open(ctx)
-    const credentials = new CoopCredentials(ctx, () => cache.settings.tokenRef)
+    const credentials = new CoopCredentials(ctx, () => cache.settings.tokenRef, undefined, () => cache.settings.credentialSource)
     const service = new CoopService(cache, credentials, new GitHubClient(() => credentials.resolve()), () => ctx.get('agentDefaultModel')?.currentSelection())
     service.subscribe(events.changed)
     installCoopRuntime(ctx, service)

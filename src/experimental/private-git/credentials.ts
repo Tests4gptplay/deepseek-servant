@@ -13,8 +13,14 @@ export function ghToken(): Promise<string | undefined> {
 
 /** Credentials → environment → the user's existing gh login, per operation. */
 export class CoopCredentials {
-  constructor(private readonly ctx: Context, private readonly reference: () => string, private readonly cli: () => Promise<string | undefined> = ghToken) {}
+  constructor(private readonly ctx: Context, private readonly reference: () => string, private readonly cli: () => Promise<string | undefined> = ghToken,
+    private readonly source: () => 'auto' | 'github-cli' = () => 'auto') {}
+  private async fromCli(): Promise<ResolvedToken | undefined> {
+    const value = await this.cli()
+    return value ? { value, source: 'GitHub CLI' } : undefined
+  }
   async resolve(): Promise<ResolvedToken | undefined> {
+    if (this.source() === 'github-cli') return this.fromCli()
     const ref = credentialRef(this.reference())
     const credentials = this.ctx.get('credentials')
     const native = await credentials?.resolve(ref)
@@ -25,10 +31,10 @@ export class CoopCredentials {
     }
     const environment = process.env[this.reference()] || process.env.GH_TOKEN || process.env.GITHUB_TOKEN
     if (environment) return { value: environment, source: 'environment' }
-    const value = await this.cli()
-    return value ? { value, source: 'GitHub CLI' } : undefined
+    return this.fromCli()
   }
   async describe(): Promise<{ configured: boolean; source?: string; writable: boolean }> {
+    if (this.source() === 'github-cli') return { configured: false, source: 'GitHub CLI', writable: false }
     const credentials = this.ctx.get('credentials')
     const info = await credentials?.describe(credentialRef(this.reference()))
     if (info?.configured) return info

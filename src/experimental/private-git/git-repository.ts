@@ -86,7 +86,7 @@ export class GitHubRepository implements GitRepository {
   private physical(e: GitEnvironment, path: string): string {
     if (path === 'dss-coop') return e.directory
     if (!validCoopPath(path)) throw new Error('Choose a record inside the configured DSS-cah directory.')
-    return e.directory + '/' + path.slice('dss-coop/'.length)
+    return (e.directory ? e.directory + '/' : '') + path.slice('dss-coop/'.length)
   }
   private async fetch(e: GitEnvironment): Promise<string> {
     const branch = e.connection.repository.branch
@@ -106,7 +106,7 @@ export class GitHubRepository implements GitRepository {
     const result = new Map<string, string>()
     for (const line of output.split('\0')) {
       const match = /^\d+ blob ([0-9a-f]+)\t(.+)$/s.exec(line)
-      if (match) result.set('dss-coop/' + match[2]!.slice(e.directory.length + 1), match[1]!)
+      if (match) result.set('dss-coop/' + match[2]!.slice(e.directory ? e.directory.length + 1 : 0), match[1]!)
     }
     return result
   }
@@ -129,9 +129,9 @@ export class GitHubRepository implements GitRepository {
     const files = new Map(previous?.files)
     if (previous?.head && previous.head !== head && head) {
       // Git performs transfer incrementally. Only names changed under the configured directory are compared.
-      const changed = (await this.git(e, ['diff', '--name-only', '-z', '--no-renames', previous.head, head, '--', e.directory + '/'])).split('\0').filter(Boolean)
+      const changed = (await this.git(e, ['diff', '--name-only', '-z', '--no-renames', previous.head, head, '--', e.directory || '.'])).split('\0').filter(Boolean)
       for (const path of changed) {
-        const logical = 'dss-coop/' + path.slice(e.directory.length + 1)
+        const logical = 'dss-coop/' + path.slice(e.directory ? e.directory.length + 1 : 0)
         files.delete(logical)
         // Remember only metadata already requested. Newly added inputs are discovered by the next targeted list.
         if (previous.files.has(logical)) for (const [name, sha] of await this.entries(e, head, path, false)) files.set(name, sha)
@@ -169,10 +169,10 @@ export class GitHubRepository implements GitRepository {
     let loaded = this.loaded.get(snapshot)
     if (!loaded) this.loaded.set(snapshot, loaded = new Set())
     if (loaded.has(directory)) return
-    const e = this.environments.get(snapshot) ?? await this.environment(), physical = this.physical(e, directory.slice(0, -1)) + '/'
+    const e = this.environments.get(snapshot) ?? await this.environment(), physical = this.physical(e, directory.slice(0, -1))
     const files = snapshot.files as Map<string, string>
     for (const path of files.keys()) if (path.startsWith(directory)) files.delete(path)
-    for (const [path, sha] of await this.entries(e, snapshot.head, physical, true)) files.set(path, sha)
+    for (const [path, sha] of await this.entries(e, snapshot.head, physical ? physical + '/' : '.', true)) files.set(path, sha)
     loaded.add(directory)
   }
   async at(revision: string): Promise<GitSnapshot> {
@@ -189,26 +189,26 @@ export class GitHubRepository implements GitRepository {
     const changes: GitFileChange[] = []
     if (!from) {
       // Initial discovery reads names and object IDs, never blobs or historical file bodies.
-      for (const [path, after] of await this.entries(e, snapshot.head, e.directory + '/', true)) {
+      for (const [path, after] of await this.entries(e, snapshot.head, e.directory || '.', true)) {
         if (/^dss-coop\/(?:instances\/[^/]+\/(?:status|watch)\.json|participants\/[^/]+\/profile\.json|assistants\/[^/]+\/[^/]+\/identity\.json)$/.test(path)) continue
         changes.push({ path, status: 'A', commit: snapshot.head, after })
       }
       return changes
     }
-    const commits = await this.git(e, ['log', '--reverse', '--first-parent', '--format=%H%x09%P%x09%(trailers:key=DSS-cah-Instance,valueonly)', from + '..' + snapshot.head, '--', e.directory + '/'])
+    const commits = await this.git(e, ['log', '--reverse', '--first-parent', '--format=%H%x09%P%x09%(trailers:key=DSS-cah-Instance,valueonly)', from + '..' + snapshot.head, '--', e.directory || '.'])
     for (const line of commits.split('\n').filter(Boolean)) {
       const [commit, parents, instance] = line.split('\t')
       if (!commit || ownInstance && instance?.trim() === ownInstance) continue
       const parent = parents?.split(' ')[0]
       const raw = await this.git(e, ['diff-tree', '--no-commit-id', '--root', '-r', '--raw', '-z', '--no-renames', '--no-abbrev',
-        ...(parent ? [parent, commit] : [commit]), '--', e.directory + '/'])
+        ...(parent ? [parent, commit] : [commit]), '--', e.directory || '.'])
       const fields = raw.split('\0')
       for (let i = 0; i + 1 < fields.length; i += 2) {
         const match = /^:\d+ \d+ ([0-9a-f]+) ([0-9a-f]+) ([A-Z])$/.exec(fields[i]!)
         const path = fields[i + 1]
         if (!match || !path) continue
         const status = match[3] === 'A' ? 'A' : match[3] === 'D' ? 'D' : 'M'
-        changes.push({ path: 'dss-coop/' + path.slice(e.directory.length + 1), status, commit, parent,
+        changes.push({ path: 'dss-coop/' + path.slice(e.directory ? e.directory.length + 1 : 0), status, commit, parent,
           before: /^0+$/.test(match[1]!) ? undefined : match[1], after: /^0+$/.test(match[2]!) ? undefined : match[2] })
       }
     }

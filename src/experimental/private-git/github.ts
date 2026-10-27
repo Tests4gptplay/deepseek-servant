@@ -46,7 +46,7 @@ export class GitHubClient {
         const data = await response.json().catch(() => ({})) as { message?: string }
         const message = String(data.message ?? response.statusText).split(token.value).join('[redacted]')
         const seconds = Number(response.headers.get('retry-after')) || (response.headers.get('x-ratelimit-remaining') === '0' ? Math.max(1, Number(response.headers.get('x-ratelimit-reset')) - Math.floor(Date.now() / 1000)) : 0)
-        throw new GitHubError(response.status, 'GitHub ' + response.status + ': ' + message, seconds > 0 ? seconds : undefined)
+        throw new GitHubError(response.status, 'GitHub ' + response.status + ': ' + message + ' (' + method + ' ' + path + '; authorization: ' + token.source + ')', seconds > 0 ? seconds : undefined)
       }
       const result = response.status === 204 ? undefined : await response.json()
       signal.throwIfAborted()

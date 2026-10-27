@@ -2,7 +2,7 @@ import type { CoopSettings } from './contracts.js'
 
 const start = '<!-- DSS-CAH GUIDE START -->', end = '<!-- DSS-CAH GUIDE END -->'
 export function repositoryGuide(settings: CoopSettings): string {
-  const root = settings.repositoryDirectory
+  const root = settings.repositoryDirectory ? settings.repositoryDirectory + '/' : ''
   return `${start}
 # DSS-cah 协作目录 / Collaboration directory
 
@@ -11,7 +11,7 @@ export function repositoryGuide(settings: CoopSettings): string {
 ## 从外部投递任务
 
 1. 在 DSS-cah 配置中连接此私有仓库，并开启“接收远端任务与控制指令”。运行中的 Host 正常每 1 秒增量同步一次。
-2. 在 \`${root}/inbox/\` 下新建一份名称唯一的 Markdown 文件并提交到当前连接分支。比如 \`${root}/inbox/design-review.md\`。
+2. 在 \`${root}inbox/\` 下新建一份名称唯一的 Markdown 文件并提交到当前连接分支。比如 \`${root}inbox/design-review.md\`。
 3. 写清原始要求、目标、保留内容、交付物、必要的验收标准；需要指定参与者或实例时，写明其 ID。可附项目文件和参考路径。
 4. 前台会读取变更及相关原文，讨论或创建任务，再由 Planner 分解并交给 Worker。补充和纠正优先修改原投递文件并注明任务 ID，避免同一目标重复投递。
 
@@ -64,7 +64,7 @@ Foreground_List 保存重要交代和可追溯索引，完成事项更新状态�
 
 ## Reading from another tool
 
-Commit a plain-language task or control document under \`${root}/inbox/\` on the connected branch. Follow contract.json for task identity, status/* for the independent role signal, and outcome.json / entries/* for work records and intermediate results. Completed tasks are indexed in history and collected under records. The two Foreground memory documents are optional-to-read working notes, maintained by the Foreground rather than injected in full.
+Commit a plain-language task or control document under \`${root}inbox/\` on the connected branch. Follow contract.json for task identity, status/* for the independent role signal, and outcome.json / entries/* for work records and intermediate results. Completed tasks are indexed in history and collected under records. The two Foreground memory documents are optional-to-read working notes, maintained by the Foreground rather than injected in full.
 
 此目录保存任务相关对话、计划、状态和结果，仓库成员可以读取。凭据通过本机 GitHub 授权管理。
 ${end}

@@ -16,7 +16,7 @@ export async function gitTaskViews(service: CoopService, base: ServantView): Pro
   const participant = String(view.connection!.identity.id)
   const link = (path: string) => 'https://github.com/' + view.settings.ownerRepo + '/tree/' +
     encodeURIComponent(view.connection!.repository.branch) + '/' +
-    (view.settings.repositoryDirectory + '/' + path.replace(/^dss-coop\//, '')).split('/').map(encodeURIComponent).join('/')
+    [view.settings.repositoryDirectory, path.replace(/^dss-coop\//, '')].filter(Boolean).join('/').split('/').map(encodeURIComponent).join('/')
   for (const summary of view.tasks) {
     try {
     const root = taskPath(summary.id)
