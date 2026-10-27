@@ -242,15 +242,23 @@ export class RuntimeCoordinator {
   /** Cold evidence precedes resume. A stored job id is never treated as a surviving job. */
   async recover(): Promise<void> {
     for (const saved of await this.options.tasks.list()) {
+      try { await this.recoverTask(saved) }
+      catch (error) { this.reportError(error) }
+    }
+  }
+
+  private async recoverTask(saved: Task): Promise<void> {
       if (Object.values(saved.pendingActions).some(action => action.kind === 'help' && ['pending', 'running', 'uncertain'].includes(action.status))) {
         await this.command(saved.id, { type: 'recovery.legacy', commandId: 'migrate-helper:' + saved.id, source })
       }
-      const task = (await this.options.tasks.get(saved.id))!
+      const task = await this.options.tasks.get(saved.id)
+      if (!task) return
       for (const execution of Object.values(task.executions)) {
         if (this.options.supervisor.get(execution.executionId)) continue
         try { await this.recoverExecution(task, execution) } catch (error) { this.reportError(error) }
       }
-      const fresh = (await this.options.tasks.get(task.id))!
+      const fresh = await this.options.tasks.get(task.id)
+      if (!fresh) return
       for (const action of Object.values(fresh.pendingActions)) {
         if (!['running', 'uncertain'].includes(action.status) || action.executionId) continue
         if (action.kind === 'continue') {
@@ -267,7 +275,6 @@ export class RuntimeCoordinator {
         if (['deliver', 'learn', 'feedback'].includes(action.kind)) await this.reset(fresh.id, action, 'Retry the idempotent local commit by its saved stable identity, not business execution.')
         else await this.reset(fresh.id, action, 'A persisted claim has no execution binding. Native creation always follows the binding commit.')
       }
-    }
   }
 
   private async reset(taskId: string, action: PendingAction, evidence: string): Promise<void> {
@@ -309,7 +316,7 @@ export class RuntimeCoordinator {
       if (action && ['running', 'uncertain'].includes(action.status) && action.kind === 'dispatch') await this.finish(task.id, action, 'Cold native report and closed inbox prove the original dispatch completed admission.')
       return
     }
-    if ((execution.state === 'active' || unfinishedSemantic) && execution.role !== 'helper') {
+    if (task.control !== 'cancelled' && (execution.state === 'active' || unfinishedSemantic) && execution.role !== 'helper') {
       // Save interruption facts before releasing the old runtime claim. This also
       // survives a second power loss between these two durable writes.
       await this.command(task.id, { type: 'incident.open', commandId: `cold-incident:${this.ownerId}:${execution.executionId}`, source,

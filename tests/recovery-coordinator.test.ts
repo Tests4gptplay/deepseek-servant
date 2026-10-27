@@ -36,6 +36,24 @@ async function coldFixture() {
   return { ...f, worker, inspection, restored, seen, report, recover, admitInput: () => { inputPresent = true } }
 }
 
+test('one unreadable task does not prevent recovery of the remaining tasks', async () => {
+  const visited: string[] = [], errors: unknown[] = []
+  const rows = ['broken', 'healthy'].map(id => ({ id, pendingActions: {}, executions: {} }))
+  const coordinator = new RuntimeCoordinator({
+    tasks: { list: async () => rows, get: async (id: string) => {
+      visited.push(id)
+      if (id === 'broken') throw new Error('Broken task record')
+      return rows[1]
+    } } as any,
+    assistants: {} as any, knowledge: {} as any, supervisor: {} as any, sessions: {} as any,
+    onError: error => errors.push(error),
+  })
+  await coordinator.recover()
+  assert.ok(visited.includes('healthy'))
+  assert.equal(errors.length, 1)
+  assert.match(coordinator.status().message ?? '', /Broken task record/)
+})
+
 test('cold recovery restores the exact reported idle owner and reconciles admitted continuation ID', async () => {
   const f = await coldFixture()
   await f.report('continue')
@@ -103,6 +121,12 @@ test('cold reconciliation preserves explicit user pause and cancellation', async
     for (const action of Object.values(task.pendingActions).filter(action => action.status === 'pending' && action.kind !== 'stop'))
       assert.equal(new Scheduler().canRun(task, action, [task]).allowed, false)
     assert.equal(task.control, intent === 'pause' ? 'paused' : 'cancelled')
+    if (intent === 'cancel') {
+      assert.equal(task.executions[f.worker.execution.executionId].state, 'closed')
+      assert.equal(task.children.a.status, 'cancelled')
+      assert.equal(task.children.a.activeExecutionId, undefined)
+      assert.equal(Object.values(task.pendingActions).some(action => action.kind === 'recover' && action.status === 'pending'), false)
+    }
   }
 })
 

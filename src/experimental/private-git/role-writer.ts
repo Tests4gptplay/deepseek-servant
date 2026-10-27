@@ -134,13 +134,13 @@ export class RoleWriter {
     })
   }
   async retryDrafts(): Promise<void> {
-    for (const [, draft] of this.cache.entries<RoleDraft>('draft/')) {
+    for (const [key, draft] of this.cache.entries<RoleDraft>('draft/')) {
       if (draft.kind !== 'transaction') continue
-      if (!draft.stale) {
-        try { await this.execute(draft.payload.binding, draft.payload.command); continue }
-        catch (error) { if (!(error instanceof RejectedCoopWrite)) throw error; draft.error = error.message }
-      }
-      {
+      try {
+        if (!draft.stale) {
+          try { await this.execute(draft.payload.binding, draft.payload.command); continue }
+          catch (error) { if (!(error instanceof RejectedCoopWrite)) throw error; draft.error = error.message }
+        }
         const b = draft.payload.binding
         await this.journal.transact('late-' + draft.id, draft.payload, async snapshot => {
           const root = b.taskId && snapshot.files.has(taskPath(b.taskId) + '/contract.json')
@@ -149,7 +149,11 @@ export class RoleWriter {
           return [...textChanges(root + '/command', json(draft.payload.command)), { path: root + '/incident.json',
             content: json({ binding: b, error: draft.error, createdAt: draft.createdAt, commandPath: root + '/command' }) }]
         })
-        await this.cache.remove('draft/' + draft.id)
+        await this.cache.remove(key)
+      } catch (error) {
+        // Keep this draft and its visible error without starving other writes or remote intake.
+        await this.cache.put(key, { ...(this.cache.get<RoleDraft>(key) ?? draft),
+          error: error instanceof Error ? error.message : String(error) })
       }
     }
   }

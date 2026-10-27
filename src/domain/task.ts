@@ -342,6 +342,7 @@ export function applyTaskCommand(current: Task | undefined, command: TaskCommand
 
       case 'task.reviseGoal': {
         requireIntent(command.source, task); requireNotTerminal(task)
+        check(!task.delivery, 'TASK_DELIVERING', 'The accepted result is being delivered. Submit additional requirements as a follow-up task.')
         check(command.expectedGoalRevision === task.goal.revision, 'GOAL_CHANGED', 'The goal has changed.', 'stale'); validGoal(command.goal)
         task.goalHistory ??= []
         task.goalHistory.push({ goal: structuredClone(task.goal), replacedAt: env.now, commandId: command.commandId, changeSource: structuredClone(command.source) })
@@ -387,7 +388,7 @@ export function applyTaskCommand(current: Task | undefined, command: TaskCommand
         const wait = own(task.waits, command.waitId); check(wait, 'WAIT_NOT_FOUND', 'The wait does not exist.')
         if (command.type === 'wait.answer') {
           check(command.source.kind === 'user', 'USER_ONLY', 'Only an authenticated user can answer a user question.')
-          check(wait.kind === 'user' || wait.kind === 'configuration', 'PHYSICAL_WAIT', 'An answer does not prove that a job or recovery finished.'); text(command.answer, 'answer')
+          check(wait.kind === 'user' || wait.kind === 'configuration' || wait.kind === 'resource', 'PHYSICAL_WAIT', 'An answer does not prove that a job or recovery finished.'); text(command.answer, 'answer')
           wait.answer = command.answer
         } else {
           requireRuntime(command.source); check(wait.kind !== 'user', 'USER_ONLY', 'Runtime observations cannot answer a user-only question.'); text(command.evidence, 'evidence'); wait.answer = command.evidence
@@ -533,10 +534,10 @@ export function applyTaskCommand(current: Task | undefined, command: TaskCommand
         check(['starting', 'running', 'idle', 'stopping', 'stopped', 'lost', 'unknown'].includes(command.physicalState), 'INVALID_PHYSICAL_STATE', 'Unknown physical execution state.')
         binding.physicalState = command.physicalState; binding.observedAt = env.now
         if (command.ownedJobIds) { strings(command.ownedJobIds, 'ownedJobIds'); binding.ownedJobIds = [...new Set(command.ownedJobIds)] }
-        if (command.physicalState === 'stopped' && binding.state === 'active') {
+        if ((command.physicalState === 'stopped' || command.physicalState === 'lost' && task.control === 'cancelled') && binding.state === 'active') {
           binding.state = 'closed'; binding.closedAt = env.now
           if (binding.childId && task.children[binding.childId].activeExecutionId === binding.executionId) {
-            delete task.children[binding.childId].activeExecutionId; task.children[binding.childId].status = 'waiting'
+            delete task.children[binding.childId].activeExecutionId; task.children[binding.childId].status = task.control === 'cancelled' ? 'cancelled' : 'waiting'
           }
           if (task.control !== 'cancelled') {
             if (binding.role === 'helper' && binding.incidentId) {

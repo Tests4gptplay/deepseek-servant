@@ -1,0 +1,77 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { AgentSupervisor } from '../src/runtime/agent-supervisor.js'
+import { AssistantService } from '../src/application/assistant-service.js'
+import { installRoleTools } from '../src/roles/tools.js'
+import { MemoryStorage } from './support.js'
+import { childSpec, fixture } from './task-fixture.js'
+
+test('foreground registered tools survive supervisor restrictions and execution guard', async t => {
+  const store = new MemoryStorage()
+  const assistants = new AssistantService({ store, defaults: { name: 'Servant', presetId: 'standard', foreground: {}, background: {} },
+    runtime: {} as any, resolveWorkspace: async () => ({ id: 'workspace', directory: process.cwd() }) })
+  const definitions = new Map<string, any>(), denied = new Set<string>(), hooks = new Map<string, any>()
+  const agent = { id: 'foreground', session: { snapshotEvents: () => [] } } as any
+  const ctx = { systemPrompt: { section() {} }, tools: {
+    register: (tool: any) => definitions.set(tool.name, tool),
+    schemas: () => [...definitions.values()].filter(tool => !denied.has(tool.name)),
+    restrict: ({ deny }: { deny: string[] }) => deny.forEach(name => denied.add(name)),
+  }, get: () => ({ registerProvider: () => () => {} }), on: (event: string, callback: any) => { hooks.set(event, callback); return () => {} }, effect() {} } as any
+  const supervisor = new AgentSupervisor({
+    gateway: { exists: async () => false, create: async (request: any) => {
+      await request.setup(ctx, agent)
+      return { sessionId: request.sessionId, subscribe: () => () => {}, dispose: async () => {} }
+    } } as any,
+    tasks: {} as any, knowledge: { subscribe: () => () => {} } as any,
+    defaults: { version: 'test', presetId: 'standard', foreground: {}, background: {} },
+    setupRole: (scope, owner, binding) => installRoleTools(scope, owner, binding, { assistants } as any),
+    onError: error => { throw error },
+  })
+  t.after(() => supervisor.dispose())
+  await supervisor.ensureForeground({ id: 'default', sessionId: 'foreground-session', workspace: { id: 'workspace', directory: process.cwd() },
+    settings: { foreground: {}, presetId: 'standard' } } as any)
+  for (const name of definitions.keys()) {
+    assert.ok(!denied.has(name), name + ' is hidden by supervisor')
+    const result = await hooks.get('tools/pre-execute')({ agent, name }, async () => 'allowed')
+    assert.equal(result, 'allowed', name + ' is rejected by execution guard')
+  }
+  const exec = { agent, signal: new AbortController().signal, callId: 'memory' }
+  const memory = definitions.get('foreground_memory')
+  await memory.execute({ action: 'replace', document: 'Foreground_List', text: 'Current assignment' }, exec)
+  assert.equal((await memory.execute({ action: 'read', document: 'Foreground_List' }, exec)).text, 'Current assignment')
+})
+
+test('goal revision during accepted delivery leaves the existing delivery runnable', async () => {
+  const f = await fixture(), planner = await f.bind('plan')
+  await f.execute({ type: 'planning.commit', expectedGoalRevision: 1, expectedPlanRevision: 0, strategy: 'Deliver result', children: [childSpec()] }, planner.source)
+  const worker = await f.bind('dispatch')
+  await f.execute({ type: 'execution.report', report: { resultId: 'done', assignmentVersion: 1, outcome: 'complete',
+    summary: 'Saved result', artifacts: [], evidence: ['Result inspected'], frontier: 'Review' } }, worker.source)
+  const evaluator = await f.bind('evaluate')
+  assert.equal((await f.execute({ type: 'planning.decide', expectedGoalRevision: 1, summary: 'Accepted',
+    decisions: [{ childId: 'a', resultId: 'done', outcome: 'accept', reason: 'Matches request' }],
+    deliver: { id: 'delivery', summary: 'Finished', artifacts: [] } }, evaluator.source)).status, 'applied')
+  const before = await f.get()
+  const revised = await f.execute({ type: 'task.reviseGoal', expectedGoalRevision: 1,
+    goal: { ...before.goal, objective: 'Different goal' } }, { kind: 'user', id: 'owner' })
+  assert.equal(revised.code, 'TASK_DELIVERING')
+  const task = await f.get()
+  assert.deepEqual(task.goal, before.goal)
+  const delivery = Object.values(task.pendingActions).find(action => action.kind === 'deliver')!
+  assert.equal((await f.execute({ type: 'action.claim', actionId: delivery.id, ownerId: 'runtime' })).status, 'applied')
+  assert.equal((await f.execute({ type: 'action.finish', actionId: delivery.id, notificationId: 'delivered' })).status, 'applied')
+  assert.equal((await f.get()).phase, 'completed')
+})
+
+test('resource waits accept an explicit user resolution and resume the existing work', async () => {
+  const f = await fixture(), planner = await f.bind('plan')
+  await f.execute({ type: 'planning.commit', expectedGoalRevision: 1, expectedPlanRevision: 0, strategy: 'Use supplied asset', children: [childSpec()] }, planner.source)
+  const worker = await f.bind('dispatch')
+  assert.equal((await f.execute({ type: 'execution.report', report: { resultId: 'await-resource', assignmentVersion: 1, outcome: 'wait',
+    summary: 'Need source asset', artifacts: [], evidence: [], frontier: 'Read supplied asset',
+    wait: { id: 'asset', kind: 'resource', reason: 'Missing source', condition: 'Asset supplied', resume: 'worker' } } }, worker.source)).status, 'applied')
+  assert.equal((await f.execute({ type: 'wait.answer', waitId: 'asset', answer: 'Source asset is available in the workspace' }, { kind: 'user', id: 'owner' })).status, 'applied')
+  const task = await f.get()
+  assert.equal(task.waits.asset.state, 'resolved')
+  assert.ok(Object.values(task.pendingActions).some(action => action.kind === 'continue' && action.status === 'pending'))
+})

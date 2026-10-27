@@ -275,6 +275,24 @@ test('three independent participants execute through readback, review, seal and 
   }
 })
 
+test('a conflicting draft preserves its error while a later healthy draft still commits', async () => {
+  const repo = new MemoryRepo(), target = instance(repo)
+  await input(repo, target, 'draft-isolation', 'Hello')
+  await target.tick(2)
+  const fg = target.agents.latest('foreground')
+  const conflicting = executionPath(fg.binding) + '/entries/broken/reply/source.json'
+  await repo.seed([{ path: conflicting, content: 'Existing immutable evidence' }])
+  await assert.rejects(write(target, fg, { op: 'entry', id: 'broken', kind: 'reply', text: 'Conflicting draft' }), /immutable/)
+  repo.offline = true
+  await assert.rejects(write(target, fg, { op: 'entry', id: 'healthy', kind: 'reply', text: 'Healthy reply' }), /network/)
+  repo.offline = false
+  await target.consumer.writer.retryDrafts()
+  assert.equal(await repo.read(await repo.snapshot(), conflicting), 'Existing immutable evidence')
+  assert.equal(await readText(repo, await repo.snapshot(), executionPath(fg.binding) + '/entries/healthy/reply'), 'Healthy reply')
+  assert.equal(target.cache.drafts().length, 1)
+  assert.match(target.cache.drafts()[0].error ?? '', /immutable/)
+})
+
 test('offline role output is a draft, then reconciles once without dispatching from its write callback', async () => {
   const repo = new MemoryRepo(), target = instance(repo)
   await input(repo, target, 'short', 'Hello')

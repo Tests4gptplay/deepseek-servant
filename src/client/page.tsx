@@ -290,7 +290,7 @@ function TaskDetails({ task, busy, actions, onBack, t }: { task: TaskView, busy:
     {ended && <Button size="sm" variant="outline" disabled={busy} onClick={() => { void actions.onExportRecords(task.id) }}>{t('tasks.exportRecords')}</Button>}
     {!ended && <div className={css.actions}>
       <Button size="sm" variant="outline" disabled={busy || !!task.remote && !task.remote.canControl} onClick={() => { void actions.onControl(task.id, task.control === 'paused' ? 'resume' : 'pause') }}>{t(task.control === 'paused' ? 'tasks.resume' : 'tasks.pause')}</Button>
-      <Button size="sm" disabled={busy || !!task.remote && !task.remote.canRevise} onClick={() => { setEditing(true) }}>{t('tasks.edit')}</Button>
+      <Button size="sm" disabled={busy || !task.remote && !!task.delivery || !!task.remote && !task.remote.canRevise} onClick={() => { setEditing(true) }}>{t('tasks.edit')}</Button>
       <Button size="sm" disabled={busy || !!task.remote && !task.remote.canCancel} onClick={() => { void actions.onControl(task.id, 'cancel') }}>{t('tasks.cancel')}</Button>
     </div>}
     {!ended && !task.remote && <PriorityEditor key={`${task.id}:${task.priority}`} task={task} busy={busy} onSave={actions.onPriority} t={t} />}
@@ -309,7 +309,7 @@ function TaskDetails({ task, busy, actions, onBack, t }: { task: TaskView, busy:
     </Section>
     {waits.length > 0 && <Section title={t('tasks.waits')}>{waits.map(wait => <div key={wait.id} className={css.wait}>
       <h4>{t(`wait.${wait.kind}`)}</h4><p>{wait.question || wait.reason}</p><p className={css.muted}>{t('tasks.waitCondition')}：{wait.condition}</p>
-      {(wait.kind === 'user' || wait.kind === 'configuration') && <WaitAnswer busy={busy} onAnswer={answer => actions.onAnswer(task.id, wait.id, answer)} t={t} />}
+      {(wait.kind === 'user' || wait.kind === 'configuration' || wait.kind === 'resource') && <WaitAnswer busy={busy} onAnswer={answer => actions.onAnswer(task.id, wait.id, answer)} t={t} />}
     </div>)}</Section>}
     <Section title={t('tasks.deliverables')}>
       {task.delivery && <p>{task.delivery.summary}</p>}
