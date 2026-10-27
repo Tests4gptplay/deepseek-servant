@@ -16,7 +16,7 @@ const selectionSpec = defineDomain({ name: 'deepseek_servant_mode', version: 1,
 const callSchema = z.object({ mode: z.enum(modes), method: z.string(), params: z.record(z.string(), z.json()).default({}) })
 const selectSchema = z.object({ mode: z.enum(modes) })
 
-export interface ServantModes { router: ModeRouter; coop(): Promise<CoopService> }
+export interface ServantModes { router: ModeRouter; shared: ModeEndpoint; coop(): Promise<CoopService> }
 declare module '@deepseek-ai/cordis' { interface Context { deepseekServantModes: ServantModes } }
 
 /** Only this composition boundary knows both mode endpoints. */
@@ -26,7 +26,7 @@ export async function installModeHost(ctx: Context, local: ModeEndpoint): Promis
   let pendingCoop: Promise<CoopService> | undefined
   const coop = (): Promise<CoopService> => pendingCoop ??= (async () => {
     const cache = await CoopCache.open(ctx)
-    const credentials = new CoopCredentials(ctx, () => cache.settings.tokenRef, undefined, () => cache.settings.credentialSource)
+    const credentials = new CoopCredentials()
     const service = new CoopService(cache, credentials, new GitHubClient(() => credentials.resolve()), () => ctx.get('agentDefaultModel')?.currentSelection())
     service.subscribe(events.changed)
     installCoopRuntime(ctx, service)
@@ -38,7 +38,7 @@ export async function installModeHost(ctx: Context, local: ModeEndpoint): Promis
     write: async activeMode => { await selection.global.set({ activeMode, coopActivated: selection.global.get().coopActivated || activeMode === 'PRIVATE_GIT_EXPERIMENTAL' }); events.changed() },
   }, { LOCAL: local, PRIVATE_GIT_EXPERIMENTAL: { call: async (...args) => (await coop()).call(...args) } })
   const shared = new SharedForeground(local, coop, () => router.current(), () => selection.global.get().coopActivated)
-  ctx.provide('deepseekServantModes', { router, coop })
+  ctx.provide('deepseekServantModes', { router, shared, coop })
   const fiber = ctx.inject(['connection'], scope => {
     scope.effect(() => scope.connection.fetch.register({ path: '/api/deepseek-servant-mode/events', methods: ['GET'], requestBody: 'buffered', fetch: async request => events.response(request) }), 'servant.modes.events')
     for (const method of ['selection', 'select', 'call', 'shared']) scope.effect(() => scope.connection.fetch.register({

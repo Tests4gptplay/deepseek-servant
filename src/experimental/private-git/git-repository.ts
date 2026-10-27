@@ -3,12 +3,15 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { GitChange, GitFileChange, GitReceipt, GitRepository, GitSnapshot, RepoBinding, RepoConnection } from './contracts.js'
-import { GitConflictError, GitHubClient, inspectPrivateRepo, type TokenSource } from './github.js'
+import { GitConflictError, GitHubClient, inspectPrivateRepo, GITHUB_CLI_SETUP_REQUIRED, type TokenSource } from './github.js'
 import { GitError, runGit } from './vendor/git-runner.js'
 
 export function validCoopPath(path: string): boolean {
   return path.startsWith('dss-coop/') && !/[\\\0\r\n]/.test(path)
     && path.split('/').every(part => part.length > 0 && part !== '.' && part !== '..')
+}
+export function isPushConflict(error: unknown): boolean {
+  return error instanceof GitError && /\[rejected\].*(fetch first|non-fast-forward)|\[remote rejected\].*cannot lock ref .*is at [0-9a-f]+ but expected [0-9a-f]+/i.test(error.stderr)
 }
 interface GitEnvironment { cwd: string; env: NodeJS.ProcessEnv; connection: RepoConnection; directory: string; signal: AbortSignal }
 
@@ -46,7 +49,7 @@ export class GitHubRepository implements GitRepository {
     const signal = this.controller.signal, binding = this.binding()
     const token = await this.tokens()
     signal.throwIfAborted()
-    if (!token) throw new Error('Sign in with GitHub CLI or configure the existing DSH GitHub credential.')
+    if (!token) throw new Error(GITHUB_CLI_SETUP_REQUIRED)
     const key = JSON.stringify([binding.ownerRepo, binding.repositoryId, binding.participantId, binding.branch])
     const tokenHash = createHash('sha256').update(token.value).digest('hex')
     let connection = !forWrite && this.checked?.key === key && this.checked.tokenHash === tokenHash ? this.checked.connection : undefined
@@ -262,7 +265,7 @@ export class GitHubRepository implements GitRepository {
         { ...env, GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email })).trim()
       try { await this.git(e, ['push', 'origin', commit + ':refs/heads/' + e.connection.repository.branch]) }
       catch (error) {
-        if (error instanceof GitError && /\[rejected\].*(fetch first|non-fast-forward)/.test(error.stderr)) throw new GitConflictError('A concurrent commit changed the branch; retry this operation against it.')
+        if (isPushConflict(error)) throw new GitConflictError('A concurrent commit changed the branch; retry this operation against it.')
         throw error
       }
       return { commit, replay: false }

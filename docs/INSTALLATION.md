@@ -1,26 +1,47 @@
 # 安装与升级
 
-正式版本：`0.3.1`。测试环境：Windows / DSH `0.2.1-rc.3`。
+正式版本：`0.3.2`。测试环境：Windows / DSH `0.2.1-rc.3`。
 
 ## 原生安装
 
 Desktop 打开“插件 → 添加插件”，粘贴以下固定来源，安装并启用：
 
 ```text
-github:Tests4gptplay/deepseek-servant#v0.3.1
+github:Tests4gptplay/deepseek-servant#v0.3.2
 ```
 
 Web profile 使用：
 
 ```sh
-dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.3.1'
+dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.3.2'
 ```
 
 固定版本包含编译后的 Host 和 Client。升级沿用现有配置、存储 Domain、会话与记录目录。模型、工具权限和预设由 DSH 管理。
 
-安装后进入侧栏 DeepSeek Servant，选择前台模型和工作区。页面齿轮与全局设置共用配置。标准模式可直接使用；DSS-cah 在实验性设置中按需启用。协作需要 Git 命令及目标私库的已有 GitHub 授权，配置步骤见 [DSS-cah 使用说明](../PRIVATE_GIT.md)。
+安装后进入侧栏 DeepSeek Servant，选择前台模型和工作区。页面齿轮与全局设置共用配置。标准模式可直接使用；DSS-cah 在实验性设置中按需启用。协作使用 Git 和 GitHub CLI，依赖配置见下节，仓库设置见 [DSS-cah 使用说明](../PRIVATE_GIT.md)。
 
-Release 同时提供 `deepseek-servant-0.3.1.tgz` 与 SHA-256，作为备用安装包；也可通过同一插件管理入口安装该文件。
+Release 同时提供 `deepseek-servant-0.3.2.tgz` 与 SHA-256，作为备用安装包；也可通过同一插件管理入口安装该文件。
+
+## DSS-cah 依赖
+
+准备 Git（`git`）与 GitHub CLI（`gh`），让运行 DSH 的环境能够找到这两个命令。Git 用于仓库同步，GitHub CLI 提供当前账号授权。
+
+Windows 安装 GitHub CLI：
+
+```powershell
+winget install --id GitHub.cli --source winget
+```
+
+安装后打开新的终端窗口，登录并检查当前账号：
+
+```sh
+gh auth login --hostname github.com --web
+gh auth status --hostname github.com
+```
+
+当前账号需有目标私库的读写权限。回到 DSS-cah 填写仓库与目录，点击“连接私有仓库”。CLI 未安装、未登录或仓库授权不足时，页面上方显示配置提示；完成配置后点击“重试”重新连接。
+
+参考：[GitHub CLI Windows 安装](https://github.com/cli/cli/blob/trunk/docs/install_windows.md)、[GitHub CLI 登录](https://cli.github.com/manual/gh_auth_login)。
 
 ## 开发
 

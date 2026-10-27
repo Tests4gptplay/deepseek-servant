@@ -96,7 +96,7 @@ export class CoopService implements ModeEndpoint {
     const moving = settings.ownerRepo !== this.cache.settings.ownerRepo || settings.repositoryDirectory !== this.cache.settings.repositoryDirectory
     if (moving && (this.cache.drafts().length || this.cache.entries('physical/').length || (this.cache.get<number>('pending-tasks') ?? 0) > 0)) throw new Error('Finish or cancel this repository’s pending work before changing repositories.')
     ++this.generation
-    if (moving || settings.tokenRef !== this.cache.settings.tokenRef || settings.credentialSource !== this.cache.settings.credentialSource) { this.client.cancel(); this.repository.cancel?.() }
+    if (moving) { this.client.cancel(); this.repository.cancel?.() }
     if (moving) {
       await this.syncing?.catch(() => {})
       await this.repository.releaseCache?.()
@@ -271,7 +271,7 @@ export class CoopService implements ModeEndpoint {
     await this.refreshProjection()
     const projection = this.cache.get<Pick<CoopView, 'confirmedHead' | 'messages' | 'tasks' | 'moreBefore'>>('projection')
     return { settings: this.cache.settings, defaultModel: this.defaultModel(), instanceId: this.cache.instanceId, connection: this.cache.connection(),
-      credential: await this.credentials.describe(), status: this.error ? 'offline' : this.cache.connection() ? 'connected' : 'unconfigured',
+      status: this.error ? 'offline' : this.cache.connection() ? 'connected' : 'unconfigured',
       error: this.error ?? this.cache.get<string>('runtime-error') ?? (this.cache.entries<string>('read-error/').map(([, value]) => value).join('\n') || undefined), pending: this.cache.drafts(), confirmedHead: this.cache.get<string>('confirmed-head') ?? projection?.confirmedHead, messages: projection?.messages ?? [], moreBefore: projection?.moreBefore, tasks: projection?.tasks ?? [] }
   }
   async call(method: string, params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {

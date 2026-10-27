@@ -2,7 +2,8 @@ import { z } from 'zod'
 import type { RoleBinding } from './contracts.js'
 import { ForegroundDocument, type ForegroundDocumentName } from '../../contracts/foreground-memory.js'
 
-export const Id = z.string().min(1).regex(/^(?!\.{1,2}$|__proto__$|prototype$|constructor$)[^/\\\0\r\n]+$/u)
+// Enforce path identities locally; model APIs use different regular-expression dialects.
+export const Id = z.string().min(1).refine(value => /^(?!\.{1,2}$|__proto__$|prototype$|constructor$)[^/\\\0\r\n]+$/u.test(value), 'Invalid record identity.')
 export const Text = z.string().min(1)
 export const Revision = z.int().nonnegative()
 export const ReviewSchema = z.object({

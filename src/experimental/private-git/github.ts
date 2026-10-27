@@ -1,5 +1,8 @@
 import type { CoopCollaborator, CoopInvitation, RepoBinding, RepoConnection } from './contracts.js'
 
+export const GITHUB_CLI_SETUP_REQUIRED = 'Configure GitHub CLI: install gh and run gh auth login --hostname github.com.'
+export const GITHUB_CLI_ACCESS_REQUIRED = 'Configure GitHub CLI and verify access to this repository.'
+
 export interface ResolvedToken { value: string; source: string }
 export type TokenSource = () => Promise<ResolvedToken | undefined>
 export type GitHubFetch = (input: string, init?: RequestInit) => Promise<Response>
@@ -27,7 +30,7 @@ export class GitHubClient {
     const signal = this.requests.signal
     const token = await this.tokenSource()
     signal.throwIfAborted()
-    if (!token?.value) throw new GitHubError(401, 'Configure GitHub credentials or sign in with GitHub CLI.')
+    if (!token?.value) throw new GitHubError(401, GITHUB_CLI_SETUP_REQUIRED)
     const request = async <R>(method: string, path: string, body?: unknown): Promise<R> => {
       signal.throwIfAborted()
       if (!path.startsWith('/') || path.startsWith('//') || path.includes('://')) throw new Error('Invalid GitHub API path.')
@@ -46,7 +49,8 @@ export class GitHubClient {
         const data = await response.json().catch(() => ({})) as { message?: string }
         const message = String(data.message ?? response.statusText).split(token.value).join('[redacted]')
         const seconds = Number(response.headers.get('retry-after')) || (response.headers.get('x-ratelimit-remaining') === '0' ? Math.max(1, Number(response.headers.get('x-ratelimit-reset')) - Math.floor(Date.now() / 1000)) : 0)
-        throw new GitHubError(response.status, 'GitHub ' + response.status + ': ' + message + ' (' + method + ' ' + path + '; authorization: ' + token.source + ')', seconds > 0 ? seconds : undefined)
+        const hint = token.source === 'GitHub CLI' && [401, 403, 404].includes(response.status) ? GITHUB_CLI_ACCESS_REQUIRED + ' ' : ''
+        throw new GitHubError(response.status, hint + 'GitHub ' + response.status + ': ' + message + ' (' + method + ' ' + path + '; authorization: ' + token.source + ')', seconds > 0 ? seconds : undefined)
       }
       const result = response.status === 204 ? undefined : await response.json()
       signal.throwIfAborted()

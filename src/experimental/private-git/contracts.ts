@@ -9,8 +9,6 @@ export const RepositoryDirectorySchema = z.string().trim().default('dss-coop')
 
 export const CoopSettingsSchema = z.object({
   ownerRepo: z.string().default(''),
-  tokenRef: z.string().min(1).default('GITHUB_TOKEN'),
-  credentialSource: z.enum(['auto', 'github-cli']).default('auto'),
   repositoryDirectory: RepositoryDirectorySchema,
   remoteEnabled: z.boolean().default(false),
   workerSeats: z.int().positive().default(2),
@@ -85,7 +83,6 @@ export interface CoopView {
   defaultModel?: { provider?: string; model?: string; reasoningEffort?: string }
   instanceId: string
   connection?: RepoConnection
-  credential: { configured: boolean; source?: string; writable: boolean }
   confirmedHead?: string
   status: 'unconfigured' | 'connected' | 'offline'
   error?: string

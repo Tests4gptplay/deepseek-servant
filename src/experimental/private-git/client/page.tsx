@@ -2,6 +2,7 @@ import { useEffect, useId, useState, useSyncExternalStore, type ReactNode } from
 import type { CoopCollaborator, CoopInvitation, CoopSettings, CoopView } from '../contracts.js'
 import type { ModeClient } from '../../../mode-router/client.js'
 import type { ModeText } from '../../../mode-router/locales.js'
+import { GITHUB_CLI_SETUP_REQUIRED, GITHUB_CLI_ACCESS_REQUIRED } from '../github.js'
 import css from './page.module.css'
 
 export interface CoopControls {
@@ -35,6 +36,10 @@ export function CoopPage({ client, t, settingsOnly, controls, onOpenSettings }: 
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
     finally { await client.refresh(); setBusy(false) }
   }
+  const errorText = error || view.error || ''
+  const cliError = errorText.includes(GITHUB_CLI_SETUP_REQUIRED) || errorText.includes(GITHUB_CLI_ACCESS_REQUIRED)
+  const displayError = errorText.replace(GITHUB_CLI_SETUP_REQUIRED, t('githubCliSetup')).replace(GITHUB_CLI_ACCESS_REQUIRED, t('githubCliAccess'))
+  const connect = async () => { await client.call('configure', settings); await client.call('connect') }
   const field = (key: Exclude<keyof CoopSettings, 'remoteEnabled'>, label: string, type = 'text') => <label className={css.field} htmlFor={prefix + key}>{label}
     <input id={prefix + key} type={type} min={type === 'number' ? 1 : undefined}
       value={settings[key] ?? ''} disabled={busy} onChange={event => setSettings({ ...settings, [key]: type === 'number' ? Number(event.target.value) : event.target.value })} />
@@ -61,26 +66,19 @@ export function CoopPage({ client, t, settingsOnly, controls, onOpenSettings }: 
       <span>{view.connection.repository.fullName}</span>
       {view.confirmedHead && <span title={view.confirmedHead}>{t('head')}: {view.confirmedHead.slice(0, 12)}</span>}
     </div>}
-    {(error || view.error) && <p className={css.notice} role="alert">{error || view.error} <button disabled={busy} onClick={() => void run(() => client.call('retryNative'))}>{t('retry')}</button></p>}
+    {displayError && <p className={css.notice} role="alert">{displayError} <button disabled={busy} onClick={() => void run(cliError ? connect : () => client.call('retryNative'))}>{t('retry')}</button></p>}
     {notice && <p className={css.notice} role="status">{notice}</p>}
     {settingsOnly && <section className={css.card} aria-label={t('settings')}>
       <div className={css.grid}>
         {field('ownerRepo', t('repository'))}{field('repositoryDirectory', t('repositoryDirectory'))}<div>{field('workspace', t('workspace'))}{controls?.pickDirectory && <button disabled={busy} onClick={() => void run(async () => { const workspace = await controls.pickDirectory!(); if (workspace) setSettings({ ...settings, workspace }) })}>{t('pickDirectory')}</button>}</div>
         {field('workerSeats', t('seats'), 'number')}
-        <label className={css.field} htmlFor={prefix + 'credentialSource'}>{t('credentialSource')}
-          <select id={prefix + 'credentialSource'} value={settings.credentialSource} disabled={busy} onChange={event => setSettings({ ...settings, credentialSource: event.target.value as CoopSettings['credentialSource'] })}>
-            <option value="auto">{t('credentialAuto')}</option><option value="github-cli">GitHub CLI</option>
-          </select>
-        </label>
         {controls ? <><div className={css.field}>{t('preset')}{controls.preset(settings.presetId, presetId => setSettings({ ...settings, presetId }), busy)}</div>
           <div className={css.field}>{t('model')}{controls.model(settings, value => setSettings({ ...settings, provider: value.provider, model: value.model, reasoningEffort: value.reasoningEffort }), busy)}</div></>
           : <>{field('presetId', t('preset'))}{field('provider', t('provider'))}{field('model', t('model'))}{field('reasoningEffort', t('effort'))}</>}
       </div><label className={css.hint}><input type="checkbox" checked={settings.remoteEnabled} disabled={busy} onChange={event => setSettings({ ...settings, remoteEnabled: event.target.checked })} /> {t('remoteEnabled')}</label><p className={css.hint}>{t('remoteHint')}</p><div className={css.actions}>
         <button disabled={busy} onClick={() => void run(() => client.call('configure', settings), t('saved'))}>{t('save')}</button>
-        <button disabled={busy || !settings.ownerRepo.trim()} onClick={() => void run(async () => { await client.call('configure', settings); await client.call('connect') })}>{t('connect')}</button>
+        <button disabled={busy || !settings.ownerRepo.trim()} onClick={() => void run(connect)}>{t('connect')}</button>
       </div>
-      <p className={css.hint}>{t('authHint')}</p>
-      <p className={css.hint}>{t(view.connection || view.credential.configured ? 'credentialConfigured' : 'credentialMissing')}{view.credential.source ? ' · ' + view.credential.source : ''}</p>
       <section className={css.members}>
         <h2>{t('members')}</h2><p className={css.hint}>{t('membersHint')}</p>
         {!view.connection && <p className={css.hint}>{t('connectForMembers')}</p>}
