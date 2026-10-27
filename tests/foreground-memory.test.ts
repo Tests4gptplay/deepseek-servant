@@ -29,8 +29,8 @@ test('local foreground notes survive fresh services, stay out of prompt bodies a
   assert.equal((await store.list('foreground-memory/')).length, 0)
 })
 
-test('foreground notes guidance includes cleanup, weekly review, monthly confirmation and on-demand access', () => {
+test('foreground notes persist by default with requested cleanup and scheduled conversational review', () => {
   const text = foregroundMemoryGuide('list-ref', 'cache-ref', 'Read via tools.')
-  for (const phrase of ['Promptly remove completed items', '7 days', '30 days', 'user-specified', 'reminder alone does not reset',
-    'replace its entire contents every turn', 'remove the corresponding content', 'no word or character quota', 'body is not preloaded']) assert.ok(text.includes(phrase), phrase)
+  for (const phrase of ['Keep completed items', '7 days', '30 days', 'user-specified', 'reminder alone does not reset',
+    'Keep memory by default', 'only when the user requests cleanup', 'no word or character quota', 'body is not preloaded']) assert.ok(text.includes(phrase), phrase)
 })

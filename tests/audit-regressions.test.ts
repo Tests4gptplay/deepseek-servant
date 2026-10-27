@@ -7,6 +7,30 @@ import { installRoleTools } from '../src/roles/tools.js'
 import { MemoryStorage } from './support.js'
 import { childSpec, fixture } from './task-fixture.js'
 
+test('supervisor releases remaining owners when one foreground disposal fails', async () => {
+  const supervisor = new AgentSupervisor({} as any)
+  const foreground = (supervisor as any).foreground as Map<string, any>
+  let released = false
+  foreground.set('broken', { dispose: async () => { throw new Error('Close failed') } })
+  foreground.set('healthy', { dispose: async () => { await new Promise(resolve => setTimeout(resolve, 5)); released = true } })
+  await assert.rejects(supervisor.dispose(), AggregateError)
+  assert.equal(released, true)
+  assert.equal(foreground.size, 0)
+})
+
+test('missing persisted map records are reported instead of silently becoming empty', async () => {
+  const f = await fixture()
+  const before = await f.get()
+  assert.ok(Object.keys(before.receipts).length > 0)
+  const rows = await f.storage.list<any>('execution/one/')
+  for (const row of rows) {
+    if (row.value?.metadata?.field === 'receipts') await f.storage.delete(row.key)
+  }
+  await assert.rejects(f.get(), /incomplete.*receipts/i)
+  assert.equal((await f.store.listTasks()).length, 0)
+  assert.match(f.store.problems.get('one') ?? '', /receipts/)
+})
+
 test('one failed view section preserves other sections and exposes its error', async () => {
   const f = await fixture(), task = await f.get()
   for (const failed of ['tasks', 'history', 'messages', 'knowledge']) {

@@ -7,7 +7,7 @@ const fields = ['goal', 'goalHistory', 'plannerNote', 'plan', 'children', 'repor
 type Field = typeof fields[number]
 const scalar = new Set<Field>(['goal', 'plannerNote', 'plan'])
 const arrays = new Set<Field>(['goalHistory', 'decisions'])
-interface Layout { version: 1; fields: Field[] }
+interface Layout { version: 1; fields: Field[]; counts?: Partial<Record<Field, number>> }
 export type StoredTask = Partial<Task> & Pick<Task, 'id' | 'revision'> & { recordsLayout: Layout }
 export interface PreparedTask { schemaVersion: 1; expectedRevision: number; root: StoredTask; writes: RecordAppend[] }
 export function isSeparatedTask(value: unknown): value is StoredTask {
@@ -34,7 +34,9 @@ export class TaskRecords {
 
   prepare(task: Task, previous?: Task): PreparedTask {
     const root = JSON.parse(JSON.stringify(task)) as StoredTask
-    root.recordsLayout = { version: 1, fields: fields.filter(field => task[field] !== undefined) }
+    const storedFields = fields.filter(field => task[field] !== undefined)
+    root.recordsLayout = { version: 1, fields: storedFields,
+      counts: Object.fromEntries(storedFields.map(field => [field, values(task, field).size])) }
     const writes: RecordAppend[] = []
     for (const field of fields) {
       const before = values(previous, field), after = values(task, field)
@@ -88,6 +90,8 @@ export class TaskRecords {
     for (const field of root.recordsLayout.fields) {
       const entries = [...selected.values()].filter(entry => entry.metadata.field === field && !entry.metadata.deleted)
         .sort((a, b) => Number(a.metadata.taskRevision) - Number(b.metadata.taskRevision) || a.sequence - b.sequence)
+      const expected = root.recordsLayout.counts?.[field]
+      if (expected !== undefined && entries.length !== expected) throw new Error('Task records incomplete: ' + root.id + '/' + field)
       const contents = await Promise.all(entries.map(async entry => [String(entry.metadata.recordKey), JSON.parse(await this.journal.fullText(entry.ref))] as const))
       const value = scalar.has(field) ? contents[0]?.[1] : arrays.has(field) ? contents.map(([, value]) => value) : Object.fromEntries(contents)
       Object.defineProperty(result, field, { value, enumerable: true, writable: true, configurable: true })

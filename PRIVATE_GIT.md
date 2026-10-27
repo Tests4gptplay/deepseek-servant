@@ -60,7 +60,7 @@ AI 业务正文、操作记录与启动/完成状态以新文件追加；两份 
 
 DSS-cah 前台跟随原对话框的模型、思考强度、预设与工作区；初次衔接可按需读取最近六次 Local 讨论的引用。后台模型和工作区使用协作设置，后台 Auto 跟随 Host 默认模型。
 
-两种前台均提供 Foreground_List 和 Foreground_Cache。List 保存重要交代及任务、对话、证据路径，完成项及时移除；正常交流时检查 7 天无进展的提醒（每周最多一次）与 30 天搁置的确认，用户指定复查时间优先。Cache 可随时全文重写、删减和清空，不设字数上限，结束、完成或陈旧话题及时清理。系统只告知用途和入口，正文由前台按需读取。Git 文档位于 `assistants/<participant>/<instance>/Foreground_List.md` 与 `Foreground_Cache.md`，通过 `coop_read` 读取、`coop_commit op=foreground_memory` 改写；空文本删除当前文档。
+两种前台均提供 Foreground_List 和 Foreground_Cache。List 保存重要交代及任务、对话、证据路径，完成项更新状态并保留；正常交流时检查 7 天无进展的提醒（每周最多一次）与 30 天搁置的确认，用户指定复查时间优先。Cache 可整理和更新，不设字数上限；记忆默认保留，不因结束、完成、陈旧或长期未提及而自动删除。仅按用户要求删除或清空，手动清理与一键清空入口保留。系统只告知用途和入口，正文由前台按需读取。Git 文档位于 `assistants/<participant>/<instance>/Foreground_List.md` 与 `Foreground_Cache.md`，通过 `coop_read` 读取、`coop_commit op=foreground_memory` 改写；空文本删除当前文档。
 
 任务结束后保留完整记录、成果和 Git 历史，释放已完成动作、读取投影及重试缓存。切换仓库或子目录时清理退役的本地 Git 缓存。未提交草稿及仍运行或暂停等待的工作保留。
 

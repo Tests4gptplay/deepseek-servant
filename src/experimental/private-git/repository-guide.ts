@@ -36,7 +36,7 @@ export function repositoryGuide(settings: CoopSettings): string {
 | \`instances/<instance>/watch.json\` | 已处理的远端变更位置。 |
 | \`assistants/<participant>/<instance>/identity.json\` | 前台所属参与者、实例和模式。 |
 | \`assistants/<participant>/<instance>/Foreground_List.md\` | 前台的重要交代索引，含任务、原话、证据和快速查阅路径；普通闲聊不入列。 |
-| \`assistants/<participant>/<instance>/Foreground_Cache.md\` | 前台可全文重写、删减的简短随记；结束或陈旧话题及时释放。按需读取，保持缓存用途。 |
+| \`assistants/<participant>/<instance>/Foreground_Cache.md\` | 前台可整理和更新的持久随记；默认保留，按需读取，仅按用户要求删除或清空。 |
 | \`conversations/<participant>/<date>/*/entry.json\` | 对话作者、时间和正文 textPath。 |
 | \`intents/<participant>/*.json\`、\`inputs/<participant>/*.json\` | 待处理与已消费的用户输入，含正文和可选 contextPath 引用。 |
 | \`origins/<task>/request/\`、\`origins/<task>/goal/<revision>/\` | 原始要求及各次确认目标，可核对需求变化。 |
@@ -60,7 +60,7 @@ export function repositoryGuide(settings: CoopSettings): string {
 
 ## 前台随记
 
-Foreground_List 保存重要交代和可追溯索引，完成事项及时移除。在前台处理对话时检查：7 天无进展可简短提醒，每周最多一次；30 天无实质进展或用户确认时询问继续、保持 pending、暂缓跟踪或结束。用户指定等待期限则按该期限；确认后刷新状态和复查时间，提醒本身不重置搁置时间。Foreground_Cache 是可删改的当前随记，前台每轮可自由全文重写，不设字数上限；主动精简，删除已结束、已完成或陈旧话题。两者都只告知用途与路径，由前台按需读取。普通对话原文仍在 conversations 中。
+Foreground_List 保存重要交代和可追溯索引，完成事项更新状态并保留。在前台处理对话时检查：7 天无进展可简短提醒，每周最多一次；30 天无实质进展或用户确认时询问继续、保持 pending、暂缓跟踪或结束。用户指定等待期限则按该期限；确认后刷新状态和复查时间，提醒本身不重置搁置时间。Foreground_Cache 是可整理和更新的持久随记，不设字数上限；默认保留记忆，任务完成、话题结束、陈旧或长期未提及都不触发删除。仅按用户明确要求删除或清空，手动清理入口保留。两者都只告知用途与路径，由前台按需读取。普通对话原文仍在 conversations 中。
 
 ## Reading from another tool
 

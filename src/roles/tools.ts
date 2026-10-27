@@ -73,7 +73,7 @@ export function installRoleTools(ctx: Context, agent: Agent, binding: RoleBindin
     register('foreground_memory', 'Read or rewrite the Foreground’s important-assignment index or editable conversation scratch space.',
       z.discriminatedUnion('action', [
         z.object({ action: z.literal('read'), document: ForegroundDocument }),
-        z.object({ action: z.literal('replace'), document: ForegroundDocument, text: z.string().describe('Complete replacement text; rewrite and remove stale material rather than append a transcript. Empty text clears the document.') }),
+        z.object({ action: z.literal('replace'), document: ForegroundDocument, text: z.string().describe('Complete replacement text, preserving existing memories unless the user requested their removal. Use empty text only for a user-requested clear.') }),
         z.object({ action: z.literal('clear'), document: ForegroundDocument }),
       ]), input => options.assistants.foregroundMemory(binding.assistantId, input.document, input.action === 'read' ? undefined : input.action === 'clear' ? '' : input.text))
     register('conversation_search', 'Search dated original conversations; returns excerpts, message identities and exact references.',

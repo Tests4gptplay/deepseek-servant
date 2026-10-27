@@ -135,14 +135,16 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const stopTaskNotifications = tasks.subscribe(() => changed())
   ctx.effect(() => async () => {
     stopTaskNotifications()
-    await coordinator!.dispose()
-    await supervisor.dispose()
-    await assistants.flush(); await tasks.flush(); await runtimeSettings.flush()
-    await store.close()
-    listeners.clear()
+    const results = await Promise.allSettled([coordinator!.dispose(), supervisor.dispose()])
+    results.push(...await Promise.allSettled([assistants.flush(), tasks.flush(), runtimeSettings.flush()]))
+    try { await store.close() } catch (reason) { results.push({ status: 'rejected', reason }) }
+    finally { listeners.clear() }
+    const errors = results.filter(result => result.status === 'rejected').map(result => result.reason)
+    if (errors.length) throw new AggregateError(errors, 'Servant shutdown encountered errors')
   }, 'servant.host.ownership')
   await installModeHost(ctx, { call: (method, params, signal) => api.call(method, params, signal ?? new AbortController().signal) })
   await coordinator.start()
-  const admissions = await assistants.recoverInputs()
-  if (admissions.failed.length) coordinator.reportError(new Error(`${admissions.failed.length} 条前台消息等待修复后重新接纳。`))
+  void assistants.recoverInputs().then(admissions => {
+    if (admissions.failed.length) coordinator.reportError(new Error(`${admissions.failed.length} 条前台消息等待修复后重新接纳。`))
+  }).catch(error => coordinator.reportError(error))
 }

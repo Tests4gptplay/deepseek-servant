@@ -393,19 +393,20 @@ export class AgentSupervisor {
     this.stopping = true
     await Promise.allSettled([...this.foregroundOpening.values()])
     for (const unsubscribe of this.foregroundSubscriptions.values()) unsubscribe()
-    await Promise.all([...this.owners.values()].map(async owner => {
+    const results = await Promise.allSettled([...this.owners.values()].map(async owner => {
       if (this.releases.has(owner.executionId)) { await this.releases.get(owner.executionId); return }
-      await owner.handle.cancel()
-      await owner.handle.dispose()
-      owner.unsubscribe()
+      try { await owner.handle.cancel() }
+      finally { try { await owner.handle.dispose() } finally { owner.unsubscribe() } }
       await this.observationChains.get(owner.executionId)
       await this.watches.get(owner.executionId)
       // Closing the Host interrupts execution; it does not cancel the user's goal.
       await this.options.tasks.execute(owner.taskId, { type: 'execution.observed', commandId: `shutdown:${randomUUID()}`,
         source: { kind: 'runtime', id: 'deepseek-servant' }, executionId: owner.executionId, physicalState: 'lost', ownedJobIds: [] })
     }))
-    await Promise.all([...this.foreground.values()].map(handle => handle.dispose()))
-    await Promise.all([...this.observationChains.values(), ...this.watches.values()])
+    results.push(...await Promise.allSettled([...this.foreground.values()].map(handle => handle.dispose())))
+    results.push(...await Promise.allSettled([...this.observationChains.values(), ...this.watches.values()]))
     this.owners.clear(); this.foreground.clear(); this.foregroundSubscriptions.clear()
+    const errors = results.filter(result => result.status === 'rejected').map(result => result.reason)
+    if (errors.length) throw new AggregateError(errors, 'Servant owners could not all close cleanly')
   }
 }

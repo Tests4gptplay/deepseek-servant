@@ -1,4 +1,4 @@
-// Vendored without functional changes from lxj808624/dsh-tool-git v0.1.3.
+// Adapted from lxj808624/dsh-tool-git v0.1.3; adds bounded operation timeouts.
 // MIT, Copyright (c) 2026 dsh-tool-git contributors. See THIRD_PARTY_NOTICES.md.
 /**
  * Safe Git subprocess runner.
@@ -47,6 +47,8 @@ export interface RunGitOptions {
   cwd: string
   /** Abort the subprocess when this signal fires. */
   signal?: AbortSignal
+  /** Maximum duration of one command; defaults to five minutes. */
+  timeoutMs?: number
   /** Extra environment variables merged over `process.env`. */
   env?: NodeJS.ProcessEnv
 }
@@ -76,6 +78,7 @@ export function runGit(gitPath: string, args: string[], opts: RunGitOptions): Pr
         cwd: opts.cwd,
         env,
         signal: opts.signal,
+        timeout: opts.timeoutMs ?? 300_000,
         maxBuffer: 64 * 1024 * 1024,
         windowsHide: true,
       },
@@ -95,6 +98,10 @@ export function runGit(gitPath: string, args: string[], opts: RunGitOptions): Pr
           }
           if (errno === 'ABORT_ERR') {
             reject(error)
+            return
+          }
+          if ((error as { killed?: boolean }).killed && (error as { signal?: string }).signal === 'SIGTERM') {
+            reject(new GitError('Git operation timed out after ' + (opts.timeoutMs ?? 300_000) + ' ms.', 124, result.stderr, result.stdout))
             return
           }
           // execFile reports non-zero exits as an Error carrying the exit code.
