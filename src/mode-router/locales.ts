@@ -7,7 +7,7 @@ export const modeZh = {
   useMode: '用于新对话', collapseSettings: '收起配置',
   memoryWarningTitle: '重要：任务记忆将直接写入 Git 仓库',
   memoryWarning: '此模式下，所有任务相关记忆，包括对话、计划、执行状态、结果和归档，都会直接写入指定 Git 目录，并保留在提交历史中。仓库成员可读取这些内容。请使用你授权的私有仓库；凭据不写入仓库。',
-  repositoryDirectory: '仓库内目录',
+  repositoryDirectory: '仓库内目录（全仓库利用为空值）',
   credentialSource: 'GitHub 授权来源', credentialAuto: '自动（已保存授权优先）',
   authHint: '使用已有授权连接；首次连接自动创建目录和基础配置。',
   connectForMembers: '连接仓库后可查看成员；仓库管理员可发送邀请。',
