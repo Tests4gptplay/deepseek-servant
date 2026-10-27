@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto'
+import { z } from 'zod'
 import type { ModeEndpoint } from '../../mode-router/mode-router.js'
-import { CoopSettingsSchema, type CoopView, type GitChangeNotice, type GitSnapshot, type PendingDraft, type RepoBinding, type UserIntent } from './contracts.js'
+import { ForegroundProfileSchema, CoopSettingsSchema, type CoopView, type GitChangeNotice, type GitSnapshot, type PendingDraft, type RepoBinding, type UserIntent } from './contracts.js'
 import type { CoopStore } from './cache.js'
 import { CoopCredentials } from './credentials.js'
 import { GitHubClient, GitHubMembers, repositoryPath } from './github.js'
 import { GitHubRepository } from './git-repository.js'
 import { conversationPage } from './conversation.js'
+import { mergeRepositoryGuide, repositoryGuide } from './repository-guide.js'
 import { childDirectories, loadPaths } from './repository-paths.js'
 import { readIntent } from './intake.js'
 import { isProtocolPath, recordPublished } from './outcome.js'
@@ -116,6 +118,7 @@ export class CoopService implements ModeEndpoint {
       try {
         if (!this.cache.connection() || this.disposed) return
         this.current(generation)
+        await this.publishGuide()
         await this.publishSettings()
         this.current(generation)
         await this.retryInputs()
@@ -162,7 +165,10 @@ export class CoopService implements ModeEndpoint {
     }
     const existing = this.cache.get<UserIntent>('user-source/' + id)
     if (existing && existing.text !== text) throw new Error('A message identity was reused with different text.')
-    const intent: UserIntent = existing ?? { id, participantId: String(connection.identity.id), instanceId: this.cache.instanceId, text, createdAt: new Date().toISOString() }
+    const foreground = params.foreground === undefined ? undefined : ForegroundProfileSchema.parse(params.foreground)
+    const context = params.context === undefined ? undefined : z.array(z.object({ role: z.string(), text: z.string(), at: z.string().optional() })).parse(params.context)
+    const intent: UserIntent = existing ?? { id, participantId: String(connection.identity.id), instanceId: this.cache.instanceId, text, createdAt: new Date().toISOString(),
+      foreground, ...(context?.length ? { context, contextPath: 'dss-coop/foreground/context/' + digest(json(context)) } : {}) }
     await this.cache.put('user-source/' + id, intent)
     const draft: PendingDraft = { id, kind: 'user-input', createdAt: intent.createdAt, state: 'PENDING_UNCOMMITTED', payload: intent }
     await this.cache.put('draft/' + id, draft)
@@ -183,15 +189,27 @@ export class CoopService implements ModeEndpoint {
   }
   private async publishInput(intent: UserIntent): Promise<void> {
     const root = 'dss-coop/conversations/' + intent.participantId + '/' + intent.createdAt.slice(0, 10) + '/' + intent.createdAt.replace(/\D/g, '') + '-' + intent.id
-    const entry = { ...intent, text: undefined, role: 'user', textPath: root + '/text', textHash: digest(intent.text) }
+    const entry = { ...intent, text: undefined, context: undefined, foreground: undefined, role: 'user', textPath: root + '/text', textHash: digest(intent.text) }
     const receipt = await this.getJournal().transact('input-' + intent.id, intent, async snapshot => [
       ...await this.getJournal().immutable(snapshot, root + '/entry.json', json(entry)),
       ...textChanges(root + '/text', intent.text),
+      ...(intent.contextPath && intent.context ? textChanges(intent.contextPath, json(intent.context)) : []),
       { path: 'dss-coop/intents/' + intent.participantId + '/' + intent.id + '.json', content: json({ ...entry, conversationPath: root + '/entry.json' }) },
       { path: 'dss-coop/participants/' + intent.participantId + '/profile.json', content: json(this.cache.connection()!.identity) },
     ])
     await this.cache.put('user-confirmed/' + intent.id, { commit: receipt.commit, textHash: digest(intent.text), participantId: intent.participantId })
     await this.cache.remove('draft/' + intent.id)
+  }
+  private async publishGuide(): Promise<void> {
+    const settings = this.cache.settings
+    const key = digest(json([settings.ownerRepo, repositoryGuide(settings)]))
+    if (this.cache.get<string>('guide-confirmed') === key) return
+    await this.getJournal().transact('guide-' + key.slice(0, 32), { guide: key }, async snapshot => {
+      const path = 'dss-coop/README.md', previous = await this.repository.read(snapshot, path)
+      const content = mergeRepositoryGuide(previous, settings)
+      return content === previous ? [] : [{ path, content }]
+    })
+    await this.cache.put('guide-confirmed', key)
   }
   private async publishSettings(): Promise<void> {
     const connection = this.cache.connection()!
@@ -247,6 +265,7 @@ export class CoopService implements ModeEndpoint {
     }
     await this.cache.put('projection', { confirmedHead: snapshot.head, messages, tasks, moreBefore })
   }
+  displaySnapshot(): GitSnapshot | undefined { return this.latestSnapshot }
   async view(): Promise<CoopView> {
     // UI rendering explicitly requests display text; the headless watcher never loads it.
     await this.refreshProjection()

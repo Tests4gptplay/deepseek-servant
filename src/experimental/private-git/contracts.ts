@@ -60,7 +60,11 @@ export interface RoleBinding {
   sourceIntentId?: string
   outputPath: string
 }
+export const ForegroundProfileSchema = z.object({ workspace: z.string(), presetId: z.string(), provider: z.string().optional(), model: z.string().optional(), reasoningEffort: z.string().optional() })
 export interface UserIntent {
+  foreground?: z.infer<typeof ForegroundProfileSchema>
+  contextPath?: string
+  context?: Array<{ role: string; text: string; at?: string }>
   id: string
   participantId: string
   instanceId: string

@@ -21,7 +21,7 @@ async function removeKeys(cache: CoopStore, keys: Iterable<string>): Promise<Cac
 export async function releaseScopeCaches(cache: CoopStore): Promise<CacheCleanupResult> {
   const prefixes = ['message-header/', 'message-view/', 'read-error/', 'native-error/']
   return removeKeys(cache, cache.entries('').map(([key]) => key).filter(key =>
-    key === 'projection' || key === 'settings-confirmed' || key === 'runtime-error' || prefixes.some(prefix => key.startsWith(prefix))))
+    key === 'projection' || key === 'guide-confirmed' || key === 'settings-confirmed' || key === 'runtime-error' || prefixes.some(prefix => key.startsWith(prefix))))
 }
 
 /** Call after a Git snapshot confirms this action. These are transaction retry copies, not authority records. */

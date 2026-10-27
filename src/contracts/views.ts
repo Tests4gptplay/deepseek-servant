@@ -6,6 +6,7 @@ import type { KnowledgeRecord } from './knowledge.ts'
 export type TaskView = Omit<Task, 'receipts' | 'pendingActions' | 'source' | 'foregroundEvaluator'> & {
   pendingActionCount: number
   uncertainActionCount: number
+  remote?: { recordsUrl: string; statusUrl?: string; canControl: boolean; canRevise: boolean; canCancel: boolean }
 }
 export interface AssistantView {
   id: string

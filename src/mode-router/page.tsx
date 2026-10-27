@@ -1,5 +1,6 @@
 import { useState, useSyncExternalStore } from 'react'
-import { ServantPage, ServantSettingsPage, ServantSettingsDialog, type ServantPageProps, type ServantSettingsProps } from '../client/page.js'
+import { Button, Menu, IconChevronDownOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+import { ServantPage, ServantSettingsPage, type ServantPageProps, type ServantSettingsProps } from '../client/page.js'
 import { ModelPicker } from '../client/model-picker.js'
 import { PresetPicker } from '../client/preset-picker.js'
 import { CoopPage, type CoopControls } from '../experimental/private-git/client/page.js'
@@ -43,16 +44,32 @@ function useNativeControls(props: ServantPageProps | ServantSettingsProps): Coop
     preset: (value, onChange, disabled) => <PresetPicker value={value} onChange={onChange} disabled={disabled} onLoad={props.onLoadPresets} t={props.t} />,
     pickDirectory: props.onPickDirectory }
 }
+export function ModeSelector({ modeClient, modeText: t }: ModeInjected) {
+  const state = useSyncExternalStore(modeClient.subscribe, modeClient.snapshot)
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const selected = state.activeMode
+  return <div className={css.selector}>
+    <Menu open={open} portal side="bottom" align="start" selectedId={selected}
+      items={[{ id: 'LOCAL', label: 'local' }, { id: 'PRIVATE_GIT_EXPERIMENTAL', label: 'DSS-cah' }]}
+      onSelect={id => {
+        setOpen(false); setError(''); setBusy(true)
+        void modeClient.select(id === 'LOCAL' ? 'LOCAL' : 'PRIVATE_GIT_EXPERIMENTAL')
+          .catch(reason => setError(reason instanceof Error ? reason.message : String(reason)))
+          .finally(() => setBusy(false))
+      }} onClose={() => setOpen(false)}
+      anchor={<Button variant="outline" size="sm" aria-label={t('mode')} aria-haspopup="menu" aria-expanded={open}
+        disabled={!state.ready || busy} onClick={() => setOpen(!open)}>
+        <span>{selected === 'LOCAL' ? 'local' : 'DSS-cah'}</span><IconChevronDownOutlineRegular size={14} />
+      </Button>} />
+    {error && <span role="alert" className={css.error}>{error}</span>}
+  </div>
+}
 export function ModePage(props: ServantPageProps & ModeInjected) {
   const controls = useNativeControls(props)
-  const state = useSyncExternalStore(props.modeClient.subscribe, props.modeClient.snapshot)
-  const [settingsOpen, setSettingsOpen] = useState(false)
-  const experimentalSettings = <ExperimentalCoopSettings {...props} controls={controls} />
-  if (state.activeMode === 'LOCAL') return <ServantPage {...props} experimentalSettings={experimentalSettings} />
-  return <section className={css.shell}>
-    <CoopPage client={props.modeClient} t={props.modeText} onOpenSettings={() => setSettingsOpen(true)} />
-    <ServantSettingsDialog {...props} experimentalSettings={experimentalSettings} open={settingsOpen} onClose={() => setSettingsOpen(false)} />
-  </section>
+  return <ServantPage {...props} modeSelector={<ModeSelector {...props} />}
+    experimentalSettings={<ExperimentalCoopSettings {...props} controls={controls} />} />
 }
 export function ModeSettingsPage(props: ServantSettingsProps & ModeInjected) {
   const controls = useNativeControls(props)

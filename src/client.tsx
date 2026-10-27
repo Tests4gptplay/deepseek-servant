@@ -46,7 +46,7 @@ export function apply(ctx: Context): void {
   const connection = installedConnection as unknown as ConnectionHandle
   const notices = createServantNotices()
   const call = async (method: string, params: Record<string, unknown>): Promise<unknown> => {
-    const result = await connection.rpc.call('/api', 'deepseek-servant-mode/call', { mode: 'LOCAL', method, params })
+    const result = await connection.rpc.call('/api', 'deepseek-servant-mode/shared', { method, params })
     if (!result.ok) throw new Error(result.error.message)
     return result.value
   }
@@ -71,7 +71,9 @@ export function apply(ctx: Context): void {
       // Re-read after connection establishment as well as after commits: an
       // initial read or reconnect can otherwise miss an intervening write.
       events.addEventListener('open', listener)
-      return () => { events.close() }
+      const modes = new EventSource(new URL('api/deepseek-servant-mode/events', document.baseURI))
+      modes.addEventListener('changed', listener); modes.addEventListener('open', listener)
+      return () => { events.close(); modes.close() }
     },
     subscribeReset: listener => ctx.on('connection/reset', listener),
   }

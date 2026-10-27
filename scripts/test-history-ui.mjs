@@ -5,7 +5,7 @@ import { JSDOM } from 'jsdom'
 
 await mkdir('.validation/history-ui', { recursive: true })
 await build({
-  entryPoints: { page: 'src/client/page.tsx', locales: 'src/client/locales.ts' },
+  entryPoints: { page: 'src/mode-router/page.tsx', locales: 'src/client/locales.ts', modes: 'src/mode-router/locales.ts' },
   outdir: '.validation/history-ui', outExtension: { '.js': '.mjs' }, bundle: true,
   platform: 'node', format: 'esm', target: 'node24',
   external: ['react', 'react/*', 'react-dom', 'react-dom/*'],
@@ -13,7 +13,7 @@ await build({
   define: Object.fromEntries(['STATUS_ICON', 'ICON', 'WELCOME_CHARACTER', 'TASK_EMPTY_CHARACTER'].map(key => ['__SERVANT_' + key + '_DATA_URI__', '""'])),
 })
 const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', { url: 'http://localhost/', pretendToBeVisual: true })
-for (const key of ['window', 'document', 'HTMLElement', 'HTMLButtonElement', 'HTMLTextAreaElement', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'WheelEvent'])
+for (const key of ['window', 'document', 'Element', 'HTMLElement', 'HTMLButtonElement', 'HTMLTextAreaElement', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'WheelEvent'])
   Object.defineProperty(globalThis, key, { value: key === 'window' ? dom.window : dom.window[key], configurable: true })
 globalThis.getComputedStyle = dom.window.getComputedStyle.bind(dom.window)
 globalThis.requestAnimationFrame = dom.window.requestAnimationFrame.bind(dom.window)
@@ -24,7 +24,12 @@ dom.window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEv
 const React = await import('react')
 const { act } = React
 const { createRoot } = await import('react-dom/client')
-const { ServantPage } = await import('../.validation/history-ui/page.mjs')
+const { ModePage: ServantPage } = await import('../.validation/history-ui/page.mjs')
+const { modeZh } = await import('../.validation/history-ui/modes.mjs')
+let modeSnapshot = { ready: true, activeMode: 'LOCAL' }
+const modeListeners = new Set()
+const modeClient = { snapshot: () => modeSnapshot, subscribe: fn => { modeListeners.add(fn); return () => modeListeners.delete(fn) },
+  select: async mode => { modeSnapshot = { ...modeSnapshot, activeMode: mode }; for (const fn of modeListeners) fn() }, loadCoop: async () => {} }
 const { zh } = await import('../.validation/history-ui/locales.mjs')
 const root = createRoot(document.getElementById('root'))
 const historyCalls = [], sends = []
@@ -40,6 +45,8 @@ let snapshot = {
   },
 }
 const props = {
+  modeClient,
+  modeText: key => modeZh[key] ?? key,
   t: (key, params = {}) => Object.entries(params).reduce((text, [name, value]) => text.replace('{' + name + '}', value), zh[key] ?? key),
   useServant: selector => selector(snapshot),
   useModels: selector => selector({ current: null, groups: [], failures: [], status: 'ready', error: null }),
@@ -101,7 +108,20 @@ try {
   assert.equal(sends[0][1], 'hello foreground')
   assert.deepEqual(sends[0][2], { provider: 'fixture', model: 'model' })
   assert.equal(input.value, '')
-  console.log('PASS: scroll preload, in-flight coalescing, reading anchor, background update, themed date selection, Escape, clear date and Enter send.')
+  const draft = 'Keep this unsubmitted draft'
+  await act(() => { Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, draft); input.dispatchEvent(new Event('input', { bubbles: true })) })
+  const modeButton = () => [...document.querySelectorAll('button')].find(button => button.textContent.trim() === modeSnapshot.activeMode.replace('LOCAL', 'local').replace('PRIVATE_GIT_EXPERIMENTAL', 'DSS-cah'))
+  await click(modeButton())
+  assert.deepEqual([...document.querySelectorAll('[role="menuitem"]')].map(e => e.textContent.trim()), ['local', 'DSS-cah'])
+  await click([...document.querySelectorAll('[role="menuitem"]')].find(e => e.textContent.trim() === 'DSS-cah'))
+  assert.equal(modeSnapshot.activeMode, 'PRIVATE_GIT_EXPERIMENTAL')
+  assert.equal(document.querySelector('textarea'), input, 'mode switch preserves the original composer element')
+  assert.equal(input.value, draft)
+  assert.equal(sends.length, 1, 'selection alone does not send or create a task')
+  await click(modeButton())
+  await click([...document.querySelectorAll('[role="menuitem"]')].find(e => e.textContent.trim() === 'local'))
+  assert.equal(input.value, draft)
+  console.log('PASS: mode selector, preserved composer/draft, scroll preload, in-flight coalescing, reading anchor, background update, themed date selection, Escape, clear date and Enter send.')
 } finally {
   await act(() => root.unmount())
   dom.window.close()

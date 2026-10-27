@@ -3,6 +3,10 @@ import assert from 'node:assert/strict'
 import { readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { ModeRouter } from '../src/mode-router/mode-router.js'
+import { SharedForeground } from '../src/mode-router/shared-foreground.js'
+import type { ServantView } from '../src/contracts/views.js'
+import { foregroundMemoryPath } from '../src/experimental/private-git/protocol.js'
+import { mergeRepositoryGuide } from '../src/experimental/private-git/repository-guide.js'
 import { CoopSettingsSchema, type CoopSettings, type GitChange, type GitRepository, type GitSnapshot, type PendingDraft, type RepoConnection, type RoleBinding, type UserIntent } from '../src/experimental/private-git/contracts.js'
 import type { CoopStore } from '../src/experimental/private-git/cache.js'
 import { GitConflictError, GitHubClient, GitHubError, GitHubMembers, inspectPrivateRepo } from '../src/experimental/private-git/github.js'
@@ -890,6 +894,74 @@ test('task projection shows acceptance only after the Planner final status is re
   await write(target, planner, { op: 'outcome', id: 'final', turn_signal: 'complete', text: 'Root accepted; preserve final evidence', prerequisitePaths: [] })
   await service.sync()
   assert.equal((await service.view()).tasks.find(t => t.id === 'task-origin-1')?.status, 'accepted')
+})
+
+test('Foreground working memory replaces and clears the current document without accumulating transcript entries', async () => {
+  const repo = new MemoryRepo(), target = instance(repo)
+  await input(repo, target, 'notes', 'Remember the important assignment and rewrite your scratch notes.')
+  await target.tick(2)
+  const fg = target.agents.latest('foreground'), cachePath = foregroundMemoryPath(fg.binding, 'Foreground_Cache')
+  const listPath = foregroundMemoryPath(fg.binding, 'Foreground_List')
+  await write(target, fg, { op: 'foreground_memory', id: 'list', document: 'Foreground_List', text: '- Build result; source: inputs/notes; task: task-notes; pending.' })
+  const long = '自由随记。'.repeat(20_000)
+  await write(target, fg, { op: 'foreground_memory', id: 'cache-1', document: 'Foreground_Cache', text: long })
+  assert.equal(await repo.read(await repo.snapshot(), cachePath), long)
+  await write(target, fg, { op: 'foreground_memory', id: 'cache-2', document: 'Foreground_Cache', text: 'Current topic only.' })
+  assert.equal(await repo.read(await repo.snapshot(), cachePath), 'Current topic only.')
+  assert.equal([...repo.files.keys()].some(path => /entries\/(cache-1|cache-2)\//.test(path)), false)
+  await write(target, fg, { op: 'foreground_memory', id: 'cache-3', document: 'Foreground_Cache', text: '' })
+  await write(target, fg, { op: 'foreground_memory', id: 'list-done', document: 'Foreground_List', text: '' })
+  assert.equal(repo.files.has(cachePath), false); assert.equal(repo.files.has(listPath), false)
+  assert.equal(roleCommandSchema('worker').safeParse({ op: 'foreground_memory', document: 'Foreground_Cache', text: 'worker' }).success, false)
+  assert.equal(roleCommandSchema('planner').safeParse({ op: 'foreground_memory', document: 'Foreground_List', text: 'planner' }).success, false)
+})
+
+test('shared conversation changes only its send backend; Git input starts Foreground without automatically creating a task', async () => {
+  const repo = new MemoryRepo(), target = instance(repo)
+  const service = new CoopService(target.cache, { describe: async () => ({ configured: true }) } as unknown as CoopCredentials, new GitHubClient(async () => undefined))
+  Object.defineProperty(service, 'repository', { value: repo }); service.attach(target.consumer)
+  const localCalls: string[] = []
+  const base = { assistant: { id: 'default', revision: 1, settings: { name: 'Servant', presetId: 'standard', foreground: { provider: 'chosen', model: 'foreground' }, background: {} },
+    workspace: { id: 'test', directory: process.cwd() }, pendingInputs: [] }, messages: [{ id: 'local-1', role: 'user', text: 'Earlier discussion', at: '2026-10-27T00:00:00Z' }],
+    tasks: [], knowledge: [], workspaces: [], runtime: { status: 'running', workerSeats: 2 }, recordStorage: { directory: process.cwd() },
+    runtimeSettings: { revision: 1, workerSeats: 2 } } as ServantView
+  let mode: 'LOCAL' | 'PRIVATE_GIT_EXPERIMENTAL' = 'LOCAL'
+  const shared = new SharedForeground({ call: async method => { localCalls.push(method); return method === 'view' ? base : { status: 'applied' } } }, async () => service, () => mode, () => true)
+  await shared.call('send', { messageId: 'local-send', text: 'Discuss locally' })
+  assert.equal(localCalls.filter(m => m === 'send').length, 1)
+  mode = 'PRIVATE_GIT_EXPERIMENTAL'
+  await shared.call('send', { messageId: 'shared-send', text: 'Let us discuss this before implementing.' })
+  await target.tick(2); await service.sync()
+  assert.equal(target.agents.starts.length, 1)
+  assert.equal(target.agents.latest('foreground').binding.sourceIntentId, 'shared-send')
+  assert.equal([...repo.files.keys()].some(path => path.startsWith('dss-coop/tasks/')), false)
+  const committed = await readJson<any>(repo, await repo.snapshot(), 'dss-coop/intents/1/shared-send.json')
+  assert.equal(committed.foreground, undefined, 'local working directory stays local')
+  assert.match(await readText(repo, await repo.snapshot(), committed.contextPath), /Earlier discussion/)
+  assert.equal(target.cache.get<UserIntent>('user-source/shared-send')?.foreground?.model, 'foreground')
+  const ui = await shared.call('view', {}) as ServantView
+  assert.equal(ui.assistant.id, 'default')
+  assert.ok(ui.messages.some(m => m.id === 'local-1'))
+  assert.ok(ui.messages.some(m => m.id === 'git:shared-send'))
+  mode = 'LOCAL'
+  await shared.call('send', { messageId: 'local-again', text: 'Local again' })
+  assert.equal(localCalls.filter(m => m === 'send').length, 2)
+})
+
+test('connecting publishes the directory guide once and preserves owner documentation', async () => {
+  const cache = new MemoryStore(), repo = new MemoryRepo()
+  await repo.seed([{ path: 'dss-coop/README.md', content: '# Owner notes\n\nKeep this paragraph.\n' }])
+  const service = new CoopService(cache, { describe: async () => ({ configured: true }) } as unknown as CoopCredentials, new GitHubClient(async () => undefined))
+  Object.defineProperty(service, 'repository', { value: repo })
+  await service.connect()
+  const text = (await repo.read(await repo.snapshot(), 'dss-coop/README.md'))!
+  assert.match(text, /Keep this paragraph/)
+  for (const name of ['inbox', 'Foreground_List', 'Foreground_Cache', 'outcome.json', 'records.md', '30 天', '7 天']) assert.ok(text.includes(name), name)
+  assert.equal(mergeRepositoryGuide(text, cache.settings), text)
+  const count = repo.writes.length
+  await service.sync(); await service.sync()
+  assert.equal(repo.writes.length, count)
+  assert.equal(isProtocolPath('dss-coop/README.md'), true)
 })
 
 test('mode modules have no imports from Local business execution or prompts', async () => {

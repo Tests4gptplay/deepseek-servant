@@ -5,6 +5,7 @@ import type { Assistant, AssistantSettings, AssistantSettingsChange, AssistantUs
   AssistantInputEvidence, AssistantInputReceipt, AssistantDeliveryReceipt, ForegroundCapture } from '../contracts/assistant.ts'
 import type { Delivery, ModelRoute, WorkspaceBinding } from '../contracts/task.ts'
 import { ConversationStore } from './conversation-store.js'
+import type { ForegroundDocumentName } from '../contracts/foreground-memory.js'
 
 export interface AssistantRuntimePort {
   send(assistant: Assistant, text: string, messageId: string, source?: 'user' | 'deepseek-servant'): Promise<void>
@@ -78,6 +79,16 @@ export class AssistantService {
   private readonly advanceAgain = new Set<string>()
   constructor(private readonly options: AssistantServiceOptions) {
     this.conversations = new ConversationStore(options.store, options.timeZone, () => this.now())
+  }
+  async foregroundMemory(assistantId: string, document: ForegroundDocumentName, text?: string): Promise<unknown> {
+    const ref = 'foreground-memory/' + encodeURIComponent(assistantId) + '/' + document
+    if (text === undefined) {
+      const value = await this.options.store.get<{ text: string; updatedAt: string }>(ref)
+      return { ref, exists: !!value?.text, text: value?.text ?? '', updatedAt: value?.updatedAt }
+    }
+    if (!text && this.options.store.delete) await this.options.store.delete(ref)
+    else await this.options.store.set(ref, { text, updatedAt: this.now() })
+    return { ref, exists: !!text, characters: text.length }
   }
   private now(): string { return this.options.now?.() ?? new Date().toISOString() }
   private key(id: string): string { return 'assistant/' + id }
@@ -417,6 +428,7 @@ export class AssistantService {
         'conversation-staging/' + encoded + '/', 'conversation-exchanges/' + encoded + '/',
         'assistant-history/' + encoded + '/session/', 'assistant-history/' + encoded + '/input/']
       const keys = (await Promise.all(prefixes.map(prefix => this.options.store.list(prefix)))).flat().map(row => row.key)
+      keys.push('foreground-memory/' + encoded + '/Foreground_Cache')
       const deliveries: ConversationCleanup['deliveries'] = []
       for (const [key, receipt] of Object.entries(assistant.deliveries)) {
         const sessionId = 'servant-foreground-' + fingerprint(epoch + '\0' + receipt.messageId)

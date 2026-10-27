@@ -36,8 +36,10 @@ export class ModeClient {
         const generation = this.generation
         try {
           const { activeMode } = await this.rpc('selection', {}) as { activeMode: ServantMode }
-          const view = this.includeCoop || activeMode === 'PRIVATE_GIT_EXPERIMENTAL' ? await this.call('view', {}) as CoopView : this.value.view
-          if (!this.disposed && generation === this.generation) this.publish({ ready: true, activeMode, view })
+          let view = this.value.view, error: string | undefined
+          try { if (this.includeCoop || activeMode === 'PRIVATE_GIT_EXPERIMENTAL') view = await this.call('view', {}) as CoopView }
+          catch (reason) { error = reason instanceof Error ? reason.message : String(reason) }
+          if (!this.disposed && generation === this.generation) this.publish({ ready: true, activeMode, view, error })
         } catch (error) { if (!this.disposed && generation === this.generation) this.publish({ ...this.value, error: error instanceof Error ? error.message : String(error) }) }
       }
     })().finally(() => { this.refreshing = undefined })
