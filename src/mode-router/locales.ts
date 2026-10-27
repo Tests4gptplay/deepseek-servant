@@ -2,7 +2,7 @@ export const MODE_NS = 'dsh.servant.modes'
 export const modeZh = {
   mode: '运行模式', local: '标准模式', git: 'DSS-cah 模式',
   autoModelHint: '跟随宿主默认模型；后台运行与这里显示的选择一致。',
-  remoteEnabled: '接收远端任务与控制指令', remoteHint: 'Host 每 15 秒检测新增、修改和删除，读取任务协议与完成信号并调度角色；普通文档由 AI 按需读取。',
+  remoteEnabled: '接收远端任务与控制指令', remoteHint: 'Host 以 1 秒正常间隔增量同步，读回独立远端状态后调度角色；各角色先保存业务记录，再单独提交最终信号。',
   inbox: '远端投递目录',
   useMode: '用于新对话', collapseSettings: '收起配置',
   memoryWarningTitle: '重要：任务记忆将直接写入 Git 仓库',
@@ -33,7 +33,7 @@ export type ModeTextKey = keyof typeof modeZh
 export const modeEn: Record<ModeTextKey, string> = {
   mode: 'Execution mode', local: 'Standard', git: 'DSS-cah mode',
   autoModelHint: 'Follow the host default model, used by background execution too.',
-  remoteEnabled: 'Receive remote tasks and controls', remoteHint: 'Every 15 seconds the Host detects added, modified and deleted paths, reads task protocols and completion signals, and dispatches roles. Other documents are read by AI on demand.',
+  remoteEnabled: 'Receive remote tasks and controls', remoteHint: 'The Host syncs incrementally at a normal one-second interval and dispatches from confirmed remote status. Each role saves its work records before separately submitting its final signal.',
   inbox: 'Remote inbox directory',
   useMode: 'Use for new conversations', collapseSettings: 'Collapse configuration',
   memoryWarningTitle: 'Important: task memory is written directly to Git',

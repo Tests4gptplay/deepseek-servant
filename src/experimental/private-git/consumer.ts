@@ -4,7 +4,8 @@ import type { CoopStore } from './cache.js'
 import type { GitChange, GitChangeNotice, GitRepository, GitSnapshot, RoleBinding, UserIntent } from './contracts.js'
 import { digest, GitJournal, json, readJson, readText, textChanges } from './journal.js'
 import { RoleWriter, plannerTrigger } from './role-writer.js'
-import { readOutcome } from './outcome.js'
+import { readOutcome, recordPublished } from './outcome.js'
+import { appendStatus, statusPath } from './status.js'
 import { actionPath, executionPath, joinPath, participantPath, planPath, sameBinding, StaleCoopWrite, taskPath,
   type ChildState, type Claim, type Join, type LocalGrant, type ParticipantPlan, type RoleAction, type RoleOutcome, type RootTask } from './protocol.js'
 import { CoopFinalizer } from './finalizer.js'
@@ -148,6 +149,24 @@ export class CoopConsumer {
         if (!(error instanceof StaleCoopWrite)) throw error
         await this.close(action, physical, error.message); changed = true; continue
       }
+      if (!physical && action.stateProtocol !== 1) {
+        // Resume an unfinished pre-upgrade action with the same binding and the new role contract.
+        await this.options.journal().transact('startup-' + b.executionId, { binding: b }, async head => {
+          const current = await readJson<RoleAction>(repo, head, actionPath(b))
+          if (!current || current.state !== 'active' || !sameBinding(current.binding, b)) return []
+          return [{ path: actionPath(b), content: json({ ...current, stateProtocol: 1 }) },
+            ...await appendStatus(this.options.journal(), head, { version: 1, kind: 'started', binding: b, createdAt: current.createdAt })]
+        })
+        changed = true; continue
+      }
+      if (action.stateProtocol === 1) {
+        const prepared = await readJson<RoleOutcome>(repo, snapshot, b.outputPath)
+        if (prepared?.operationId && prepared.binding && sameBinding(prepared.binding, b)) {
+          // A crash between the result and status commits can recover entirely from Git.
+          await this.writer.completeOutcome(b, prepared.operationId)
+          changed = true; continue
+        }
+      }
       if (physical?.finished && !physical.busy) {
         if (cache.drafts().some(draft => draft.kind === 'transaction' && (draft.payload as { binding?: RoleBinding }).binding?.executionId === b.executionId)) continue
         const incident = physical.error ?? 'The native turn ended before saving its role outcome.'
@@ -201,6 +220,8 @@ export class CoopConsumer {
       if (!join || join.instanceId !== cache.instanceId || join.participantId !== participantId) continue
 
       if (join.state !== 'active') continue
+      // Role bodies/indexes can arrive before their final status. Never hand off from those alone.
+      if (!await recordPublished(repo, snapshot, join.writer) || !await recordPublished(repo, snapshot, task.writer)) { pendingTasks++; continue }
       const taskActions = actions.filter(action => action.binding.taskId === task.id)
       const activePlanner = taskActions.some(action => action.state === 'active' && action.binding.role === 'planner')
       if (task.status === 'accepted' || task.status === 'cancelled') {
@@ -220,6 +241,8 @@ export class CoopConsumer {
         continue
       }
       pendingTasks++
+      const sharedPlan = await this.writer.rootPlan(snapshot, task.id)
+      if (!await recordPublished(repo, snapshot, sharedPlan.writer)) continue
       const trigger = await plannerTrigger(repo, snapshot, task.id, participantId)
       const outcomes: RoleOutcome[] = []
       for (const action of taskActions.filter(value => value.binding.role === 'planner')) {
@@ -271,14 +294,15 @@ export class CoopConsumer {
       sessionId: 'dss-coop-' + randomUUID(), generation: 1, epoch: input.epoch, fence: randomUUID(),
       assignmentVersion: input.assignmentVersion, childId: input.childId, childRevision: input.childRevision, sourceIntentId: input.sourceIntentId, outputPath: '' }
     binding.outputPath = executionPath(binding) + '/outcome.json'
-    const action: RoleAction = { id: input.actionId, binding, trigger: input.trigger, input: input.input, state: 'active', createdAt: new Date().toISOString() }
+    const action: RoleAction = { id: input.actionId, binding, trigger: input.trigger, input: input.input, state: 'active', stateProtocol: 1, createdAt: new Date().toISOString() }
     const path = actionPath(binding)
     // Stable action ID deduplicates multiple syncs; the admitted object is retained for a lost Git reply.
     const pending = cache.get<RoleAction>('staged/' + path) ?? action
     await cache.put('staged/' + path, pending)
     await this.options.journal().transact('dispatch-' + digest(path).slice(0, 40), { path }, async snapshot => {
       if (await this.options.repo.read(snapshot, path) !== undefined) return []
-      const changes = [{ path, content: json(pending) }, { path: executionPath(pending.binding) + '/binding.json', content: json(pending.binding) }]
+      const changes = [{ path, content: json(pending) }, { path: executionPath(pending.binding) + '/binding.json', content: json(pending.binding) },
+        ...await appendStatus(this.options.journal(), snapshot, { version: 1, kind: 'started', binding: pending.binding, createdAt: pending.createdAt })]
       const notice = (input.input as { gitChanges?: { to: string } }).gitChanges
       if (notice) changes.push({ path: 'dss-coop/instances/' + cache.instanceId + '/watch.json', content: json({ head: notice.to }) })
       return changes
@@ -287,17 +311,16 @@ export class CoopConsumer {
   private async close(action: RoleAction, physical?: CoopPhysicalState, cancelled?: string, outcome?: RoleOutcome): Promise<void> {
     const { cache, agents } = this.options, path = actionPath(action.binding)
     if (cancelled && physical) await agents.release(action.binding.executionId, true)
-    const closed: RoleAction = { ...action, state: 'closed' }
+    const closed: RoleAction = { ...action, state: 'closed' }, closedAt = new Date().toISOString()
     await cache.put('transition/' + path, closed)
     await this.options.journal().transact('close-' + action.binding.executionId, { path, cancelled }, async snapshot => {
       const current = await readJson<RoleAction>(this.options.repo, snapshot, path)
       if (!current || !sameBinding(current.binding, action.binding)) return []
       const changes: GitChange[] = [{ path, content: json(closed) }]
-      if (outcome) {
-        const observedTrigger = outcome.observedTrigger ?? (action.binding.role === 'planner' && action.binding.taskId
-          ? await plannerTrigger(this.options.repo, snapshot, action.binding.taskId, action.binding.participantId) : undefined)
-        changes.push({ path: action.binding.outputPath, content: json({ ...outcome, observedTrigger }) })
-      }
+      const observedTrigger = outcome?.observedTrigger ?? (outcome && action.binding.role === 'planner' && action.binding.taskId
+        ? await plannerTrigger(this.options.repo, snapshot, action.binding.taskId, action.binding.participantId) : undefined)
+      changes.push(...await appendStatus(this.options.journal(), snapshot, { version: 1, kind: 'closed', binding: action.binding,
+        createdAt: closedAt, observedTrigger, reason: cancelled }))
       if (physical) {
         changes.push(...textChanges(executionPath(action.binding) + '/transcript', physical.transcript))
         changes.push({ path: executionPath(action.binding) + '/physical-result.json', content: json({ jobs: physical.jobs, error: physical.error, cancelled, settled: !physical.busy || !!cancelled }) })
@@ -316,7 +339,7 @@ export class CoopConsumer {
     if (!replacement) {
       const binding: RoleBinding = { ...old, executionId: 'exec-' + randomUUID(), sessionId: 'dss-coop-' + randomUUID(), generation: old.generation + 1, fence: randomUUID(), outputPath: '' }
       binding.outputPath = executionPath(binding) + '/outcome.json'
-      replacement = { ...action, binding, input: { original: action.input, recovery: { reason, previous: old, outcome } } }
+      replacement = { ...action, binding, stateProtocol: 1, createdAt: new Date().toISOString(), input: { original: action.input, recovery: { reason, previous: old, outcome } } }
       await cache.put(pendingKey, replacement)
     }
     const next = replacement
@@ -326,6 +349,9 @@ export class CoopConsumer {
       if (!current || !sameBinding(current.binding, old)) throw new StaleCoopWrite('The recovery was superseded.')
       const changes: GitChange[] = [{ path, content: json(next) }, { path: executionPath(next.binding) + '/binding.json', content: json(next.binding) },
         { path: executionPath(old) + '/incident.json', content: json({ reason, previous: old, replacement: next.binding, jobs: physical?.jobs, createdAt: new Date().toISOString() }) }]
+      changes.push(...await appendStatus(this.options.journal(), snapshot, { version: 1, kind: 'replaced', binding: old,
+        successor: next.binding.executionId, reason, createdAt: next.createdAt }),
+        ...await appendStatus(this.options.journal(), snapshot, { version: 1, kind: 'started', binding: next.binding, createdAt: next.createdAt }))
       if (physical) {
         changes.push(...textChanges(executionPath(old) + '/transcript', physical.transcript))
         changes.push({ path: executionPath(old) + '/physical-result.json', content: json({ jobs: physical.jobs, error: physical.error, settled: !physical.busy }) })
@@ -337,10 +363,11 @@ export class CoopConsumer {
   async context(snapshot: GitSnapshot, action: RoleAction): Promise<unknown> {
     const { cache } = this.options, b = action.binding
     // Pass references, not prefetched documents. Each role chooses the relevant text through coop_read.
-    return { binding: b, confirmedHead: snapshot.head, input: action.input, capacity: { workerSeats: cache.settings.workerSeats },
+    return { binding: b, startupStatusPath: action.stateProtocol === 1 ? statusPath(b, 'started') : undefined, confirmedHead: snapshot.head, input: action.input, capacity: { workerSeats: cache.settings.workerSeats },
       inputPath: b.sourceIntentId ? 'dss-coop/intents/' + b.participantId + '/' + b.sourceIntentId + '.json' : undefined,
       conversationPrefix: 'dss-coop/conversations/' + b.participantId + '/',
       tasksPrefix: 'dss-coop/tasks/',
+      roleRecordsPrefix: (b.taskId ? taskPath(b.taskId) : 'dss-coop/foreground') + '/executions/' + b.participantId + '/',
       taskPath: b.taskId ? taskPath(b.taskId) + '/contract.json' : undefined,
       participationPath: b.taskId ? joinPath(b.taskId, b.participantId, b.instanceId) : undefined,
       planPath: b.taskId ? planPath(b.taskId, b.participantId, b.instanceId) : undefined }
