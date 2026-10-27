@@ -1,11 +1,12 @@
 import type { CoopStore } from './cache.js'
 import { readIntent } from './intake.js'
-import { legacySignal, readOutcome, signalDisposition } from './outcome.js'
+import { legacySignal, readOutcome, recordPublished, signalDisposition } from './outcome.js'
+import { appendStatus, readStatus } from './status.js'
 import { loadPaths } from './repository-paths.js'
 import type { GitChange, GitRepository, GitSnapshot, RoleBinding, UserIntent } from './contracts.js'
 import { digest, GitJournal, json, readJson, readText, textChanges } from './journal.js'
 import {
-  actionPath, CommandSchema, executionPath, joinPath, participantPath, planPath, sameBinding, RejectedCoopWrite, StaleCoopWrite, taskPath,
+  actionPath, CommandSchema, executionPath, joinPath, participantPath, planPath, sameBinding, roleCommandSchema, RejectedCoopWrite, StaleCoopWrite, taskPath,
   type Claim, type CoopCommand, type Join, type ParticipantPlan, type RoleAction, type RoleOutcome, type RootPlan, type RootTask,
 } from './protocol.js'
 
@@ -20,6 +21,7 @@ export class RoleWriter {
     const action = await this.read<RoleAction>(snapshot, actionPath(binding))
     if (!action || action.state !== 'active' || !sameBinding(action.binding, binding)) throw new StaleCoopWrite('This role execution was replaced or ended.')
     if (await readOutcome(this.repo, snapshot, binding)) throw new StaleCoopWrite('This role already committed its final outcome.')
+    if (action.stateProtocol === 1 && !await readStatus(this.repo, snapshot, binding, 'started')) throw new StaleCoopWrite('Read the committed startup status before executing this role.')
     if (binding.role !== 'foreground' && !binding.taskId) throw new StaleCoopWrite('Planner and Worker executions need their task assignment.')
     if (binding.taskId) {
       const task = await this.task(snapshot, binding.taskId)
@@ -71,7 +73,7 @@ export class RoleWriter {
     if (!join || join.state !== 'active') throw new RejectedCoopWrite('This instance has not accepted participation in that task.')
     return join
   }
-  async execute(binding: RoleBinding, input: unknown): Promise<{ commit: string; replay: boolean; refs: string[] }> {
+  async execute(binding: RoleBinding, input: unknown): Promise<{ commit: string; replay: boolean; refs: string[]; textPath?: string }> {
     const command = CommandSchema.parse(input)
     const id = 'role-' + digest(binding.executionId + ':' + command.id).slice(0, 40)
     const key = 'draft/' + id
@@ -81,18 +83,55 @@ export class RoleWriter {
     await this.cache.put(key, draft)
     let refs: string[] = []
     try {
-      const receipt = await this.journal.transact(id, { binding, command }, async snapshot => {
-        await this.current(snapshot, binding)
+      let receipt = await this.journal.transact(id, { binding, command }, async snapshot => {
+        const action = await this.current(snapshot, binding)
+        if (action.stateProtocol === 1) {
+          const { id: _id, ...operation } = command
+          const validated = roleCommandSchema(binding.role).safeParse(operation)
+          if (!validated.success) throw new RejectedCoopWrite(validated.error.message)
+          if (await this.repo.read(snapshot, binding.outputPath) !== undefined) throw new RejectedCoopWrite('The final result is already saved. Retry its pending completion status instead of adding more work records.')
+        }
         const changes = await this.build(snapshot, binding, command, draft.createdAt)
+        // AI-authored text and semantic operation records are append-only.
+        if (command.op !== 'entry' && command.op !== 'outcome') changes.push({
+          path: executionPath(binding) + '/entries/' + command.id + '/operation.json',
+          content: json({ writer: binding, command, createdAt: draft.createdAt }),
+        })
+        const committed: GitChange[] = []
+        for (const change of changes) {
+          const ownedRecord = change.path.startsWith(executionPath(binding) + '/')
+            || binding.role === 'foreground' && change.path.startsWith(executionPath({ ...binding, taskId: undefined }) + '/')
+            || change.path.startsWith('dss-coop/knowledge/')
+          committed.push(...(ownedRecord && change.content !== null
+            ? await this.journal.immutable(snapshot, change.path, change.content) : [change]))
+        }
         refs = changes.filter(change => change.content !== null && !change.path.includes('/parts/')).map(change => change.path)
-        return changes
+        return committed
       })
+      if (command.op === 'outcome') {
+        // A separate transaction fetches the remote result before publishing completion.
+        // The consumer never sees a local receipt or an unconfirmed draft as completion.
+        receipt = await this.completeOutcome(binding, command.id)
+      }
       await this.cache.remove(key)
-      return { ...receipt, refs }
+      const textPath = command.op === 'entry' ? this.entryPath(binding, command) : undefined
+      return { ...receipt, refs, textPath }
     } catch (error) {
       await this.cache.put(key, { ...draft, error: error instanceof Error ? error.message : String(error), stale: error instanceof RejectedCoopWrite })
       throw error
     }
+  }
+  async completeOutcome(binding: RoleBinding, operation: string) {
+    const id = 'role-' + digest(binding.executionId + ':' + operation).slice(0, 40)
+    return this.journal.transact(id + '-status', { binding, operation }, async snapshot => {
+      const action = await readJson<RoleAction>(this.repo, snapshot, actionPath(binding))
+      if (action?.stateProtocol !== 1) return []
+      await this.current(snapshot, binding)
+      const outcome = await readJson<RoleOutcome>(this.repo, snapshot, binding.outputPath)
+      if (!outcome?.binding || !sameBinding(outcome.binding, binding) || outcome.operationId !== operation) throw new StaleCoopWrite('Read the bound remote result before completing this turn.')
+      return appendStatus(this.journal, snapshot, { version: 1, kind: 'completed', binding,
+        turn_signal: outcome.turn_signal, outcomePath: binding.outputPath, createdAt: outcome.createdAt })
+    })
   }
   async retryDrafts(): Promise<void> {
     for (const [, draft] of this.cache.entries<RoleDraft>('draft/')) {
@@ -114,6 +153,16 @@ export class RoleWriter {
       }
     }
   }
+  private entryPath(b: RoleBinding, c: Extract<CoopCommand, { op: 'entry' }>): string {
+    return ['knowledge', 'skill', 'preference'].includes(c.kind)
+      ? 'dss-coop/knowledge/' + b.participantId + '/' + c.kind + '/' + b.executionId + '-' + c.id
+      : executionPath(b.role === 'foreground' && c.kind === 'reply' ? { ...b, taskId: undefined } : b) + '/entries/' + c.id + '/' + c.kind
+  }
+  private async roleText(s: GitSnapshot, b: RoleBinding, path: string, kind: 'reply' | 'memory' | 'note'): Promise<void> {
+    const source = await readJson<{ writer: RoleBinding; kind: string }>(this.repo, s, path + '/source.json')
+    if (!source || source.kind !== kind || !sameBinding(source.writer, b)) throw new RejectedCoopWrite('Use this turn’s committed ' + kind + ' entry textPath.')
+    await readText(this.repo, s, path)
+  }
   private async build(s: GitSnapshot, b: RoleBinding, c: CoopCommand, now: string): Promise<GitChange[]> {
     const object = (path: string, value: unknown): GitChange => ({ path, content: json(value) })
     const requireRole = (role: string) => { if (b.role !== role) throw new RejectedCoopWrite('This operation belongs to the ' + role + ' role.') }
@@ -134,7 +183,7 @@ export class RoleWriter {
       const goalPath = 'dss-coop/origins/' + id + '/goal/1'
       const task: RootTask = { id, title: c.title, originatingParticipantId: b.participantId, coordinatorParticipantId: b.participantId,
         originIntentId: source.id, originPath: 'dss-coop/origins/' + id + '/request', goalPath,
-        revision: 1, goalRevision: 1, epoch: 1, status: 'active', createdAt: now, updatedAt: now, sourcePath: c.sourcePath, sourceRevision: c.sourceRevision }
+        revision: 1, goalRevision: 1, epoch: 1, status: 'active', createdAt: now, updatedAt: now, sourcePath: c.sourcePath, sourceRevision: c.sourceRevision, writer: b }
       const join: Join = { taskId: id, participantId: b.participantId, instanceId: b.instanceId,
         sourceIntentId: source.id, sourceHash: digest(source.text), scope: c.goal, capabilities: '', revision: 1, epoch: 1,
         state: 'active', goalRevision: 1, writer: b }
@@ -165,12 +214,12 @@ export class RoleWriter {
         const path = joinPath(task.id, b.participantId, b.instanceId), previous = await this.joined(s, b, task.id)
         const join: Join = { ...previous, goalRevision: revision, revision: previous.revision + 1, epoch: previous.epoch + 1,
           sourceIntentId: source.id, sourceHash: digest(source.text), scope: c.goal, writer: b }
-        return [...textChanges(goalPath, c.goal), object(path, join), object(taskPath(task.id) + '/contract.json', { ...task, goalPath, goalRevision: revision, revision: task.revision + 1, updatedAt: now })]
+        return [...textChanges(goalPath, c.goal), object(path, join), object(taskPath(task.id) + '/contract.json', { ...task, goalPath, goalRevision: revision, revision: task.revision + 1, updatedAt: now, writer: b })]
       }
       if (c.state === 'cancel') {
         if (task.originatingParticipantId !== b.participantId) throw new RejectedCoopWrite('Only the originating user cancels the shared goal. Other participants may leave.')
         compare(task.revision, c.expectedRevision)
-        return [object(taskPath(task.id) + '/contract.json', { ...task, status: 'cancelled', revision: task.revision + 1, epoch: task.epoch + 1, updatedAt: now })]
+        return [object(taskPath(task.id) + '/contract.json', { ...task, status: 'cancelled', revision: task.revision + 1, epoch: task.epoch + 1, updatedAt: now, writer: b })]
       }
       const path = joinPath(task.id, b.participantId, b.instanceId)
       const previous = await this.read<Join>(s, path)
@@ -189,7 +238,7 @@ export class RoleWriter {
         if (old && json(old) !== json(work) && work.version !== old.version + 1) throw new RejectedCoopWrite('Changed assignments increment their version by one.')
         if (!old && work.version !== 1) throw new RejectedCoopWrite('New assignments start at version one.')
       }
-      const changes: GitChange[] = [object(root + '/plan.json', { revision: plan.revision + 1, works: c.works })]
+      const changes: GitChange[] = [object(root + '/plan.json', { revision: plan.revision + 1, works: c.works, writer: b })]
       for (const work of c.works) changes.push(object(root + '/assignments/' + work.id + '.json', work))
       for (const old of plan.works) if (!c.works.some(work => work.id === old.id)) changes.push({ path: root + '/assignments/' + old.id + '.json', content: null })
       return changes
@@ -271,11 +320,10 @@ export class RoleWriter {
         if (!report || report.assignmentVersion !== work.version) throw new RejectedCoopWrite('A current assignment still needs its participant review: ' + work.id)
       }
       return [...textChanges(entry, c.text), object(root + '/acceptance.json', { writer: b, review: c.review, textPath: entry, createdAt: now }),
-        object(root + '/contract.json', { ...task, status: 'accepted', revision: task.revision + 1, updatedAt: now })]
+        object(root + '/contract.json', { ...task, status: 'accepted', revision: task.revision + 1, updatedAt: now, writer: b })]
     }
     if (c.op === 'entry') {
-      const permanent = ['knowledge', 'skill', 'preference'].includes(c.kind)
-      const path = permanent ? 'dss-coop/knowledge/' + b.participantId + '/' + c.kind + '/' + b.executionId + '-' + c.id : entry + '/' + c.kind
+      const path = this.entryPath(b, c)
       return [...textChanges(path, c.text), object(path + '/source.json', { writer: b, kind: c.kind, createdAt: now })]
     }
     if (c.op === 'outcome') {
@@ -291,6 +339,7 @@ export class RoleWriter {
         const join = await this.joined(s, b, c.taskId)
         if (join.writer.executionId !== b.executionId) throw new RejectedCoopWrite('Join or create this task from the current user input before handing it to the Planner.')
       }
+      if (b.role === 'planner' && signal === 'complete' && (await this.task(s, requireTask())).status !== 'accepted') throw new RejectedCoopWrite('Accept the root task before publishing Planner complete.')
       if (signal === 'need_user' && !c.question) throw new RejectedCoopWrite('Include the question for the local user.')
       if (c.question && (b.role !== 'planner' || kind !== 'wait')) throw new RejectedCoopWrite('A local-user question belongs to a Planner wait outcome.')
       const refs = [...c.prerequisitePaths]
@@ -302,14 +351,19 @@ export class RoleWriter {
       }
       const outputRoot = executionPath(b) + '/output'
       const conversation = 'dss-coop/conversations/' + b.participantId + '/' + now.slice(0, 10) + '/' + now.replace(/\D/g, '') + '-' + b.executionId
-      const textPath = b.role === 'foreground' ? conversation + '/text' : outputRoot + '/text'
-      const changes = textChanges(textPath, c.text)
+      const ownPath = b.role === 'planner' ? c.memoryPath : c.replyPath
+      if (!ownPath && !c.text) throw new RejectedCoopWrite(b.role === 'planner' ? 'Commit Planner Memory first, then pass memoryPath.' : 'Commit the reply first, then pass replyPath.')
+      if (ownPath) await this.roleText(s, b, ownPath, b.role === 'planner' ? 'memory' : 'reply')
+      if (c.notePath) await this.roleText(s, b, c.notePath, 'note')
+      const textPath = ownPath ?? (b.role === 'foreground' ? conversation + '/text' : outputRoot + '/text')
+      // Inline text remains readable for saved pre-upgrade drafts; new role tools expose references only.
+      const changes = ownPath ? [] : textChanges(textPath, c.text!)
       if (c.memory) changes.push(...textChanges(outputRoot + '/memory', c.memory))
       if (c.note) changes.push(...textChanges(outputRoot + '/note', c.note))
-      const outcome: RoleOutcome & { observedTrigger?: string } = { binding: b, kind, turn_signal: signal, textPath, taskId: c.taskId ?? b.taskId,
-        memoryPath: c.memory ? outputRoot + '/memory' : undefined, notePath: c.note ? outputRoot + '/note' : undefined,
+      const outcome: RoleOutcome & { observedTrigger?: string } = { binding: b, kind, operationId: c.id, turn_signal: signal, textPath, taskId: c.taskId ?? b.taskId,
+        memoryPath: c.memoryPath ?? (c.memory ? outputRoot + '/memory' : undefined), notePath: c.notePath ?? (c.note ? outputRoot + '/note' : undefined),
         prerequisitePaths: [...new Set(refs)], resultStatus: disposition.resultStatus, question: c.question, createdAt: now }
-      if (b.role === 'planner' && b.taskId) outcome.observedTrigger = await plannerTrigger(this.repo, s, b.taskId, b.participantId)
+      if (b.role === 'planner' && b.taskId) outcome.observedTrigger = await plannerTrigger(this.repo, s, b.taskId, b.participantId, b)
       changes.push(object(b.outputPath, outcome))
       if (b.role === 'foreground') {
         changes.push(object(conversation + '/entry.json', { id: b.executionId, role: 'assistant', textPath: outcome.textPath, createdAt: now, writer: b }))
@@ -320,14 +374,17 @@ export class RoleWriter {
   }
 }
 
-export async function plannerTrigger(repo: GitRepository, snapshot: GitSnapshot, taskId: string, participantId: string): Promise<string> {
+export async function plannerTrigger(repo: GitRepository, snapshot: GitSnapshot, taskId: string, participantId: string, completing?: RoleBinding): Promise<string> {
   const prefix = taskPath(taskId) + '/'
   await loadPaths(repo, snapshot, prefix)
   const selected: Array<[string, string]> = []
   for (const [path, sha] of snapshot.files) {
     if (!path.startsWith(prefix)) continue
     if (path === prefix + 'contract.json' || path === prefix + 'plan.json'
-      || path.endsWith('/join.json') || /\/(proposals|reports)\/[^/]+\.json$/.test(path)) selected.push([path, sha])
+      || path.endsWith('/join.json') || /\/(proposals|reports)\/[^/]+\.json$/.test(path)) {
+      const record = await readJson<{ writer?: RoleBinding }>(repo, snapshot, path)
+      if (record?.writer && completing && sameBinding(record.writer, completing) || await recordPublished(repo, snapshot, record?.writer)) selected.push([path, sha])
+    }
     else if (path.startsWith(prefix + 'executions/' + participantId + '/') && path.endsWith('/outcome.json')) {
       const result = await readOutcome(repo, snapshot, path)
       if (result?.binding.role === 'worker' && result.kind === 'result') selected.push([path, sha])

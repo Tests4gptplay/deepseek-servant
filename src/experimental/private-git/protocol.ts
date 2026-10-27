@@ -29,9 +29,9 @@ export interface RootTask {
   revision: number; goalRevision: number; epoch: number
   status: 'active' | 'waiting' | 'accepted' | 'cancelled'
   createdAt: string; updatedAt: string
-  sourcePath?: string; sourceRevision?: string
+  sourcePath?: string; sourceRevision?: string; writer?: RoleBinding
 }
-export interface RootPlan { revision: number; works: Work[] }
+export interface RootPlan { revision: number; works: Work[]; writer?: RoleBinding }
 export interface Join {
   taskId: string; participantId: string; instanceId: string; sourceIntentId: string
   sourceHash: string; scope: string; capabilities: string; revision: number; epoch: number
@@ -44,7 +44,7 @@ export interface Claim {
 export interface ParticipantPlan { revision: number; children: ChildState[]; writer: RoleBinding }
 export interface RoleAction {
   id: string; binding: RoleBinding; trigger: string; input: unknown
-  state: 'active' | 'closed'; createdAt: string
+  state: 'active' | 'closed'; createdAt: string; stateProtocol?: 1
 }
 export const RoleSignals = {
   foreground: ['respond', 'handoff_planner'],
@@ -55,6 +55,7 @@ export const TurnSignalSchema = z.enum([...RoleSignals.foreground, ...RoleSignal
 export type TurnSignal = z.infer<typeof TurnSignalSchema>
 export interface RoleOutcome {
   turn_signal?: TurnSignal
+  operationId?: string
   binding: RoleBinding; kind: 'respond' | 'handoff_planner' | 'plan_ready' | 'wait' | 'result' | 'continue' | 'complete'
   textPath: string; memoryPath?: string; notePath?: string; taskId?: string; question?: string
   prerequisitePaths: string[]; createdAt: string; observedTrigger?: string; resultStatus?: 'done' | 'failed' | 'handoff'
@@ -81,11 +82,40 @@ export const CommandSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('outcome'), id: Id,
     turn_signal: TurnSignalSchema.optional(),
     kind: z.enum(['respond', 'handoff_planner', 'plan_ready', 'wait', 'result', 'continue', 'complete']).optional(),
-    text: Text, memory: z.string().optional(), note: z.string().optional(), taskId: Id.optional(),
+    replyPath: Text.optional().describe('textPath returned by an earlier reply entry committed to remote Git.'),
+    memoryPath: Text.optional().describe('textPath of an earlier committed memory entry.'),
+    notePath: Text.optional().describe('textPath of an earlier committed note or handoff entry.'),
+    text: Text.optional(), memory: z.string().optional(), note: z.string().optional(), taskId: Id.optional(),
     question: Text.optional().describe('Planner wait only: a concrete question for this participant’s local user, delivered through their Foreground.'),
     prerequisitePaths: z.array(z.string()).default([]), resultStatus: z.enum(['done', 'failed', 'handoff']).optional() }),
 ])
 export type CoopCommand = z.infer<typeof CommandSchema>
+export const RoleEntries = {
+  foreground: ['reply', 'note', 'knowledge', 'skill', 'preference'],
+  planner: ['memory', 'note', 'knowledge', 'skill', 'preference'],
+  worker: ['reply', 'knowledge', 'skill'],
+} as const
+/** The installed schema exposes only the current role's own record responsibilities. */
+export function roleCommandSchema(role: RoleBinding['role']) {
+  const allowed = role === 'foreground' ? new Set(['root', 'join', 'revise', 'control', 'entry', 'outcome'])
+    : role === 'worker' ? new Set(['entry', 'outcome']) : new Set(['root_plan', 'proposal', 'claim', 'participant_plan', 'review', 'report', 'accept', 'entry', 'outcome'])
+  const variants = CommandSchema.options.filter(schema => allowed.has(schema.shape.op.value)).map(schema => {
+    const outcome = schema.shape.op.value === 'outcome'
+    const hidden = role === 'planner' ? ['replyPath'] : ['memoryPath', 'notePath', 'question']
+    const shape = Object.fromEntries(Object.entries(schema.shape).filter(([key]) =>
+      key !== 'id' && (!outcome || !['kind', 'resultStatus', 'text', 'memory', 'note', ...hidden].includes(key))))
+    if (schema.shape.op.value === 'entry') shape.kind = z.enum(RoleEntries[role])
+    if (outcome) {
+      shape.turn_signal = z.enum(RoleSignals[role]).describe('Final remote status, after this role has committed its work records.')
+      if (role === 'planner') shape.memoryPath = Text.describe('textPath of this turn’s committed Planner Memory entry.')
+      else shape.replyPath = Text.describe(role === 'worker'
+        ? 'textPath of this turn’s committed Child Reply entry.'
+        : 'textPath of the committed user-facing response entry.')
+    }
+    return z.object(shape).strict()
+  })
+  return z.union([variants[0]!, variants[1]!, ...variants.slice(2)])
+}
 export const taskPath = (id: string): string => 'dss-coop/tasks/' + Id.parse(id)
 export const participantPath = (taskId: string, participantId: string): string => taskPath(taskId) + '/participants/' + Id.parse(participantId)
 export const joinPath = (taskId: string, participantId: string, instanceId: string): string => participantPath(taskId, participantId) + '/instances/' + Id.parse(instanceId) + '/join.json'

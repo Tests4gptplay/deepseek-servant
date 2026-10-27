@@ -12,7 +12,7 @@ import { isAbsolute } from 'node:path'
 import { z } from 'zod'
 import type { CoopStore } from './cache.js'
 import type { CoopAgentPort, CoopPhysicalState } from './consumer.js'
-import { CommandSchema, RoleSignals, type RoleAction, type RoleOutcome } from './protocol.js'
+import { CommandSchema, roleCommandSchema, type RoleAction } from './protocol.js'
 import { digest, readJson, readText } from './journal.js'
 import type { RoleWriter } from './role-writer.js'
 import { loadPaths, childDirectories } from './repository-paths.js'
@@ -91,16 +91,8 @@ export class CoopNativeAgents implements CoopAgentPort {
           return { from: value.from, to: snapshot.head, changes: changes.slice(value.offset, value.offset + value.limit),
             nextOffset: value.offset + value.limit < changes.length ? value.offset + value.limit : null, count: changes.length }
         })
-      const allowed = b.role === 'foreground' ? new Set(['root', 'join', 'revise', 'control', 'entry', 'outcome'])
-        : b.role === 'worker' ? new Set(['entry', 'outcome']) : new Set(['root_plan', 'proposal', 'claim', 'participant_plan', 'review', 'report', 'accept', 'entry', 'outcome'])
-      const variants = CommandSchema.options.filter(schema => allowed.has(schema.shape.op.value)).map(schema => {
-        const outcome = schema.shape.op.value === 'outcome'
-        const shape = Object.fromEntries(Object.entries(schema.shape).filter(([key]) => key !== 'id' && (!outcome || !['kind', 'resultStatus'].includes(key))))
-        if (outcome) shape.turn_signal = z.enum(RoleSignals[b.role]).describe('Final durable signal for this role; write after its semantic work.')
-        return z.object(shape)
-      })
-      const operationSchema = z.union([variants[0]!, variants[1]!, ...variants.slice(2)])
-      register('coop_commit', 'Commit this role’s task, plan, review or text to private Git. Finish with outcome and turn_signal; the Host binds IDs and dispatches the next role.',
+      const operationSchema = roleCommandSchema(b.role)
+      register('coop_commit', 'Append this role’s work to remote Git. entry returns textPath; outcome separately publishes the final status after the committed role records.',
         z.object({ operation: operationSchema }), async (value, callId) => {
           const command = CommandSchema.parse({ ...(value.operation as object), id: 'op-' + digest(callId).slice(0, 40) })
           if (command.op === 'outcome') {

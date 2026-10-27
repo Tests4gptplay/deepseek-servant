@@ -1,5 +1,6 @@
 import type { GitRepository, GitSnapshot, RoleBinding } from './contracts.js'
 import { readJson } from './journal.js'
+import { readStatus } from './status.js'
 import { actionPath, executionPath, sameBinding, type RoleAction, type RoleOutcome, type TurnSignal } from './protocol.js'
 
 type Disposition = Pick<RoleOutcome, 'kind' | 'resultStatus'>
@@ -43,14 +44,29 @@ export async function readOutcome(repo: GitRepository, snapshot: GitSnapshot, ex
     || binding.outputPath !== path || executionPath(binding) + '/outcome.json' !== path) return undefined
   const action = await readJson<RoleAction>(repo, snapshot, actionPath(binding))
   if (!action?.binding || !sameBinding(action.binding, binding)) return undefined
-  const signal = value.turn_signal ?? legacySignal(binding.role, value)
+  const completed = action.stateProtocol === 1 ? await readStatus(repo, snapshot, binding, 'completed') : undefined
+  if (action.stateProtocol === 1 && (!completed?.turn_signal || completed.outcomePath !== path
+    || completed.turn_signal !== value.turn_signal)) return undefined
+  const signal = completed?.turn_signal ?? value.turn_signal ?? legacySignal(binding.role, value)
   const disposition = signal && signalDisposition(binding.role, signal)
   if (!disposition) return undefined
-  return { ...value, ...disposition, binding, turn_signal: signal,
+  const closed = value.observedTrigger === undefined && binding.role === 'planner'
+    ? await readStatus(repo, snapshot, binding, 'closed') : undefined
+  return { ...value, ...disposition, binding, turn_signal: signal, observedTrigger: value.observedTrigger ?? closed?.observedTrigger,
     textPath: value.textPath ?? executionPath(binding) + '/output/text',
     prerequisitePaths: value.prerequisitePaths ?? [], createdAt: value.createdAt ?? '' }
 }
 
+/** Mutable Host indexes become schedulable only after their author's remote completion. */
+export async function recordPublished(repo: GitRepository, snapshot: GitSnapshot, writer?: RoleBinding): Promise<boolean> {
+  if (!writer) return true // Existing records predate separate status files.
+  const action = await readJson<RoleAction>(repo, snapshot, actionPath(writer))
+  const started = await readStatus(repo, snapshot, writer, 'started')
+  if (!started && action?.stateProtocol !== 1) return true
+  const completed = await readStatus(repo, snapshot, writer, 'completed')
+  return !!completed?.turn_signal && completed.outcomePath === writer.outputPath && !!signalDisposition(writer.role, completed.turn_signal)
+}
+
 /** Protocol changes are consumed by the Host; business-source notices go to Foreground. */
 export const isProtocolPath = (path: string): boolean =>
-  /^dss-coop\/(?:tasks|foreground|intents|inputs|instances|participants|assistants|conversations|history|records|origins|events|incidents)\//.test(path)
+  /^dss-coop\/(?:tasks|foreground|intents|inputs|instances|participants|assistants|conversations|history|records|origins|events|incidents|status)\//.test(path)

@@ -9,11 +9,14 @@ import { GitConflictError, GitHubClient, GitHubError, GitHubMembers, inspectPriv
 import { digest, GitJournal, json, readJson, readText, textChanges } from '../src/experimental/private-git/journal.js'
 import { CoopConsumer, type CoopAgentPort, type CoopPhysicalState } from '../src/experimental/private-git/consumer.js'
 import { RoleWriter } from '../src/experimental/private-git/role-writer.js'
-import { isProtocolPath, readOutcome, signalDisposition } from '../src/experimental/private-git/outcome.js'
+import { CoopNativeAgents } from '../src/experimental/private-git/native-agents.js'
+import { isProtocolPath, legacySignal, readOutcome, signalDisposition } from '../src/experimental/private-git/outcome.js'
+import { statusPath } from '../src/experimental/private-git/status.js'
+import { CoopSync } from '../src/experimental/private-git/sync.js'
 import { conversationPage } from '../src/experimental/private-git/conversation.js'
 import { CoopService } from '../src/experimental/private-git/service.js'
 import type { CoopCredentials } from '../src/experimental/private-git/credentials.js'
-import { actionPath, executionPath, joinPath, planPath, taskPath, type CoopCommand, type RoleAction, type RoleOutcome, type RootTask } from '../src/experimental/private-git/protocol.js'
+import { actionPath, executionPath, joinPath, planPath, roleCommandSchema, taskPath, type CoopCommand, type RoleAction, type RoleOutcome, type RootTask } from '../src/experimental/private-git/protocol.js'
 
 const connection = (id: number): RepoConnection => ({ identity: { id, login: 'participant-' + id }, repository: {
   id: 77, fullName: 'example/private-collaboration', branch: 'main', private: true, permissions: { pull: true, push: true, admin: id === 1 },
@@ -86,7 +89,19 @@ async function input(repo: MemoryRepo, target: Instance, id: string, text: strin
     content: json({ ...source, text: undefined, textPath: path + '/text' }) },
     { path: path + '/entry.json', content: json({ ...source, text: undefined, textPath: path + '/text', role: 'user' }) }])
 }
-async function write(target: Instance, action: RoleAction, command: CoopCommand) { return target.consumer.writer.execute(action.binding, command) }
+async function write(target: Instance, action: RoleAction, command: CoopCommand) {
+  const writer = target.consumer.writer, b = action.binding
+  if (action.stateProtocol === 1 && command.op === 'outcome' && command.text) {
+    const { text, memory, note, kind, resultStatus, ...rest } = command
+    const record = await writer.execute(b, { op: 'entry', id: command.id + '-body', kind: b.role === 'planner' ? 'memory' : 'reply',
+      text: [text, memory].filter(Boolean).join('\n') })
+    const noteRecord = note ? await writer.execute(b, { op: 'entry', id: command.id + '-note', kind: 'note', text: note }) : undefined
+    return writer.execute(b, { ...rest, turn_signal: command.turn_signal ?? legacySignal(b.role, command),
+      ...(b.role === 'planner' ? { memoryPath: record.textPath } : { replyPath: record.textPath }),
+      ...(noteRecord ? { notePath: noteRecord.textPath } : {}) })
+  }
+  return writer.execute(b, command)
+}
 const review = { reported: 'Produced the requested artifact', checked: 'Opened the actual artifact and ran the named check', discrepancy: 'None', decision: 'Accepted', next: 'Integrate the shared result' }
 async function root(repo: MemoryRepo, target: Instance) {
   await input(repo, target, 'origin-1', 'Build the shared deliverable without changing accepted content.')
@@ -202,7 +217,7 @@ test('three independent participants execute through readback, review, seal and 
     assert.equal(target.agents.starts.length, count, 'staging a Worker does not start it')
     await target.tick()
     const worker = target.agents.latest('worker')
-    await write(target, worker, { op: 'entry', id: 'progress', kind: 'checkpoint', text: 'Complete checkpoint text for participant ' + (n + 1) })
+    await write(target, worker, { op: 'entry', id: 'progress', kind: 'reply', text: 'Complete checkpoint text for participant ' + (n + 1) })
     await write(target, worker, { op: 'outcome', id: 'out', kind: 'result', resultStatus: 'done', text: 'Artifact and exact verification evidence ' + (n + 1), prerequisitePaths: [] })
     target.agents.finish(worker, 'Full Worker visible transcript ' + (n + 1))
     await target.tick(2)
@@ -232,6 +247,8 @@ test('three independent participants execute through readback, review, seal and 
   await a.tick()
   const cleaned = await repo.snapshot()
   assert.ok(![...cleaned.files.keys()].some(path => path.startsWith(taskPath(taskId) + '/')))
+  const conversation = await conversationPage(repo, new MemoryStore(), cleaned, '1')
+  assert.ok(conversation.messages.some(message => message.text === 'All three contributions are integrated. Here are the final artifact references.'), 'the delivered reply remains readable after task cleanup')
   const manifest = await readJson<{ recordsPath: string }>(repo, cleaned, 'dss-coop/records/' + taskId + '/manifest.json')
   const records = await readText(repo, cleaned, manifest!.recordsPath)
   assert.match(records, /Build the shared deliverable without changing accepted content/)
@@ -259,8 +276,9 @@ test('offline role output is a draft, then reconciles once without dispatching f
   await input(repo, target, 'short', 'Hello')
   await target.tick(2)
   const fg = target.agents.latest('foreground')
+  const reply = await write(target, fg, { op: 'entry', id: 'body', kind: 'reply', text: 'Hello back' })
   repo.offline = true
-  await assert.rejects(write(target, fg, { op: 'outcome', id: 'reply', kind: 'respond', text: 'Hello back', prerequisitePaths: [] }), /network/)
+  await assert.rejects(write(target, fg, { op: 'outcome', id: 'reply', turn_signal: 'respond', replyPath: reply.textPath, prerequisitePaths: [] }), /network/)
   assert.equal(target.cache.drafts().length, 1)
   assert.equal(target.agents.starts.length, 1)
   repo.offline = false
@@ -326,7 +344,7 @@ test('cold consumption resumes the exact saved Worker and respects explicit part
   await write(target, planner, { op: 'outcome', id: 'out', kind: 'plan_ready', text: 'Ready', memory: 'Saved memory', note: 'Saved frontier', prerequisitePaths: [] })
   target.agents.finish(planner); await target.tick(2)
   const worker = target.agents.latest('worker')
-  await write(target, worker, { op: 'entry', id: 'checkpoint', kind: 'checkpoint', text: 'Completed first segment, retained file exists' })
+  await write(target, worker, { op: 'entry', id: 'checkpoint', kind: 'reply', text: 'Completed first segment, retained file exists' })
   await target.agents.dispose()
   const agents = new Agents(), consumer = new CoopConsumer({ repo, cache: target.cache, journal: () => target.journal, agents, wake() {} })
   await consumer.consume(await repo.snapshot())
@@ -341,6 +359,49 @@ test('cold consumption resumes the exact saved Worker and respects explicit part
   const fresh = new Agents(), paused = new CoopConsumer({ repo, cache: target.cache, journal: () => target.journal, agents: fresh, wake() {} })
   await paused.consume(await repo.snapshot())
   assert.equal(fresh.starts.filter(value => value.binding.role === 'worker').length, 0)
+})
+
+for (const role of ['foreground', 'planner', 'worker'] as const) test('cold ' + role + ' resumes its native Session and queues the same role with saved progress once', async () => {
+  const repo = new MemoryRepo(), target = instance(repo)
+  if (role === 'foreground') { await input(repo, target, 'wake', 'Continue the requested task'); await target.tick(2) }
+  else if (role === 'planner') await root(repo, target)
+  else await plannedChild(repo, target)
+  const action = target.agents.latest(role), b = action.binding
+  const progress = await write(target, action, { op: 'entry', id: 'before-restart', kind: role === 'planner' ? 'memory' : 'reply', text: 'Saved progress before interruption' })
+  await target.agents.dispose()
+  const resumed: string[] = [], messages: any[] = [], sections: string[] = []
+  let flushed = 0
+  const scope = { systemPrompt: { section: (section: { text: string }) => sections.push(section.text) },
+    tools: { schemas: () => [], register() {} }, on() {}, get() {}, effect() {} }
+  const ctx = {
+    get(name: string) { return name === 'sessionPersistence' ? { stat: async (id: string) => id === b.sessionId ? { id } : undefined } : undefined },
+    sessions: { async flush() { flushed++ } },
+    agents: {
+      get() {},
+      async create() { assert.fail('saved native Session must resume') },
+      async resume({ resumeSessionId, setup }: any) {
+        resumed.push(resumeSessionId)
+        const agent = { id: resumeSessionId, ctx: scope, status: 'running', inbox: { nextTurn: [], nextStep: [] },
+          session: { snapshotEvents: () => [], deriveMessages: () => [] }, followup(message: unknown) { messages.push(message) }, cancel() {} }
+        await setup(scope, agent)
+        return { agent, async dispose() {} }
+      },
+    },
+  }
+  const native = new CoopNativeAgents(ctx as any, target.cache)
+  const cold = new CoopConsumer({ repo, cache: target.cache, journal: () => target.journal, agents: native, wake() {} })
+  try {
+    await cold.consume(await repo.snapshot())
+    await cold.consume(await repo.snapshot())
+    assert.deepEqual(resumed, [b.sessionId])
+    assert.equal(messages.length, 1); assert.equal(flushed, 1)
+    assert.match(messages[0].content[0].text, /^Resume the same local role after Host restart\./)
+    const context = JSON.parse(messages[0].content[0].text.split('\n').slice(1).join('\n'))
+    assert.deepEqual(context.binding, b)
+    assert.ok(sections.includes(await readFile('src/experimental/private-git/prompts/' + role + '.md', 'utf8')))
+    assert.equal(await readText(repo, await repo.snapshot(), progress.textPath!), 'Saved progress before interruption')
+    assert.equal(native.state(b.executionId)?.busy, true)
+  } finally { await cold.dispose() }
 })
 
 test('Planner questions reach Foreground once and a genuine goal revision authorizes its own new scope', async () => {
@@ -563,6 +624,8 @@ test('CAH role signals have explicit routing and remain compatible with committe
   assert.equal(signalDisposition('worker', 'done'), undefined)
   const repo = new MemoryRepo(), target = instance(repo)
   const planner = await root(repo, target)
+  delete planner.stateProtocol
+  await repo.seed([{ path: actionPath(planner.binding), content: json(planner) }])
   await write(target, planner, { op: 'outcome', id: 'legacy', kind: 'wait', text: 'Legacy result', prerequisitePaths: [] })
   const legacy = await readJson<RoleOutcome>(repo, await repo.snapshot(), planner.binding.outputPath)
   delete legacy!.turn_signal
@@ -584,7 +647,8 @@ test('the bound protocol body, not prose or a mismatched ID, completes a role', 
   await repo.seed([{ path: b.outputPath, content: json({ binding: b, text: 'complete respond done' }) }])
   await target.tick()
   assert.equal((await readJson<RoleAction>(repo, await repo.snapshot(), actionPath(b)))?.state, 'active')
-  await repo.seed([{ path: b.outputPath, content: json({ binding: b, turn_signal: 'respond' }) }])
+  await repo.seed([{ path: b.outputPath, content: json({ binding: b, turn_signal: 'respond' }) },
+    { path: statusPath(b, 'completed'), content: json({ version: 1, kind: 'completed', binding: b, turn_signal: 'respond', outcomePath: b.outputPath }) }])
   await target.tick()
   assert.equal((await readJson<RoleAction>(repo, await repo.snapshot(), actionPath(b)))?.state, 'closed')
   assert.equal(target.agents.state(b.executionId)?.busy, true, 'native reply ending is not required')
@@ -658,7 +722,7 @@ test('protocol changes are read mechanically without generic Foreground notices;
   await input(repo, target, 'protocol', 'Hello'); await target.tick(2)
   const foreground = target.agents.latest('foreground')
   target.cache.settings.remoteEnabled = true
-  await repo.seed([{ path: foreground.binding.outputPath, content: json({ binding: foreground.binding, turn_signal: 'respond' }) }])
+  await write(target, foreground, { op: 'outcome', id: 'remote', turn_signal: 'respond', text: 'Saved response', prerequisitePaths: [] })
   let changes = [{ path: foreground.binding.outputPath, status: 'A', commit: repo.head },
     { path: 'dss-coop/events/2/receipt.json', status: 'A', commit: repo.head }]
   Object.defineProperty(repo, 'changes', { value: async () => changes })
@@ -670,13 +734,162 @@ test('protocol changes are read mechanically without generic Foreground notices;
   target.agents.finish(foreground); await service.sync()
   assert.ok(reads.includes(foreground.binding.outputPath))
   assert.equal(target.agents.starts.length, 1)
-  for (const prefix of ['events', 'records', 'origins', 'incidents']) assert.equal(isProtocolPath('dss-coop/' + prefix + '/item'), true)
+  for (const prefix of ['events', 'records', 'origins', 'incidents', 'status']) assert.equal(isProtocolPath('dss-coop/' + prefix + '/item'), true)
   const sourcePath = 'dss-coop/requests/new.md'
   await repo.seed([{ path: sourcePath, content: 'AI reads this business request deliberately.' }])
   changes = [{ path: sourcePath, status: 'A', commit: repo.head }]
   await service.sync(); changes = []; await service.sync()
   assert.equal(target.agents.starts.length, 2)
   assert.equal(reads.includes(sourcePath), false)
+})
+
+
+test('installed role contracts, schemas and writer agree on distinct record responsibilities', async () => {
+  for (const role of ['foreground', 'planner', 'worker'] as const) {
+    const schema = roleCommandSchema(role), kind = role === 'planner' ? 'memory' : 'reply'
+    const key = role === 'planner' ? 'memoryPath' : 'replyPath'
+    assert.ok(schema.safeParse({ op: 'entry', kind, text: 'Actual role work' }).success)
+    assert.ok(schema.safeParse({ op: 'outcome', turn_signal: role === 'foreground' ? 'respond' : role === 'planner' ? 'done' : 'complete', [key]: 'saved/text' }).success)
+    assert.equal(schema.safeParse({ op: 'entry', kind: role === 'planner' ? 'reply' : 'memory', text: 'Wrong responsibility' }).success, false)
+    assert.equal(schema.safeParse({ op: 'outcome', turn_signal: 'complete', text: 'Uncommitted inline body' }).success, false)
+    const prompt = await readFile('src/experimental/private-git/prompts/' + role + '.md', 'utf8')
+    assert.ok(prompt.includes('kind=' + kind))
+    assert.ok(prompt.includes(key))
+    if (role === 'planner') assert.ok(prompt.includes('nextDirection'), 'Planner retains its child review/direction responsibility')
+    if (role === 'worker') assert.ok(prompt.includes('Progress checkpoints and handoff facts belong in this Child Reply'))
+  }
+  const repo = new MemoryRepo(), target = instance(repo)
+  const planner = await plannedChild(repo, target), worker = target.agents.latest('worker')
+  await assert.rejects(target.consumer.writer.execute(worker.binding, { op: 'entry', id: 'wrong', kind: 'memory', text: 'Wrong role' }), /Invalid|invalid/)
+  const result = await write(target, worker, { op: 'entry', id: 'reply-body', kind: 'reply', text: 'Saved Child Reply and evidence' })
+  assert.ok(result.textPath)
+  const source = await readJson<{ kind: string; writer: RoleBinding }>(repo, await repo.snapshot(), result.textPath + '/source.json')
+  assert.equal(source?.kind, 'reply'); assert.equal(source?.writer.role, 'worker')
+  await assert.rejects(target.consumer.writer.execute(worker.binding, {
+    op: 'outcome', id: 'wrong-reference', turn_signal: 'complete', replyPath: executionPath(planner.binding) + '/entries/out-body/memory',
+  }), /this turn’s committed reply/)
+  assert.equal(await readOutcome(repo, await repo.snapshot(), worker.binding), undefined)
+})
+
+test('remote startup, role text, result and final status are ordered; cold recovery never dispatches from a write', async () => {
+  const repo = new MemoryRepo(), target = instance(repo)
+  await input(repo, target, 'ordered', 'Build a managed output')
+  await target.tick()
+  assert.equal(target.agents.starts.length, 0)
+  const startedPath = [...repo.files.keys()].find(path => path.endsWith('/started.json'))!
+  assert.ok(startedPath.startsWith('dss-coop/status/'))
+  const startupSha = repo.files.get(startedPath)
+  await target.tick()
+  const fg = target.agents.latest('foreground'), b = fg.binding
+  await write(target, fg, { op: 'root', id: 'root', title: 'Ordered output', goal: 'Make output', initialPlan: 'Plan and execute' })
+  await target.tick(2)
+  assert.equal(target.agents.starts.filter(a => a.binding.role === 'planner').length, 0, 'root and join alone do not dispatch')
+  const reply = await write(target, fg, { op: 'entry', id: 'body', kind: 'reply', text: 'The task and initial plan are saved.' })
+  const textSha = repo.files.get(reply.textPath + '/manifest.json')
+  const commit = repo.commit.bind(repo)
+  repo.commit = async (snapshot, changes) => {
+    if (changes.some(change => change.path === statusPath(b, 'completed'))) throw new GitHubError(0, 'final status network failure')
+    return commit(snapshot, changes)
+  }
+  await assert.rejects(write(target, fg, { op: 'outcome', id: 'finish', turn_signal: 'handoff_planner',
+    taskId: 'task-ordered', replyPath: reply.textPath, prerequisitePaths: [] }), /final status network/)
+  const resultSha = repo.files.get(b.outputPath)
+  assert.ok(resultSha, 'the result reference is already remote')
+  assert.equal(await readOutcome(repo, await repo.snapshot(), b), undefined)
+  await assert.rejects(target.tick(), /final status network/)
+  assert.equal(target.agents.starts.filter(a => a.binding.role === 'planner').length, 0)
+  repo.commit = commit
+  const cold = instance(repo) // No local drafts, running agents or previous confirmations.
+  await cold.tick()
+  assert.equal(cold.agents.starts.length, 0, 'recovering the final remote status still requires a later read')
+  assert.ok(repo.files.has(statusPath(b, 'completed')))
+  const completedSha = repo.files.get(statusPath(b, 'completed'))
+  await cold.tick(2)
+  assert.equal(cold.agents.starts.filter(a => a.binding.role === 'planner').length, 1)
+  await cold.tick(2)
+  assert.equal(cold.agents.starts.filter(a => a.binding.role === 'planner').length, 1)
+  await target.consumer.writer.retryDrafts()
+  assert.equal(target.cache.drafts().length, 0)
+  assert.equal(repo.files.get(startedPath), startupSha)
+  assert.equal(repo.files.get(b.outputPath), resultSha, 'consumer close never rewrites AI result')
+  assert.equal(repo.files.get(reply.textPath + '/manifest.json'), textSha)
+  assert.equal(repo.files.get(statusPath(b, 'completed')), completedSha)
+  const bodyWrite = repo.writes.findIndex(w => w.changes.some(c => c.path === reply.textPath + '/manifest.json'))
+  const resultWrite = repo.writes.findIndex(w => w.changes.some(c => c.path === b.outputPath))
+  const finalWrite = repo.writes.findIndex(w => w.changes.some(c => c.path === statusPath(b, 'completed')))
+  assert.ok(bodyWrite < resultWrite && resultWrite < finalWrite)
+  assert.equal(repo.writes.filter(w => w.changes.some(c => c.path === statusPath(b, 'completed'))).length, 1)
+})
+
+test('Planner Memory and directions wait for final remote status before Worker dispatch', async () => {
+  const repo = new MemoryRepo(), target = instance(repo)
+  const planner = await root(repo, target), b = planner.binding
+  await write(target, planner, { op: 'root_plan', id: 'assign', expectedRevision: 0, works: [
+    { id: 'part', title: 'Part', direction: 'Make part', acceptance: 'Open part', participantId: '1', instanceId: target.cache.instanceId, version: 1 },
+  ] })
+  await write(target, planner, { op: 'claim', id: 'claim', workId: 'part', assignmentVersion: 1, scope: 'Make part' })
+  await write(target, planner, { op: 'participant_plan', id: 'plan', expectedRevision: 0, children: [
+    { id: 'child', workId: 'part', assignmentVersion: 1, title: 'Child', direction: 'Make part', acceptance: 'Open part', dependencies: [] },
+  ] })
+  const memory = await write(target, planner, { op: 'entry', id: 'memory', kind: 'memory', text: 'Assigned bounded work; inspect the resulting part.' })
+  const note = await write(target, planner, { op: 'entry', id: 'note', kind: 'note', text: 'After part: integrate and deliver.' })
+  await target.tick(2)
+  assert.equal(target.agents.starts.filter(a => a.binding.role === 'worker').length, 0)
+  await write(target, planner, { op: 'outcome', id: 'finish', turn_signal: 'done', memoryPath: memory.textPath, notePath: note.textPath, prerequisitePaths: [] })
+  assert.equal(target.agents.starts.filter(a => a.binding.role === 'worker').length, 0)
+  const outcome = await readOutcome(repo, await repo.snapshot(), b)
+  assert.equal(outcome?.memoryPath, memory.textPath)
+  assert.equal(outcome?.notePath, note.textPath)
+  assert.equal(outcome?.textPath, memory.textPath)
+  await target.tick(2)
+  assert.equal(target.agents.starts.filter(a => a.binding.role === 'worker').length, 1)
+})
+
+test('one-second remote timer coalesces event requests and stops cleanly', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let calls = 0, release!: () => void
+  const pending = new Promise<void>(resolve => { release = resolve })
+  const sync = new CoopSync({ sync: async () => { calls++; if (calls === 1) await pending } } as unknown as CoopService,
+    { hasWork: () => true } as CoopConsumer)
+  const flush = () => new Promise<void>(resolve => setImmediate(resolve))
+  sync.request(); sync.request(); t.mock.timers.tick(0)
+  assert.equal(calls, 1)
+  sync.request(); sync.request()
+  release(); await flush(); t.mock.timers.tick(0); await flush()
+  assert.equal(calls, 2, 'events during one fetch coalesce into one following fetch')
+  t.mock.timers.tick(999); await flush(); assert.equal(calls, 2)
+  t.mock.timers.tick(1); await flush(); assert.equal(calls, 3)
+  sync.dispose(); t.mock.timers.tick(5000); await flush(); assert.equal(calls, 3)
+})
+
+
+test('an unfinished pre-upgrade action publishes startup before resuming the same native binding', async () => {
+  const repo = new MemoryRepo(), target = instance(repo)
+  const b: RoleBinding = { participantId: '1', instanceId: target.cache.instanceId, role: 'foreground',
+    actionId: 'legacy-pending', executionId: 'legacy-execution', sessionId: 'legacy-session', generation: 1, epoch: 0, fence: 'legacy', outputPath: '' }
+  b.outputPath = executionPath(b) + '/outcome.json'
+  const action: RoleAction = { id: b.actionId, binding: b, state: 'active', trigger: 'old', input: {}, createdAt: '2026-10-27T00:00:00Z' }
+  await repo.seed([{ path: actionPath(b), content: json(action) }])
+  await target.tick()
+  assert.equal(target.agents.starts.length, 0)
+  assert.ok(repo.files.has(statusPath(b, 'started')))
+  await target.tick()
+  assert.equal(target.agents.latest('foreground').binding.executionId, b.executionId)
+  await write(target, target.agents.latest('foreground'), { op: 'outcome', id: 'finish', turn_signal: 'respond', text: 'Resumed reply', prerequisitePaths: [] })
+  await target.tick()
+  assert.equal((await readJson<RoleAction>(repo, await repo.snapshot(), actionPath(b)))?.state, 'closed')
+})
+
+test('task projection shows acceptance only after the Planner final status is remote', async () => {
+  const repo = new MemoryRepo(), target = instance(repo), planner = await root(repo, target)
+  const service = new CoopService(target.cache, { describe: async () => ({ configured: true }) } as unknown as CoopCredentials, new GitHubClient(async () => undefined))
+  Object.defineProperty(service, 'repository', { value: repo }); service.attach(target.consumer)
+  await write(target, planner, { op: 'accept', id: 'accept', expectedRevision: 1, review, text: 'Reviewed final artifact' })
+  await service.sync()
+  assert.equal((await service.view()).tasks.find(t => t.id === 'task-origin-1')?.status, 'active')
+  await write(target, planner, { op: 'outcome', id: 'final', turn_signal: 'complete', text: 'Root accepted; preserve final evidence', prerequisitePaths: [] })
+  await service.sync()
+  assert.equal((await service.view()).tasks.find(t => t.id === 'task-origin-1')?.status, 'accepted')
 })
 
 test('mode modules have no imports from Local business execution or prompts', async () => {

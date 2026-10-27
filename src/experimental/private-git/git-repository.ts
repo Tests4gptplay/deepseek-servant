@@ -22,11 +22,15 @@ export class GitHubRepository implements GitRepository {
   private scope?: string
   private readonly loaded = new WeakMap<GitSnapshot, Set<string>>()
   private readonly environments = new WeakMap<GitSnapshot, GitEnvironment>()
+  private readonly directoryCache = new WeakMap<GitSnapshot, Map<string, string[]>>()
+  private readonly absent = new WeakMap<GitSnapshot, Set<string>>()
+  private checked?: { key: string; tokenHash: string; connection: RepoConnection }
+  private prepared?: string
   private readonly blobs = new Map<string, string>()
   private snapshotPending?: Promise<GitSnapshot>
   constructor(private readonly client: GitHubClient, private readonly binding: () => RepoBinding,
     private readonly tokens: TokenSource, private readonly cacheRoot = join(tmpdir(), 'deepseek-servant-git')) {}
-  cancel(): void { this.controller.abort(); this.controller = new AbortController(); this.confirmed = undefined; this.blobs.clear() }
+  cancel(): void { this.controller.abort(); this.controller = new AbortController(); this.confirmed = undefined; this.blobs.clear(); this.checked = undefined; this.prepared = undefined }
   async releaseCache(): Promise<void> {
     const scope = this.scope
     this.cancel()
@@ -38,17 +42,23 @@ export class GitHubRepository implements GitRepository {
     this.scope = undefined
   }
   connect(): Promise<RepoConnection> { return this.client.session(session => inspectPrivateRepo(session, { ...this.binding(), participantId: undefined })) }
-  private async environment(): Promise<GitEnvironment> {
+  private async environment(forWrite = false): Promise<GitEnvironment> {
     const signal = this.controller.signal, binding = this.binding()
-    const connection = await this.client.session(session => inspectPrivateRepo(session, binding))
     const token = await this.tokens()
     signal.throwIfAborted()
     if (!token) throw new Error('Sign in with GitHub CLI or configure the existing DSH GitHub credential.')
+    const key = JSON.stringify([binding.ownerRepo, binding.repositoryId, binding.participantId, binding.branch])
+    const tokenHash = createHash('sha256').update(token.value).digest('hex')
+    let connection = !forWrite && this.checked?.key === key && this.checked.tokenHash === tokenHash ? this.checked.connection : undefined
+    if (!connection) {
+      connection = await this.client.session(session => inspectPrivateRepo(session, binding))
+      this.checked = { key, tokenHash, connection }
+    }
     const directory = binding.repositoryDirectory ?? 'dss-coop'
     const scope = connection.repository.fullName + '/' + directory + '/' + (binding.instanceId ?? 'default')
-    if (this.scope !== scope) { this.scope = scope; this.confirmed = undefined; this.blobs.clear() }
+    if (this.scope !== scope) { this.scope = scope; this.confirmed = undefined; this.blobs.clear(); this.prepared = undefined }
     const cwd = join(this.cacheRoot, createHash('sha256').update(scope).digest('hex').slice(0, 24))
-    await mkdir(cwd, { recursive: true })
+    if (this.prepared !== scope) await mkdir(cwd, { recursive: true })
     const env: NodeJS.ProcessEnv = {
       // Credentials stay in the subprocess environment, never in URLs, config or disk.
       GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
@@ -56,14 +66,17 @@ export class GitHubRepository implements GitRepository {
       GIT_CONFIG_NOSYSTEM: '0', GIT_DIR: cwd, GIT_WORK_TREE: undefined, GIT_INDEX_FILE: undefined,
     }
     const result = { cwd, env, connection, directory, signal }
-    try { await this.git(result, ['rev-parse', '--git-dir']) }
-    catch (error) {
-      if (!(error instanceof GitError)) throw error
-      await this.git(result, ['init', '--bare', '.'])
-      await this.git(result, ['config', 'remote.origin.url', 'https://github.com/' + connection.repository.fullName + '.git'])
-      await this.git(result, ['config', 'remote.origin.promisor', 'true'])
-      await this.git(result, ['config', 'remote.origin.partialclonefilter', 'blob:none'])
-      await this.git(result, ['config', 'core.logAllRefUpdates', 'false'])
+    if (this.prepared !== scope) {
+      try { await this.git(result, ['rev-parse', '--git-dir']) }
+      catch (error) {
+        if (!(error instanceof GitError)) throw error
+        await this.git(result, ['init', '--bare', '.'])
+        await this.git(result, ['config', 'remote.origin.url', 'https://github.com/' + connection.repository.fullName + '.git'])
+        await this.git(result, ['config', 'remote.origin.promisor', 'true'])
+        await this.git(result, ['config', 'remote.origin.partialclonefilter', 'blob:none'])
+        await this.git(result, ['config', 'core.logAllRefUpdates', 'false'])
+      }
+      this.prepared = scope
     }
     return result
   }
@@ -103,12 +116,16 @@ export class GitHubRepository implements GitRepository {
       const snapshot = { ...source, reads: new Map<string, string | undefined>() }
       const environment = this.environments.get(source)
       if (environment) this.environments.set(snapshot, environment)
+      this.loaded.set(snapshot, this.loaded.get(source)!)
+      this.directoryCache.set(snapshot, this.directoryCache.get(source)!)
+      this.absent.set(snapshot, this.absent.get(source)!)
       return snapshot
     })
   }
   private async refresh(): Promise<GitSnapshot> {
     const e = await this.environment(), head = await this.fetch(e)
     const previous = this.confirmed
+    if (previous?.head === head) { this.environments.set(previous, e); return previous }
     const files = new Map(previous?.files)
     if (previous?.head && previous.head !== head && head) {
       // Git performs transfer incrementally. Only names changed under the configured directory are compared.
@@ -124,18 +141,26 @@ export class GitHubRepository implements GitRepository {
     const snapshot: GitSnapshot = { head, tree: head ? (await this.git(e, ['rev-parse', head + '^{tree}'])).trim() : '', files, reads: new Map() }
     this.confirmed = snapshot
     this.loaded.set(snapshot, new Set())
+    this.directoryCache.set(snapshot, new Map())
+    this.absent.set(snapshot, new Set())
     this.environments.set(snapshot, e)
     return snapshot
   }
   async directories(snapshot: GitSnapshot, prefix: string): Promise<string[]> {
+    let cached = this.directoryCache.get(snapshot)
+    if (!cached) this.directoryCache.set(snapshot, cached = new Map())
+    const known = cached.get(prefix)
+    if (known) return known
     const e = this.environments.get(snapshot) ?? await this.environment()
     const path = this.physical(e, prefix.replace(/\/$/, ''))
     if (!snapshot.head) return []
     try {
       const output = await this.git(e, ['ls-tree', '-z', '-d', '--name-only', snapshot.head + ':' + path])
-      return output.split('\0').filter(Boolean).map(name => prefix.replace(/\/$/, '') + '/' + name + '/')
+      const result = output.split('\0').filter(Boolean).map(name => prefix.replace(/\/$/, '') + '/' + name + '/')
+      cached.set(prefix, result)
+      return result
     } catch (error) {
-      if (error instanceof GitError && /does not exist|Not a valid object name/.test(error.stderr)) return []
+      if (error instanceof GitError && /does not exist|Not a valid object name/.test(error.stderr)) { cached.set(prefix, []); return [] }
       throw error
     }
   }
@@ -192,12 +217,15 @@ export class GitHubRepository implements GitRepository {
   async read(snapshot: GitSnapshot, path: string): Promise<string | undefined> {
     const e = this.environments.get(snapshot) ?? await this.environment(), physical = this.physical(e, path)
     let sha = snapshot.files.get(path)
-    if (!sha) {
+    let absent = this.absent.get(snapshot)
+    if (!absent) this.absent.set(snapshot, absent = new Set())
+    const listed = [...(this.loaded.get(snapshot) ?? [])].some(prefix => path.startsWith(prefix))
+    if (!sha && !absent.has(path) && !listed) {
       sha = (await this.entries(e, snapshot.head, physical, false)).get(path)
       if (sha) (snapshot.files as Map<string, string>).set(path, sha)
     }
     snapshot.reads?.set(path, sha)
-    if (!sha) return
+    if (!sha) { absent.add(path); return }
     const cached = this.blobs.get(sha)
     if (cached !== undefined) return cached
     const content = await this.git(e, ['show', snapshot.head + ':' + physical])
@@ -208,7 +236,7 @@ export class GitHubRepository implements GitRepository {
   async commit(base: GitSnapshot, changes: readonly GitChange[], message: string): Promise<GitReceipt> {
     if (!changes.length || changes.some(change => !validCoopPath(change.path))) throw new Error('Commit changes inside the configured DSS-cah directory.')
     if (new Set(changes.map(change => change.path)).size !== changes.length) throw new Error('Duplicate paths in a Git transaction.')
-    const e = await this.environment(), head = await this.fetch(e)
+    const e = await this.environment(true), head = await this.fetch(e)
     // Rebase onto unrelated remote commits. Conflicts concern only this operation's reads and writes.
     if (head !== base.head) {
       const paths = new Set([...changes.map(change => change.path), ...(base.reads?.keys() ?? [])])

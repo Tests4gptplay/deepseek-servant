@@ -8,7 +8,7 @@
 
 **设计逻辑源自 [Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness)。** DeepSeek Servant 延续 CAH 以目标为中心的 Agent 工作闭环：理解需求、制定计划、执行工作、评价成果、调整方法、跨会话接续、故障恢复与技能积累。Servant 将这套持续工作机制整合到 DeepSeek Harness 运行环境，复用宿主的模型、工具、Session、作业与 Skill 能力。
 
-**当前版本：** `0.2.1` · **适配宿主：** DSH `0.2.1-rc.3` · **项目形态：** 独立安装的社区插件
+**当前版本：** `0.2.2` · **适配宿主：** DSH `0.2.1-rc.3` · **项目形态：** 独立安装的社区插件
 
 ## 核心能力
 
@@ -53,16 +53,16 @@
 
 ## DSS-cah 实验协作
 
-在统一设置中启用 DSS-cah，选择私有仓库、仓库子目录、已有 GitHub 授权、模型与本实例工作目录。Host 增量检测指定目录的新增、修改和删除，读取当前任务绑定的协议正文与 `turn_signal`，按任务和执行 ID 调度角色；普通业务文档的正文、历史和知识由 AI 按需读取。任务、记忆与结果以远端 Git 为权威，原生 Foreground、Planner 和 Worker 持续执行、评价与交付。
+在统一设置中启用 DSS-cah，选择私有仓库、仓库子目录、已有 GitHub 授权、模型与本实例工作目录。Host 以 1 秒正常间隔增量同步远端，启动与完成状态使用独立追加记录；AI 按角色保存前台答复、Planner Memory / Plan Note、Worker Child Reply，再单独提交最终信号，由读回的远端状态推进下一角色。普通业务文档、历史和知识按需读取。任务、记忆与结果以远端 Git 为权威，原生 Foreground、Planner 和 Worker 持续执行、评价与交付。
 
 操作步骤和数据位置见 [Private Git 使用说明](PRIVATE_GIT.md)。
 
 ## 安装与使用
 
-在 DSH Desktop 的“插件 → 添加插件”中输入固定来源 `github:Tests4gptplay/deepseek-servant#v0.2.1`，安装并启用。Web profile 使用：
+在 DSH Desktop 的“插件 → 添加插件”中输入固定来源 `github:Tests4gptplay/deepseek-servant#v0.2.2`，安装并启用。Web profile 使用：
 
 ```sh
-dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.2.1'
+dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.2.2'
 ```
 
 模型提供者、工具权限和凭据沿用 DSH 配置。进入侧栏 DeepSeek Servant，选择前台模型与工作区即可开始；后台 `Auto` 跟随本页前台模型，Worker 席位默认 2，可在设置中调整。

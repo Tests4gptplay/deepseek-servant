@@ -8,7 +8,8 @@ import { GitHubRepository } from './git-repository.js'
 import { conversationPage } from './conversation.js'
 import { childDirectories, loadPaths } from './repository-paths.js'
 import { readIntent } from './intake.js'
-import { isProtocolPath } from './outcome.js'
+import { isProtocolPath, recordPublished } from './outcome.js'
+import type { RootTask } from './protocol.js'
 import { releaseScopeCaches, type ConsumedInput, type CacheCleanupResult } from './cache-cleanup.js'
 import { GitJournal, digest, json, readJson, readText, segment, textChanges } from './journal.js'
 
@@ -223,8 +224,9 @@ export class CoopService implements ModeEndpoint {
     for (const directory of await childDirectories(this.repository, snapshot, 'dss-coop/tasks/')) {
       const path = directory + 'contract.json'
       try {
-        const task = await readJson<{ id: string; title: string; coordinatorParticipantId: string; status: string }>(this.repository, snapshot, path)
-        if (task) tasks.push({ id: task.id, title: task.title, coordinator: task.coordinatorParticipantId, status: task.status })
+        const task = await readJson<RootTask>(this.repository, snapshot, path)
+        if (task) tasks.push({ id: task.id, title: task.title, coordinator: task.coordinatorParticipantId,
+          status: task.status === 'accepted' && !await recordPublished(this.repository, snapshot, task.writer) ? 'active' : task.status })
         await this.cache.remove('read-error/' + path)
       } catch (error) { await this.cache.put('read-error/' + path, String(error)) }
     }

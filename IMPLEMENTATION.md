@@ -1,6 +1,14 @@
 # DeepSeek Servant 实现说明
 
-版本：`0.2.1`。双模式架构见 [DESIGN.md](DESIGN.md)，协作操作见 [PRIVATE_GIT.md](PRIVATE_GIT.md)，Local 已接受运行记录见[alpha.39 验收](docs/acceptance-20261026.md)。
+版本：`0.2.2`。双模式架构见 [DESIGN.md](DESIGN.md)，协作操作见 [PRIVATE_GIT.md](PRIVATE_GIT.md)，Local 已接受运行记录见[alpha.39 验收](docs/acceptance-20261026.md)。
+
+## 0.2.2 角色记录与远端状态
+
+`protocol.ts` 的 `roleCommandSchema` 同时用于模型工具参数与 RoleWriter 校验；实际角色 Markdown 位于 `src/experimental/private-git/prompts`。Foreground 保存用户答复，Planner 保存 Memory、按需更新 Plan Note 并执行计划/评审操作，Worker 保存 Child Reply。操作与返回路径见 [角色写入顺序](PRIVATE_GIT.md#git-完成信号)。
+
+`status.ts` 为每次执行追加 started、completed、closed 或 replaced 状态。Consumer 先写启动状态，再由后续快照启动原生执行；RoleWriter 先保存角色正文，随后保存 Result 引用，再独立追加 completed。消费端按远端完成状态推进，保留 AI 原文。正文已提交而最终状态中断时，可从远端 Result 恢复最后一步；旧的已完成结果继续可读，旧的未完成 action 在续作前升级启动契约。
+
+正常同步间隔为 1 秒，保留单轮合并与网络退避。未改变的 HEAD 复用元数据、目录与缺失路径缓存；账户/仓库验证结果按配置及凭据身份复用，实际写入重新核对私有性与权限。任务状态和指派的本地消费以发布者最终远端状态为准。封存包含独立状态记录。
 
 ## 0.2.1 DSS-cah
 

@@ -21,7 +21,7 @@ export class CoopSync {
   private async run(): Promise<void> {
     if (this.running || this.stopped) return
     this.running = true
-    let delay = 15_000
+    let delay = 1_000
     try { await this.service.sync(); this.failures = 0; this.nextAttempt = 0 }
     catch (error) {
       this.failures++
