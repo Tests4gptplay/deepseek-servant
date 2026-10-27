@@ -71,11 +71,9 @@ export function installRoleTools(ctx: Context, agent: Agent, binding: RoleBindin
       text: foregroundMemoryGuide(prefix + 'Foreground_List', prefix + 'Foreground_Cache',
         'Use foreground_memory with action=read on demand. action=replace rewrites the whole document; action=clear removes its current contents.') })
     register('foreground_memory', 'Read or rewrite the Foreground’s important-assignment index or editable conversation scratch space.',
-      z.discriminatedUnion('action', [
-        z.object({ action: z.literal('read'), document: ForegroundDocument }),
-        z.object({ action: z.literal('replace'), document: ForegroundDocument, text: z.string().describe('Complete replacement text, preserving existing memories unless the user requested their removal. Use empty text only for a user-requested clear.') }),
-        z.object({ action: z.literal('clear'), document: ForegroundDocument }),
-      ]), input => options.assistants.foregroundMemory(binding.assistantId, input.document, input.action === 'read' ? undefined : input.action === 'clear' ? '' : input.text))
+      z.object({ action: z.enum(['read', 'replace', 'clear']), document: ForegroundDocument,
+        text: z.string().describe('Required for replace: complete replacement text, preserving existing memories unless the user requested their removal. Use empty text only for a user-requested clear.').optional(),
+      }).refine(input => input.action !== 'replace' || input.text !== undefined, { message: 'Replacement text is required for action=replace.', path: ['text'] }), input => options.assistants.foregroundMemory(binding.assistantId, input.document, input.action === 'read' ? undefined : input.action === 'clear' ? '' : input.text))
     register('conversation_search', 'Search dated original conversations; returns excerpts, message identities and exact references.',
       z.strictObject({ query: z.string().min(1), cursor: z.int().nonnegative().optional(), limit: z.int().min(1).max(50).optional() }),
       input => options.assistants.conversations.search(binding.assistantId, input.query, input.cursor, input.limit))

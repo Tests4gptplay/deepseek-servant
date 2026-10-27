@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
-export const Id = z.string().min(1).regex(/^(?!__proto__$|prototype$|constructor$)[^\0\r\n]+$/u)
+// Keep identity checks local; model APIs support different regular-expression dialects.
+export const Id = z.string().min(1).refine(value => /^(?!__proto__$|prototype$|constructor$)[^\0\r\n]+$/u.test(value), 'Invalid record identity.')
 export const Text = z.string().min(1)
 export const ModelRouteSchema = z.strictObject({ provider: z.string().optional(), model: z.string().optional(), reasoningEffort: z.string().optional() })
 export const SettingsSchema = z.strictObject({ name: z.string().min(1), userName: z.string().optional(), workspaceId: Id.optional(),

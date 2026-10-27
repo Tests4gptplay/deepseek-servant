@@ -8,7 +8,7 @@
 
 **设计逻辑源自 [Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness)。** DeepSeek Servant 延续 CAH 以目标为中心的 Agent 工作闭环：理解需求、制定计划、执行工作、评价成果、调整方法、跨会话接续、故障恢复与技能积累。Servant 将这套持续工作机制整合到 DeepSeek Harness 运行环境，复用宿主的模型、工具、Session、作业与 Skill 能力。
 
-**当前版本：** `0.3.2` · **测试宿主：** DSH `0.2.1-rc.3` · **项目形态：** 独立安装的社区插件
+**当前版本：** `0.3.3` · **测试宿主：** DSH `0.2.1-rc.3` · **项目形态：** 独立安装的社区插件
 
 ## 核心能力
 
@@ -41,7 +41,7 @@
 
 长任务验证处理了 **16 批、64 条合成事件**，包括 **3 次周期评审、2 次正常 Worker 换代**、跨代历史回查和最终独立核对。32 行最终账本与 16 批累计快照均与预先保存的独立答案一致；任务完成后执行了正式清理，成果文件哈希保持一致。
 
-更多实测过程、运行条件及清理结果见[实现与验证记录](IMPLEMENTATION.md)；历次候选与整理范围见[版本摘要](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.2/CHANGELOG.md)。
+更多实测过程、运行条件及清理结果见[实现与验证记录](IMPLEMENTATION.md)；历次候选与整理范围见[版本摘要](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.3/CHANGELOG.md)。
 
 ## 架构
 
@@ -59,10 +59,10 @@
 
 ## 安装与使用
 
-正式版在 DSH Desktop 的“插件 → 添加插件”中输入固定来源 `github:Tests4gptplay/deepseek-servant#v0.3.2`，安装并启用。Web profile 使用：
+正式版在 DSH Desktop 的“插件 → 添加插件”中输入固定来源 `github:Tests4gptplay/deepseek-servant#v0.3.3`，安装并启用。Web profile 使用：
 
 ```sh
-dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.3.2'
+dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.3.3'
 ```
 
 模型提供者、工具权限和凭据沿用 DSH 配置。进入侧栏 DeepSeek Servant，选择前台模型与工作区即可开始；后台 `Auto` 跟随本页前台模型，Worker 席位默认 2，可在设置中调整。
@@ -79,7 +79,7 @@ dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.3.2'
 ## 开发文档
 
 - [当前架构](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/DESIGN.md)
-- [版本与验收摘要](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.2/CHANGELOG.md)
+- [版本与验收摘要](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.3/CHANGELOG.md)
 - [alpha.40 协作开发验收](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/docs/acceptance-private-git-20261026.md)
 - [alpha.39 验收记录](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/docs/acceptance-20261026.md)
 - [实现与验证记录](IMPLEMENTATION.md)

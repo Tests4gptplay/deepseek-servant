@@ -19,6 +19,16 @@ function toolsFor(events: SessionEvent[], options: RoleToolsOptions) {
   return (name: string, input: unknown) => definitions.get(name)!.execute(input, { agent, signal: new AbortController().signal, callId: 'call' })
 }
 
+test('foreground memory keeps object parameters and validates replacement text before writing', async () => {
+  const writes: unknown[][] = []
+  const call = toolsFor([], { assistants: { foregroundMemory: async (...args: unknown[]) => { writes.push(args); return { body: args[2] ?? 'saved' } } } } as unknown as RoleToolsOptions)
+  await call('foreground_memory', { action: 'read', document: 'Foreground_List' })
+  await call('foreground_memory', { action: 'replace', document: 'Foreground_Cache', text: 'remember this' })
+  await call('foreground_memory', { action: 'clear', document: 'Foreground_Cache' })
+  await assert.rejects(call('foreground_memory', { action: 'replace', document: 'Foreground_List' }), /Replacement text is required/)
+  assert.deepEqual(writes, [['assistant', 'Foreground_List', undefined], ['assistant', 'Foreground_Cache', 'remember this'], ['assistant', 'Foreground_Cache', '']])
+})
+
 test('a resumed foreground intent binds the original user identity and keeps task submission idempotent', async () => {
   const submitted: any[] = []
   const call = toolsFor([event('turn/start', { turn: 1 }), user('original', 'Original request'),

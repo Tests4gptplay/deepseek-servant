@@ -59,6 +59,7 @@ test('foreground registered tools survive supervisor restrictions and execution 
   const assistants = new AssistantService({ store, defaults: { name: 'Servant', presetId: 'standard', foreground: {}, background: {} },
     runtime: {} as any, resolveWorkspace: async () => ({ id: 'workspace', directory: process.cwd() }) })
   const definitions = new Map<string, any>(), denied = new Set<string>(), hooks = new Map<string, any>()
+  definitions.set('present', { name: 'present' })
   const agent = { id: 'foreground', session: { snapshotEvents: () => [] } } as any
   const ctx = { systemPrompt: { section() {} }, tools: {
     register: (tool: any) => definitions.set(tool.name, tool),

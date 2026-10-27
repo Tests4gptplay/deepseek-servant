@@ -159,7 +159,7 @@ export class AgentSupervisor {
         const visible = ctx.tools.schemas().map(tool => tool.name).filter(name => unsupervisedTools.has(name))
         if (visible.length) ctx.tools.restrict({ deny: visible })
         installSkillProvider(ctx, agent, this.options.knowledge, { assistantId: assistant.id, workspaceId: assistant.workspace.id })
-        const allowed = new Set(['task_submit', 'task_query', 'task_records', 'task_control', 'task_answer', 'task_priority', 'task_revise_goal', 'memory_query', 'foreground_memory', 'conversation_search', 'conversation_read', 'memory_index', 'memory_read', 'memory_search', 'task_origin_read', 'planner_note_read', 'child_reply_read', 'knowledge_query', 'knowledge_preference', 'skill', 'run_code'])
+        const allowed = new Set(['task_submit', 'task_query', 'task_records', 'task_control', 'task_answer', 'task_priority', 'task_revise_goal', 'memory_query', 'foreground_memory', 'conversation_search', 'conversation_read', 'memory_index', 'memory_read', 'memory_search', 'task_origin_read', 'planner_note_read', 'child_reply_read', 'knowledge_query', 'knowledge_preference', 'skill', 'run_code', 'present'])
         ctx.tools.restrict({ deny: ctx.tools.schemas().map(tool => tool.name).filter(name => !allowed.has(name)) })
         installExecutionGuard(ctx, agent, (_owner, name) => allowed.has(name))
       },
