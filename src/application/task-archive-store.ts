@@ -42,6 +42,7 @@ export interface TaskHistoryIndex {
   tombstone?: TaskTombstone
   cleanedAt?: string
   deliveryReadAt?: string
+  nativeSessionIds?: string[]
 }
 
 /** Permanent, same-domain records. Sealing reads the stored parts before publishing its manifest. */
@@ -78,7 +79,12 @@ export class TaskArchiveStore {
     if (previous?.taskRevision === task.revision && previous.stage === stage && published?.taskRevision === task.revision && published.stage === stage) return previous
     const rows = (await Promise.all([...taskRecordPrefixes(task.id), 'task-origin/' + encodeURIComponent(task.id) + '/']
       .map(prefix => this.storage.list<unknown>(prefix)))).flat()
-    const entries = rows.filter(row => (row.value as RecordEntry)?.kind === 'servant-record-entry')
+    const futureKeys = new Set(rows.flatMap(({ key, value }) => {
+      const entry = value as RecordEntry
+      return entry?.kind === 'servant-record-entry' && typeof entry.metadata.taskRevision === 'number' && entry.metadata.taskRevision > task.revision
+        ? [key, ...entry.parts.map(part => part.key)] : []
+    }))
+    const entries = rows.filter(row => !futureKeys.has(row.key) && (row.value as RecordEntry)?.kind === 'servant-record-entry')
       .map(row => ({ key: row.key, entry: row.value as RecordEntry }))
       .filter(row => row.entry.scope.taskId === task.id)
       .sort((a, b) => a.entry.createdAt.localeCompare(b.entry.createdAt) || a.entry.sequence - b.entry.sequence || a.key.localeCompare(b.key))
@@ -115,11 +121,13 @@ export class TaskArchiveStore {
     }
     const manifest: SealedTaskRecords = { schemaVersion: 1, state: 'sealed', taskId: task.id, taskRevision: task.revision, stage,
       sealedAt: this.now(), snapshot, document, sha256: digest.digest('hex'), characters, bytes, copiedRefs,
-      cleanupKeys: rows.map(row => row.key).filter(key => taskRecordPrefixes(task.id).some(prefix => key.startsWith(prefix))) }
+      cleanupKeys: rows.map(row => row.key).filter(key => !futureKeys.has(key) && taskRecordPrefixes(task.id).some(prefix => key.startsWith(prefix))) }
     await this.storage.set(root(task.id) + 'manifest', manifest)
     const prior = await this.index(task.id)
     await this.storage.set(indexKey(task.id), { schemaVersion: 1, taskId: task.id, assistantId: task.assistantId,
       workspaceId: task.workspace.id, objective: task.goal.objective, updatedAt: task.updatedAt, stage, taskRevision: task.revision,
+      nativeSessionIds: [...new Set(task.archive ? task.archive.sessions.map(item => item.sessionId)
+        : Object.values(task.executions).filter(execution => execution.role !== 'foreground').map(execution => execution.sessionId))],
       ...(prior?.hidden ? { hidden: true } : {}), ...(prior?.deliveryReadAt ? { deliveryReadAt: prior.deliveryReadAt } : {}) } satisfies TaskHistoryIndex)
     return manifest
   }

@@ -1,6 +1,6 @@
 # 记录、归档与清理
 
-当前实现：`0.3.1-rc.1`。使用入口见[使用指南](docs/USAGE.md)。
+当前实现：`0.3.1-rc.2`。使用入口见[使用指南](docs/USAGE.md)。
 
 ## Private Git 模式
 
@@ -8,7 +8,7 @@
 
 协作任务先完成前台交付及在途动作收束，再提交完整封存清单，独立读回核对后以另一提交清理该任务的活动目录。历史入口、完整档案、需求、对话和知识保留。具体位置与操作见 [Private Git 指南](PRIVATE_GIT.md)。
 
-以下保留 Local 的存储与清理规则；其已接受运行结果见[alpha.39 验收记录](docs/acceptance-20261026.md)。
+以下保留 Local 的存储与清理规则；其已接受运行结果见[alpha.39 验收记录](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/docs/acceptance-20261026.md)。
 
 ## Local 原生存储域
 

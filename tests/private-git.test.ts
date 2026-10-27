@@ -121,6 +121,25 @@ async function root(repo: MemoryRepo, target: Instance) {
   return target.agents.latest('planner')
 }
 
+test('a malformed task stays isolated, keeps one error record, and recovers after the record is repaired', async () => {
+  const repo = new MemoryRepo(), target = instance(repo)
+  const contract = taskPath('broken') + '/contract.json', joined = joinPath('broken', '1', target.cache.instanceId)
+  await repo.seed([{ path: contract, content: '{malformed' },
+    { path: joined, content: json({ taskId: 'broken', participantId: '1', instanceId: target.cache.instanceId, state: 'paused' }) }])
+  await target.tick()
+  const retained = target.cache.values.size
+  await target.tick(10)
+  assert.equal(target.cache.values.size, retained)
+  assert.equal(target.cache.entries('read-error/').length, 1)
+  assert.equal(repo.writes.length, 1)
+  await input(repo, target, 'healthy-input', 'Continue a separate conversation.')
+  await target.tick(2)
+  assert.equal(target.agents.latest('foreground').binding.sourceIntentId, 'healthy-input')
+  await repo.seed([{ path: contract, content: json({ id: 'broken', status: 'active', coordinatorParticipantId: '1' }) }])
+  await target.tick()
+  assert.equal(target.cache.get('read-error/' + contract), undefined)
+})
+
 test('mode default isolates Git, selection persists, and switching does not dispose background endpoints', async () => {
   let selected: 'LOCAL' | 'PRIVATE_GIT_EXPERIMENTAL' = 'LOCAL', gitCalls = 0, localCalls = 0
   const router = new ModeRouter({ read: () => selected, write: async mode => { selected = mode } }, {

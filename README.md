@@ -8,7 +8,7 @@
 
 **设计逻辑源自 [Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness)。** DeepSeek Servant 延续 CAH 以目标为中心的 Agent 工作闭环：理解需求、制定计划、执行工作、评价成果、调整方法、跨会话接续、故障恢复与技能积累。Servant 将这套持续工作机制整合到 DeepSeek Harness 运行环境，复用宿主的模型、工具、Session、作业与 Skill 能力。
 
-**当前候选版本：** `0.3.1-rc.1` · **测试宿主：** DSH `0.2.1-rc.3` · **项目形态：** 独立安装的社区插件
+**当前候选版本：** `0.3.1-rc.2` · **测试宿主：** DSH `0.2.1-rc.3` · **项目形态：** 独立安装的社区插件
 
 ## 核心能力
 
@@ -59,7 +59,7 @@
 
 ## 安装与使用
 
-在 DSH Desktop 的“插件 → 添加插件”中输入固定来源 `github:Tests4gptplay/deepseek-servant#v0.3.0`，安装并启用。Web profile 使用：
+正式版在 DSH Desktop 的“插件 → 添加插件”中输入固定来源 `github:Tests4gptplay/deepseek-servant#v0.3.0`，安装并启用。Web profile 使用：
 
 ```sh
 dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.3.0'
@@ -67,8 +67,8 @@ dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.3.0'
 
 模型提供者、工具权限和凭据沿用 DSH 配置。进入侧栏 DeepSeek Servant，选择前台模型与工作区即可开始；后台 `Auto` 跟随本页前台模型，Worker 席位默认 2，可在设置中调整。
 
-- [安装、升级与开发构建](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/docs/INSTALLATION.md)：固定版本安装、升级与显式开发命令。
-- [使用指南](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/docs/USAGE.md)：任务提交与修订、聊天答复、并发控制、历史阅读、重启接续和记录管理。
+- [安装、升级与开发构建](docs/INSTALLATION.md)：固定版本安装、升级与显式开发命令。
+- [使用指南](docs/USAGE.md)：任务提交与修订、聊天答复、并发控制、历史阅读、重启接续和记录管理。
 
 ## 兼容性与数据存储
 

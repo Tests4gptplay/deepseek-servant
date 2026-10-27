@@ -96,9 +96,14 @@ export class TaskService {
     return exportTaskRecords(this.archives, taskId, task.workspace.directory)
   }
   async prepareDelivery(taskId: string): Promise<void> {
-    const task = await this.store.getTask(taskId)
-    if (!task?.delivery) throw new Error('Records require the accepted task delivery.')
-    await this.archives.seal(task, 'accepted')
+    const previous = this.queues.get(taskId) ?? Promise.resolve()
+    const pending = previous.catch(() => {}).then(async () => {
+      const task = await this.store.getTask(taskId)
+      if (!task?.delivery) throw new Error('Records require the accepted task delivery.')
+      await this.archives.seal(task, 'accepted')
+    })
+    this.queues.set(taskId, pending)
+    try { await pending } finally { if (this.queues.get(taskId) === pending) this.queues.delete(taskId) }
   }
   /** Completion cleanup shares the same Task queue as every business write. */
   async cleanupCompleted(taskId: string): Promise<boolean> {

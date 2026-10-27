@@ -1,6 +1,6 @@
 # DeepSeek Servant 实现说明
 
-版本：`0.2.3`。双模式架构见 [DESIGN.md](DESIGN.md)，协作操作见 [PRIVATE_GIT.md](PRIVATE_GIT.md)，Local 已接受运行记录见[alpha.39 验收](docs/acceptance-20261026.md)。
+版本：`0.2.3`。双模式架构见 [DESIGN.md](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/DESIGN.md)，协作操作见 [PRIVATE_GIT.md](PRIVATE_GIT.md)，Local 已接受运行记录见[alpha.39 验收](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/docs/acceptance-20261026.md)。
 
 ## 0.2.3 共用前台与工作随记
 
@@ -34,7 +34,7 @@ Git 操作使用显式 GIT_DIR，缓存目录与任何上级工程隔离。写�
 
 `src/mode-router` 只路由新输入与界面选择；`src/experimental/private-git` 独立拥有设置、Git I/O、角色提示、状态机、调度、原生 Agent、页面和封存。GitJournal 以稳定回执和非强推 CAS 提交；Consumer 读取不可变提交后兑现动作，NativeAgents 使用实际 Session、工具操作身份和 Jobs。用户主动参与与当前指派共同决定本机工作范围。
 
-协作使用 `deepseek_servant_coop` 原生 Domain。GitHub 凭据来自原生 Credentials、环境或已登录 CLI；完整协作记录写入专用私库。原生存储键采用路径安全摘要，保留逻辑键用于投影与恢复。协议参数错误转为可读证据，网络失败保持待提交草稿。当前代码的协作验收见[alpha.40 开发验收](docs/acceptance-private-git-20261026.md)。
+协作使用 `deepseek_servant_coop` 原生 Domain。GitHub 凭据来自原生 Credentials、环境或已登录 CLI；完整协作记录写入专用私库。原生存储键采用路径安全摘要，保留逻辑键用于投影与恢复。协议参数错误转为可读证据，网络失败保持待提交草稿。当前代码的协作验收见[alpha.40 开发验收](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/docs/acceptance-private-git-20261026.md)。
 
 下文保留 Local 的实现与历次运行记录。
 
@@ -208,7 +208,7 @@ DSH 原生 Session 日志保存在宿主配置的目录。页面按 Domain 实�
 - 历史上翻预加载、消息去重、失败重试和阅读锚点通过源码与真实组件测试；日历复用官方 ui-schedule 设计、官方 UI primitives 与主题变量，支持键盘导航、选择及清空日期。
 - 73 项源码回归通过；实际 React 页面与官方 primitives 的 jsdom 测试通过。独立原生 SDK 场景在前台和 Worker 均执行期间，强制结束宿主及其子进程树；重新启动后保留旧文件，第二代 Worker 完成剩余文件，原 Task 完成 Planner 验收、前台主动交付和 records 封存清理。模型端为受控 SSE，Agent、Session、文件工具和后台 PowerShell Job 为原生实现。
 - 当前宿主由真实对话入口经 GPT完成原生静默 Job：持续 **1860.2037818 秒**、退出码 **0**，同一 Worker 持有同一 Job 直到完成。Planner 接受成果后前台主动交付，档案封存，临时 Task 清理，Jobs 列表为空。
-- 候选包已通过原生插件管理器安装并应用；完整时间、执行身份、包清单与 SHA-256 见[alpha.39 验收记录](docs/acceptance-20261026.md)。
+- 候选包已通过原生插件管理器安装并应用；完整时间、执行身份、包清单与 SHA-256 见[alpha.39 验收记录](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/docs/acceptance-20261026.md)。
 
 ## alpha.37 升级验收（2026-10-26）
 

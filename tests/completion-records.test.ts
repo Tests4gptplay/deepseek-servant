@@ -78,6 +78,57 @@ async function document(archives: TaskArchiveStore, id: string) {
   return text
 }
 
+test('delivery sealing shares the task queue with concurrent commands', async () => {
+  const f = await accepted(), before = await f.get()
+  let started!: () => void, release!: () => void
+  const arrival = new Promise<void>(resolve => { started = resolve })
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const seal = f.tasks.archives.seal.bind(f.tasks.archives)
+  f.tasks.archives.seal = async (task, stage) => { started(); await gate; return seal(task, stage) }
+  const sealing = f.tasks.prepareDelivery('one')
+  await arrival
+  let updated = false
+  const update = f.execute({ type: 'task.priority', priority: 3 }, { kind: 'user', id: 'owner' }).then(result => { updated = true; return result })
+  try {
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.equal(updated, false, 'the command must wait until the accepted revision is sealed')
+  } finally { release(); await Promise.allSettled([sealing, update]) }
+  assert.equal((await update).status, 'applied')
+  assert.equal((await f.tasks.archives.manifest('one'))!.taskRevision, before.revision)
+  assert.equal((await f.tasks.archives.task('one'))!.priority, before.priority)
+  assert.equal((await f.get()).priority, 3)
+})
+
+test('sealing excludes future revision entries and their cleanup keys', async () => {
+  const f = await accepted(), task = await f.get()
+  const future = await f.store.journal.append({ scope: { kind: 'planner-memory', taskId: 'one' },
+    commandId: 'future-revision', text: 'Later revision only', source: f.runtime, metadata: { taskRevision: task.revision + 1 } })
+  const entry = (await f.store.journal.byCommand({ kind: 'planner-memory', taskId: 'one' }, 'future-revision'))!
+  const manifest = await f.tasks.archives.seal(task, 'accepted')
+  assert.equal(manifest.copiedRefs.includes(future.ref), false)
+  assert.equal(manifest.cleanupKeys.includes(decodeURIComponent(future.ref.slice('dss-record://'.length))), false)
+  for (const part of entry.parts) assert.equal(manifest.cleanupKeys.includes(part.key), false)
+})
+
+test('hiding completed tasks preserves native session size accounting', async () => {
+  const f = await accepted()
+  await finish(f); await f.tasks.cleanupCompleted('one')
+  const retention = new RetentionService({ store: f.storage, tasks: f.tasks, completedTasks: f.tasks,
+    knowledge: { withRetentionLock: work => work({ listSkills: async () => [], compactSkill: async () => ({ status: 'unchanged', reclaimedBytes: 0 }) }) },
+    nativeSessions: { catalog: async ids => ids.map(sessionId => ({ sessionId, liveAgent: false, liveSession: false, archived: true, sizeBytes: 123 })),
+      retire: async sessionId => ({ sessionId, status: 'archived', logRetained: true, reclaimedBytes: 0 }) } })
+  const before = await retention.preview()
+  assert.ok(before.totals.nativeSessionBytes > 0)
+  await f.tasks.archives.hide('one')
+  const after = await retention.preview()
+  assert.equal(after.totals.nativeSessionBytes, before.totals.nativeSessionBytes)
+  assert.equal(after.totals.nativeRetainedSessions, before.totals.nativeRetainedSessions)
+  const index = (await f.tasks.archives.index('one'))!
+  delete index.nativeSessionIds
+  await f.storage.set('task-history/one', index)
+  assert.equal((await retention.preview()).totals.nativeSessionBytes, before.totals.nativeSessionBytes)
+})
+
 test('T23/T24: seal full records before foreground wake; automatically release exact Task-owned temporary keys', { timeout: 10000 }, async () => {
   const f = await accepted(), longText = '完整原文🙂\n'.repeat(6000) + 'END OF MEMORY'
   const memory = await f.store.journal.append({ scope: { kind: 'planner-memory', taskId: 'one' },

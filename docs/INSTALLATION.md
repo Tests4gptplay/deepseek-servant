@@ -1,6 +1,6 @@
 # 安装与升级
 
-当前版本：`0.3.0`。测试环境：Windows / DSH `0.2.1-rc.3`。
+正式版本：`0.3.0`；当前候选：`0.3.1-rc.2`。测试环境：Windows / DSH `0.2.1-rc.3`。
 
 ## 原生安装
 
@@ -22,6 +22,8 @@ dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.3.0'
 
 Release 同时提供 `deepseek-servant-0.3.0.tgz` 与 SHA-256，作为备用安装包；也可通过同一插件管理入口安装该文件。
 
+候选包 `deepseek-servant-0.3.1-rc.2.tgz` 也使用上述原生插件管理入口安装；安装该文件时版本为 `0.3.1-rc.2`。
+
 ## 开发
 
 使用包内声明的 Node.js `^22.19.0 || >=24.0.0`：
@@ -33,4 +35,4 @@ npm run build
 npm pack --ignore-scripts
 ```
 
-构建将角色提示、样式及已接受美术嵌入生产文件。安装包由 files 白名单控制；测试、临时配置和开发验证按需显式运行。Local 的原生恢复与 31 分钟静默作业结果沿用 [alpha.39 验收](acceptance-20261026.md)。
+构建将角色提示、样式及已接受美术嵌入生产文件。安装包由 files 白名单控制；测试、临时配置和开发验证按需显式运行。Local 的原生恢复与 31 分钟静默作业结果沿用 [alpha.39 验收](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/docs/acceptance-20261026.md)。

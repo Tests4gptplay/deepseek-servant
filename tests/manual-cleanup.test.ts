@@ -90,6 +90,14 @@ test('manual cleanup ignores saved retention periods and only acts on confirmed 
   assert.equal(compacted(), 0)
 })
 
+test('background previews do not evict the owners pending manual confirmation', async () => {
+  const { retention } = await fixture()
+  const manual = await retention.preview({ manual: true })
+  for (let i = 0; i < 8; i++) await retention.preview()
+  const outcome = await retention.sweep({ previewId: manual.previewId, manual: true })
+  assert.deepEqual(outcome.deletedArchives.sort(), ['cancelled', 'completed'])
+})
+
 test('owner API requires explicit confirmation; a zero-candidate cleanup is allowed', async () => {
   const { retention, tasks } = await fixture()
   const api = new ServantApi({ retention } as never)

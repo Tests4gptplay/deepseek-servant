@@ -312,7 +312,14 @@ export class RetentionService {
         if (protectedVersions.length) plan.blocked.push({ id: record.skillId, kind: 'skill', bytes: jsonBytes(protectedVersions), reasons: ['active-latest-used-or-evidence-bearing-version'] })
       }
     }
-    const sessionIds = [...new Set(allTasks.flatMap(task => task.archive ? task.archive.sessions.map(item => item.sessionId) : Object.values(task.executions).filter(execution => execution.role !== 'foreground').map(execution => execution.sessionId)))]
+    const taskSessionIds = (task: Task) => task.archive ? task.archive.sessions.map(item => item.sessionId)
+      : Object.values(task.executions).filter(execution => execution.role !== 'foreground').map(execution => execution.sessionId)
+    const hiddenSessionIds = await Promise.all(sealed.filter(index => index.tombstone && index.hidden).map(async index => {
+      if (index.nativeSessionIds) return index.nativeSessionIds
+      const task = await this.options.completedTasks!.archives.task(index.taskId)
+      return task ? taskSessionIds(task) : []
+    }))
+    const sessionIds = [...new Set([...allTasks.flatMap(taskSessionIds), ...hiddenSessionIds.flat()])]
     const foregroundIds = [...new Set(rows.filter(row => row.key.startsWith('assistant/')).flatMap(row => {
       const value = row.value
       if (!value || typeof value !== 'object' || !('sessionId' in value) || typeof value.sessionId !== 'string') return []
@@ -334,7 +341,9 @@ export class RetentionService {
     }
     totals.overBudgetBytes = policy.maxServantBytes === undefined ? 0 : Math.max(0, totals.servantBytes - totals.estimatedReclaimedBytes - policy.maxServantBytes)
     this.previews.set(plan.previewId, structuredClone(plan))
-    while (this.previews.size > 4) this.previews.delete(this.previews.keys().next().value!)
+    // Background refreshes do not displace an open manual confirmation.
+    const peers = [...this.previews].filter(([, preview]) => preview.manual === plan.manual)
+    for (const [key] of peers.slice(0, Math.max(0, peers.length - 4))) this.previews.delete(key)
     return plan
   }
 
