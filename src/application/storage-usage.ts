@@ -11,7 +11,7 @@ type TaskCategory = keyof StorageUsageStats['temporary']
 export function calculateStorageUsage(rows: UsageRows, recordedAt: string): StorageUsageStats {
   const permanent: StorageUsageStats['permanent'] = {
     chatBytes: 0, assistantBytes: 0, knowledgeBytes: 0,
-    originBytes: 0, archiveBytes: 0, historyBytes: 0,
+    originBytes: 0, archiveBytes: 0, planningBytes: 0,
   }
   const temporary: StorageUsageStats['temporary'] = {
     taskBytes: 0, plannerMemoryBytes: 0, plannerNoteBytes: 0,
@@ -25,11 +25,13 @@ export function calculateStorageUsage(rows: UsageRows, recordedAt: string): Stor
     if (key.startsWith('task:')) {
       // Old Tasks contain memory, notes, reports and runtime details inline.
       // Split their serialized field byte sizes without double counting.
-      if (isTombstone(value)) addPermanent('historyBytes', size)
+      if (isTombstone(value)) addPermanent('archiveBytes', size)
       else splitLegacyTask(value, size, addTemporary)
     } else if (key.startsWith('conversations/') || key.startsWith('conversation/') || key.startsWith('conversation-index/')
       || key.startsWith('conversation-exchanges/') || key.startsWith('conversation-staging/') || key.startsWith('conversation-cleanup/')) {
       addPermanent('chatBytes', size)
+    } else if (key.startsWith('foreground-memory/')) {
+      addPermanent('planningBytes', size)
     } else if (key.startsWith('knowledge/')) {
       addPermanent('knowledgeBytes', size)
     } else if (key.startsWith('task-origin/') || key.startsWith('goal-origin/')) {
@@ -37,7 +39,7 @@ export function calculateStorageUsage(rows: UsageRows, recordedAt: string): Stor
     } else if (key.startsWith('records/') || key.startsWith('record-archive/')) {
       addPermanent('archiveBytes', size)
     } else if (key.startsWith('task-history/') || key.startsWith('tombstone/')) {
-      addPermanent('historyBytes', size)
+      addPermanent('archiveBytes', size)
     } else if (key.startsWith('planner-memory/') || key.startsWith('memory/planner/')) {
       addTemporary('plannerMemoryBytes', size)
     } else if (key.startsWith('planner-note/')) {

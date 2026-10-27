@@ -58,7 +58,7 @@ export function repositoryGuide(settings: CoopSettings): string {
 
 角色执行顺序：提交启动状态 → 远端读回 → 原生执行 → 保存业务正文 → 单独提交最终状态 → 远端读回 → 下一步调度。Foreground 的 respond / handoff_planner、Planner 的规划与交接信号、Worker 的执行结果各有职责；从状态引用继续打开对应正文即可查看具体进度和依据。
 
-## 前台随记
+## 工作规划记录 / Work Planning Notes
 
 Foreground_List 保存重要交代和可追溯索引，完成事项更新状态并保留。在前台处理对话时检查：7 天无进展可简短提醒，每周最多一次；30 天无实质进展或用户确认时询问继续、保持 pending、暂缓跟踪或结束。用户指定等待期限则按该期限；确认后刷新状态和复查时间，提醒本身不重置搁置时间。Foreground_Cache 是可整理和更新的持久随记，不设字数上限；默认保留记忆，任务完成、话题结束、陈旧或长期未提及都不触发删除。仅按用户明确要求删除或清空，手动清理入口保留。两者都只告知用途与路径，由前台按需读取。普通对话原文仍在 conversations 中。
 

@@ -252,7 +252,7 @@ test('Explicit conversation deletion stops only foreground and keeps pending com
   await service.foregroundMemory('default', 'Foreground_Cache', 'Old conversational topic')
   await service.foregroundMemory('default', 'Foreground_List', 'Pending task: one')
   await service.clearConversation()
-  assert.equal((await service.foregroundMemory('default', 'Foreground_Cache') as any).exists, false)
+  assert.equal((await service.foregroundMemory('default', 'Foreground_Cache') as any).text, 'Old conversational topic')
   assert.equal((await service.foregroundMemory('default', 'Foreground_List') as any).text, 'Pending task: one')
   const fresh = await service.get()
   assert.notEqual(fresh.sessionId, old.sessionId)

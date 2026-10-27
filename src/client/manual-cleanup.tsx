@@ -44,25 +44,28 @@ export function ManualTaskCleanup({ preview, busy, onRetention, t }: CleanupProp
 }
 
 /** Foreground history is a separate owner action, independent of task cleanup. */
-export function ManualConversationCleanup({ busy, onRetention, t }: CleanupProps) {
+export function ManualConversationCleanup({ busy, onRetention, t, planning = false }: CleanupProps & { planning?: boolean }) {
+  const labels = planning ? { button: 'retention.clearPlanningNotes', title: 'retention.planningTitle', warning: 'retention.planningWarning', detail: 'retention.planningDetail' } as const
+    : { button: 'retention.clearConversation', title: 'retention.conversationTitle', warning: 'retention.conversationWarning', detail: 'retention.conversationDetail' } as const
   const [open, setOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   async function confirm() {
     if (busy || submitting) return
     setSubmitting(true)
     try {
-      if (await onRetention({ action: 'clearConversation', confirmation: 'clear-foreground-conversation' })) setOpen(false)
+      if (await onRetention(planning ? { action: 'clearPlanningNotes', confirmation: 'clear-work-planning-notes' }
+        : { action: 'clearConversation', confirmation: 'clear-foreground-conversation' })) setOpen(false)
     } finally { setSubmitting(false) }
   }
   return <>
-    <Button type="button" variant="outline" disabled={busy || submitting} onClick={() => setOpen(true)}>{t('retention.clearConversation')}</Button>
-    <Modal open={open} onClose={() => { if (!submitting) setOpen(false) }} title={t('retention.conversationTitle')} closeLabel={t('retention.cancel')}
+    <Button type="button" variant="outline" disabled={busy || submitting} onClick={() => setOpen(true)}>{t(labels.button)}</Button>
+    <Modal open={open} onClose={() => { if (!submitting) setOpen(false) }} title={t(labels.title)} closeLabel={t('retention.cancel')}
       className={css.cleanupDialog} contentClassName={css.cleanupContent} footer={<div className={css.cleanupActions}>
         <Button type="button" variant="primary" data-modal-autofocus disabled={submitting} onClick={() => setOpen(false)}>{t('retention.cancel')}</Button>
         <Button type="button" variant="outline" disabled={busy || submitting} onClick={() => { void confirm() }}>{t('retention.confirm')}</Button>
       </div>}>
-      <p className={css.cleanupWarning}>{t('retention.conversationWarning')}</p>
-      <p className={css.cleanupDetail}>{t('retention.conversationDetail')}</p>
+      <p className={css.cleanupWarning}>{t(labels.warning)}</p>
+      <p className={css.cleanupDetail}>{t(labels.detail)}</p>
     </Modal>
   </>
 }

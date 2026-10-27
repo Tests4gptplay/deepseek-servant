@@ -148,7 +148,7 @@ export interface StorageUsageStats {
     knowledgeBytes: number
     originBytes: number
     archiveBytes: number
-    historyBytes: number
+    planningBytes: number
   }
   temporary: {
     taskBytes: number

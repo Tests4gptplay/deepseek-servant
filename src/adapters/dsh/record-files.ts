@@ -8,11 +8,13 @@ type KvFacet = JsonStorageBackend['kv']
 type KvUnit = Awaited<ReturnType<KvFacet['open']>>
 const descriptor = { name: 'record', version: 1, tables: ['records'], hasGlobal: false } as const
 const LAYOUT = { format: 'deepseek-servant-record-folders', version: 1 } as const
-export const recordCategories = ['tasks', 'assistants', 'skills', 'knowledge/facts', 'knowledge/preferences', 'settings', 'other'] as const
+export const recordCategories = ['tasks', 'assistants', 'skills', 'knowledge/facts', 'knowledge/preferences', 'settings', 'other', 'work-planning', 'archives'] as const
 
 /** A readable ID plus a digest keeps distinct scopes and Windows case variants apart. */
 export function recordFolder(key: string): string {
   const category = key.startsWith('task:') ? 'tasks'
+    : key.startsWith('foreground-memory/') ? 'work-planning'
+    : ['records/', 'record-archive/', 'task-history/', 'tombstone/'].some(prefix => key.startsWith(prefix)) ? 'archives'
     : key.startsWith('assistant/') ? 'assistants'
     : key.startsWith('knowledge/skills/') ? 'skills'
     : key.startsWith('knowledge/facts/') ? 'knowledge/facts'
@@ -109,6 +111,20 @@ export class RecordFilesBackend {
       const entries = Object.entries(snapshot.tables.records ?? {})
       if (entries.length > 1) throw new Error('每个记录文件只能保存一个记录')
       for (const [key, value] of entries) {
+        const target = recordFolder(key)
+        if (['work-planning', 'archives'].includes(path.dirname(target)) && relative === path.join('other', path.basename(target))
+          && value && typeof value === 'object' && 'key' in value && value.key === key && 'value' in value) {
+          const destination = await this.openFile(target)
+          const saved = await destination.unit.loadAll()
+          if (!Object.keys(saved.tables.records ?? {}).length) await destination.unit.putRecord('records', key, value)
+          const migrated = await this.readRecord(target)
+          await file.unit.deleteRecord('records', key)
+          await file.backend.close()
+          this.files.delete(relative)
+          try { await unlink(filePath); await rmdir(path.join(this.directory, relative)) } catch { /* Keep any additional files. */ }
+          this.faults.delete(relative)
+          return migrated
+        }
         if (recordFolder(key) !== relative || !value || typeof value !== 'object'
           || !('key' in value) || value.key !== key || !('value' in value)) throw new Error('记录路径、身份或封装不匹配')
       }

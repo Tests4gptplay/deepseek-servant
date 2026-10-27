@@ -90,6 +90,11 @@ export class AssistantService {
     else await this.options.store.set(ref, { text, updatedAt: this.now() })
     return { ref, exists: !!text, characters: text.length }
   }
+  async clearPlanningNotes(id = 'default'): Promise<{ cleared: true }> {
+    await this.foregroundMemory(id, 'Foreground_List', '')
+    await this.foregroundMemory(id, 'Foreground_Cache', '')
+    return { cleared: true }
+  }
   private now(): string { return this.options.now?.() ?? new Date().toISOString() }
   private key(id: string): string { return 'assistant/' + id }
   private historyKey(id: string, kind: string, key: string): string {
@@ -428,7 +433,6 @@ export class AssistantService {
         'conversation-staging/' + encoded + '/', 'conversation-exchanges/' + encoded + '/',
         'assistant-history/' + encoded + '/session/', 'assistant-history/' + encoded + '/input/']
       const keys = (await Promise.all(prefixes.map(prefix => this.options.store.list(prefix)))).flat().map(row => row.key)
-      keys.push('foreground-memory/' + encoded + '/Foreground_Cache')
       const deliveries: ConversationCleanup['deliveries'] = []
       for (const [key, receipt] of Object.entries(assistant.deliveries)) {
         const sessionId = 'servant-foreground-' + fingerprint(epoch + '\0' + receipt.messageId)

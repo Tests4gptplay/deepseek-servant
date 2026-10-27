@@ -22,7 +22,7 @@ export function RetentionPanel({ stats, preview, outcome, busy, recordStorage, m
     ['retention.skillBytes', stats?.permanent.knowledgeBytes ?? 0],
     ['retention.originBytes', stats?.permanent.originBytes ?? 0],
     ['retention.archiveBytes', stats?.permanent.archiveBytes ?? 0],
-    ['retention.historyBytes', stats?.permanent.historyBytes ?? 0],
+    ['retention.planningBytes', stats?.permanent.planningBytes ?? 0],
   ]
   const temporary: UsageRow[] = [
     ['retention.activeTaskBytes', stats?.temporary.taskBytes ?? 0],
@@ -48,6 +48,7 @@ export function RetentionPanel({ stats, preview, outcome, busy, recordStorage, m
         <Button size="sm" variant="outline" disabled={busy} onClick={() => { void onRetention({ action: 'preview' }) }}>{t('retention.preview')}</Button>
         <ManualTaskCleanup preview={preview} busy={busy || moving} onRetention={onRetention} t={t} />
         <ManualConversationCleanup busy={busy || moving} onRetention={onRetention} t={t} />
+        <ManualConversationCleanup planning busy={busy || moving} onRetention={onRetention} t={t} />
       </div>
       {preview && <>
         <p className={css.muted}>{t('retention.plan', { archive: preview.archiveTasks.length, remove: preview.deleteArchives.length,

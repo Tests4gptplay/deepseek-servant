@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { calculateStorageUsage } from '../src/application/storage-usage.js'
 
 test('T29-T31: Domain categories count every key once, including legacy fields; empty Domain stays zero', () => {
-  const categories = ['conversations/a', 'assistant/a', 'knowledge/a', 'task-origin/a', 'records/a', 'task-history/a',
+  const categories = ['conversations/a', 'assistant/a', 'knowledge/a', 'task-origin/a', 'records/a', 'task-history/a', 'foreground-memory/a/Foreground_List', 'foreground-memory/a/Foreground_Cache',
     'planner-memory/a', 'planner-note/a', 'worker-reply/a', 'execution/a', 'recovery/a']
   const rows: Array<{ key: string; value: unknown }> = categories.map(key => ({ key, value: { text: '完整正文 🙂' } }))
   rows.push({ key: 'task:legacy', value: { id: 'legacy', goal: { objective: 'Goal' }, decisions: [{ summary: 'Decision' }],

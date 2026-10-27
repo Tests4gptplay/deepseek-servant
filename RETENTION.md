@@ -1,6 +1,6 @@
 # 记录、归档与清理
 
-当前实现：`0.2.0`。使用入口见[使用指南](docs/USAGE.md)。
+当前实现：`0.3.1-rc.1`。使用入口见[使用指南](docs/USAGE.md)。
 
 ## Private Git 模式
 
@@ -15,6 +15,23 @@
 完整对话、原始任务需求、Planner Memory、Planner Note 各版本、Child Reply、Task 运行状态、知识和 records 档案均保存在 deepseek_servant 原生 storageDomain。原文使用分段内容和稳定引用保存；角色按引用分页读取，长期记录不受热上下文的条数与长度限制。
 
 设置页保留六项长期记录与六项临时记录的大小统计。统计逐项读取 Domain 内实际 JSON 值，合计包含旧版内嵌字段且只计一次。迁移备份、文件封装、文件系统开销与 DSH 原生 Session 日志由各自的存储位置管理。
+
+### 分类关系
+
+长期列保持六项：前台完整聊天、助理身份与设置、知识与技能、原始任务需求、已完成任务档案、工作规划记录。
+
+- **已完成任务档案**合计完整 records、历史任务索引及永久任务身份标记。索引仍用于查阅与恢复，合并统计不删除索引。
+- **工作规划记录 / Work Planning Notes**对应 `Foreground_List` 与 `Foreground_Cache`，单独计量，默认保留。它们与后台任务的 Planner Memory、Planner Note 分开。
+- “清理工作规划记录”经确认后清空当前助理的 List 与 Cache；聊天、任务档案、知识及技能保留。“清理前台对话”和“清理已结束任务”均保留工作规划记录。
+
+Local 记录目录中的 `work-planning/` 保存 List 与 Cache，`archives/` 保存完整 records 和历史索引。
+
+| 记录 | Local 物理位置（相对 `deepseek_servant/`） | 稳定逻辑引用 |
+| --- | --- | --- |
+| List：重要交代索引 | `work-planning/foreground_list--<身份摘要>/record.json` | `foreground-memory/<助理ID>/Foreground_List` |
+| 随记（Cache） | `work-planning/foreground_cache--<身份摘要>/record.json` | `foreground-memory/<助理ID>/Foreground_Cache` |
+
+身份摘要包含助理与文档身份，因此不同助理的两份记录各自独立。以上随记即前台的 note，不是后台任务的 Planner Note。Private Git 模式继续使用私库中的 `assistants/<participant>/<instance>/Foreground_List.md` 与 `Foreground_Cache.md`，由 Git 保存；本页 Local 清理不删除这些远端文件。每条记录沿用带身份摘要的独立子目录；旧版 `other/` 下的对应记录在加载时迁入新类别，逻辑引用与正文保持不变。迁移中断后继续使用已落盘的新记录。
 
 ## 存储位置与迁移
 
@@ -42,7 +59,7 @@ records 由 Domain 中的封存清单及内容分段组成。用户可以在已�
 
 每次完整用户交互结束，保存原始用户消息和模型最终回复，再释放当前物理 Session；下一次带入最近六次完整交互。更早的完整原文按日期保存，可分页浏览、检索和读取。后台完成通知独立保存，不计入六次用户交互。
 
-“清理前台对话”是单独的确认操作：停止当前 Foreground，删除 DSS 自有前台原文及索引，开启新的对话。后台 Task、原始任务需求、知识和待交付的系统结果继续保留。DSH 原生日志按宿主自己的存储策略管理。
+“清理前台对话”是单独的确认操作：停止当前 Foreground，删除 DSS 自有前台原文及索引，开启新的对话。后台 Task、原始任务需求、工作规划记录、知识和待交付的系统结果继续保留。DSH 原生日志按宿主自己的存储策略管理。
 
 ## 手动清理已结束任务
 

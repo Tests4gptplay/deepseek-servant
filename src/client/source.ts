@@ -7,6 +7,7 @@ import type { RetentionPolicy, RetentionPreview, RetentionSweepResult, StorageUs
 export type RetentionRequest = { action: 'stats' } | { action: 'preview' } | { action: 'sweep'; previewId: string; confirmation: 'clear-ended-task-records' }
   | { action: 'configure'; policy: RetentionPolicy; expectedRevision: number }
   | { action: 'clearConversation'; confirmation: 'clear-foreground-conversation' }
+  | { action: 'clearPlanningNotes'; confirmation: 'clear-work-planning-notes' }
 
 export interface ServantClientApi {
   view(input?: { conversation?: ConversationQuery }): Promise<ServantView>
@@ -182,6 +183,7 @@ export function createServantSource(api: ServantClientApi, notify: (notice: Omit
     moveRecords: (directory: string, expectedDirectory: string) => mutate('moveRecords', 'recordsMoved', () => api.moveRecords({ directory, expectedDirectory })),
     retention: (input: RetentionRequest) => mutate('retention', input.action === 'preview' ? undefined : input.action === 'configure' ? 'retentionPolicySaved' : 'retentionUpdated', async () => {
       const result = await api.retention(input)
+      if (input.action === 'clearPlanningNotes') return result
       if (input.action === 'clearConversation') {
         history = [{}]; historyIndex = 0; historyPages = []
         publish({ ...snapshot, history: { canGoNewer: false } })
