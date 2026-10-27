@@ -275,6 +275,52 @@ test('three independent participants execute through readback, review, seal and 
   }
 })
 
+test('GitHub requests abort stalled transport at the operation deadline', async () => {
+  let observed: AbortSignal | undefined
+  const client = new GitHubClient(async () => ({ value: 'test-token', source: 'test' }), async (_url, init) => {
+    observed = init?.signal ?? undefined
+    return await new Promise<Response>((_resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Test transport exceeded its bounded wait')), 100)
+      observed?.addEventListener('abort', () => { clearTimeout(timer); reject(observed!.reason) }, { once: true })
+    })
+  }, 10)
+  await assert.rejects(client.session(session => session.request('GET', '/user')), /timeout/i)
+  assert.equal(observed?.aborted, true)
+})
+
+test('failed native admission does not leave a phantom physical owner', async () => {
+  const repo = new MemoryRepo(), target = instance(repo)
+  const start = target.agents.start.bind(target.agents)
+  target.agents.start = async () => { throw new Error('Native startup unavailable') }
+  await input(repo, target, 'admission', 'Hello')
+  await target.tick(2)
+  assert.equal(target.cache.entries('physical/').length, 0)
+  assert.ok(target.cache.entries('read-error/').length > 0)
+  target.agents.start = start
+  await target.tick()
+  assert.ok(target.agents.latest('foreground'))
+  assert.equal(target.cache.entries('physical/').length, 1)
+})
+
+test('closed foreground actions do not repeat consumed-input Git transactions', async () => {
+  const repo = new MemoryRepo(), target = instance(repo)
+  await input(repo, target, 'closed-input', 'Hello')
+  await target.tick(2)
+  const fg = target.agents.latest('foreground')
+  const reply = await write(target, fg, { op: 'entry', id: 'body', kind: 'reply', text: 'Hello back' })
+  await write(target, fg, { op: 'outcome', id: 'reply', turn_signal: 'respond', replyPath: reply.textPath, prerequisitePaths: [] })
+  target.agents.finish(fg)
+  await target.tick(2)
+  let transactions = 0
+  const transact = target.journal.transact.bind(target.journal)
+  target.journal.transact = (id, request, build) => {
+    if (id.startsWith('consume-')) transactions++
+    return transact(id, request, build)
+  }
+  await target.tick(3)
+  assert.equal(transactions, 0)
+})
+
 test('a conflicting draft preserves its error while a later healthy draft still commits', async () => {
   const repo = new MemoryRepo(), target = instance(repo)
   await input(repo, target, 'draft-isolation', 'Hello')

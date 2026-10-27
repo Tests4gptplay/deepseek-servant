@@ -117,7 +117,7 @@ export class CoopConsumer {
         this.reportCleanup(await releaseInputCaches(cache, action.binding))
         if (action.binding.sourceIntentId) {
           const inputPath = 'dss-coop/intents/' + participantId + '/' + action.binding.sourceIntentId + '.json'
-          await this.options.journal().transact('consume-' + action.id, { path: inputPath }, async head => {
+          if (snapshot.files.has(inputPath)) await this.options.journal().transact('consume-' + action.id, { path: inputPath }, async head => {
             const input = await repo.read(head, inputPath)
             if (input === undefined) return []
             return [{ path: 'dss-coop/inputs/' + participantId + '/' + action.binding.sourceIntentId + '.json', content: input }, { path: inputPath, content: null }]
@@ -183,9 +183,14 @@ export class CoopConsumer {
         if (b.role === 'worker' && activeWorkers >= cache.settings.workerSeats) continue
         const context = await this.context(snapshot, action)
         if (this.stopping) return
-        await cache.put('physical/' + b.executionId, { actionId: action.id, binding: b })
-        if (this.stopping) return
-        await agents.start(action, context, this.writer, this.options.wake)
+        const physicalKey = 'physical/' + b.executionId
+        await cache.put(physicalKey, { actionId: action.id, binding: b })
+        if (this.stopping) { await cache.remove(physicalKey); return }
+        try { await agents.start(action, context, this.writer, this.options.wake) }
+        catch (error) {
+          if (!agents.state(b.executionId)) await cache.remove(physicalKey)
+          throw error
+        }
       }
       } catch (error) { await recordReadError(cache, actionPath(action.binding), error) }
     }

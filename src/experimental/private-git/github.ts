@@ -20,7 +20,8 @@ export function repositoryPath(ownerRepo: string): string {
 /** Secrets exist only inside one operation; no credential is returned or cached. */
 export class GitHubClient {
   private requests = new AbortController()
-  constructor(private readonly tokenSource: TokenSource, private readonly fetcher: GitHubFetch = fetch) {}
+  constructor(private readonly tokenSource: TokenSource, private readonly fetcher: GitHubFetch = fetch,
+    private readonly requestTimeoutMs = 60_000) {}
   cancel(): void { this.requests.abort(); this.requests = new AbortController() }
   async session<T>(operation: (session: GitHubSession) => Promise<T>): Promise<T> {
     const signal = this.requests.signal
@@ -33,7 +34,7 @@ export class GitHubClient {
       let response: Response
       try {
         response = await this.fetcher('https://api.github.com' + path, {
-          method, signal, headers: { Accept: 'application/vnd.github+json', Authorization: 'Bearer ' + token.value,
+          method, signal: AbortSignal.any([signal, AbortSignal.timeout(this.requestTimeoutMs)]), headers: { Accept: 'application/vnd.github+json', Authorization: 'Bearer ' + token.value,
             'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'DeepSeek-Servant-Coop', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         })
