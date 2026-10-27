@@ -181,6 +181,14 @@ export class TaskArchiveStore {
       try {
         const manifest = await this.manifest(index.taskId)
         if (!manifest || manifest.stage !== 'ended') throw new Error('Cleanup requires its sealed records: ' + index.taskId)
+        const current = await this.storage.get<{ id: string; revision: number; kind?: string }>('task:' + index.taskId)
+        if (current) {
+          const expectedRevision = current.kind === 'task-tombstone' ? index.tombstone.revision : manifest.taskRevision
+          if (current.id !== index.taskId || current.revision !== expectedRevision) {
+            throw new Error('Task changed after records were sealed; originals retained: ' + index.taskId)
+          }
+          if (current.kind !== 'task-tombstone') await this.storage.set('task:' + index.taskId, index.tombstone)
+        }
         await this.finishCleanup(manifest)
       } catch (error) { report(error) }
     }

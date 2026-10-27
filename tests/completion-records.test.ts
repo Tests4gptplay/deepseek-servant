@@ -136,6 +136,32 @@ test('T25: a failed archive write leaves runtime originals intact; retry seals a
   assert.equal((await f.tasks.get('one'))?.phase, 'completed')
 })
 
+test('restart cleanup preserves a task updated after its archive was sealed', async () => {
+  for (const newer of [false, true]) {
+    const f = await accepted()
+    await finish(f)
+    f.storage.fail = key => key === 'task:one'
+    await assert.rejects(f.tasks.cleanupCompleted('one'), /Injected storage interruption/)
+    f.storage.fail = undefined
+    const original = (await f.storage.get<any>('task:one'))!
+    const current = newer ? { ...original, revision: original.revision + 1 } : original
+    if (newer) await f.storage.set('task:one', current)
+    const errors: unknown[] = []
+    const restarted = new TaskArchiveStore(f.storage)
+    await restarted.resumeCleanup(error => errors.push(error))
+    if (newer) {
+      assert.deepEqual(await f.storage.get('task:one'), current)
+      assert.ok((await f.storage.list('worker-reply/one/')).length)
+      assert.equal(errors.length, 1)
+      assert.equal((await restarted.index('one'))?.cleanedAt, undefined)
+    } else {
+      assert.equal(await f.storage.get('task:one'), undefined)
+      assert.equal(errors.length, 0)
+      assert.ok((await restarted.index('one'))?.cleanedAt)
+    }
+  }
+})
+
 test('T26: interrupted exact-key cleanup resumes after restart from the sealed manifest and replay fence', async () => {
   const f = await accepted()
   await finish(f)

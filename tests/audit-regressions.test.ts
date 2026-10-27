@@ -1,10 +1,34 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { AgentSupervisor } from '../src/runtime/agent-supervisor.js'
+import { QueryService } from '../src/application/query-service.js'
 import { AssistantService } from '../src/application/assistant-service.js'
 import { installRoleTools } from '../src/roles/tools.js'
 import { MemoryStorage } from './support.js'
 import { childSpec, fixture } from './task-fixture.js'
+
+test('one failed view section preserves other sections and exposes its error', async () => {
+  const f = await fixture(), task = await f.get()
+  for (const failed of ['tasks', 'history', 'messages', 'knowledge']) {
+    const read = async (name: string, value: any) => {
+      if (failed === name) throw new Error(name + ' record is damaged')
+      return value
+    }
+    const query = new QueryService({
+      assistants: { get: async () => ({ id: 'default', revision: 1, sessionId: 'session', settings: {}, workspace: { id: 'workspace' }, inputs: {} }),
+        conversationPage: () => read('messages', { messages: [{ id: 'message' }] }) },
+      tasks: { list: () => read('tasks', [{ ...task, assistantId: 'default' }]), history: () => read('history', []), store: { problems: new Map() } },
+      knowledge: { list: () => read('knowledge', [{ id: 'knowledge' }]) },
+      workspaces: () => [], runtime: () => ({ status: 'running', workerSeats: 2 }), runtimeSettings: () => ({ workerSeats: 2 }),
+      recordStorage: () => ({ directory: process.cwd() }),
+    } as any)
+    const view = await query.view()
+    assert.equal(view.tasks.length, failed === 'tasks' ? 0 : 1)
+    assert.equal(view.messages.length, failed === 'messages' ? 0 : 1)
+    assert.equal(view.knowledge.length, failed === 'knowledge' ? 0 : 1)
+    assert.ok(view.recordStorage.issues?.some(issue => issue.includes(failed + ' record is damaged')))
+  }
+})
 
 test('foreground registered tools survive supervisor restrictions and execution guard', async t => {
   const store = new MemoryStorage()

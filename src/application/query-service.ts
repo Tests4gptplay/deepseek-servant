@@ -21,20 +21,28 @@ export class QueryService {
   constructor(private readonly options: QueryServiceOptions) {}
   async view(assistantId = 'default', conversation: ConversationQuery = {}): Promise<ServantView> {
     const assistant = await this.options.assistants.get(assistantId)
-    const [tasks, page, knowledge] = await Promise.all([
-      this.options.tasks.list(), this.options.assistants.conversationPage(assistantId, conversation.before, 40, conversation.date),
-      this.options.knowledge.list({ assistantId, workspaceId: assistant.workspace.id }),
+    const issues: string[] = []
+    const section = async <T>(name: string, read: () => Promise<T>, fallback: T): Promise<T> => {
+      try { return await read() }
+      catch (error) { issues.push(name + ': ' + (error instanceof Error ? error.message : String(error))); return fallback }
+    }
+    const [tasks, history, page, knowledge] = await Promise.all([
+      section('Tasks', () => this.options.tasks.list(), []),
+      section('History', () => this.options.tasks.history(), []),
+      section('Conversation', () => this.options.assistants.conversationPage(assistantId, conversation.before, 40, conversation.date), { messages: [] }),
+      section('Knowledge', () => this.options.knowledge.list({ assistantId, workspaceId: assistant.workspace.id }), []),
     ])
+    const storage = this.options.recordStorage()
     return {
       assistant: { id: assistant.id, revision: assistant.revision, sessionId: assistant.sessionId,
         settings: assistant.settings, workspace: assistant.workspace,
         pendingInputs: Object.entries(assistant.inputs).filter(([, input]) => input.status === 'pending' || input.error !== undefined)
           .map(([messageId, input]) => ({ messageId, ...(input.error ? { error: input.error } : {}) })),
       },
-      tasks: [...new Map([...tasks, ...await this.options.tasks.history()].map(task => [task.id, task])).values()].filter(task => task.assistantId === assistantId)
+      tasks: [...new Map([...tasks, ...history].map(task => [task.id, task])).values()].filter(task => task.assistantId === assistantId)
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map(taskView),
       runtimeSettings: this.options.runtimeSettings(),
-      messages: page.messages, ...(page.before ? { conversationBefore: page.before } : {}), knowledge, workspaces: this.options.workspaces(), runtime: this.options.runtime(), recordStorage: { ...this.options.recordStorage(), issues: [...(this.options.recordStorage().issues ?? []), ...this.options.tasks.store.problems.values()] },
+      messages: page.messages, ...(page.before ? { conversationBefore: page.before } : {}), knowledge, workspaces: this.options.workspaces(), runtime: this.options.runtime(), recordStorage: { ...storage, issues: [...(storage.issues ?? []), ...this.options.tasks.store.problems.values(), ...issues] },
     }
   }
   async task(taskId: string): Promise<TaskView | undefined> {
