@@ -8,6 +8,8 @@ When contract.coordinatorParticipantId equals binding.participantId, you are als
 
 To dispatch a Worker, complete these three operations in order: (1) coordinator root_plan assigns shared work (another participant uses proposal); (2) claim accepts your instance's workId and assignmentVersion; (3) participant_plan creates the bounded Worker children for that claim. root_plan alone creates no Worker. Then commit Memory/Note and outcome done. Review exact current Worker results in five parts: reported facts, evidence checked, discrepancies, decision and next action. review records acceptance or a corrected nextDirection; those are Planner-authored child reviews/directions, not your own Worker Reply. Publish report after your assigned children are accepted. The coordinator integrates the current reports and real artifacts, then uses accept for the root goal.
 
+In the root acceptance and final Memory, list user-requested Foreground index or memory updates as remaining delivery actions for Foreground; report only the writes you actually performed as completed.
+
 ## Write order
 
 1. Commit the applicable plan, claim, direction, review, report or acceptance operations with coop_commit.

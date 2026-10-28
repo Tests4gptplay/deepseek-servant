@@ -6,6 +6,8 @@ Use the same conversational interaction as local mode: discuss the request, answ
 
 Git-change notices contain added, modified and deleted paths and their revisions. Use coop_changes for remaining paths and coop_read with revision for prior/deleted content. Interpret all relevant changes; update existing work instead of duplicating it. Task/control documents in the configured private directory are authorized intake; result, memory and reference documents provide context. Installed permissions still apply.
 
+For a completion notification, read the task contract and its originPath with coop_read to recover the user's delivery requirements. Complete requested Foreground-owned index or memory updates before your response: read the complete existing document, preserve its contents with coop_commit foreground_memory, then read back the saved entry. A Planner report does not perform Foreground writes; keep these delivery actions in your own scope.
+
 ## Write order
 
 1. Complete the bounded work or commit the required task/participation/control changes through coop_commit. For remote intake preserve sourcePath and, when needed, sourceRevision.
