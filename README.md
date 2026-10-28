@@ -8,7 +8,7 @@
 
 **设计逻辑源自 [Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness)。** DeepSeek Servant 延续 CAH 以目标为中心的 Agent 工作闭环：理解需求、制定计划、执行工作、评价成果、调整方法、跨会话接续、故障恢复与技能积累。Servant 将这套持续工作机制整合到 DeepSeek Harness 运行环境，复用宿主的模型、工具、Session、作业与 Skill 能力。
 
-**当前版本：** `0.3.3` · **测试宿主：** DSH `0.2.1-rc.3` · **项目形态：** 独立安装的社区插件
+**当前版本：** `0.3.4` · **测试宿主：** DSH `0.2.1-rc.3` · **项目形态：** 独立安装的社区插件
 
 **Support / 赞助：** [GitHub Sponsors](https://github.com/sponsors/Tests4gptplay) · [Ko-fi](https://ko-fi.com/kou392350) · [Patreon](https://www.patreon.com/cw/Kou848) · [爱发电 / Afdian](https://afdian.com/a/kkt_ifd1) · [支付宝 / Alipay](SPONSOR.md)
 
@@ -43,7 +43,7 @@
 
 长任务验证处理了 **16 批、64 条合成事件**，包括 **3 次周期评审、2 次正常 Worker 换代**、跨代历史回查和最终独立核对。32 行最终账本与 16 批累计快照均与预先保存的独立答案一致；任务完成后执行了正式清理，成果文件哈希保持一致。
 
-更多实测过程、运行条件及清理结果见[实现与验证记录](IMPLEMENTATION.md)；历次候选与整理范围见[版本摘要](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.3/CHANGELOG.md)。
+更多实测过程、运行条件及清理结果见[实现与验证记录](IMPLEMENTATION.md)；历次候选与整理范围见[版本摘要](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.4/CHANGELOG.md)。
 
 ## 架构
 
@@ -61,10 +61,10 @@
 
 ## 安装与使用
 
-正式版在 DSH Desktop 的“插件 → 添加插件”中输入固定来源 `github:Tests4gptplay/deepseek-servant#v0.3.3`，安装并启用。Web profile 使用：
+正式版在 DSH Desktop 的“插件 → 添加插件”中输入固定来源 `github:Tests4gptplay/deepseek-servant#v0.3.4`，安装并启用。Web profile 使用：
 
 ```sh
-dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.3.3'
+dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.3.4'
 ```
 
 模型提供者、工具权限和凭据沿用 DSH 配置。进入侧栏 DeepSeek Servant，选择前台模型与工作区即可开始；后台 `Auto` 跟随本页前台模型，Worker 席位默认 2，可在设置中调整。
@@ -76,12 +76,12 @@ dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.3.3'
 
 **已验证宿主版本：** 当前升级使用 Windows / DSH `0.2.1-rc.3` 原生 SDK profile；此前功能基线使用 Linux / DSH `0.2.1-rc.2`。插件从宿主获取 DSH 组件，按实际接口运行，无 DSH 版本号硬性准入限制。已确认的 Desktop UI、侧栏行为和美术资源继续保留。
 
-任务、助理、知识、完整对话与 records 档案通过原生 `storageDomain` 保存。在“Servant 记录管理”中可迁移整个记录目录；迁移完成后立即使用新位置，不改变任务工作区。大小统计分为六项长期记录与六项临时记录，按 Domain 实际内容计量。历史任务索引计入“已完成任务档案”；“工作规划记录 / Work Planning Notes”独立统计 Foreground_List 与 Foreground_Cache，并提供单独清理入口。清理聊天保留规划记录。规划记录位于 `work-planning/`，完整档案及历史索引位于 `archives/`。DSH 原生 Session 日志使用宿主单独配置的存储位置。详见 [数据保留与清理](RETENTION.md)。
+任务、助理、知识、完整对话与 records 档案通过原生 `storageDomain` 保存。在“Servant 记录管理”中可迁移整个记录目录；迁移完成后立即使用新位置，不改变任务工作区。大小统计分为六项长期记录与六项临时记录，按 Domain 实际内容计量。历史任务索引计入“已完成任务档案”；“工作规划记录 / Work Planning Notes”独立统计 Foreground_List 与 Foreground_Cache，并提供单独清理入口。清理聊天保留规划记录。相对所选记录存储位置，规划记录位于 `deepseek_servant/work-planning/`，完整档案及历史索引位于 `deepseek_servant/archives/`。DSH 原生 Session 日志使用宿主单独配置的存储位置。详见 [数据保留与清理](RETENTION.md)。
 
 ## 开发文档
 
 - [当前架构](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/DESIGN.md)
-- [版本与验收摘要](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.3/CHANGELOG.md)
+- [版本与验收摘要](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.4/CHANGELOG.md)
 - [alpha.40 协作开发验收](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/docs/acceptance-private-git-20261026.md)
 - [alpha.39 验收记录](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/docs/acceptance-20261026.md)
 - [实现与验证记录](IMPLEMENTATION.md)

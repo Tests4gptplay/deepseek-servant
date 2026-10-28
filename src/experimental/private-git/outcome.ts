@@ -58,13 +58,22 @@ export async function readOutcome(repo: GitRepository, snapshot: GitSnapshot, ex
 }
 
 /** Mutable Host indexes become schedulable only after their author's remote completion. */
-export async function recordPublished(repo: GitRepository, snapshot: GitSnapshot, writer?: RoleBinding): Promise<boolean> {
+export async function recordPublished(repo: GitRepository, snapshot: GitSnapshot, writer?: RoleBinding, handoffTaskId?: string): Promise<boolean> {
   if (!writer) return true // Existing records predate separate status files.
   const action = await readJson<RoleAction>(repo, snapshot, actionPath(writer))
   const started = await readStatus(repo, snapshot, writer, 'started')
   if (!started && action?.stateProtocol !== 1) return true
   const completed = await readStatus(repo, snapshot, writer, 'completed')
-  return !!completed?.turn_signal && completed.outcomePath === writer.outputPath && !!signalDisposition(writer.role, completed.turn_signal)
+  if (completed?.turn_signal && completed.outcomePath === writer.outputPath && signalDisposition(writer.role, completed.turn_signal)) return true
+  // A recovered intake explicitly hands off the same saved task after its original turn was interrupted.
+  const current = action?.binding
+  if (handoffTaskId && writer.role === 'foreground' && current?.role === 'foreground'
+    && current.generation > writer.generation && current.sourceIntentId === writer.sourceIntentId
+    && actionPath(current) === actionPath(writer)) {
+    const outcome = await readOutcome(repo, snapshot, current)
+    return outcome?.kind === 'handoff_planner' && outcome.taskId === handoffTaskId
+  }
+  return false
 }
 
 /** Protocol changes are consumed by the Host; business-source notices go to Foreground. */

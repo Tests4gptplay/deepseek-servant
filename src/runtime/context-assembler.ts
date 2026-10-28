@@ -160,14 +160,10 @@ export function childMemory(task: Task, childId: string): MemoryEntry[] {
     exactRead: entry.kind === 'work' ? { ref: entry.ref, limit: 1 } : { ref: memoryRef(task.id, 'child', childId), offset: index, limit: 1 } }))
 }
 
-/** Paged cold reads. Callers cannot turn a Task-scoped reference into filesystem or network access. */
-export function queryTaskMemory(task: Task, execution: ExecutionBinding | undefined, query: TaskMemoryQuery): TaskMemoryPage {
+function taskMemoryEntries(task: Task, execution: ExecutionBinding | undefined, ref: string): unknown[] {
   const current = caller(task, execution)
-  const { section, id } = parseRef(task, query.ref)
+  const { section, id } = parseRef(task, ref)
   authorize(task, current, section, id)
-  const offset = query.offset ?? 0
-  const limit = query.limit ?? 20
-  if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > MAX_PAGE) throw new Error('MEMORY_PAGE: offset must be nonnegative and limit must be between 1 and 50.')
   let entries: unknown[]
   switch (section) {
     case 'goal': entries = [task.goal]; break
@@ -184,6 +180,24 @@ export function queryTaskMemory(task: Task, execution: ExecutionBinding | undefi
       exactRef: memoryRef(task.id, 'wait', id!), exactRead: { ref: memoryRef(task.id, 'wait', id!), offset: index, limit: 1 } })); break
     case 'waits': entries = waitMemory(task, current).map(entry => waitView(task, entry)); break
   }
+  return entries
+}
+
+/** Character pages for the same logical references supplied in role context and saved indexes. */
+export function readTaskMemoryText(task: Task, execution: ExecutionBinding | undefined, ref: string, cursor = 0, limit = 8192) {
+  const text = JSON.stringify(taskMemoryEntries(task, execution, ref))
+  if (!Number.isInteger(cursor) || cursor < 0 || cursor > text.length || !Number.isInteger(limit) || limit < 1 || limit > 32768) throw new Error('MEMORY_PAGE: Invalid text cursor or page size.')
+  const end = Math.min(text.length, cursor + limit)
+  return { ref, taskRevision: task.revision, text: text.slice(cursor, end), cursor, characters: text.length,
+    ...(end < text.length ? { nextCursor: end } : {}) }
+}
+
+/** Paged cold reads. Callers cannot turn a Task-scoped reference into filesystem or network access. */
+export function queryTaskMemory(task: Task, execution: ExecutionBinding | undefined, query: TaskMemoryQuery): TaskMemoryPage {
+  const entries = taskMemoryEntries(task, execution, query.ref)
+  const offset = query.offset ?? 0
+  const limit = query.limit ?? 20
+  if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > MAX_PAGE) throw new Error('MEMORY_PAGE: offset must be nonnegative and limit must be between 1 and 50.')
   const selected = entries.slice(offset, offset + limit), serialized = JSON.stringify(selected)
   const characterOffset = query.characterOffset ?? 0
   if (!Number.isInteger(characterOffset) || characterOffset < 0 || characterOffset > serialized.length) throw new Error('MEMORY_PAGE: Invalid character cursor.')

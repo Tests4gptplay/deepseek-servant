@@ -64,6 +64,26 @@ test('T05/T06: versioned full note, bounded hot context, owner-scoped exact reco
   assert.ok(direct.streams.find(stream => stream.scope.kind === 'task-origin')!.recent.every(entry => !('excerpt' in entry)))
 })
 
+test('saved logical task references use the same character reader and role scope as full records', async () => {
+  const request = '完整需求🙂'.repeat(3000), f = await fixture(request), planner = await f.bind('plan')
+  const foreground = new TaskRecordAccess(f.tasks, { assistantId: 'assistant', role: 'foreground' })
+  let cursor: number | undefined = 0, text = ''
+  while (cursor !== undefined) {
+    const page = await foreground.read(memoryRef('one', 'goal'), cursor, 1024)
+    text += page.text; cursor = page.nextCursor
+  }
+  assert.equal(JSON.parse(text)[0].request, request)
+  await assert.rejects(new TaskRecordAccess(f.tasks, { assistantId: 'different', role: 'foreground' }).read(memoryRef('one', 'goal')), /RECORD_SCOPE/)
+  await f.execute({ type: 'planning.commit', expectedGoalRevision: 1, expectedPlanRevision: 0, strategy: 'Produce output', children: [childSpec('a'), childSpec('b')] }, planner.source)
+  const worker = await f.bind('dispatch', 'a')
+  await f.execute({ type: 'execution.report', report: { resultId: 'result:a', assignmentVersion: 1, outcome: 'complete', summary: 'Actual saved output', artifacts: [], evidence: ['Read output'], frontier: 'Review' } }, worker.source)
+  const ref = memoryRef('one', 'report', 'result:a')
+  assert.equal(JSON.parse((await foreground.read(ref)).text)[0].summary, 'Actual saved output')
+  const other = await f.bind('dispatch', 'b')
+  const scoped = new TaskRecordAccess(f.tasks, { assistantId: 'assistant', role: 'worker', taskId: 'one', executionId: other.execution.executionId, agentId: other.source.id, sessionId: other.source.sessionId })
+  await assert.rejects(scoped.read(ref), /MEMORY_SCOPE/)
+})
+
 test('T07: completed immediate Child cannot hide required future backlog', async () => {
   const f = await fixture(), planner = await f.bind('plan')
   assert.equal((await f.execute({ type: 'planning.commit', expectedGoalRevision: 1, expectedPlanRevision: 0, strategy: 'Immediate work',

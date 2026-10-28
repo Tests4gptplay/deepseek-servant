@@ -235,7 +235,16 @@ export class RoleWriter {
       compare(previous.revision, c.expectedRevision)
       const join: Join = { ...previous, revision: previous.revision + 1, epoch: previous.epoch + 1,
         state: c.state === 'resume' ? 'active' : c.state === 'pause' ? 'paused' : 'left', writer: b }
-      return [object(path, join)]
+      const changes = [object(path, join)]
+      if (c.state === 'resume' && join.goalRevision === task.goalRevision) {
+        const plan = await this.rootPlan(s, task.id)
+        for (const work of plan.works.filter(work => work.participantId === b.participantId && work.instanceId === b.instanceId)) {
+          const claimPath = participantPath(task.id, b.participantId) + '/instances/' + b.instanceId + '/claims/' + work.id + '.json'
+          const claim = await this.read<Claim>(s, claimPath)
+          if (claim?.assignmentVersion === work.version) changes.push(object(claimPath, { ...claim, joinRevision: join.revision }))
+        }
+      }
+      return changes
     }
     if (c.op === 'root_plan') {
       const task = await coordinator()
@@ -345,7 +354,9 @@ export class RoleWriter {
       if (kind === 'handoff_planner') {
         if (!c.taskId) throw new RejectedCoopWrite('Choose the task for this handoff.')
         const join = await this.joined(s, b, c.taskId)
-        if (join.writer.executionId !== b.executionId) throw new RejectedCoopWrite('Join or create this task from the current user input before handing it to the Planner.')
+        const sameIntake = join.writer.role === 'foreground' && actionPath(join.writer) === actionPath(b)
+          && join.writer.sourceIntentId === b.sourceIntentId
+        if (join.writer.executionId !== b.executionId && !sameIntake) throw new RejectedCoopWrite('Join or create this task from the current user input before handing it to the Planner.')
       }
       if (b.role === 'planner' && signal === 'complete' && (await this.task(s, requireTask())).status !== 'accepted') throw new RejectedCoopWrite('Accept the root task before publishing Planner complete.')
       if (signal === 'need_user' && !c.question) throw new RejectedCoopWrite('Include the question for the local user.')
@@ -354,8 +365,10 @@ export class RoleWriter {
       if (b.taskId) refs.push(taskPath(b.taskId) + '/contract.json')
       if (c.taskId) refs.push(joinPath(c.taskId, b.participantId, b.instanceId))
       for (const path of refs) {
-        if (await this.repo.read(s, path) === undefined) throw new RejectedCoopWrite('Commit the prerequisite before its outcome: ' + path)
-        if (path.endsWith('/manifest.json')) await readText(this.repo, s, path.slice(0, -'/manifest.json'.length))
+        if (await this.repo.read(s, path) === undefined) {
+          if (await this.repo.read(s, path + '/manifest.json') === undefined) throw new RejectedCoopWrite('Commit the prerequisite before its outcome: ' + path)
+          await readText(this.repo, s, path)
+        } else if (path.endsWith('/manifest.json')) await readText(this.repo, s, path.slice(0, -'/manifest.json'.length))
       }
       const outputRoot = executionPath(b) + '/output'
       const conversation = 'dss-coop/conversations/' + b.participantId + '/' + now.slice(0, 10) + '/' + now.replace(/\D/g, '') + '-' + b.executionId
@@ -368,10 +381,31 @@ export class RoleWriter {
       const changes = ownPath ? [] : textChanges(textPath, c.text!)
       if (c.memory) changes.push(...textChanges(outputRoot + '/memory', c.memory))
       if (c.note) changes.push(...textChanges(outputRoot + '/note', c.note))
+      let resumedRootPlan = false
+      if (b.role === 'planner' && kind === 'plan_ready' && b.taskId) {
+        const shared = await this.rootPlan(s, b.taskId)
+        const plan = await this.read<ParticipantPlan>(s, planPath(b.taskId, b.participantId, b.instanceId))
+        if (shared.works.some(work => work.participantId === b.participantId && work.instanceId === b.instanceId) && !plan?.children.length) {
+          throw new RejectedCoopWrite('root_plan saved shared work but created no Worker. Commit claim for your assignment, then participant_plan with its Worker children, then retry outcome done.')
+        }
+      }
+      if (b.role === 'planner' && kind === 'plan_ready' && b.taskId) {
+        const path = planPath(b.taskId, b.participantId, b.instanceId)
+        const plan = await this.read<ParticipantPlan>(s, path)
+        if (plan?.writer && !sameBinding(plan.writer, b)) {
+          changes.push(object(path, { ...plan, revision: plan.revision + 1, writer: b }))
+        }
+        const shared = await this.rootPlan(s, b.taskId)
+        if (shared.writer?.participantId === b.participantId && shared.writer.instanceId === b.instanceId
+          && !sameBinding(shared.writer, b) && !await recordPublished(this.repo, s, shared.writer)) {
+          changes.push(object(taskPath(b.taskId) + '/plan.json', { ...shared, revision: shared.revision + 1, writer: b }))
+          resumedRootPlan = true
+        }
+      }
       const outcome: RoleOutcome & { observedTrigger?: string } = { binding: b, kind, operationId: c.id, turn_signal: signal, textPath, taskId: c.taskId ?? b.taskId,
         memoryPath: c.memoryPath ?? (c.memory ? outputRoot + '/memory' : undefined), notePath: c.notePath ?? (c.note ? outputRoot + '/note' : undefined),
         prerequisitePaths: [...new Set(refs)], resultStatus: disposition.resultStatus, question: c.question, createdAt: now }
-      if (b.role === 'planner' && b.taskId) outcome.observedTrigger = await plannerTrigger(this.repo, s, b.taskId, b.participantId, b)
+      if (b.role === 'planner' && b.taskId && !resumedRootPlan) outcome.observedTrigger = await plannerTrigger(this.repo, s, b.taskId, b.participantId, b)
       changes.push(object(b.outputPath, outcome))
       if (b.role === 'foreground') {
         changes.push(object(conversation + '/entry.json', { id: b.executionId, role: 'assistant', textPath: outcome.textPath, createdAt: now, writer: b }))
@@ -391,7 +425,7 @@ export async function plannerTrigger(repo: GitRepository, snapshot: GitSnapshot,
     if (path === prefix + 'contract.json' || path === prefix + 'plan.json'
       || path.endsWith('/join.json') || /\/(proposals|reports)\/[^/]+\.json$/.test(path)) {
       const record = await readJson<{ writer?: RoleBinding }>(repo, snapshot, path)
-      if (record?.writer && completing && sameBinding(record.writer, completing) || await recordPublished(repo, snapshot, record?.writer)) selected.push([path, sha])
+      if (record?.writer && completing && sameBinding(record.writer, completing) || await recordPublished(repo, snapshot, record?.writer, taskId)) selected.push([path, sha])
     }
     else if (path.startsWith(prefix + 'executions/' + participantId + '/') && path.endsWith('/outcome.json')) {
       const result = await readOutcome(repo, snapshot, path)

@@ -2,7 +2,7 @@ import type { ServantView, TaskView } from '../contracts/views.js'
 import type { CoopService } from '../experimental/private-git/service.js'
 import { readJson, readText } from '../experimental/private-git/journal.js'
 import { joinPath, taskPath, type Join, type ParticipantPlan, type RoleAction, type RoleOutcome, type RootPlan, type RootTask } from '../experimental/private-git/protocol.js'
-import { loadPaths } from '../experimental/private-git/repository-paths.js'
+import { loadPaths, repositoryUrl, toRepositoryPath } from '../experimental/private-git/repository-paths.js'
 import { recordPublished, readOutcome } from '../experimental/private-git/outcome.js'
 
 export const gitTaskId = (id: string) => 'git:' + id
@@ -14,9 +14,8 @@ export async function gitTaskViews(service: CoopService, base: ServantView): Pro
   if (!snapshot) return []
   const view = await service.view(), repo = service.repository, result: TaskView[] = []
   const participant = String(view.connection!.identity.id)
-  const link = (path: string) => 'https://github.com/' + view.settings.ownerRepo + '/tree/' +
-    encodeURIComponent(view.connection!.repository.branch) + '/' +
-    [view.settings.repositoryDirectory, path.replace(/^dss-coop\//, '')].filter(Boolean).join('/').split('/').map(encodeURIComponent).join('/')
+  const link = (path: string) => repositoryUrl(view.settings.ownerRepo, view.connection!.repository.branch,
+    toRepositoryPath(view.settings.repositoryDirectory, path))
   for (const summary of view.tasks) {
     try {
     const root = taskPath(summary.id)

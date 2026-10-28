@@ -24,7 +24,7 @@
 - **工作规划记录 / Work Planning Notes**对应 `Foreground_List` 与 `Foreground_Cache`，单独计量，默认保留。它们与后台任务的 Planner Memory、Planner Note 分开。
 - “清理工作规划记录”经确认后清空当前助理的 List 与 Cache；聊天、任务档案、知识及技能保留。“清理前台对话”和“清理已结束任务”均保留工作规划记录。
 
-Local 记录目录中的 `work-planning/` 保存 List 与 Cache，`archives/` 保存完整 records 和历史索引。
+以设置中的记录存储位置为根目录，`deepseek_servant/work-planning/` 保存 List 与 Cache，`deepseek_servant/archives/` 保存完整 records 和历史索引。`foreground-memory/...` 与 `dss-record://...` 是工具读取使用的稳定引用；成果文件使用各自的工作区路径。
 
 | 记录 | Local 物理位置（相对 `deepseek_servant/`） | 稳定逻辑引用 |
 | --- | --- | --- |

@@ -1,6 +1,7 @@
 import type { CommandSource, ExecutionBinding, Role, Task } from '../contracts/task.js'
 import type { RecordEntry, RecordScope, RecordSummary } from '../contracts/records.js'
 import type { TaskService } from './task-service.js'
+import { readTaskMemoryText } from '../runtime/context-assembler.js'
 
 export interface RecordCaller { assistantId: string; role: Role; taskId?: string; executionId?: string; agentId?: string; sessionId?: string }
 function summary(entry: RecordEntry): RecordSummary {
@@ -55,6 +56,11 @@ export class TaskRecordAccess {
   }
 
   async read(ref: string, cursor = 0, limit = 8192) {
+    const logical = /^servant-memory:\/\/tasks\/([^/]+)\//.exec(ref)
+    if (logical) {
+      const task = await this.task({ kind: 'execution', taskId: decodeURIComponent(logical[1]!) })
+      return readTaskMemoryText(task, this.caller.role === 'foreground' ? undefined : task.executions[this.caller.executionId!], ref, cursor, limit)
+    }
     const entry = await this.journal.manifest(ref), task = await this.task(entry.scope)
     if (!this.visible(entry, task)) throw new Error('RECORD_SCOPE: Record is outside this published task context.')
     return this.journal.read(ref, cursor, limit)

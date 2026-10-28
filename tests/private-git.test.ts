@@ -12,7 +12,7 @@ import type { CoopStore } from '../src/experimental/private-git/cache.js'
 import { GitConflictError, GitHubClient, GitHubError, GitHubMembers, inspectPrivateRepo } from '../src/experimental/private-git/github.js'
 import { digest, GitJournal, json, readJson, readText, textChanges } from '../src/experimental/private-git/journal.js'
 import { CoopConsumer, type CoopAgentPort, type CoopPhysicalState } from '../src/experimental/private-git/consumer.js'
-import { RoleWriter } from '../src/experimental/private-git/role-writer.js'
+import { RoleWriter, plannerTrigger } from '../src/experimental/private-git/role-writer.js'
 import { CoopNativeAgents } from '../src/experimental/private-git/native-agents.js'
 import { isProtocolPath, legacySignal, readOutcome, signalDisposition } from '../src/experimental/private-git/outcome.js'
 import { statusPath } from '../src/experimental/private-git/status.js'
@@ -138,6 +138,38 @@ test('a malformed task stays isolated, keeps one error record, and recovers afte
   await repo.seed([{ path: contract, content: json({ id: 'broken', status: 'active', coordinatorParticipantId: '1' }) }])
   await target.tick()
   assert.equal(target.cache.get('read-error/' + contract), undefined)
+})
+
+test('an interrupted unpublished root plan resumes its planner without dispatching unfinished work', async () => {
+  const repo = new MemoryRepo(), target = instance(repo), planner = await root(repo, target)
+  await write(target, planner, { op: 'root_plan', id: 'partial-plan', expectedRevision: 0, works: [{
+    id: 'part', title: 'Saved work', direction: 'Write artifact', acceptance: 'Read it',
+    participantId: '1', instanceId: target.cache.instanceId, version: 1,
+  }] })
+  await write(target, planner, { op: 'claim', id: 'partial-claim', workId: 'part', assignmentVersion: 1, scope: 'Current task' })
+  await write(target, planner, { op: 'participant_plan', id: 'partial-children', expectedRevision: 0, children: [{
+    id: 'child', workId: 'part', assignmentVersion: 1, title: 'Saved child', direction: 'Write artifact', acceptance: 'Read it', dependencies: [],
+  }] })
+  await repo.seed([{ path: actionPath(planner.binding), content: json({ ...planner, state: 'closed' }) }])
+  await target.agents.release(planner.binding.executionId)
+  await target.tick(2)
+  const resumed = target.agents.latest('planner')
+  assert.notEqual(resumed.binding.executionId, planner.binding.executionId)
+  assert.equal(resumed.binding.taskId, planner.binding.taskId)
+  assert.equal(target.agents.starts.filter(a => a.binding.role === 'worker').length, 0)
+  assert.equal((await readJson<{ works: unknown[] }>(repo, await repo.snapshot(), taskPath(planner.binding.taskId!) + '/plan.json'))?.works.length, 1)
+  await repo.seed([{ path: actionPath(resumed.binding), content: json({ ...resumed, state: 'closed' }) }])
+  await target.agents.release(resumed.binding.executionId)
+  await target.tick(2)
+  const ready = target.agents.latest('planner')
+  assert.notEqual(ready.binding.executionId, resumed.binding.executionId, 'same-trigger unfinished action resumes too')
+  await write(target, ready, { op: 'outcome', id: 'ready', kind: 'plan_ready', text: 'Confirmed saved plan; dispatch pending child', prerequisitePaths: [] })
+  target.agents.finish(ready)
+  await target.tick(2)
+  assert.equal(target.agents.latest('worker').binding.childId, 'child')
+  const plan = await readJson<{ writer: RoleBinding; children: Array<{ id: string; revision: number }> }>(repo, await repo.snapshot(), planPath(planner.binding.taskId!, '1', target.cache.instanceId))
+  assert.equal(plan?.writer.executionId, ready.binding.executionId)
+  assert.equal(plan?.children[0].revision, 1, 'resuming saved directions preserves the child revision')
 })
 
 test('mode default isolates Git, selection persists, and switching does not dispose background endpoints', async () => {
@@ -446,6 +478,33 @@ test('cold consumption resumes the exact saved Worker and respects explicit part
   const fresh = new Agents(), paused = new CoopConsumer({ repo, cache: target.cache, journal: () => target.journal, agents: fresh, wake() {} })
   await paused.consume(await repo.snapshot())
   assert.equal(fresh.starts.filter(value => value.binding.role === 'worker').length, 0)
+})
+
+test('resume retains unchanged accepted assignments and dispatches saved children', async () => {
+  const repo = new MemoryRepo(), target = instance(repo)
+  const planning = await plannedChild(repo, target)
+  target.agents.finish(planning); await target.tick()
+  const worker = target.agents.latest('worker'), taskId = worker.binding.taskId!
+  await input(repo, target, 'pause-saved', 'Pause the existing task')
+  await target.tick(2)
+  const pause = target.agents.latest('foreground')
+  await write(target, pause, { op: 'control', id: 'pause', taskId, expectedRevision: 1, state: 'pause' })
+  await write(target, pause, { op: 'outcome', id: 'paused', kind: 'respond', text: 'Paused', prerequisitePaths: [] })
+  target.agents.finish(pause); await target.tick(2)
+  assert.equal(target.agents.starts.filter(action => action.binding.role === 'worker').length, 1)
+  await input(repo, target, 'resume-saved', 'Resume the same task and scope')
+  await target.tick(2)
+  const resume = target.agents.latest('foreground')
+  await write(target, resume, { op: 'control', id: 'resume', taskId, expectedRevision: 2, state: 'resume' })
+  await write(target, resume, { op: 'outcome', id: 'resumed', kind: 'respond', text: 'Resumed', prerequisitePaths: [] })
+  target.agents.finish(resume); await target.tick(2)
+  const planner = target.agents.latest('planner')
+  await write(target, planner, { op: 'outcome', id: 'ready-again', kind: 'plan_ready', text: 'Saved directions remain ready', prerequisitePaths: [] })
+  target.agents.finish(planner); await target.tick(2)
+  const resumed = target.agents.latest('worker')
+  assert.notEqual(resumed.binding.executionId, worker.binding.executionId)
+  assert.equal(resumed.binding.childRevision, worker.binding.childRevision)
+  assert.equal(resumed.binding.epoch, 3)
 })
 
 for (const role of ['foreground', 'planner', 'worker'] as const) test('cold ' + role + ' resumes its native Session and queues the same role with saved progress once', async () => {
@@ -773,6 +832,26 @@ test('Worker complete, blocked and error each wake Planner once without waiting 
   }
 })
 
+test('a Worker result arriving during a Planner turn still wakes one review turn', async () => {
+  const repo = new MemoryRepo(), target = instance(repo)
+  await plannedChild(repo, target)
+  const worker = target.agents.latest('worker')
+  await repo.seed([{ path: taskPath(worker.binding.taskId!) + '/proposals/new-input.json', content: json({ text: 'Updated task evidence' }) }])
+  await target.tick(2)
+  const concurrentPlanner = target.agents.latest('planner')
+  await write(target, worker, { op: 'outcome', id: 'finished', turn_signal: 'complete', text: 'Artifact is ready', prerequisitePaths: [] })
+  await write(target, concurrentPlanner, { op: 'outcome', id: 'waiting', turn_signal: 'wait', text: 'Worker had no outcome when checked', prerequisitePaths: [] })
+  await target.tick(3)
+  const reviewer = target.agents.latest('planner')
+  assert.notEqual(reviewer.binding.executionId, concurrentPlanner.binding.executionId)
+  assert.equal(target.agents.starts.filter(a => a.binding.role === 'planner').length, 3)
+  await write(target, reviewer, { op: 'review', id: 'accept-child', childId: 'child', expectedRevision: 1,
+    resultExecutionId: worker.binding.executionId, accepted: true, review })
+  await write(target, reviewer, { op: 'outcome', id: 'reviewed', turn_signal: 'wait', text: 'Child independently reviewed', prerequisitePaths: [] })
+  await target.tick(4)
+  assert.equal(target.agents.starts.filter(a => a.binding.role === 'planner').length, 3, 'a reviewed result does not cause repeated turns')
+})
+
 test('Worker continue and Planner handoff advance generations, with physical Worker seats retained until drain', async () => {
   const repo = new MemoryRepo(), target = instance(repo)
   target.cache.settings.workerSeats = 1
@@ -856,6 +935,72 @@ test('installed role contracts, schemas and writer agree on distinct record resp
     op: 'outcome', id: 'wrong-reference', turn_signal: 'complete', replyPath: executionPath(planner.binding) + '/entries/out-body/memory',
   }), /this turn’s committed reply/)
   assert.equal(await readOutcome(repo, await repo.snapshot(), worker.binding), undefined)
+})
+
+test('outcome prerequisites accept committed text records and still verify every chunk', async () => {
+  const repo = new MemoryRepo(), target = instance(repo)
+  await plannedChild(repo, target)
+  const worker = target.agents.latest('worker')
+  const reply = await write(target, worker, { op: 'entry', id: 'reply', kind: 'reply', text: 'Verified artifact' })
+  const command: CoopCommand = { op: 'outcome', id: 'finished', turn_signal: 'complete',
+    replyPath: reply.textPath, prerequisitePaths: [reply.textPath!] }
+  const part = reply.textPath + '/parts/000000.txt'
+  await repo.seed([{ path: part, content: null }])
+  await assert.rejects(write(target, worker, command), /Missing text chunk/)
+  assert.equal(await readOutcome(repo, await repo.snapshot(), worker.binding), undefined)
+  await repo.seed([{ path: part, content: 'Verified artifact' }])
+  await write(target, worker, command)
+  assert.equal((await readOutcome(repo, await repo.snapshot(), worker.binding))?.resultStatus, 'done')
+})
+
+test('a shared assignment needs Worker children and a saved incomplete dispatch receives one repair turn', async () => {
+  const repo = new MemoryRepo(), target = instance(repo), planner = await root(repo, target), b = planner.binding
+  await write(target, planner, { op: 'root_plan', id: 'shared-only', expectedRevision: 0, works: [{
+    id: 'part', title: 'Artifact', direction: 'Write artifact', acceptance: 'Read it', participantId: '1', instanceId: target.cache.instanceId, version: 1,
+  }] })
+  await assert.rejects(write(target, planner, { op: 'outcome', id: 'premature', turn_signal: 'done', text: 'Shared assignment is ready', prerequisitePaths: [] }), /claim.*participant_plan/)
+  const saved: RoleOutcome = { binding: b, kind: 'plan_ready', turn_signal: 'done', textPath: executionPath(b) + '/memory', prerequisitePaths: [], createdAt: new Date().toISOString() }
+  await repo.seed([{ path: b.outputPath, content: json(saved) },
+    { path: statusPath(b, 'completed'), content: json({ version: 1, kind: 'completed', binding: b, turn_signal: 'done', outcomePath: b.outputPath }) }])
+  saved.observedTrigger = await plannerTrigger(repo, await repo.snapshot(), b.taskId!, '1', b)
+  await repo.seed([{ path: b.outputPath, content: json(saved) }])
+  target.agents.finish(planner)
+  await target.tick(3)
+  const repair = target.agents.latest('planner')
+  assert.notEqual(repair.binding.executionId, b.executionId)
+  await target.tick(6)
+  assert.equal(target.agents.starts.filter(a => a.binding.role === 'planner').length, 2)
+  await write(target, repair, { op: 'claim', id: 'claim', workId: 'part', assignmentVersion: 1, scope: 'Current task' })
+  await write(target, repair, { op: 'participant_plan', id: 'children', expectedRevision: 0, children: [{
+    id: 'child', workId: 'part', assignmentVersion: 1, title: 'Artifact', direction: 'Write artifact', acceptance: 'Read it', dependencies: [],
+  }] })
+  await write(target, repair, { op: 'outcome', id: 'ready', turn_signal: 'done', text: 'Worker direction is ready', prerequisitePaths: [] })
+  target.agents.finish(repair)
+  await target.tick(2)
+  assert.equal(target.agents.latest('worker').binding.childId, 'child')
+})
+
+test('recovered Foreground handoff publishes its saved root and participation without recreating the task', async () => {
+  for (const rejoin of [true, false]) {
+    const repo = new MemoryRepo(), target = instance(repo)
+    await input(repo, target, 'interrupted-intake', 'Build the saved task')
+    await target.tick(2)
+    const first = target.agents.latest('foreground'), taskId = 'task-interrupted-intake'
+    await write(target, first, { op: 'root', id: 'root', title: 'Saved task', goal: 'Original goal', initialPlan: 'Original plan' })
+    target.agents.finish(first, 'Interrupted after saving the task')
+    await target.tick(2)
+    const resumed = target.agents.latest('foreground')
+    assert.notEqual(resumed.binding.executionId, first.binding.executionId)
+    if (rejoin) await write(target, resumed, { op: 'join', id: 'join', taskId, scope: 'Original goal', capabilities: '' })
+    await target.tick(2)
+    assert.equal(target.agents.starts.filter(a => a.binding.role === 'planner').length, 0)
+    await write(target, resumed, { op: 'outcome', id: 'handoff', turn_signal: 'handoff_planner', taskId, text: 'Continue the saved task', prerequisitePaths: [] })
+    await target.tick(2)
+    assert.equal(target.agents.starts.filter(a => a.binding.role === 'planner').length, 1)
+    const task = await readJson<RootTask>(repo, await repo.snapshot(), taskPath(taskId) + '/contract.json')
+    assert.equal(task?.goalRevision, 1)
+    assert.equal(await readText(repo, await repo.snapshot(), task!.goalPath), 'Original goal')
+  }
 })
 
 test('remote startup, role text, result and final status are ordered; cold recovery never dispatches from a write', async () => {

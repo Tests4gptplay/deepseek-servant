@@ -1,5 +1,5 @@
 import type { CoopStore } from './cache.js'
-import { loadPaths } from './repository-paths.js'
+import { archiveRepositoryPaths, loadPaths, repositoryUrl, toRepositoryPath } from './repository-paths.js'
 import type { GitChange, GitRepository, GitSnapshot } from './contracts.js'
 import { digest, GitJournal, json, readJson, readText, textChanges } from './journal.js'
 import { taskPath, type RoleAction, type RootTask } from './protocol.js'
@@ -7,6 +7,7 @@ import { statusPrefix } from './status.js'
 
 interface ArchiveManifest {
   version: 1; taskId: string; sourceHead: string; recordsPath: string; recordsSha256: string
+  repositoryPaths?: ReturnType<typeof archiveRepositoryPaths>
   sources: Array<{ path: string; sha: string; sha256: string }>
   status: string; title: string; coordinator: string
 }
@@ -42,11 +43,14 @@ export class CoopFinalizer {
         const text = (await this.repo.read(snapshot, path))!
         sources.push({ path, sha: snapshot.files.get(path)!, sha256: digest(text) })
         if (path.includes('/parts/')) continue
-        if (path.endsWith('/manifest.json')) sections.push('', '## ' + path.slice(0, -'/manifest.json'.length), '', await readText(this.repo, snapshot, path.slice(0, -'/manifest.json'.length)))
-        else sections.push('', '## ' + path, '', text)
+        const repositoryPath = toRepositoryPath(this.cache.settings.repositoryDirectory, path)
+        const heading = '## [' + repositoryPath + '](' + repositoryUrl(this.cache.settings.ownerRepo, snapshot.head, repositoryPath) + ')'
+        if (path.endsWith('/manifest.json')) sections.push('', heading, '', await readText(this.repo, snapshot, path.slice(0, -'/manifest.json'.length)))
+        else sections.push('', heading, '', text)
       }
       const records = sections.join('\n')
       const sealed: ArchiveManifest = { version: 1, taskId: task.id, sourceHead: snapshot.head, recordsPath, recordsSha256: digest(records),
+        repositoryPaths: archiveRepositoryPaths(this.cache.settings.repositoryDirectory, task.id, recordsPath),
         sources, status: task.status, title: task.title, coordinator: task.coordinatorParticipantId }
       await this.journal.transact('seal-' + task.id + '-' + fingerprint.slice(0, 12), { taskId: task.id, fingerprint }, async head => {
         for (const [path, sha] of current) if (head.files.get(path) !== sha) throw new Error('Task records changed while sealing; read the new snapshot.')
@@ -65,7 +69,8 @@ export class CoopFinalizer {
         || [...head.files.keys()].filter(taskRecord).length !== paths.length
         || paths.some(path => head.files.get(path) !== snapshot.files.get(path))) throw new Error('Task records changed after sealing; reseal the updated snapshot.')
       return [...paths.map(path => ({ path, content: null })), { path: 'dss-coop/history/' + task.id + '.json',
-        content: json({ id: task.id, title: task.title, status: task.status, coordinator: task.coordinatorParticipantId, manifestPath, sourceHead: manifest.sourceHead, recordsPath: manifest.recordsPath }) }]
+        content: json({ id: task.id, title: task.title, status: task.status, coordinator: task.coordinatorParticipantId, manifestPath, sourceHead: manifest.sourceHead, recordsPath: manifest.recordsPath,
+          repositoryPaths: archiveRepositoryPaths(this.cache.settings.repositoryDirectory, task.id, manifest.recordsPath) }) }]
     })
     return true
   }

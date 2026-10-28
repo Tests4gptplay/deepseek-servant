@@ -69,7 +69,7 @@ export function installRoleTools(ctx: Context, agent: Agent, binding: RoleBindin
     const prefix = 'foreground-memory/' + encodeURIComponent(binding.assistantId) + '/'
     ctx.systemPrompt.section({ name: 'deepseek-servant:foreground-memory', order: 103, interpolate: false,
       text: foregroundMemoryGuide(prefix + 'Foreground_List', prefix + 'Foreground_Cache',
-        'Use foreground_memory with action=read on demand. action=replace rewrites the whole document; action=clear removes its current contents.') })
+        'These are storage references; read with foreground_memory action=read. Keep task record references from memory_search for memory_read, and artifact file paths separately. action=replace rewrites the whole document; action=clear removes its current contents.') })
     register('foreground_memory', 'Read or rewrite the Foreground’s important-assignment index or editable conversation scratch space.',
       z.object({ action: z.enum(['read', 'replace', 'clear']), document: ForegroundDocument,
         text: z.string().describe('Required for replace: complete replacement text, preserving existing memories unless the user requested their removal. Use empty text only for a user-requested clear.').optional(),
@@ -124,7 +124,7 @@ export function installRoleTools(ctx: Context, agent: Agent, binding: RoleBindin
     z.strictObject({ taskId: Id.optional(), ref: z.string().min(1), offset: z.int().nonnegative().optional(), limit: z.int().min(1).max(50).optional(), characterOffset: z.int().nonnegative().optional() }),
     async input => options.memoryQuery((await currentTask(input.taskId)).id, input, binding.executionId))
   register('memory_read', 'Read an exact saved record as text pages, including original requirements, decisions and Child replies.',
-    z.strictObject({ ref: z.string().min(1).describe('Exact dss-record reference from memory_search or the current context.'),
+    z.strictObject({ ref: z.string().min(1).describe('Exact dss-record:// or servant-memory:// reference from a record tool, current context or saved index.'),
       cursor: z.int().nonnegative().optional().describe('Character cursor; omitted starts at zero.'),
       limit: z.int().min(1).max(32768).optional().describe('Characters per page; default 8192.') }),
     async input => records.read(input.ref, input.cursor, input.limit))

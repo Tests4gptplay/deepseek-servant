@@ -11,6 +11,11 @@ import { GitHubClient } from '../src/experimental/private-git/github.js'
 import { GitHubRepository } from '../src/experimental/private-git/git-repository.js'
 import { CoopService } from '../src/experimental/private-git/service.js'
 import { runGit } from '../src/experimental/private-git/vendor/git-runner.js'
+import { CoopFinalizer } from '../src/experimental/private-git/finalizer.js'
+import { GitJournal, json, textChanges } from '../src/experimental/private-git/journal.js'
+import { CoopReadSchema, readCoopRecord } from '../src/experimental/private-git/record-access.js'
+import { toRepositoryPath, toRecordPath } from '../src/experimental/private-git/repository-paths.js'
+import type { RootTask } from '../src/experimental/private-git/protocol.js'
 
 class Store implements CoopStore {
   readonly instanceId = 'fixture'
@@ -32,9 +37,13 @@ test('Git directory settings accept root aliases and ordinary subdirectory paths
   for (const input of ['Maid', './Maid', '/Maid/', 'Maid//', 'Maid/./']) assert.equal(CoopSettingsSchema.parse({ repositoryDirectory: input }).repositoryDirectory, 'Maid', input)
   for (const input of ['Maid/Notes', './Maid/Notes/', 'Maid\\Notes']) assert.equal(CoopSettingsSchema.parse({ repositoryDirectory: input }).repositoryDirectory, 'Maid/Notes', input)
   assert.equal(CoopSettingsSchema.parse({}).repositoryDirectory, 'dss-coop')
+  for (const directory of ['', 'dss-coop', 'Maid/Notes', 'dss-coop/Notes']) {
+    const ref = 'dss-coop/records/task one/manifest.json'
+    assert.equal(toRecordPath(directory, toRepositoryPath(directory, ref)), ref)
+  }
 })
 
-for (const directory of ['Maid', '']) for (const populated of [false, true]) {
+for (const directory of ['Maid/Notes', '']) for (const populated of [false, true]) {
   test('connecting initializes ' + (directory || 'repository root') + ' in ' + (populated ? 'an existing repository' : 'an empty repository'), async t => {
     const root = await mkdtemp(join(tmpdir(), 'dss-git-initialize-'))
     t.after(() => rm(root, { recursive: true, force: true }))
@@ -86,5 +95,48 @@ for (const directory of ['Maid', '']) for (const populated of [false, true]) {
     assert.equal(await repository.read(next, 'dss-coop/inbox/task.md'), 'A normal task.')
     assert.deepEqual((await repository.changes(next, snapshot.head)).map(change => ({ path: change.path, status: change.status })), [{ path: 'dss-coop/inbox/task.md', status: 'A' }])
     assert.ok((await repository.changes(next, '')).some(change => change.path === 'dss-coop/inbox/task.md'))
+    const task = { id: 'archive-path', title: 'Archived path fixture', status: 'accepted', coordinatorParticipantId: '1',
+      originPath: 'dss-coop/origins/archive-path/request', goalPath: 'dss-coop/origins/archive-path/goal/1' } as RootTask
+    const acceptance = 'dss-coop/tasks/archive-path/acceptance.json', memory = 'dss-coop/tasks/archive-path/executions/planner/memory'
+    await repository.commit(next, [
+      ...textChanges(task.originPath, 'Original request'), ...textChanges(task.goalPath, 'Accepted goal'),
+      { path: 'dss-coop/tasks/archive-path/contract.json', content: json(task) },
+      { path: acceptance, content: json({ accepted: true }) }, ...textChanges(memory, 'Complete planner evidence'),
+    ], 'Record accepted task')
+    const finalizer = new CoopFinalizer(repository, new GitJournal(repository, '1'), store)
+    await finalizer.finalize(await repository.snapshot(), task)
+    await finalizer.finalize(await repository.snapshot(), task)
+    const cleaned = await repository.snapshot()
+    assert.equal(await repository.read(cleaned, acceptance), undefined, 'the runtime still sees the cleaned task tree')
+    const history = JSON.parse((await repository.read(cleaned, 'dss-coop/history/archive-path.json'))!)
+    const archive = JSON.parse(await git(remote, ['show', 'main:' + history.repositoryPaths.manifest]))
+    assert.equal(archive.recordsPath, history.recordsPath)
+    assert.match(await git(remote, ['show', 'main:' + history.repositoryPaths.summary]), /Complete planner evidence/)
+    assert.ok(await git(remote, ['show', 'main:' + history.repositoryPaths.text + '/manifest.json']))
+    assert.ok(readme.includes('repositoryPaths'))
+    for (const pathKind of ['record', 'repository'] as const) {
+      const path = pathKind === 'record' ? acceptance : toRepositoryPath(directory, acceptance)
+      const read = await readCoopRecord(repository, store.settings, CoopReadSchema.parse({ path, pathKind }))
+      assert.equal(read.archived, true)
+      assert.equal(read.commit, archive.sourceHead)
+      assert.equal(read.repositoryPath, toRepositoryPath(directory, acceptance))
+      assert.equal(JSON.parse(read.text!).accepted, true)
+      assert.ok(await git(remote, ['show', read.commit + ':' + read.repositoryPath]))
+    }
+    const text = await readCoopRecord(repository, store.settings, CoopReadSchema.parse({ path: memory, textRecord: true, offset: 9, limit: 7 }))
+    assert.equal(text.text, 'planner')
+    assert.equal(text.nextOffset, 16)
+    const automaticText = await readCoopRecord(repository, store.settings, CoopReadSchema.parse({ path: memory }))
+    assert.equal(automaticText.text, 'Complete planner evidence')
+    const directPart = await readCoopRecord(repository, store.settings, CoopReadSchema.parse({ path: memory + '/parts/000000.txt', textRecord: true }))
+    assert.equal(directPart.text, 'Complete planner evidence')
+    const automaticDirectory = await readCoopRecord(repository, store.settings, CoopReadSchema.parse({ path: 'dss-coop/tasks/archive-path' }))
+    assert.ok(automaticDirectory.paths?.includes(acceptance))
+    const archiveDirectory = await readCoopRecord(repository, store.settings, CoopReadSchema.parse({ path: 'dss-coop/records/archive-path' }))
+    assert.ok(archiveDirectory.paths?.includes('dss-coop/records/archive-path/manifest.json'))
+    const listing = await readCoopRecord(repository, store.settings, CoopReadSchema.parse({ path: 'dss-coop/tasks/archive-path/' }))
+    assert.ok(listing.paths?.includes(acceptance))
+    assert.ok(listing.repositoryPaths?.includes(toRepositoryPath(directory, acceptance)))
+    await assert.rejects(readCoopRecord(repository, store.settings, CoopReadSchema.parse({ path: acceptance, revision: cleaned.head })), /No record/)
   })
 }

@@ -59,7 +59,7 @@ test('foreground registered tools survive supervisor restrictions and execution 
   const assistants = new AssistantService({ store, defaults: { name: 'Servant', presetId: 'standard', foreground: {}, background: {} },
     runtime: {} as any, resolveWorkspace: async () => ({ id: 'workspace', directory: process.cwd() }) })
   const definitions = new Map<string, any>(), denied = new Set<string>(), hooks = new Map<string, any>()
-  definitions.set('present', { name: 'present' })
+  for (const name of ['present', 'read', 'pwsh']) definitions.set(name, { name })
   const agent = { id: 'foreground', session: { snapshotEvents: () => [] } } as any
   const ctx = { systemPrompt: { section() {} }, tools: {
     register: (tool: any) => definitions.set(tool.name, tool),
@@ -84,6 +84,7 @@ test('foreground registered tools survive supervisor restrictions and execution 
     const result = await hooks.get('tools/pre-execute')({ agent, name }, async () => 'allowed')
     assert.equal(result, 'allowed', name + ' is rejected by execution guard')
   }
+  assert.equal((await hooks.get('tools/pre-execute')({ agent, name: 'subagent' }, async () => 'allowed')).kind, 'deny')
   const exec = { agent, signal: new AbortController().signal, callId: 'memory' }
   const memory = definitions.get('foreground_memory')
   await memory.execute({ action: 'replace', document: 'Foreground_List', text: 'Current assignment' }, exec)

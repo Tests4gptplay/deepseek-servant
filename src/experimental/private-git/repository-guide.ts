@@ -54,6 +54,12 @@ export function repositoryGuide(settings: CoopSettings): string {
 | \`knowledge/<participant>/\` | 有来源的知识、偏好和技能记录。 |
 | \`events/\`、\`incidents/\` | 操作提交回执和中断 / 迟到写入等具体诊断线索。 |
 
+### 记录引用与仓库实际路径
+
+索引的 \`repositoryPaths\` 列出相对仓库根目录的实际位置，可以直接交给 Git、GitHub 或其他远程读取工具。\`manifestPath\`、\`recordsPath\`、\`textPath\` 和 \`chunks\` 中的 \`dss-coop/\` 是 DSS 工具引用前缀；本目录对应仓库中的 \`${root || '/'}\`，将该前缀替换为 \`${root || '空字符串'}\` 即得到实际路径。例如 \`dss-coop/records/<task>/manifest.json\` 对应 \`${root}records/<task>/manifest.json\`。
+
+DSS 内使用 \`coop_read\` 读取工具引用；读取实际仓库路径时设置 \`pathKind=repository\`。返回的 \`repositoryPath\` 和 \`url\` 可用于对外索引。完成任务从 \`history/<task>.json\` 进入归档；历史工作记录通过 \`sourceHead\` 指定的提交读取，\`coop_read\` 会自动解析已归档的任务引用。汇总正文中的来源链接固定到该提交。
+
 正文目录中的 \`manifest.json\` 按 chunks 顺序列出 \`parts/*.txt\`，将分块顺序连接即可读完整文本。大记录的完整入口以 manifest 为准。
 
 角色执行顺序：提交启动状态 → 远端读回 → 原生执行 → 保存业务正文 → 单独提交最终状态 → 远端读回 → 下一步调度。Foreground 的 respond / handoff_planner、Planner 的规划与交接信号、Worker 的执行结果各有职责；从状态引用继续打开对应正文即可查看具体进度和依据。

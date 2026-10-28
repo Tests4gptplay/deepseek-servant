@@ -11,6 +11,8 @@ import { RuntimeCoordinator, type CoordinatorOptions } from '../src/runtime/coor
 import { TaskArchiveStore } from '../src/application/task-archive-store.js'
 import { taskRecordPrefixes } from '../src/application/record-journal.js'
 import { taskInput } from './support.js'
+import { TaskRecordAccess } from '../src/application/task-record-access.js'
+import { memoryRef } from '../src/runtime/context-assembler.js'
 
 async function accepted() {
   const f = await fixture(), planner = await f.bind('plan')
@@ -42,6 +44,9 @@ test('archived read acknowledgments, Markdown export and manual hiding retain al
   const memory = await f.store.journal.append({ scope: { kind: 'planner-memory', taskId: 'one' },
     commandId: 'export-memory', text: original, source: f.runtime })
   await f.tasks.cleanupCompleted('one')
+  const reader = new TaskRecordAccess(f.tasks, { assistantId: 'assistant', role: 'foreground' })
+  assert.equal(JSON.parse((await reader.read(memoryRef('one', 'report', 'accepted-output'))).text)[0].summary, 'Result saved')
+  assert.equal((await reader.read(memory.ref)).text, original)
   let acknowledged = 0
   f.tasks.subscribe(task => { if (task.delivery?.readAt) acknowledged++ })
   await f.tasks.execute('one', { type: 'delivery.read', commandId: 'read-completion', source: { kind: 'user', id: 'owner' } })

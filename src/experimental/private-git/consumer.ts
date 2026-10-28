@@ -226,7 +226,7 @@ export class CoopConsumer {
 
       if (join.state !== 'active') continue
       // Role bodies/indexes can arrive before their final status. Never hand off from those alone.
-      if (!await recordPublished(repo, snapshot, join.writer) || !await recordPublished(repo, snapshot, task.writer)) { pendingTasks++; continue }
+      if (!await recordPublished(repo, snapshot, join.writer, task.id) || !await recordPublished(repo, snapshot, task.writer, task.id)) { pendingTasks++; continue }
       const taskActions = actions.filter(action => action.binding.taskId === task.id)
       const activePlanner = taskActions.some(action => action.state === 'active' && action.binding.role === 'planner')
       if (task.status === 'accepted' || task.status === 'cancelled') {
@@ -247,7 +247,7 @@ export class CoopConsumer {
       }
       pendingTasks++
       const sharedPlan = await this.writer.rootPlan(snapshot, task.id)
-      if (!await recordPublished(repo, snapshot, sharedPlan.writer)) continue
+      const planPublished = await recordPublished(repo, snapshot, sharedPlan.writer)
       const trigger = await plannerTrigger(repo, snapshot, task.id, participantId)
       const outcomes: RoleOutcome[] = []
       for (const action of taskActions.filter(value => value.binding.role === 'planner')) {
@@ -260,14 +260,35 @@ export class CoopConsumer {
           input: { notification: question.question ?? 'The Planner reported an error. Read its bound outcome and inform the user.', question: !!question.question, sourceOutcome: question.binding.outputPath }, epoch: join.epoch })
         changed = true
       }
-      if (!activePlanner && !outcomes.some(outcome => outcome.observedTrigger === trigger)) {
-        await this.stage({ role: 'planner', taskId: task.id, actionId: 'plan-' + digest(task.id + trigger + join.epoch).slice(0, 36),
-          trigger, input: { taskId: task.id, joinPath: grant.joinPath }, epoch: join.epoch })
-        changed = true
-      }
       const planFile = planPath(task.id, participantId, cache.instanceId)
       const plan = await readJson<ParticipantPlan>(repo, snapshot, planFile)
-      if (!plan) continue
+      // A result arriving during a Planner turn was not necessarily read by that turn.
+      // Schedule one turn that starts with this trigger, rather than treating commit time as observation.
+      const currentTurnFinished = outcomes.some(outcome => taskActions.some(action =>
+        sameBinding(action.binding, outcome.binding) && action.trigger === trigger))
+      const incompleteDispatch = !plan?.children.length && sharedPlan.works.some(work =>
+        work.participantId === participantId && work.instanceId === cache.instanceId)
+        && outcomes.some(outcome => outcome.kind === 'plan_ready') && !currentTurnFinished
+      let unreviewedResult = false
+      if (!activePlanner && !currentTurnFinished) {
+        for (const action of taskActions.filter(value => value.binding.role === 'worker' && value.binding.epoch === join.epoch)) {
+          const child = plan?.children.find(value => value.id === action.binding.childId)
+          if (!child || child.state !== 'pending' || child.revision !== action.binding.childRevision
+            || child.assignmentVersion !== action.binding.assignmentVersion) continue
+          if ((await readOutcome(repo, snapshot, action.binding))?.kind === 'result') { unreviewedResult = true; break }
+        }
+      }
+      if (!activePlanner && (incompleteDispatch || unreviewedResult || !outcomes.some(outcome => outcome.observedTrigger === trigger))) {
+        const actionId = 'plan-' + digest(task.id + trigger + join.epoch).slice(0, 36)
+        const unfinished = taskActions.find(action => action.id === actionId && action.state === 'closed')
+        if (unfinished) await this.replace(unfinished, 'Resume unfinished planning turn')
+        else await this.stage({ role: 'planner', taskId: task.id, actionId,
+          trigger, input: { taskId: task.id, joinPath: grant.joinPath,
+            ...(incompleteDispatch ? { remaining: 'Shared work is saved. Commit claim and participant_plan to create its Worker children before outcome done.' } : {}) }, epoch: join.epoch })
+        changed = true
+      }
+      // An interrupted plan must remain readable by its recovering Planner; only Worker dispatch waits for publication.
+      if (!planPublished || !plan) continue
       const planOutcome = await readOutcome(repo, snapshot, plan.writer)
       if (!planOutcome || planOutcome.kind !== 'plan_ready') continue
       const rootPlan = await this.writer.rootPlan(snapshot, task.id)
@@ -344,7 +365,7 @@ export class CoopConsumer {
     if (!replacement) {
       const binding: RoleBinding = { ...old, executionId: 'exec-' + randomUUID(), sessionId: 'dss-coop-' + randomUUID(), generation: old.generation + 1, fence: randomUUID(), outputPath: '' }
       binding.outputPath = executionPath(binding) + '/outcome.json'
-      replacement = { ...action, binding, stateProtocol: 1, createdAt: new Date().toISOString(), input: { original: action.input, recovery: { reason, previous: old, outcome } } }
+      replacement = { ...action, binding, state: 'active', stateProtocol: 1, createdAt: new Date().toISOString(), input: { original: action.input, recovery: { reason, previous: old, outcome } } }
       await cache.put(pendingKey, replacement)
     }
     const next = replacement
@@ -371,7 +392,7 @@ export class CoopConsumer {
     return { binding: b, startupStatusPath: action.stateProtocol === 1 ? statusPath(b, 'started') : undefined, confirmedHead: snapshot.head, input: action.input, capacity: { workerSeats: cache.settings.workerSeats },
       inputPath: b.sourceIntentId ? 'dss-coop/intents/' + b.participantId + '/' + b.sourceIntentId + '.json' : undefined,
       conversationPrefix: 'dss-coop/conversations/' + b.participantId + '/',
-      tasksPrefix: 'dss-coop/tasks/',
+      tasksPrefix: 'dss-coop/tasks/', pathKind: 'record',
       roleRecordsPrefix: (b.taskId ? taskPath(b.taskId) : 'dss-coop/foreground') + '/executions/' + b.participantId + '/',
       taskPath: b.taskId ? taskPath(b.taskId) + '/contract.json' : undefined,
       participationPath: b.taskId ? joinPath(b.taskId, b.participantId, b.instanceId) : undefined,
