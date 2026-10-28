@@ -132,7 +132,12 @@ try {
     await act(() => root.render(React.createElement(RetentionPanel, panel)))
     const button = key => [...document.querySelectorAll('button')].find(e => e.textContent.trim() === locale[key])
     const expected = ['retention.preview', 'retention.clean', 'retention.clearConversation', 'retention.clearPlanningNotes', 'retention.resetTasks']
-    assert.deepEqual([...button(expected[0]).parentElement.querySelectorAll(':scope > button')].map(e => e.textContent.trim()), expected.map(key => locale[key]))
+    const previewRow = button(expected[0]).parentElement
+    const cleanupRow = button(expected[1]).parentElement
+    assert.notEqual(previewRow, cleanupRow, 'preview is separate from destructive actions')
+    assert.equal(previewRow.nextElementSibling, cleanupRow, 'preview row is above cleanup actions')
+    assert.deepEqual([...previewRow.querySelectorAll(':scope > button')].map(e => e.textContent.trim()), [locale[expected[0]]])
+    assert.deepEqual([...cleanupRow.querySelectorAll(':scope > button')].map(e => e.textContent.trim()), expected.slice(1).map(key => locale[key]))
     await click(button('retention.resetTasks'))
     assert.ok(document.querySelector('[role="dialog"]').textContent.includes(locale['retention.resetWarning']))
     const beforeCancel = maintenance.length

@@ -125,12 +125,13 @@
 .retentionHeading h2 { margin: 0; font: var(--dsw-font-xs-strong-13); }
 .retentionGrandTotal { display: flex; gap: 8px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .retentionColumns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-bottom: 0.5px solid var(--dsw-alias-border-l3); }
-.retentionGroup { min-width: 0; margin: 0; padding: 12px 14px 0 0; }
+.retentionGroup { display: flex; flex-direction: column; min-width: 0; margin: 0; padding: 12px 14px 0 0; }
+.retentionGroup > .retentionRow:nth-last-child(2) { margin-bottom: 8px; }
 .retentionGroup + .retentionGroup { padding-inline: 14px 0; border-left: 0.5px solid var(--dsw-alias-border-l3); }
 .retentionRow { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding-block: 3px; }
 .retentionRow dt { min-width: 0; color: var(--dsw-alias-label-secondary); overflow-wrap: anywhere; }
 .retentionRow dd { margin: 0; flex: none; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.retentionSubtotal { margin-top: 8px; padding-block: 10px; border-top: 0.5px solid var(--dsw-alias-border-l3); font: var(--dsw-font-xs-strong-13); }
+.retentionSubtotal { margin-top: auto; padding-block: 10px; border-top: 0.5px solid var(--dsw-alias-border-l3); font: var(--dsw-font-xs-strong-13); }
 .retentionSubtotal dt { color: inherit; }
 .retentionManage { margin-top: 10px; }
 .retentionManage > summary { color: var(--dsw-alias-label-secondary); }

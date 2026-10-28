@@ -46,7 +46,9 @@ export function RetentionPanel({ stats, preview, outcome, busy, recordStorage, m
       <summary>{t('retention.manage')}</summary>
       {recordStorage && <RecordLocation storage={recordStorage} busy={moving || busy} moving={moving} onMove={onMoveRecords} onOpen={onOpenRecords} onPickDirectory={onPickDirectory} t={t} />}
       <div className={css.actions}>
-        <Button size="sm" variant="outline" disabled={busy} onClick={() => { void onRetention({ action: 'preview' }) }}>{t('retention.preview')}</Button>
+        <Button type="button" variant="primary" disabled={busy} onClick={() => { void onRetention({ action: 'preview' }) }}>{t('retention.preview')}</Button>
+      </div>
+      <div className={css.actions}>
         <ManualTaskCleanup preview={preview} busy={busy || moving} onRetention={onRetention} t={t} />
         <ManualConversationCleanup busy={busy || moving} onRetention={onRetention} t={t} />
         <ManualConversationCleanup planning busy={busy || moving} onRetention={onRetention} t={t} />
