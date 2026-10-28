@@ -1,6 +1,6 @@
 {
   "name": "deepseek-servant",
-  "version": "0.3.5-rc.1",
+  "version": "0.3.5",
   "description": "基于 DeepSeek Harness 的自主 AI 助理与多 Agent 协作插件，支持目标规划、持续执行、任务接续、故障恢复与技能学习。\n\n设计逻辑源自 Chat Agent Harness（CAH）：https://github.com/Tests4gptplay/chat-agent-harness",
   "private": true,
   "type": "module",

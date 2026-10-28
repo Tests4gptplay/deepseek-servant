@@ -1144,7 +1144,7 @@ test('Foreground working memory replaces and clears the current document without
   assert.equal(roleCommandSchema('planner').safeParse({ op: 'foreground_memory', document: 'Foreground_List', text: 'planner' }).success, false)
 })
 
-test('shared conversation changes only its send backend; Git input starts Foreground without automatically creating a task', async () => {
+test('selected mode separates conversations and input context; Git input starts Foreground without creating a task', async () => {
   const repo = new MemoryRepo(), target = instance(repo)
   const service = new CoopService(target.cache, { describe: async () => ({ configured: true }) } as unknown as CoopCredentials, new GitHubClient(async () => undefined))
   Object.defineProperty(service, 'repository', { value: repo }); service.attach(target.consumer)
@@ -1165,12 +1165,19 @@ test('shared conversation changes only its send backend; Git input starts Foregr
   assert.equal([...repo.files.keys()].some(path => path.startsWith('dss-coop/tasks/')), false)
   const committed = await readJson<any>(repo, await repo.snapshot(), 'dss-coop/intents/1/shared-send.json')
   assert.equal(committed.foreground, undefined, 'local working directory stays local')
-  assert.match(await readText(repo, await repo.snapshot(), committed.contextPath), /Earlier discussion/)
+  assert.equal(committed.contextPath, undefined, 'Local conversation is not sent to Git')
   assert.equal(target.cache.get<UserIntent>('user-source/shared-send')?.foreground?.model, 'foreground')
   const ui = await shared.call('view', {}) as ServantView
   assert.equal(ui.assistant.id, 'default')
-  assert.ok(ui.messages.some(m => m.id === 'local-1'))
+  assert.equal(ui.messages.some(m => m.id === 'local-1'), false)
   assert.ok(ui.messages.some(m => m.id === 'git:shared-send'))
+  mode = 'LOCAL'
+  const localUi = await shared.call('view', {}) as ServantView
+  assert.deepEqual(localUi.messages, base.messages)
+  base.messages = []
+  assert.deepEqual((await shared.call('view', {}) as ServantView).messages, [], 'Git history does not reappear after Local cleanup')
+  mode = 'PRIVATE_GIT_EXPERIMENTAL'
+  assert.ok((await shared.call('view', {}) as ServantView).messages.some(m => m.id === 'git:shared-send'))
   mode = 'LOCAL'
   await shared.call('send', { messageId: 'local-again', text: 'Local again' })
   assert.equal(localCalls.filter(m => m === 'send').length, 2)

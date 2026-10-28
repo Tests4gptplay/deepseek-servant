@@ -103,6 +103,10 @@ export class ServantApi {
       }
       case 'knowledge': return this.knowledge(raw)
       case 'retention': {
+        if (raw.action === 'resetTasks') {
+          z.strictObject({ action: z.literal('resetTasks'), confirmation: z.literal('force-reset-task-state') }).parse(raw)
+          return this.options.coordinator.resetTasks()
+        }
         if (raw.action === 'clearPlanningNotes') {
           z.strictObject({ action: z.literal('clearPlanningNotes'), confirmation: z.literal('clear-work-planning-notes') }).parse(raw)
           return this.options.assistants.clearPlanningNotes()

@@ -151,10 +151,12 @@ function ServantSettingsContent({ snapshot, models, actions, t, experimentalSett
           <Settings value={value} busy={snapshot.pending.includes('configure')} onSave={actions.onConfigure} t={t}
             models={models} onRefreshModels={actions.onRefreshModels} onLoadPresets={actions.onLoadPresets} onPickDirectory={actions.onPickDirectory} />
           <WorkerSeatsSettings value={value} busy={snapshot.pending.includes('configureRuntime')} onSave={actions.onConfigureRuntime} t={t} />
+          {value.conversationMode !== 'PRIVATE_GIT_EXPERIMENTAL' && <>
           {snapshot.storageError && <p className={css.errorDetail} role="alert">{snapshot.storageError}</p>}
           <RetentionPanel stats={snapshot.storageStats} preview={snapshot.retention} outcome={snapshot.lastCleanup} busy={snapshot.pending.includes('retention')}
             recordStorage={value.recordStorage} moving={snapshot.pending.includes('moveRecords')} onMoveRecords={actions.onMoveRecords}
             onPickDirectory={actions.onPickDirectory} onRetention={actions.onRetention} onOpenRecords={actions.onOpenRecords} t={t} />
+          </> }
           <section className={css.experimental} aria-labelledby={`${id}-experimental`}>
             <h3 id={`${id}-experimental`}>{t('experimental.title')}</h3>
             <div className={css.experimentalGroups}>

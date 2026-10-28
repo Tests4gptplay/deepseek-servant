@@ -21,7 +21,7 @@ class MemoryStorage implements StoragePort {
 const now = '2026-10-25T16:15:00.000Z'
 const source = { kind: 'user' as const, id: 'owner' }
 const goal = { request: 'Original task', objective: 'Result', constraints: [], deliverables: ['out.txt'], acceptanceCriteria: ['Done'], sourceRef: 'owner-input' }
-async function fixture() {
+async function fixture(completedRecords = false) {
   const store = new MemoryStorage()
   const tasks = new TaskService(new ServantStore(store), { clock: { now: () => now } })
   for (const id of ['completed', 'cancelled', 'running', 'paused']) {
@@ -42,7 +42,7 @@ async function fixture() {
   await store.set('assistant/default', { settings: { name: 'Keep me' }, exactConversation: 'Keep the conversation' })
   let compacted = 0
   const nativeCalls: string[] = []
-  const retention = new RetentionService({ store, tasks, now: () => now,
+  const retention = new RetentionService({ store, tasks, ...(completedRecords ? { completedTasks: tasks } : {}), now: () => now,
     knowledge: { withRetentionLock: async work => work({ listSkills: async () => [skill], compactSkill: async () => { compacted++; throw new Error('Manual cleanup must not compact skills') } }) },
     nativeSessions: { catalog: async ids => ids.map(sessionId => ({ sessionId, liveAgent: false, liveSession: false, archived: true, sizeBytes: 0 })),
       retire: async sessionId => { nativeCalls.push(sessionId); return { sessionId, status: 'archived' as const, logRetained: true, reclaimedBytes: 0 } } },
@@ -110,6 +110,68 @@ test('owner API requires explicit confirmation; a zero-candidate cleanup is allo
   const empty = await api.call('retention', { action: 'preview' }, signal) as { previewId: string }
   const outcome = await api.call('retention', { action: 'sweep', previewId: empty.previewId, confirmation: 'clear-ended-task-records' }, signal) as { deletedArchives: string[] }
   assert.deepEqual(outcome.deletedArchives, [])
+})
+
+test('real sealed histories including hidden entries are erased with receipts and identity markers', async () => {
+  const { retention, tasks, store } = await fixture(true)
+  await tasks.cleanupCompleted('completed')
+  await tasks.archives.hide('completed')
+  const keepKeys = ['conversations/default/original', 'foreground-memory/default/Foreground_List',
+    'foreground-memory/default/Foreground_Cache', 'records/completed-other/content/keep']
+  for (const key of keepKeys) await store.set(key, { text: 'Keep this exact value' })
+  const active = await tasks.get('running'), paused = await tasks.get('paused')
+  const preview = await retention.preview({ manual: true })
+  assert.deepEqual(preview.deleteArchives.map(row => row.taskId).sort(), ['cancelled', 'completed'])
+  assert.ok(preview.totals.estimatedReclaimedBytes > 0)
+  const before = (await retention.stats()).totalBytes
+  const result = await retention.sweep({ previewId: preview.previewId })
+  assert.deepEqual(result.skipped, [])
+  assert.deepEqual(result.deletedArchives.sort(), ['cancelled', 'completed'])
+  assert.equal(result.reclaimedServantBytes, before - (await retention.stats()).totalBytes)
+  for (const id of result.deletedArchives) {
+    assert.equal(await tasks.archives.index(id), undefined)
+    for (const prefix of ['records/', 'record-archive/', 'task-origin/', 'planner-memory/', 'planner-note/', 'worker-reply/', 'task-runtime/', 'task-staging/'])
+      assert.deepEqual(await store.list(prefix + id + '/'), [])
+    assert.equal(await store.get('task:' + id), undefined)
+    assert.equal((await tasks.execute(id, { type: 'task.control', commandId: 'late-' + id, source, intent: 'cancel' })).code, 'TASK_NOT_FOUND')
+  }
+  assert.deepEqual(await tasks.get('running'), active)
+  assert.deepEqual(await tasks.get('paused'), paused)
+  for (const key of keepKeys) assert.deepEqual(await store.get(key), { text: 'Keep this exact value' })
+  assert.deepEqual((await retention.preview({ manual: true })).deleteArchives, [])
+})
+
+test('manual cleanup removes legacy orphan markers and delivery receipts but keeps runtime settings', async () => {
+  const { retention, store } = await fixture(true)
+  const marker = { schemaVersion: 1, kind: 'task-tombstone', id: 'old-cleaned', assistantId: 'default',
+    workspaceId: 'workspace', revision: 6, retiredAt: now }
+  await store.set('task:old-cleaned', marker)
+  await store.set('assistant-history/default/delivery/old', { taskId: marker.id, status: 'sent' })
+  await store.set('settings/runtime', { workerSeats: 2 })
+  const result = await retention.sweep({ manual: true })
+  assert.deepEqual(result.skipped, [])
+  assert.ok(result.deletedArchives.includes(marker.id))
+  assert.equal(await store.get('task:old-cleaned'), undefined)
+  assert.equal(await store.get('assistant-history/default/delivery/old'), undefined)
+  assert.deepEqual(await store.get('settings/runtime'), { workerSeats: 2 })
+  assert.equal((await retention.stats()).permanent.archiveBytes, 0)
+  assert.deepEqual((await retention.preview({ manual: true })).deleteArchives, [])
+})
+
+test('an interrupted explicit history deletion resumes from its saved deletion marker', async () => {
+  const { retention, tasks, store } = await fixture(true)
+  await tasks.cleanupCompleted('completed')
+  const remove = store.delete.bind(store)
+  store.delete = async key => { if (key.startsWith('records/completed/')) throw new Error('Interrupted deletion'); await remove(key) }
+  const preview = await retention.preview({ manual: true })
+  const result = await retention.sweep({ previewId: preview.previewId })
+  assert.ok(result.skipped.some(row => row.id === 'completed'))
+  assert.equal((await tasks.archives.index('completed'))?.deleting, true)
+  store.delete = remove
+  await tasks.archives.resumeCleanup()
+  assert.equal(await tasks.archives.index('completed'), undefined)
+  assert.deepEqual(await store.list('records/completed/'), [])
+  assert.ok(await tasks.get('running'))
 })
 
 test('long text, names, task lists, skill bodies and evidence survive validation and message delivery exactly', async () => {

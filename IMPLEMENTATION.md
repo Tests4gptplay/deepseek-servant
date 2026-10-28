@@ -1,10 +1,10 @@
 # DeepSeek Servant 实现说明
 
-版本：`0.2.3`。双模式架构见 [DESIGN.md](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/DESIGN.md)，协作操作见 [PRIVATE_GIT.md](PRIVATE_GIT.md)，Local 已接受运行记录见[alpha.39 验收](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/docs/acceptance-20261026.md)。
+版本：`0.3.5`。双模式架构见 [DESIGN.md](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/DESIGN.md)，协作操作见 [PRIVATE_GIT.md](PRIVATE_GIT.md)，Local 已接受运行记录见[alpha.39 验收](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/docs/acceptance-20261026.md)。
 
-## 0.2.3 共用前台与工作随记
+## 0.3.5 分模式前台与工作随记
 
-`SharedForeground` 位于组合层，合并 Local / Git 的对话与任务显示，将新输入交给所选后台。模式菜单保留当前页面和输入草稿；Git 前台沿用输入框模型与前台工作区，任务仍通过独立 Coop Consumer 执行。
+`SharedForeground` 位于组合层，按所选模式显示 Local 或 Git 的对话与任务，将新输入交给对应后台；上下文与分页缓存也按模式分开。模式菜单保留当前页面和输入草稿；Git 前台沿用输入框模型与前台工作区，任务仍通过独立 Coop Consumer 执行。
 
 `foreground-memory.ts` 共用两份文档的用途与维护约定。Local 通过原生记录存储保存，Git 通过受角色绑定的 `foreground_memory` 操作更新当前 Markdown；空文本删除。安装角色工具时只提供用途、路径与按需读取方法，不加载文档正文。List 的 7 天提醒、30 天确认与 Cache 清理由前台在普通对话轮次执行，无额外定时唤醒。
 

@@ -100,6 +100,24 @@ test('failed storage statistics do not hide a valid conversation and retry on no
   assert.equal(source.source.getSnapshot().storageError, undefined)
 })
 
+test('switching mode discards preloaded pages and date cursors from the other conversation', async () => {
+  let mode: ServantView['conversationMode'] = 'LOCAL'
+  const source = createServantSource({
+    view: async ({ conversation = {} } = {}) => ({ ...page([mode + (conversation.before ? '-older' : '-latest')], conversation.before ? undefined : 'older'), conversationMode: mode }),
+    retention: async () => ({ totalBytes: 0 }),
+  } as ServantClientApi, () => {})
+  await source.refresh()
+  await source.historyPage('older')
+  assert.equal(ids(source)?.length, 2)
+  mode = 'PRIVATE_GIT_EXPERIMENTAL'
+  await source.refresh()
+  assert.deepEqual(ids(source), ['PRIVATE_GIT_EXPERIMENTAL-latest'])
+  assert.deepEqual(source.source.getSnapshot().history, { canGoNewer: false })
+  mode = 'LOCAL'
+  await source.refresh()
+  assert.deepEqual(ids(source), ['LOCAL-latest'])
+})
+
 test('calendar uses ISO local dates and clamps month changes through leap years and year boundaries', () => {
   assert.deepEqual(viewOf('2026-10-26'), { year: 2026, month: 9, day: 26 })
   assert.equal(daysIn({ year: 2024, month: 1 }), 29)

@@ -75,7 +75,7 @@ export class TaskService {
 
   async get(taskId: string): Promise<Task | undefined> { return await this.store.getTask(taskId) ?? await this.archives.task(taskId) }
   async history(includeHidden = false): Promise<Task[]> {
-    const rows = (await this.archives.list()).filter(row => row.tombstone && (includeHidden || !row.hidden))
+    const rows = (await this.archives.list()).filter(row => row.tombstone && !row.deleting && (includeHidden || !row.hidden))
     const tasks: Task[] = []
     for (const row of rows) {
       try {
@@ -112,6 +112,21 @@ export class TaskService {
       const task = await this.store.getTask(taskId)
       if (!task || retentionBlockers(task).length) return false
       await this.archives.cleanup(task)
+      return true
+    })
+    this.queues.set(taskId, pending)
+    try { return await pending } finally { if (this.queues.get(taskId) === pending) this.queues.delete(taskId) }
+  }
+  async deleteHistory(taskId: string, expectedRevision: number): Promise<boolean> {
+    const previous = this.queues.get(taskId) ?? Promise.resolve()
+    const pending = previous.catch(() => {}).then(async () => {
+      if (await this.store.getTask(taskId)) return false
+      const index = await this.archives.index(taskId)
+      if (index) {
+        if (!index.cleanedAt || index.taskRevision !== expectedRevision) return false
+      } else if ((await this.store.getTombstone(taskId))?.revision !== expectedRevision) return false
+      await this.archives.deleteHistory(taskId)
+      this.store.problems.delete(taskId)
       return true
     })
     this.queues.set(taskId, pending)

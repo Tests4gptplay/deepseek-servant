@@ -34,6 +34,7 @@ export class RuntimeCoordinator {
   private dirty = false
   private drainPromise?: Promise<void>
   private error?: string
+  private resetting?: Promise<{ resetTaskIds: string[] }>
 
   constructor(private readonly options: CoordinatorOptions) { this.scheduler = new Scheduler({ workerSeats: options.workerSeats }) }
   status(): { status: 'running' | 'stopping' | 'degraded'; message?: string; workerSeats: number } {
@@ -55,9 +56,9 @@ export class RuntimeCoordinator {
   wake(): void {
     this.dirty = true
     this.options.onChanged?.()
-    if (!this.running || this.stopping || this.drainPromise) return
+    if (!this.running || this.stopping || this.resetting || this.drainPromise) return
     this.drainPromise = Promise.resolve().then(async () => {
-      while (this.dirty && !this.stopping) { this.dirty = false; await this.drain() }
+      while (this.dirty && !this.stopping && !this.resetting) { this.dirty = false; await this.drain() }
     }).catch(error => this.reportError(error)).finally(() => {
       this.drainPromise = undefined
       if (this.dirty && !this.stopping) this.wake()
@@ -99,7 +100,7 @@ export class RuntimeCoordinator {
     const candidates = snapshot.flatMap(task => Object.values(task.pendingActions).filter(action => action.status === 'pending').map(action => ({ task, action })))
       .sort((a, b) => priority[a.action.kind] - priority[b.action.kind] || b.task.priority - a.task.priority || a.action.createdAt.localeCompare(b.action.createdAt))
     for (const candidate of candidates) {
-      if (this.stopping) return
+      if (this.stopping || this.resetting) return
       const key = `${candidate.task.id}/${candidate.action.id}`
       if (this.inflight.has(key) || this.failed.has(key)) continue
       const all = await this.options.tasks.list()
@@ -237,6 +238,50 @@ export class RuntimeCoordinator {
       actionId, resolution: 'unknown', evidence: `Runtime action failed after admission: ${String(error)}. Inspect saved/native evidence before repeating it.` })
     if (execution && execution.role !== 'helper') await this.command(taskId, { type: 'incident.open', commandId: `failure-incident:${attemptId}`, source,
       executionId: execution.executionId, operation: action.kind, message: String(error) })
+  }
+
+  /** Owner-only emergency reset. Stop admissions before touching durable task state. */
+  resetTasks(assistantId = 'default'): Promise<{ resetTaskIds: string[] }> {
+    if (this.resetting) return this.resetting
+    const work = Promise.resolve().then(async () => {
+      await this.drainPromise
+      const targets = (await this.options.tasks.list()).filter(task => task.assistantId === assistantId && task.phase !== 'completed')
+      const ids = targets.map(task => task.id), errors: unknown[] = []
+      for (const task of targets) {
+        try {
+          await this.command(task.id, { type: 'task.control', intent: 'cancel', commandId: `owner-reset:${randomUUID()}`,
+            source: { kind: 'user', id: 'servant-client-owner' } })
+        } catch (error) { errors.push(error) }
+      }
+      // Stop current owners immediately; then catch any launch already admitted before the reset.
+      try { await this.options.supervisor.forceStopTasks(ids) } catch (error) { errors.push(error) }
+      await Promise.allSettled([...this.inflight].filter(([key]) => ids.some(id => key.startsWith(id + '/'))).map(([, value]) => value))
+      try { await this.options.supervisor.forceStopTasks(ids) } catch (error) { errors.push(error) }
+      for (const id of ids) {
+        try {
+          const saved = await this.options.tasks.get(id)
+          if (!saved || saved.control !== 'cancelled') throw new Error('Task cancellation did not commit: ' + id)
+          await this.recoverTask(saved)
+          const current = (await this.options.tasks.get(id))!
+          for (const action of Object.values(current.pendingActions)) {
+            if (action.kind !== 'stop' || !['pending', 'running', 'uncertain'].includes(action.status)) continue
+            const execution = current.executions[action.payload.executionId ?? '']
+            if (!execution || !['stopped', 'lost'].includes(execution.physicalState) || execution.ownedJobIds.length)
+              throw new Error('后台执行仍未停止，保留其状态：' + id)
+            if (action.status === 'pending') await this.command(id, { type: 'action.claim', actionId: action.id,
+              commandId: `reset-claim:${randomUUID()}`, source, ownerId: this.ownerId })
+            await this.finish(id, action, 'Owner reset stopped the native execution and its jobs.')
+          }
+          if (!await this.options.tasks.cleanupCompleted(id)) throw new Error('任务状态仍待收束：' + id)
+          for (const key of this.failed.keys()) if (key.startsWith(id + '/')) this.failed.delete(key)
+        } catch (error) { errors.push(error) }
+      }
+      if (errors.length) throw new AggregateError(errors, errors.map(error => error instanceof Error ? error.message : String(error)).join('\n'))
+      this.error = undefined
+      return { resetTaskIds: ids }
+    }).finally(() => { this.resetting = undefined; this.wake() })
+    this.resetting = work
+    return work
   }
 
   /** Cold evidence precedes resume. A stored job id is never treated as a surviving job. */

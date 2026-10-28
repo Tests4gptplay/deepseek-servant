@@ -11,9 +11,9 @@ import { digest, readJson, readText, segment } from '../experimental/private-git
 import { gitTaskViews, originalTaskId } from './git-view.js'
 
 interface Cursor { local?: string | null; git?: string | null }
-const unpack = (before?: string): Cursor => before?.startsWith('shared:') ? JSON.parse(Buffer.from(before.slice(7), 'base64url').toString()) as Cursor : { local: before }
+const unpack = (before?: string): Cursor => before?.startsWith('shared:') ? JSON.parse(Buffer.from(before.slice(7), 'base64url').toString()) as Cursor : before?.startsWith('git:') ? { git: before.slice(4) } : { local: before }
 
-/** One conversation surface; selected mode routes only new input, not existing work. */
+/** The selected mode owns its conversation and pagination; running tasks retain their backend. */
 export class SharedForeground implements ModeEndpoint {
   private taskProjection?: { key: string; tasks: ServantView['tasks'] }
   private async tasks(service: CoopService, base: ServantView): Promise<ServantView['tasks']> {
@@ -30,7 +30,7 @@ export class SharedForeground implements ModeEndpoint {
   async view(params: Record<string, unknown>, signal?: AbortSignal): Promise<ServantView> {
     const query = (params.conversation ?? {}) as ConversationQuery, cursor = unpack(query.before)
     const base = await this.local.call('view', { ...params, conversation: { ...query, before: cursor.local ?? undefined } }, signal) as ServantView
-    if (!this.activated()) return base
+    if (this.mode() === 'LOCAL' || !this.activated()) return { ...base, conversationMode: 'LOCAL' }
     const service = await this.coop(), remote = await service.view()
     const snapshot = service.displaySnapshot()
     let messages = remote.messages, moreBefore = remote.moreBefore
@@ -39,16 +39,12 @@ export class SharedForeground implements ModeEndpoint {
       const page = await conversationPage(service.repository, service.cache, snapshot, String(remote.connection.identity.id), cursor.git ?? dateBefore)
       messages = page.messages; moreBefore = page.moreBefore
     }
-    const localMessages = cursor.local === null ? [] : base.messages
-    const gitMessages = cursor.git === null ? [] : messages
-    const next: Cursor = { local: cursor.local === null ? null : base.conversationBefore ?? null, git: cursor.git === null ? null : moreBefore ?? null }
-    const active = this.mode() === 'PRIVATE_GIT_EXPERIMENTAL'
-    return { ...base, tasks: [...base.tasks, ...await this.tasks(service, base)],
-      messages: [...localMessages, ...gitMessages.map(message => ({ id: 'git:' + message.id, ref: 'git:' + message.id,
-        role: message.role, text: message.text, at: message.createdAt, source: 'DSS-cah' }))].sort((a, b) => (a.at ?? '').localeCompare(b.at ?? '')),
-      conversationBefore: next.local || next.git ? 'shared:' + Buffer.from(JSON.stringify(next)).toString('base64url') : undefined,
-      assistant: { ...base.assistant, pendingInputs: [...base.assistant.pendingInputs, ...remote.pending.filter(d => d.kind === 'user-input').map(d => ({ messageId: d.id, error: d.error }))] },
-      runtime: active && remote.error ? { ...base.runtime, status: 'degraded', message: remote.error } : base.runtime }
+    return { ...base, conversationMode: 'PRIVATE_GIT_EXPERIMENTAL', tasks: await this.tasks(service, base),
+      messages: messages.map(message => ({ id: 'git:' + message.id, ref: 'git:' + message.id,
+        role: message.role, text: message.text, at: message.createdAt, source: 'DSS-cah' })),
+      conversationBefore: moreBefore ? 'git:' + moreBefore : undefined,
+      assistant: { ...base.assistant, pendingInputs: remote.pending.filter(d => d.kind === 'user-input').map(d => ({ messageId: d.id, error: d.error })) },
+      runtime: remote.error ? { ...base.runtime, status: 'degraded', message: remote.error } : base.runtime }
   }
 
   private async sendGit(params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
@@ -58,8 +54,9 @@ export class SharedForeground implements ModeEndpoint {
     const route = settings.foreground.provider && settings.foreground.model ? settings.foreground : params.autoModel ?? {}
     const profile: NonNullable<UserIntent['foreground']> = { ...(route as NonNullable<UserIntent['foreground']>),
       workspace: base.assistant.workspace.directory, presetId: settings.presetId }
-    const starts = base.messages.flatMap((message, index) => message.role === 'user' ? [index] : [])
-    const context = base.messages.slice(starts.at(-6) ?? 0).map(message => ({ role: message.role, text: message.text, at: message.at }))
+    const remote = await service.view()
+    const starts = remote.messages.flatMap((message, index) => message.role === 'user' ? [index] : [])
+    const context = remote.messages.slice(starts.at(-6) ?? 0).map(message => ({ role: message.role, text: message.text, at: message.createdAt }))
     return service.send({ ...params, id: params.messageId ?? params.id ?? randomUUID(), foreground: profile, context })
   }
 
@@ -68,11 +65,13 @@ export class SharedForeground implements ModeEndpoint {
     if (method === 'view') {
       try { return await this.view(params, signal) }
       catch (error) {
-        if (!this.activated()) throw error
+        if (this.mode() === 'LOCAL' || !this.activated()) throw error
         const base = await this.local.call('view', { ...params, conversation: { ...(params.conversation as object ?? {}), before: unpack((params.conversation as ConversationQuery | undefined)?.before).local ?? undefined } }, signal) as ServantView
-        return { ...base, runtime: { ...base.runtime, status: 'degraded', message: error instanceof Error ? error.message : String(error) } }
+        return { ...base, conversationMode: 'PRIVATE_GIT_EXPERIMENTAL', messages: [], tasks: [], conversationBefore: undefined, assistant: { ...base.assistant, pendingInputs: [] }, runtime: { ...base.runtime, status: 'degraded', message: error instanceof Error ? error.message : String(error) } }
       }
     }
+    if (method === 'retention' && this.mode() !== 'LOCAL' && !['stats'].includes(String(params.action)))
+      throw new Error('Local record maintenance is available in Local mode.')
     if (method === 'send') return this.mode() === 'LOCAL' ? this.local.call(method, params, signal) : this.sendGit(params, signal)
     if (typeof params.taskId === 'string' && params.taskId.startsWith('git:')) {
       const id = segment(originalTaskId(params.taskId)), service = await this.coop()

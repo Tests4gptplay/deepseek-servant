@@ -8,6 +8,8 @@ import { archivedRecordKey, canonicalJson, RecordJournal, taskRecordPrefixes } f
 const hash = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex')
 const root = (id: string) => 'records/' + encodeURIComponent(id) + '/'
 const indexKey = (id: string) => 'task-history/' + encodeURIComponent(id)
+export const taskHistoryPrefixes = (id: string): string[] => [...taskRecordPrefixes(id),
+  ...['records', 'record-archive', 'task-origin'].map(prefix => prefix + '/' + encodeURIComponent(id) + '/')]
 function fence(text: string): string {
   let length = 3
   for (const match of text.matchAll(/`+/g)) length = Math.max(length, match[0].length + 1)
@@ -39,6 +41,7 @@ export interface TaskHistoryIndex {
   stage: SealedTaskRecords['stage']
   taskRevision: number
   hidden?: boolean
+  deleting?: boolean
   tombstone?: TaskTombstone
   cleanedAt?: string
   deliveryReadAt?: string
@@ -132,6 +135,7 @@ export class TaskArchiveStore {
     return manifest
   }
   async task(id: string): Promise<Task | undefined> {
+    if ((await this.index(id))?.deleting) return undefined
     const manifest = await this.manifest(id)
     if (!manifest) return undefined
     const task = JSON.parse((await Promise.all(manifest.snapshot.map(part => this.text(part)))).join('')) as Task
@@ -185,8 +189,10 @@ export class TaskArchiveStore {
     await this.storage.set(indexKey(manifest.taskId), { ...index, cleanedAt: this.now() })
   }
   async resumeCleanup(report: (error: unknown) => void = error => console.error('deepseek-servant cleanup', error)): Promise<void> {
-    for (const index of await this.list()) if (index.tombstone && !index.cleanedAt) {
+    for (const index of await this.list()) if (index.deleting || index.tombstone && !index.cleanedAt) {
       try {
+        if (index.deleting) { await this.deleteHistory(index.taskId); continue }
+        if (!index.tombstone) continue
         const manifest = await this.manifest(index.taskId)
         if (!manifest || manifest.stage !== 'ended') throw new Error('Cleanup requires its sealed records: ' + index.taskId)
         const current = await this.storage.get<{ id: string; revision: number; kind?: string }>('task:' + index.taskId)
@@ -204,6 +210,21 @@ export class TaskArchiveStore {
   async markDeliveryRead(id: string): Promise<void> {
     const index = await this.index(id)
     if (index && !index.deliveryReadAt) await this.storage.set(indexKey(id), { ...index, deliveryReadAt: this.now() })
+  }
+  /** Explicit owner deletion removes the archive, receipts, index and legacy replay marker. */
+  async deleteHistory(id: string): Promise<void> {
+    if (!this.storage.delete) throw new Error('Storage does not support history deletion.')
+    const index = await this.index(id)
+    const marker = await this.storage.get<TaskTombstone>('task:' + id)
+    if (index ? !index.tombstone || !index.cleanedAt : marker?.kind !== 'task-tombstone')
+      throw new Error('Only settled task history can be deleted.')
+    if (index) await this.storage.set(indexKey(id), { ...index, deleting: true })
+    for (const prefix of taskHistoryPrefixes(id)) for (const row of await this.storage.list(prefix)) await this.storage.delete(row.key)
+    for (const row of await this.storage.list<{ taskId?: string }>('assistant-history/')) {
+      if (row.key.includes('/delivery/') && row.value.taskId === id) await this.storage.delete(row.key)
+    }
+    await this.storage.delete('task:' + id)
+    await this.storage.delete(indexKey(id))
   }
   async hide(id: string): Promise<void> {
     const index = await this.index(id)

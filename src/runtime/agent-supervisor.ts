@@ -191,7 +191,7 @@ export class AgentSupervisor {
     if (existing) {
       const current = (await this.options.tasks.get(task.id))!
       // The adapter deduplicates the stable id and rechecks its persistence barrier.
-      await existing.handle.send(await this.prompt(current, action, current.executions[executionId]!), `servant-action-${action.id}`, 'followup', 'deepseek-servant')
+      await this.sendWork(existing, current, action)
       this.requestObservation(existing); this.watch(existing)
       return
     }
@@ -199,9 +199,19 @@ export class AgentSupervisor {
     if (await this.options.gateway.exists(sessionId)) throw new Error(`Execution already has a native Session and needs reconciliation: ${sessionId}`)
     const current = (await this.options.tasks.get(task.id))!
     const owner = await this.openOwner(current, current.executions[executionId]!, false)
-    await owner.handle.send(await this.prompt(current, action, current.executions[executionId]!), `servant-action-${action.id}`, 'followup', 'deepseek-servant')
+    await this.sendWork(owner, current, action)
     await this.observe(owner)
     this.watch(owner)
+  }
+
+  private async sendWork(owner: OwnedExecution, task: Task, action: PendingAction): Promise<void> {
+    const prompt = await this.prompt(task, action, task.executions[owner.executionId]!)
+    const latest = await this.options.tasks.get(task.id)
+    if (!latest || latest.control === 'cancelled' || latest.executions[owner.executionId]?.stopRequested) {
+      await this.forceStopTasks([task.id])
+      return
+    }
+    await owner.handle.send(prompt, `servant-action-${action.id}`, 'followup', 'deepseek-servant')
   }
 
   /** Only the recovery classifier may call this after proving a closed native turn and empty inbox. */
@@ -248,7 +258,7 @@ export class AgentSupervisor {
     const id = action.payload.executionId
     const owner = id && this.owners.get(id)
     if (!owner || !id) throw new Error('Cannot continue an execution without its exact live owner')
-    await owner.handle.send(await this.prompt(task, action, task.executions[id]!), `servant-action-${action.id}`, 'followup', 'deepseek-servant')
+    await this.sendWork(owner, task, action)
     await this.observe(owner)
     this.watch(owner)
   }
@@ -259,6 +269,28 @@ export class AgentSupervisor {
     await owner.handle.cancel()
     await this.observe(owner)
     this.watch(owner)
+  }
+
+  /** Emergency stop uses native cancellation and disposal, not another model turn. */
+  async forceStopTasks(taskIds: readonly string[]): Promise<void> {
+    const selected = new Set(taskIds)
+    const results = await Promise.allSettled([...this.owners.values()].filter(owner => selected.has(owner.taskId)).map(async owner => {
+      const releasing = this.releases.get(owner.executionId)
+      if (releasing) { await releasing; if (this.owners.get(owner.executionId) !== owner) return }
+      const work = (async () => {
+        try { await owner.handle.cancel() } finally { await owner.handle.dispose() }
+        owner.unsubscribe()
+        this.owners.delete(owner.executionId)
+        await this.options.tasks.execute(owner.taskId, { type: 'execution.observed', commandId: `reset-stop:${randomUUID()}`,
+          source: { kind: 'runtime', id: 'deepseek-servant' }, executionId: owner.executionId, physicalState: 'stopped', ownedJobIds: [] })
+        return true
+      })().finally(() => this.releases.delete(owner.executionId))
+      this.releases.set(owner.executionId, work)
+      await work
+    }))
+    this.options.onChanged?.()
+    const errors = results.filter(result => result.status === 'rejected').map(result => result.reason)
+    if (errors.length) throw new AggregateError(errors, '部分后台执行未能停止，任务状态已保留，请查看具体错误后重试。')
   }
 
   /** Release this exact owned runtime once its turn and jobs have settled. */

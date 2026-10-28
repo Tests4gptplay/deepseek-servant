@@ -136,7 +136,7 @@ export interface RetentionBlockedItem { id: string; kind: 'task' | 'skill' | 'na
 export interface RetentionTaskCandidate { taskId: string; expectedRevision: number; retainResultIds: string[]; estimatedReclaimedBytes: number }
 export interface RetentionArchiveCandidate { taskId: string; expectedRevision: number; purgeId: string; estimatedReclaimedBytes: number }
 export interface RetentionSkillCandidate extends SkillCompactionRequest { estimatedReclaimedBytes: number }
-/** Live usage of deepseek_servant Storage Domain values only; no native DSH Session logs. */
+/** Actual owned record-file bytes; native Session logs and artifacts are separate. */
 export interface StorageUsageStats {
   totalBytes: number
   permanentBytes: number
@@ -149,6 +149,7 @@ export interface StorageUsageStats {
     originBytes: number
     archiveBytes: number
     planningBytes: number
+    otherBytes?: number
   }
   temporary: {
     taskBytes: number

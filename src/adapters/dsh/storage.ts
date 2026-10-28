@@ -10,7 +10,7 @@ import { JsonStorageBackend } from '@deepseek-ai/dsh-storage-json'
 import { z } from 'zod'
 import type { StoragePort } from '../../contracts/ports.js'
 import type { RecordStorageView } from '../../contracts/views.js'
-import { RecordFilesBackend, ensureRecordTree, recordFolder } from './record-files.js'
+import { RecordFilesBackend, ensureRecordTree, recordFolder, recordFileUsage } from './record-files.js'
 
 interface StoredEnvelope { key: string; value: unknown }
 const storedEnvelope: z.ZodType<StoredEnvelope> = z.object({ key: z.string().min(1), value: z.json() })
@@ -100,6 +100,10 @@ export class DshStorageAdapter implements StoragePort {
     }
   }
 
+  usageFiles(): Promise<Array<{ key?: string; path: string; bytes: number }>> {
+    return this.serial(async () => recordFileUsage(path.join(this.directory, DATA_FOLDER),
+      [...this.records.domain.table('records').entries()].map(([key]) => key)))
+  }
   recordsDirectory(): string { return this.directory }
   ensureRecordsDirectory(): Promise<string> {
     return this.serial(async () => { await this.prepareRecords(true); return this.directory })

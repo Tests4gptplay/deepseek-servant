@@ -8,6 +8,7 @@ import {
   type RetentionPreview,
   type RetentionSweepResult, type TaskRetentionPort, type TaskTombstone, type StorageUsageStats,
 } from '../contracts/retention.js'
+import { taskHistoryPrefixes } from './task-archive-store.js'
 import { calculateStorageUsage } from './storage-usage.js'
 import { applyRetentionCommand, jsonBytes, retentionBlockers } from '../domain/retention.js'
 
@@ -20,7 +21,7 @@ export interface RetentionServiceOptions {
   nativeSessions?: NativeSessionRetentionPort
   now?: () => string
   onChanged?: () => void
-  completedTasks?: Pick<import('./task-service.js').TaskService, 'cleanupCompleted' | 'archives'>
+  completedTasks?: Pick<import('./task-service.js').TaskService, 'cleanupCompleted' | 'deleteHistory' | 'archives'>
 }
 
 /** Local record maintenance. It never runs models, deletes artifact files, or edits native Skills. */
@@ -36,7 +37,7 @@ export class RetentionService {
   }
   /** Read-only storage figures; one snapshot of this plugin's own domain keys. */
   async stats(): Promise<StorageUsageStats> {
-    return calculateStorageUsage(await this.options.store.list<unknown>(''), this.now())
+    return calculateStorageUsage(await this.options.store.list<unknown>(''), this.now(), await this.options.store.usageFiles?.())
   }
 
   async configuration(): Promise<RetentionConfiguration> {
@@ -150,9 +151,15 @@ export class RetentionService {
     await this.options.completedTasks!.archives.resumeCleanup()
     for (const candidate of plan.deleteArchives) {
       if (allowed.get(candidate.taskId) !== candidate.expectedRevision) continue
-      if (!(await this.options.completedTasks!.archives.index(candidate.taskId))?.cleanedAt) continue
-      await this.options.completedTasks!.archives.hide(candidate.taskId)
-      deletedArchives.push(candidate.taskId)
+      if (!manual && !(await this.options.completedTasks!.archives.index(candidate.taskId))?.cleanedAt) continue
+      try {
+        if (manual) {
+          if (!await this.options.completedTasks!.deleteHistory(candidate.taskId, candidate.expectedRevision)) {
+            skipped.push({ id: candidate.taskId, reason: 'Task changed after preview.' }); continue
+          }
+        } else await this.options.completedTasks!.archives.hide(candidate.taskId)
+        deletedArchives.push(candidate.taskId)
+      } catch (error) { skipped.push({ id: candidate.taskId, reason: message(error) }) }
     }
     await this.options.knowledge.withRetentionLock(async session => {
       const current = await this.makePreview(session, scope, manual)
@@ -213,7 +220,7 @@ export class RetentionService {
       this.configuration(), this.options.tasks.list(), session.listSkills(), this.options.store.list<unknown>(''),
     ])
     const sealed = this.options.completedTasks ? await this.options.completedTasks.archives.list() : []
-    const historical = this.options.completedTasks ? (await Promise.all(sealed.filter(index => index.tombstone && !index.hidden)
+    const historical = this.options.completedTasks ? (await Promise.all(sealed.filter(index => index.tombstone && !index.deleting && (manual || !index.hidden))
       .map(index => this.options.completedTasks!.archives.task(index.taskId)))).filter((task): task is Task => !!task) : []
     const allTasks = [...new Map([...historical, ...liveTasks].map(task => [task.id, task])).values()]
     // Manual cleanup targets ended Tasks immediately and leaves knowledge and settings unchanged.
@@ -228,12 +235,23 @@ export class RetentionService {
     const archives = allTasks.filter(task => !!task.archive || endedIds.has(task.id))
     const archivedTaskIds = [...new Set([...archives.map(task => task.id), ...endedIds])]
     const tombstones = rows.map(row => row.value).filter(isTombstone)
+    const files = await this.options.store.usageFiles?.()
+    const fileBytes = new Map<string, number>()
+    for (const file of files ?? []) if (file.key) fileBytes.set(file.key, (fileBytes.get(file.key) ?? 0) + file.bytes)
+    const rowBytes = (row: { key: string; value: unknown }): number => files ? fileBytes.get(row.key) ?? 0 : jsonBytes(row.value)
+    const ownedBytes = (id: string): number => {
+      const prefixes = taskHistoryPrefixes(id)
+      return rows.filter(row => row.key === 'task:' + id || row.key === 'task-history/' + encodeURIComponent(id)
+        || prefixes.some(prefix => row.key.startsWith(prefix))
+        || row.key.startsWith('assistant-history/') && row.key.includes('/delivery/') && (row.value as { taskId?: string })?.taskId === id)
+        .reduce((sum, row) => sum + rowBytes(row), 0)
+    }
     const totals: RetentionPreview['totals'] = {
-      servantBytes: rows.reduce((sum, row) => sum + jsonBytes(row.value), 0),
-      taskBytes: rows.filter(row => row.key.startsWith('task:') && !isTombstone(row.value)).reduce((sum, row) => sum + jsonBytes(row.value), 0),
-      knowledgeBytes: rows.filter(row => row.key.startsWith('knowledge/')).reduce((sum, row) => sum + jsonBytes(row.value), 0),
-      assistantBytes: rows.filter(row => row.key.startsWith('assistant/')).reduce((sum, row) => sum + jsonBytes(row.value), 0),
-      tombstoneBytes: tombstones.reduce((sum, item) => sum + jsonBytes(item), 0),
+      servantBytes: calculateStorageUsage(rows, now, files).totalBytes,
+      taskBytes: rows.filter(row => row.key.startsWith('task:') && !isTombstone(row.value)).reduce((sum, row) => sum + rowBytes(row), 0),
+      knowledgeBytes: rows.filter(row => row.key.startsWith('knowledge/')).reduce((sum, row) => sum + rowBytes(row), 0),
+      assistantBytes: rows.filter(row => row.key.startsWith('assistant/')).reduce((sum, row) => sum + rowBytes(row), 0),
+      tombstoneBytes: rows.filter(row => isTombstone(row.value)).reduce((sum, row) => sum + rowBytes(row), 0),
       detailedTasks: allTasks.length - archives.length, archivedTasks: archives.length,
       pinnedArchives: archives.filter(task => Object.keys(task.reports).some(id => pins.has(id))).length,
       nativeSessionBytes: tombstones.reduce((sum, item) => sum + (item.nativeBytesRetained ?? 0), 0),
@@ -243,6 +261,13 @@ export class RetentionService {
     }
     const plan: RetentionPreview = { previewId: `retention-${randomUUID()}`, createdAt: now, policyRevision: configuration.revision,
       manual, policy: structuredClone(configuration.policy), ...(scope ? { scope: { ...scope } } : {}), archiveTasks: [], deleteArchives: [], compactSkills: [], nativeCleanup: [], blocked: [], totals }
+    if (manual && this.options.completedTasks) for (const marker of tombstones) {
+      if (allTasks.some(task => task.id === marker.id) || scope && (marker.assistantId !== scope.assistantId || marker.workspaceId !== scope.workspaceId)) continue
+      const reclaimed = ownedBytes(marker.id)
+      plan.deleteArchives.push({ taskId: marker.id, expectedRevision: marker.revision, purgeId: 'records:' + marker.id, estimatedReclaimedBytes: reclaimed })
+      totals.estimatedReclaimedBytes += reclaimed
+      totals.archivedTasks++
+    }
     const bytePressure = policy.maxServantBytes !== undefined && totals.servantBytes > policy.maxServantBytes
     let countPressure = policy.maxArchives === undefined ? 0 : Math.max(0, allTasks.filter(task => ['completed', 'cancelled'].includes(task.phase)).length - policy.maxArchives)
     for (const task of tasks) {
@@ -256,7 +281,9 @@ export class RetentionService {
         const index = sealed.find(row => row.taskId === task.id)
         if (!index?.cleanedAt) plan.archiveTasks.push({ taskId: task.id, expectedRevision: task.revision, retainResultIds: [], estimatedReclaimedBytes: 0 })
         if (manual || detailExpires || historyExpires || countPressure > 0 || bytePressure) {
-          plan.deleteArchives.push({ taskId: task.id, expectedRevision: task.revision, purgeId: 'records:' + task.id, estimatedReclaimedBytes: 0 })
+          const reclaimed = manual ? ownedBytes(task.id) : 0
+          plan.deleteArchives.push({ taskId: task.id, expectedRevision: task.revision, purgeId: 'records:' + task.id, estimatedReclaimedBytes: reclaimed })
+          totals.estimatedReclaimedBytes += reclaimed
           if (countPressure > 0) countPressure--
         }
         continue

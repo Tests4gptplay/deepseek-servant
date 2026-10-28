@@ -23,6 +23,7 @@ export function RetentionPanel({ stats, preview, outcome, busy, recordStorage, m
     ['retention.originBytes', stats?.permanent.originBytes ?? 0],
     ['retention.archiveBytes', stats?.permanent.archiveBytes ?? 0],
     ['retention.planningBytes', stats?.permanent.planningBytes ?? 0],
+    ['retention.otherBytes', stats?.permanent.otherBytes ?? 0],
   ]
   const temporary: UsageRow[] = [
     ['retention.activeTaskBytes', stats?.temporary.taskBytes ?? 0],
@@ -49,6 +50,7 @@ export function RetentionPanel({ stats, preview, outcome, busy, recordStorage, m
         <ManualTaskCleanup preview={preview} busy={busy || moving} onRetention={onRetention} t={t} />
         <ManualConversationCleanup busy={busy || moving} onRetention={onRetention} t={t} />
         <ManualConversationCleanup planning busy={busy || moving} onRetention={onRetention} t={t} />
+        <ManualConversationCleanup reset busy={busy || moving} onRetention={onRetention} t={t} />
       </div>
       {preview && <>
         <p className={css.muted}>{t('retention.plan', { archive: preview.archiveTasks.length, remove: preview.deleteArchives.length,
@@ -67,7 +69,7 @@ function UsageColumn({ rows, subtotalLabel, subtotal, measured, t }: {
   rows: UsageRow[]; subtotalLabel: string; subtotal?: number; measured: boolean; t: Translate
 }) {
   return <dl className={css.retentionGroup}>
-    {rows.map(([key, size]) => <div key={key} className={css.retentionRow}><dt>{t(key)}</dt><dd>{measured ? bytes(size) : '—'}</dd></div>)}
+    {rows.map(([key, size]) => <div key={key} className={css.retentionRow}><dt>{t(key)}</dt><dd title={measured ? size.toLocaleString() + ' B' : undefined}>{measured ? bytes(size) : '—'}</dd></div>)}
     <div className={`${css.retentionRow} ${css.retentionSubtotal}`}><dt>{subtotalLabel}</dt><dd>{measured && subtotal !== undefined ? bytes(subtotal) : '—'}</dd></div>
   </dl>
 }

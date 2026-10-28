@@ -5,10 +5,14 @@ type UsageRows = ReadonlyArray<{ key: string; value: unknown }>
 type LongCategory = keyof StorageUsageStats['permanent']
 type TaskCategory = keyof StorageUsageStats['temporary']
 
-/** Account for every persisted deepseek_servant JSON value exactly once.
+/** Account for every persisted deepseek_servant file once, with a logical-value fallback.
  * Never include DSH Session Persistence logs or workspace artifacts.
  */
-export function calculateStorageUsage(rows: UsageRows, recordedAt: string): StorageUsageStats {
+export function calculateStorageUsage(rows: UsageRows, recordedAt: string,
+  files?: ReadonlyArray<{ key?: string; path: string; bytes: number }>): StorageUsageStats {
+  const values = new Map(rows.map(row => [row.key, row.value]))
+  const entries = files ? files.map(file => ({ key: file.key ?? (file.path === 'layout.json' ? 'settings/layout' : 'other-files/' + file.path),
+    value: file.key ? values.get(file.key) : undefined, size: file.bytes })) : rows.map(row => ({ ...row, size: jsonBytes(row.value) }))
   const permanent: StorageUsageStats['permanent'] = {
     chatBytes: 0, assistantBytes: 0, knowledgeBytes: 0,
     originBytes: 0, archiveBytes: 0, planningBytes: 0,
@@ -17,19 +21,21 @@ export function calculateStorageUsage(rows: UsageRows, recordedAt: string): Stor
     taskBytes: 0, plannerMemoryBytes: 0, plannerNoteBytes: 0,
     workerReplyBytes: 0, executionBytes: 0, recoveryBytes: 0,
   }
-  const addPermanent = (category: LongCategory, size: number) => { permanent[category] += size }
+  const addPermanent = (category: LongCategory, size: number) => { permanent[category] = (permanent[category] ?? 0) + size }
   const addTemporary = (category: TaskCategory, size: number) => { temporary[category] += size }
 
-  for (const { key, value } of rows) {
-    const size = jsonBytes(value)
+  for (const { key, value, size } of entries) {
     if (key.startsWith('task:')) {
       // Old Tasks contain memory, notes, reports and runtime details inline.
       // Split their serialized field byte sizes without double counting.
       if (isTombstone(value)) addPermanent('archiveBytes', size)
+      else if (files) addTemporary('taskBytes', size)
       else splitLegacyTask(value, size, addTemporary)
     } else if (key.startsWith('conversations/') || key.startsWith('conversation/') || key.startsWith('conversation-index/')
       || key.startsWith('conversation-exchanges/') || key.startsWith('conversation-staging/') || key.startsWith('conversation-cleanup/')) {
       addPermanent('chatBytes', size)
+    } else if (key.startsWith('assistant-history/')) {
+      addPermanent(key.includes('/delivery/') ? 'archiveBytes' : 'chatBytes', size)
     } else if (key.startsWith('foreground-memory/')) {
       addPermanent('planningBytes', size)
     } else if (key.startsWith('knowledge/')) {
@@ -53,14 +59,15 @@ export function calculateStorageUsage(rows: UsageRows, recordedAt: string): Stor
       addTemporary('executionBytes', size)
     } else if (key.startsWith('task-staging/') || key.startsWith('records-staging/')) {
       addTemporary('taskBytes', size)
-    } else {
-      // Assistant records, retention settings and other domain-level metadata.
+    } else if (key.startsWith('assistant/') || key.startsWith('settings/') || key.startsWith('retention/')) {
       addPermanent('assistantBytes', size)
+    } else {
+      addPermanent('otherBytes', size)
     }
   }
   const permanentBytes = Object.values(permanent).reduce((sum, value) => sum + value, 0)
   const temporaryBytes = Object.values(temporary).reduce((sum, value) => sum + value, 0)
-  const totalBytes = rows.reduce((sum, row) => sum + jsonBytes(row.value), 0)
+  const totalBytes = entries.reduce((sum, row) => sum + row.size, 0)
   if (permanentBytes + temporaryBytes !== totalBytes) throw new Error('Servant storage breakdown does not match total bytes.')
   return { totalBytes, permanentBytes, temporaryBytes, recordedAt, permanent, temporary }
 }

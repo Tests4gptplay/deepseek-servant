@@ -35,7 +35,8 @@ test('explicit planning cleanup removes only the selected assistants two notes',
 test('old planning and archive folders migrate without losing bodies or resurrecting cleared notes', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dss-planning-folders-'))
   const descriptor = { name: 'deepseek_servant', version: 1, tables: ['records'], hasGlobal: false }
-  const keys = ['foreground-memory/default/Foreground_List', 'foreground-memory/default/Foreground_Cache', 'records/one', 'task-history/one']
+  const keys = ['foreground-memory/default/Foreground_List', 'foreground-memory/default/Foreground_Cache', 'records/one', 'task-history/one',
+    'settings/runtime', 'assistant-history/default/delivery/old', 'assistant-history/default/input/old', 'conversations/default/one']
   let backend = new RecordFilesBackend(root)
   try {
     await ensureRecordTree(root)

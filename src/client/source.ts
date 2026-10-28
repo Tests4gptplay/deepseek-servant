@@ -8,6 +8,7 @@ export type RetentionRequest = { action: 'stats' } | { action: 'preview' } | { a
   | { action: 'configure'; policy: RetentionPolicy; expectedRevision: number }
   | { action: 'clearConversation'; confirmation: 'clear-foreground-conversation' }
   | { action: 'clearPlanningNotes'; confirmation: 'clear-work-planning-notes' }
+  | { action: 'resetTasks'; confirmation: 'force-reset-task-state' }
 
 export interface ServantClientApi {
   view(input?: { conversation?: ConversationQuery }): Promise<ServantView>
@@ -77,13 +78,20 @@ export function createServantSource(api: ServantClientApi, notify: (notice: Omit
 
   const refresh = async (includeStorage = true): Promise<void> => {
     const request = ++epoch
-    const pageIndex = historyIndex
+    let pageIndex = historyIndex
     publish({ ...snapshot, status: 'loading', error: undefined })
     try {
-      const [page, usage] = await Promise.all([api.view({ conversation: history[pageIndex] }),
+      let [page, usage] = await Promise.all([api.view({ conversation: history[pageIndex] }),
         includeStorage ? api.retention({ action: 'stats' }).then(value => ({ value, error: undefined as string | undefined }),
           error => ({ value: snapshot.storageStats, error: errorMessage(error) })) : { value: snapshot.storageStats, error: snapshot.storageError }])
       if (request === epoch) {
+        if (snapshot.value && page.conversationMode !== snapshot.value.conversationMode) {
+          const hadQuery = Object.keys(history[pageIndex] ?? {}).length > 0
+          history = [{}]; historyIndex = 0; historyPages = []; pageIndex = 0
+          if (hadQuery) page = await api.view({ conversation: {} })
+          if (request !== epoch) return
+          publish({ ...snapshot, history: { canGoNewer: false } })
+        }
         historyPages[pageIndex] = page.messages
         const messages = new Map<string, ConversationMessage>()
         for (const batch of historyPages.slice(0, pageIndex + 1).reverse()) {
@@ -183,7 +191,7 @@ export function createServantSource(api: ServantClientApi, notify: (notice: Omit
     moveRecords: (directory: string, expectedDirectory: string) => mutate('moveRecords', 'recordsMoved', () => api.moveRecords({ directory, expectedDirectory })),
     retention: (input: RetentionRequest) => mutate('retention', input.action === 'preview' ? undefined : input.action === 'configure' ? 'retentionPolicySaved' : 'retentionUpdated', async () => {
       const result = await api.retention(input)
-      if (input.action === 'clearPlanningNotes') return result
+      if (input.action === 'clearPlanningNotes' || input.action === 'resetTasks') return result
       if (input.action === 'clearConversation') {
         history = [{}]; historyIndex = 0; historyPages = []
         publish({ ...snapshot, history: { canGoNewer: false } })

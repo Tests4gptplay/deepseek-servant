@@ -43,9 +43,9 @@ export function ManualTaskCleanup({ preview, busy, onRetention, t }: CleanupProp
   </>
 }
 
-/** Foreground history is a separate owner action, independent of task cleanup. */
-export function ManualConversationCleanup({ busy, onRetention, t, planning = false }: CleanupProps & { planning?: boolean }) {
-  const labels = planning ? { button: 'retention.clearPlanningNotes', title: 'retention.planningTitle', warning: 'retention.planningWarning', detail: 'retention.planningDetail' } as const
+/** Separately confirmed owner actions; reset never submits a foreground message. */
+export function ManualConversationCleanup({ busy, onRetention, t, planning = false, reset = false }: CleanupProps & { planning?: boolean; reset?: boolean }) {
+  const labels = reset ? { button: 'retention.resetTasks', title: 'retention.resetTitle', warning: 'retention.resetWarning', detail: 'retention.resetDetail' } as const : planning ? { button: 'retention.clearPlanningNotes', title: 'retention.planningTitle', warning: 'retention.planningWarning', detail: 'retention.planningDetail' } as const
     : { button: 'retention.clearConversation', title: 'retention.conversationTitle', warning: 'retention.conversationWarning', detail: 'retention.conversationDetail' } as const
   const [open, setOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
@@ -53,7 +53,7 @@ export function ManualConversationCleanup({ busy, onRetention, t, planning = fal
     if (busy || submitting) return
     setSubmitting(true)
     try {
-      if (await onRetention(planning ? { action: 'clearPlanningNotes', confirmation: 'clear-work-planning-notes' }
+      if (await onRetention(reset ? { action: 'resetTasks', confirmation: 'force-reset-task-state' } : planning ? { action: 'clearPlanningNotes', confirmation: 'clear-work-planning-notes' }
         : { action: 'clearConversation', confirmation: 'clear-foreground-conversation' })) setOpen(false)
     } finally { setSubmitting(false) }
   }
@@ -62,7 +62,7 @@ export function ManualConversationCleanup({ busy, onRetention, t, planning = fal
     <Modal open={open} onClose={() => { if (!submitting) setOpen(false) }} title={t(labels.title)} closeLabel={t('retention.cancel')}
       className={css.cleanupDialog} contentClassName={css.cleanupContent} footer={<div className={css.cleanupActions}>
         <Button type="button" variant="primary" data-modal-autofocus disabled={submitting} onClick={() => setOpen(false)}>{t('retention.cancel')}</Button>
-        <Button type="button" variant="outline" disabled={busy || submitting} onClick={() => { void confirm() }}>{t('retention.confirm')}</Button>
+        <Button type="button" variant="outline" disabled={busy || submitting} onClick={() => { void confirm() }}>{t(reset ? 'retention.resetConfirm' : 'retention.confirm')}</Button>
       </div>}>
       <p className={css.cleanupWarning}>{t(labels.warning)}</p>
       <p className={css.cleanupDetail}>{t(labels.detail)}</p>

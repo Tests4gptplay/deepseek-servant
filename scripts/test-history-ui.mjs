@@ -5,7 +5,7 @@ import { JSDOM } from 'jsdom'
 
 await mkdir('.validation/history-ui', { recursive: true })
 await build({
-  entryPoints: { page: 'src/mode-router/page.tsx', locales: 'src/client/locales.ts', modes: 'src/mode-router/locales.ts' },
+  entryPoints: { page: 'src/mode-router/page.tsx', retention: 'src/client/retention-panel.tsx', locales: 'src/client/locales.ts', modes: 'src/mode-router/locales.ts' },
   outdir: '.validation/history-ui', outExtension: { '.js': '.mjs' }, bundle: true,
   platform: 'node', format: 'esm', target: 'node24',
   external: ['react', 'react/*', 'react-dom', 'react-dom/*'],
@@ -30,7 +30,8 @@ let modeSnapshot = { ready: true, activeMode: 'LOCAL' }
 const modeListeners = new Set()
 const modeClient = { snapshot: () => modeSnapshot, subscribe: fn => { modeListeners.add(fn); return () => modeListeners.delete(fn) },
   select: async mode => { modeSnapshot = { ...modeSnapshot, activeMode: mode }; for (const fn of modeListeners) fn() }, loadCoop: async () => {} }
-const { zh } = await import('../.validation/history-ui/locales.mjs')
+const { zh, en } = await import('../.validation/history-ui/locales.mjs')
+const { RetentionPanel } = await import('../.validation/history-ui/retention.mjs')
 const root = createRoot(document.getElementById('root'))
 const historyCalls = [], sends = []
 const messages = (start, end) => Array.from({ length: end - start }, (_, offset) => ({
@@ -54,7 +55,7 @@ const props = {
   onSend: async (...args) => { sends.push(args); return true },
 }
 const render = () => root.render(React.createElement(ServantPage, props))
-const click = async element => { assert.ok(element); await act(() => element.dispatchEvent(new MouseEvent('click', { bubbles: true }))) }
+const click = async element => { assert.ok(element); await act(async () => { element.dispatchEvent(new MouseEvent('click', { bubbles: true })); await Promise.resolve() }) }
 try {
   await act(render)
   const log = document.querySelector('[role="log"]')
@@ -121,7 +122,44 @@ try {
   await click(modeButton())
   await click([...document.querySelectorAll('[role="menuitem"]')].find(e => e.textContent.trim() === 'local'))
   assert.equal(input.value, draft)
-  console.log('PASS: mode selector, preserved composer/draft, scroll preload, in-flight coalescing, reading anchor, background update, themed date selection, Escape, clear date and Enter send.')
+  const maintenance = []
+  for (const locale of [zh, en]) {
+    const panel = { busy: false, moving: false, onOpenRecords: async () => {}, onMoveRecords: async () => true,
+      t: (key, params = {}) => Object.entries(params).reduce((text, [name, value]) => text.replace('{' + name + '}', value), locale[key] ?? key),
+      preview: { previewId: 'confirmed-preview', policyRevision: 0, policy: {}, archiveTasks: [], deleteArchives: [{ taskId: 'fixture' }],
+        compactSkills: [], blocked: [], totals: { estimatedReclaimedBytes: 4000 } },
+      onRetention: async input => { maintenance.push(input); return true } }
+    await act(() => root.render(React.createElement(RetentionPanel, panel)))
+    const button = key => [...document.querySelectorAll('button')].find(e => e.textContent.trim() === locale[key])
+    const expected = ['retention.preview', 'retention.clean', 'retention.clearConversation', 'retention.clearPlanningNotes', 'retention.resetTasks']
+    assert.deepEqual([...button(expected[0]).parentElement.querySelectorAll(':scope > button')].map(e => e.textContent.trim()), expected.map(key => locale[key]))
+    await click(button('retention.resetTasks'))
+    assert.ok(document.querySelector('[role="dialog"]').textContent.includes(locale['retention.resetWarning']))
+    const beforeCancel = maintenance.length
+    await click(button('retention.cancel'))
+    assert.equal(maintenance.length, beforeCancel, 'cancelling the warning does not reset state')
+    await click(button('retention.resetTasks'))
+    await click(button('retention.resetConfirm'))
+    assert.deepEqual(maintenance.at(-1), { action: 'resetTasks', confirmation: 'force-reset-task-state' })
+    assert.equal(document.querySelector('[role="dialog"]'), null)
+    await click(button('retention.preview'))
+    assert.deepEqual(maintenance.at(-1), { action: 'preview' })
+    await click(button('retention.clean'))
+    assert.ok(document.querySelector('[role="dialog"]').textContent.includes(locale['retention.confirmWarning']))
+    await click(button('retention.confirm'))
+    assert.deepEqual(maintenance.at(-1), { action: 'sweep', previewId: 'confirmed-preview', confirmation: 'clear-ended-task-records' })
+    for (const [label, action, confirmation] of [
+      ['retention.clearConversation', 'clearConversation', 'clear-foreground-conversation'],
+      ['retention.clearPlanningNotes', 'clearPlanningNotes', 'clear-work-planning-notes'],
+    ]) {
+      await click(button(label))
+      await click(button('retention.confirm'))
+      assert.deepEqual(maintenance.at(-1), { action, confirmation })
+      assert.equal(document.querySelector('[role="dialog"]'), null)
+    }
+    assert.equal(sends.length, 1, 'all maintenance buttons bypass foreground AI')
+  }
+  console.log('PASS: bilingual cleanup/reset buttons, reset-last ordering, warning/cancel/confirm wiring, mode selector, preserved composer/draft, scroll preload, in-flight coalescing, reading anchor, background update, themed date selection, Escape, clear date and Enter send.')
 } finally {
   await act(() => root.unmount())
   dom.window.close()

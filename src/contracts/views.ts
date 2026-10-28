@@ -24,6 +24,7 @@ export interface RecordStorageView {
   retainedSource?: string
 }
 export interface ServantView {
+  conversationMode?: 'LOCAL' | 'PRIVATE_GIT_EXPERIMENTAL'
   runtimeSettings: import('../application/runtime-settings.js').RuntimeSettings
   recordStorage: RecordStorageView
   assistant: AssistantView

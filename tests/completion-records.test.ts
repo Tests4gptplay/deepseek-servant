@@ -37,7 +37,7 @@ async function finish(f: Awaited<ReturnType<typeof accepted>>) {
     assert.equal((await f.execute({ type: 'action.finish', actionId: action.id, notificationId: action.kind === 'deliver' ? 'stable-wake' : undefined })).status, 'applied')
   }
 }
-test('archived read acknowledgments, Markdown export and manual hiding retain all record evidence', async () => {
+test('archived reads and export work until explicit history deletion', async () => {
   const f = await accepted()
   await finish(f)
   const original = 'Exact Unicode 🙂\n\u0060\u0060\u0060markdown\nbody\n\u0060\u0060\u0060'
@@ -71,10 +71,12 @@ test('archived read acknowledgments, Markdown export and manual hiding retain al
   const cleaned = await retention.sweep({ previewId: preview.previewId })
   assert.deepEqual(cleaned.deletedArchives, ['one'])
   assert.equal((await f.tasks.history()).length, 0)
-  assert.equal((await f.tasks.history(true)).length, 1)
-  assert.equal(await f.store.journal.fullText(memory.ref), original)
-  assert.equal((await f.tasks.get('one'))?.reports['accepted-output']?.disposition, 'accepted')
-  assert.ok(await f.tasks.archives.manifest('one'))
+  assert.equal((await f.tasks.history(true)).length, 0)
+  await assert.rejects(f.store.journal.fullText(memory.ref))
+  assert.equal(await f.tasks.get('one'), undefined)
+  assert.equal(await f.tasks.archives.manifest('one'), undefined)
+  assert.ok(cleaned.reclaimedServantBytes > 0)
+  assert.equal(await f.storage.get('task:one'), undefined)
 })
 
 async function document(archives: TaskArchiveStore, id: string) {

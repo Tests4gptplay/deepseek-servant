@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { copyFile, lstat, mkdir, open, readFile, readdir, rename, rmdir, unlink, writeFile } from 'node:fs/promises'
+import { copyFile, lstat, mkdir, open, readFile, readdir, rename, rm, rmdir, unlink, writeFile } from 'node:fs/promises'
 import { isDeepStrictEqual } from 'node:util'
 import path from 'node:path'
 import { JsonStorageBackend } from '@deepseek-ai/dsh-storage-json'
@@ -8,20 +8,46 @@ type KvFacet = JsonStorageBackend['kv']
 type KvUnit = Awaited<ReturnType<KvFacet['open']>>
 const descriptor = { name: 'record', version: 1, tables: ['records'], hasGlobal: false } as const
 const LAYOUT = { format: 'deepseek-servant-record-folders', version: 1 } as const
-export const recordCategories = ['tasks', 'assistants', 'skills', 'knowledge/facts', 'knowledge/preferences', 'settings', 'other', 'work-planning', 'archives'] as const
+export const recordCategories = ['tasks', 'assistants', 'skills', 'knowledge/facts', 'knowledge/preferences', 'settings', 'other', 'work-planning', 'archives', 'conversations'] as const
 
 /** A readable ID plus a digest keeps distinct scopes and Windows case variants apart. */
 export function recordFolder(key: string): string {
   const category = key.startsWith('task:') ? 'tasks'
     : key.startsWith('foreground-memory/') ? 'work-planning'
     : ['records/', 'record-archive/', 'task-history/', 'tombstone/'].some(prefix => key.startsWith(prefix)) ? 'archives'
+    : key.startsWith('assistant-history/') && key.includes('/delivery/') ? 'archives'
+    : key.startsWith('conversation') || key.startsWith('assistant-history/') ? 'conversations'
     : key.startsWith('assistant/') ? 'assistants'
     : key.startsWith('knowledge/skills/') ? 'skills'
     : key.startsWith('knowledge/facts/') ? 'knowledge/facts'
     : key.startsWith('knowledge/preferences/') ? 'knowledge/preferences'
-    : key.startsWith('retention/') ? 'settings' : 'other'
+    : key.startsWith('retention/') || key.startsWith('settings/') ? 'settings' : 'other'
   const label = (key.split(/[/:]/).at(-1) ?? '').replace(/[^a-zA-Z0-9_-]/g, '-').slice(0,32).toLowerCase() || 'record'
   return path.join(category, label + '--' + createHash('sha256').update(key).digest('hex'))
+}
+
+/** Count real bytes in the owned tree, including formatting, envelopes and backup files. */
+export async function recordFileUsage(directory: string, keys: Iterable<string>): Promise<Array<{ key?: string; path: string; bytes: number }>> {
+  const identities = new Map([...keys].map(key => [recordFolder(key), key]))
+  const result: Array<{ key?: string; path: string; bytes: number }> = []
+  async function visit(relative = ''): Promise<void> {
+    let entries
+    try { entries = await readdir(path.join(directory, relative), { withFileTypes: true }) }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
+    for (const entry of entries) {
+      const child = path.join(relative, entry.name)
+      if (entry.isDirectory()) await visit(child)
+      else {
+        const info = await lstat(path.join(directory, child)).catch(error => {
+          if (error.code === 'ENOENT') return undefined
+          throw error
+        })
+        if (info) result.push({ key: identities.get(relative), path: child.replaceAll(path.sep, '/'), bytes: info.size })
+      }
+    }
+  }
+  await visit()
+  return result
 }
 
 interface OpenFile { backend: JsonStorageBackend; unit: KvUnit }
@@ -72,8 +98,7 @@ export class RecordFilesBackend {
           await file.unit.deleteRecord('records', key)
           await file.backend.close()
           this.files.delete(relative)
-          try { await unlink(path.join(this.directory, relative, 'record.json')); await rmdir(path.join(this.directory, relative)) }
-          catch { /* Preserve any additional files in the record folder. */ }
+          await rm(path.join(this.directory, relative), { recursive: true, force: true })
         },
         setGlobal: async () => { throw new Error('Servant records have no global slot.') },
         close: () => this.close(),
@@ -112,7 +137,7 @@ export class RecordFilesBackend {
       if (entries.length > 1) throw new Error('每个记录文件只能保存一个记录')
       for (const [key, value] of entries) {
         const target = recordFolder(key)
-        if (['work-planning', 'archives'].includes(path.dirname(target)) && relative === path.join('other', path.basename(target))
+        if (path.dirname(target) !== 'other' && relative === path.join('other', path.basename(target))
           && value && typeof value === 'object' && 'key' in value && value.key === key && 'value' in value) {
           const destination = await this.openFile(target)
           const saved = await destination.unit.loadAll()
