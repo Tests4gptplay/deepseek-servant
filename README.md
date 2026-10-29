@@ -55,6 +55,8 @@
 
 在统一设置中启用 DSS-cah，设置私有仓库、仓库内目录、模型与本实例工作目录，通过已登录的 GitHub CLI 连接。Host 以 1 秒正常间隔增量同步远端，启动与完成状态使用独立追加记录；AI 按角色保存前台答复、Planner Memory / Plan Note、Worker Child Reply，再单独提交最终信号，由读回的远端状态推进下一角色。普通业务文档、历史和知识按需读取。任务、记忆与结果以远端 Git 为权威，原生 Foreground、Planner 和 Worker 持续执行、评价与交付。
 
+**远程前台实验（2026-10-29）**：在已连接的 DSS-cah 私有 Git 协作仓库中，分别从外部投递 `inbox/` Markdown 消息，以及直接向 `conversations/` + `intents/` 写入聊天消息。两种入口都触发了 Host 的 Git 读回与原生 Foreground 响应；AI 回复、对话索引、`respond` 完成信号和执行关闭均已从 Git 核对。两轮均作为普通聊天处理，没有建立 Planner 任务。详见[远程 Git 前台交流实验案例](docs/cases/dss-cah-remote-foreground-20261029.md)。
+
 操作步骤和数据位置见 [Private Git 使用说明](PRIVATE_GIT.md)。
 
 ## 安装与使用
