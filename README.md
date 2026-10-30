@@ -4,7 +4,7 @@
   <img src="https://raw.githubusercontent.com/Tests4gptplay/deepseek-servant/v0.3.0/docs/images/deepseek-servant-maids-duo.webp" alt="DeepSeek Servant 短裙与长裙女仆角色设计">
 </p>
 
-基于 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai/deepseek-harness) 的自主 AI 助理与多 Agent 协作插件。围绕持久目标进行规划、执行、成果评价、方法调整、任务接续和技能积累。
+基于 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai/deepseek-harness) 的自主 AI 助理与多 Agent 协作插件。围绕持久目标进行规划、执行、成果评价、方法调整、任务接续和技能积累。当前提供 Local 持续任务模式与实验性 DSS-cah Git 模式；多 Agent 指前台、Planner 与 Worker 的角色协作。
 
 **设计逻辑源自 [Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness)。** DeepSeek Servant 延续 CAH 以目标为中心的 Agent 工作闭环：理解需求、制定计划、执行工作、评价成果、调整方法、跨会话接续、故障恢复与技能积累。Servant 将这套持续工作机制整合到 DeepSeek Harness 运行环境，复用宿主的模型、工具、Session、作业与 Skill 能力。
 
@@ -12,20 +12,15 @@
 
 ## 核心能力
 
-- **共用界面、双模式后台**
+- **目标驱动的多 Agent 工作**：前台理解要求，Planner 规划与验收，Worker 在所选工作区执行，支持并行席位、评审与任务换代。
+- **Local 持续任务模式**：在当前 DSH 实例中保存任务状态，支持暂停、继续、取消、目标修订、接续恢复及最终交付。
+- **实验性 DSS-cah Git 模式**：通过 Git 保存任务、角色记录、绑定结果与归档，读回已提交状态后推进本实例的原生角色。
+- **共用操作界面**：模式切换后分别显示对话和任务；模型、预设、工作区及 Worker 席位可配置。
+- **工作记忆与技能**：保存和回查任务记录、工作规划随记与知识，支持技能积累；Local 提供分类记录清理与显式任务重置。
 
-- **对话呈现**
+### 当前协作范围
 
-- **页面插画**
-
-- **独立助理入口**
-- **模型与设置**
-- **持续 Agent 工作**
-- **任务接续与恢复**
-- **并行与任务控制**
-- **技能积累**
-- **工作记忆管理**：前台索引实际保存并读回；Local 支持分别清理历史、对话及工作规划记录，并提供程序级强制任务重置。
-- **前台长对话**
+当前 Git 模式提供参与者与实例分工、任务及角色记录提交、读回消费、控制、接续和归档；Worker 在各自 DSH 实例的工作区运行。外部 Markdown（`inbox/`）和按目标参与者、实例绑定的 `conversations/` + `intents/` 远程输入已完成前台交流实验。仅写入 `conversations/` 的普通共享聊天尚未自动接入该消费流程；同步聊天记录与触发前台消费是不同环节。
 
 ## 已完成的运行验证
 
@@ -51,7 +46,7 @@
 
 运行时复用 DSH 的 `storageDomain`、Agent、Session、tools、jobs、工作区和原生技能能力。Local 持有自己的持续任务链；独立 Private Git 模式以 Git-first 提交、确认消费和角色结果绑定协调多个参与实例。
 
-## DSS-cah 实验协作
+## DSS-cah 实验性 Git 模式
 
 在统一设置中启用 DSS-cah，设置私有仓库、仓库内目录、模型与本实例工作目录，通过已登录的 GitHub CLI 连接。Host 以 1 秒正常间隔增量同步远端，启动与完成状态使用独立追加记录；AI 按角色保存前台答复、Planner Memory / Plan Note、Worker Child Reply，再单独提交最终信号，由读回的远端状态推进下一角色。普通业务文档、历史和知识按需读取。任务、记忆与结果以远端 Git 为权威，原生 Foreground、Planner 和 Worker 持续执行、评价与交付。
 
