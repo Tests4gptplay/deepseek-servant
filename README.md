@@ -18,13 +18,33 @@
 - **共用操作界面**：模式切换后分别显示对话和任务；模型、预设、工作区及 Worker 席位可配置。
 - **工作记忆与技能**：保存和回查任务记录、工作规划随记与知识，支持技能积累；Local 提供分类记录清理与显式任务重置。
 
-## 安装与使用
+## 安装与升级
 
-正式版在 DSH Desktop 的“插件 → 添加插件”中输入固定来源 `github:Tests4gptplay/deepseek-servant#v0.4.1`，安装并启用。Web profile 使用：
+当前版本：**0.4.1**。安装包与固定标签均已包含运行文件，无需编译。
+
+**首次安装（Desktop）：** 打开侧栏 **插件 → 添加插件**（箭头菜单的 **安装第三方插件** 也可进入），把下面一整行填入 **包名或地址**，点击 **安装**，核对版本后点击 **立即启用**。
+
+```text
+github:Tests4gptplay/deepseek-servant#v0.4.1
+```
+
+**升级已有插件：** 同样填写上面的新版来源，成功后核对版本并启用；已有设置与用户文件保留。若宿主提示已安装或要求先卸载，再按提示仅卸载该插件条目并安装新版，不清除 DSH 数据或手工删除插件目录。是否需要重启以 DSH 提示为准；需要时完全退出并重新打开（Desktop 包括托盘）。
+
+启用后从侧栏打开 DeepSeek Servant，选择模型和工作区；DSS-cah 按需启用。
+
+**备用安装包：** 将下面的 `.tgz` 直链填入同一个 **包名或地址**；也可下载后填写文件的完整绝对路径，无需解压。该路径应属于运行 DSH 的电脑。
+
+```text
+https://github.com/Tests4gptplay/deepseek-servant/releases/download/v0.4.1/deepseek-servant-0.4.1.tgz
+```
+
+**Web：** 在运行服务的环境中执行。升级前停止对应 Web profile，成功后重新启动；Web 与 Desktop 分别安装。
 
 ```sh
 dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.4.1'
 ```
+
+备用时将命令中的来源换成上面的 `.tgz` 直链或下载文件的完整绝对路径。
 
 模型提供者、工具权限和凭据沿用 DSH 配置。进入侧栏 DeepSeek Servant，选择前台模型与工作区即可开始；后台 `Auto` 跟随本页前台模型，Worker 席位默认 2，可在设置中调整。
 
@@ -41,6 +61,7 @@ dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.4.1'
 ### 当前协作范围
 
 Git 模式支持参与者分工、任务控制、接续及归档，Worker 在各自 DSH 实例的工作区执行。远端交流需使用协作指南约定的消息投递入口；仅同步普通聊天记录不会自动发起前台回复或任务。
+
 
 ## DSS-cah 实验性 Git 模式
 

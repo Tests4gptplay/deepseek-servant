@@ -4,23 +4,33 @@
 
 ## 原生安装
 
-Desktop 打开“插件 → 添加插件”，粘贴以下固定来源，安装并启用：
+当前版本：**0.4.1**。安装包与固定标签均已包含运行文件，无需编译。
+
+**首次安装（Desktop）：** 打开侧栏 **插件 → 添加插件**（箭头菜单的 **安装第三方插件** 也可进入），把下面一整行填入 **包名或地址**，点击 **安装**，核对版本后点击 **立即启用**。
 
 ```text
 github:Tests4gptplay/deepseek-servant#v0.4.1
 ```
 
-Web profile 使用：
+**升级已有插件：** 同样填写上面的新版来源，成功后核对版本并启用；已有设置与用户文件保留。若宿主提示已安装或要求先卸载，再按提示仅卸载该插件条目并安装新版，不清除 DSH 数据或手工删除插件目录。是否需要重启以 DSH 提示为准；需要时完全退出并重新打开（Desktop 包括托盘）。
+
+启用后从侧栏打开 DeepSeek Servant，选择模型和工作区；DSS-cah 按需启用。
+
+**备用安装包：** 将下面的 `.tgz` 直链填入同一个 **包名或地址**；也可下载后填写文件的完整绝对路径，无需解压。该路径应属于运行 DSH 的电脑。
+
+```text
+https://github.com/Tests4gptplay/deepseek-servant/releases/download/v0.4.1/deepseek-servant-0.4.1.tgz
+```
+
+**Web：** 在运行服务的环境中执行。升级前停止对应 Web profile，成功后重新启动；Web 与 Desktop 分别安装。
 
 ```sh
 dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.4.1'
 ```
 
-固定版本包含编译后的 Host 和 Client。升级沿用现有配置、存储 Domain、会话与记录目录。模型、工具权限和预设由 DSH 管理。
+备用时将命令中的来源换成上面的 `.tgz` 直链或下载文件的完整绝对路径。
 
-安装后进入侧栏 DeepSeek Servant，选择前台模型和工作区。页面齿轮与全局设置共用配置。标准模式可直接使用；DSS-cah 在实验性设置中按需启用。协作使用 Git 和 GitHub CLI，依赖配置见下节，仓库设置见 [DSS-cah 使用说明](../PRIVATE_GIT.md)。
-
-Release 同时提供 `deepseek-servant-0.4.1.tgz` 与 SHA-256，作为备用安装包；也可通过同一插件管理入口安装该文件。
+模型、工具权限与预设由 DSH 管理。协作依赖见下节，仓库设置见 [DSS-cah 使用说明](../PRIVATE_GIT.md)。
 
 ## DSS-cah 依赖
 
