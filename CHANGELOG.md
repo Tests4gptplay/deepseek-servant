@@ -1,6 +1,12 @@
 # 版本与验收摘要
 
-当前版本：`0.4.0`。安装方式见[安装指南](docs/INSTALLATION.md)。
+当前版本：`0.4.1`。安装方式见[安装指南](docs/INSTALLATION.md)。
+
+## 0.4.1 — 2026-10-30
+
+- 修正独立安装包 README 中指向包外文档的链接，补入当前版本文档，其余历史资料固定到可访问的仓库提交版本。
+- 自主助理、多 Agent 角色分工、持续任务、恢复、技能学习与 Git 协作能力保持完整说明。
+- 运行代码、界面与素材和已测 0.4.0 完全一致。
 
 ## 0.4.0 — 2026-10-30
 
@@ -136,7 +142,7 @@
 - Git-first 提交与读回、CAS 冲突处理、草稿重试、操作去重、精确角色和参与范围绑定。
 - 用户主动协助、Planner 指派与认领、各自 Worker、结果评审、前台交付、完整封存和单独清理。
 - 目标修订及前台问题、原文分页、Worker 换代和 Session 接续；连续原生失败按实际执行结果收敛。
-- 源码回归、隔离原生双代执行、实际进程树中断后的同任务恢复通过。具体环境和结果见[协作开发验收](docs/acceptance-private-git-20261026.md)。
+- 源码回归、隔离原生双代执行、实际进程树中断后的同任务恢复通过。具体环境和结果见[协作开发验收](https://github.com/Tests4gptplay/deepseek-servant/blob/d28a4d8538abc966608761bcfd60d568dec11cc9/docs/acceptance-private-git-20261026.md)。
 
 本版本以开发候选交付。使用步骤见 [Private Git 指南](PRIVATE_GIT.md)。
 
@@ -150,7 +156,7 @@
 - 73 项源码回归及历史 UI 组件测试通过；隔离宿主强制中断后自动恢复通过。
 - 当前宿主经 `codex-local/gpt-6-astra` 完成 1860.2037818 秒原生静默 Job，退出码 0；Planner 接受、前台交付、完整封存和临时清理全部完成。
 
-候选已安装。具体运行标识、时间与原包 SHA-256 见[alpha.39 验收](docs/acceptance-20261026.md)。
+候选已安装。具体运行标识、时间与原包 SHA-256 见[alpha.39 验收](https://github.com/Tests4gptplay/deepseek-servant/blob/d28a4d8538abc966608761bcfd60d568dec11cc9/docs/acceptance-20261026.md)。
 
 ### 同日私有仓库整理
 
@@ -166,4 +172,4 @@
 
 ## 早期基线
 
-alpha.1–alpha.3 的 Linux 原生运行、16 批任务、技能复用和当时清理结果保留在[实现记录](IMPLEMENTATION.md#历史版本验证结果)及[历史清理数据](RETENTION.md#历史版本实测)。原始架构和旧 Helper 契约保留于 [docs/history](docs/history/architecture-20261024.md)。
+alpha.1–alpha.3 的 Linux 原生运行、16 批任务、技能复用和当时清理结果保留在[实现记录](IMPLEMENTATION.md#历史版本验证结果)及[历史清理数据](RETENTION.md#历史版本实测)。原始架构和旧 Helper 契约保留于 [docs/history](https://github.com/Tests4gptplay/deepseek-servant/blob/d28a4d8538abc966608761bcfd60d568dec11cc9/docs/history/architecture-20261024.md)。

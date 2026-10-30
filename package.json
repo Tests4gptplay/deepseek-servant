@@ -1,7 +1,7 @@
 {
   "name": "deepseek-servant",
-  "version": "0.4.0",
-  "description": "\u57fa\u4e8e DeepSeek Harness \u7684\u81ea\u4e3b AI \u52a9\u7406\u4e0e\u591a Agent \u534f\u4f5c\u63d2\u4ef6\uff0c\u652f\u6301\u76ee\u6807\u89c4\u5212\u3001\u6301\u7eed\u6267\u884c\u3001\u4efb\u52a1\u63a5\u7eed\u3001\u6545\u969c\u6062\u590d\u4e0e\u6280\u80fd\u5b66\u4e60\uff1b\u63d0\u4f9b Local \u6a21\u5f0f\u4e0e\u5b9e\u9a8c\u6027 Git \u534f\u4f5c\u6a21\u5f0f\u3002\n\n\u8bbe\u8ba1\u903b\u8f91\u6e90\u81ea Chat Agent Harness\uff08CAH\uff09\uff1ahttps://github.com/Tests4gptplay/chat-agent-harness",
+  "version": "0.4.1",
+  "description": "DeepSeek Harness 自主 AI 助理与多 Agent 协作插件：前台对话理解需求，后台规划并组织多个 Worker 持续执行和验收任务；支持暂停与接续、故障恢复、任务历史与成果记录、工作记忆和技能学习，提供标准模式及可选的实验性私有 Git 协作。",
   "private": true,
   "type": "module",
   "main": "lib/host.js",
@@ -30,7 +30,9 @@
     "RETENTION.md",
     "docs/INSTALLATION.md",
     "docs/USAGE.md",
-    "THIRD_PARTY_NOTICES.md"
+    "THIRD_PARTY_NOTICES.md",
+    "CHANGELOG.md",
+    "docs/releases/0.4.1.md"
   ],
   "engines": {
     "node": "^22.19.0 || >=24.0.0"

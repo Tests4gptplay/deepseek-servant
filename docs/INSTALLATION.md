@@ -1,26 +1,26 @@
 # 安装与升级
 
-正式版本：`0.4.0`。最近设置增量验证环境：Windows Desktop `0.2.1-rc.5`；历史任务验证环境见验收记录。
+正式版本：`0.4.1`。模型设置已在 Windows Desktop `0.2.1-rc.5` 验证；任务运行的历史环境见验收记录。
 
 ## 原生安装
 
 Desktop 打开“插件 → 添加插件”，粘贴以下固定来源，安装并启用：
 
 ```text
-github:Tests4gptplay/deepseek-servant#v0.4.0
+github:Tests4gptplay/deepseek-servant#v0.4.1
 ```
 
 Web profile 使用：
 
 ```sh
-dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.4.0'
+dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.4.1'
 ```
 
 固定版本包含编译后的 Host 和 Client。升级沿用现有配置、存储 Domain、会话与记录目录。模型、工具权限和预设由 DSH 管理。
 
 安装后进入侧栏 DeepSeek Servant，选择前台模型和工作区。页面齿轮与全局设置共用配置。标准模式可直接使用；DSS-cah 在实验性设置中按需启用。协作使用 Git 和 GitHub CLI，依赖配置见下节，仓库设置见 [DSS-cah 使用说明](../PRIVATE_GIT.md)。
 
-Release 同时提供 `deepseek-servant-0.4.0.tgz` 与 SHA-256，作为备用安装包；也可通过同一插件管理入口安装该文件。
+Release 同时提供 `deepseek-servant-0.4.1.tgz` 与 SHA-256，作为备用安装包；也可通过同一插件管理入口安装该文件。
 
 ## DSS-cah 依赖
 
