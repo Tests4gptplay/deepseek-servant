@@ -3,7 +3,7 @@
 /**
  * Safe Git subprocess runner.
  *
- * Every command goes through `execFile` with an explicit argument array — no
+ * Every command goes through `spawn` with an explicit argument array — no
  * shell, no string interpolation — so model-supplied paths and messages can
  * never inject shell syntax. Machine output is kept deterministic with
  * `-c core.quotepath=false` (non-ASCII paths stay unquoted UTF-8) and
@@ -11,7 +11,7 @@
  * @module dsh-tool-git/runner
  */
 
-import { execFile } from 'node:child_process'
+import { spawn } from 'node:child_process'
 
 /** One completed `git` invocation. */
 export interface GitRunResult {
@@ -71,51 +71,34 @@ export function runGit(gitPath: string, args: string[], opts: RunGitOptions): Pr
     ...opts.env,
   }
   return new Promise<GitRunResult>((resolve, reject) => {
-    execFile(
-      gitPath,
-      fullArgs,
-      {
-        cwd: opts.cwd,
-        env,
-        signal: opts.signal,
-        timeout: opts.timeoutMs ?? 300_000,
-        maxBuffer: 64 * 1024 * 1024,
-        windowsHide: true,
-      },
-      (error, stdout, stderr) => {
-        const result: GitRunResult = {
-          stdout: String(stdout ?? ''),
-          stderr: String(stderr ?? ''),
-          code: error && typeof (error as NodeJS.ErrnoException & { code?: unknown }).code === 'number'
-            ? (error as { code: number }).code
-            : 0,
-        }
-        if (error) {
-          const errno = (error as NodeJS.ErrnoException).code
-          if (errno === 'ENOENT') {
-            reject(new Error(`git executable not found: ${gitPath}`))
-            return
-          }
-          if (errno === 'ABORT_ERR') {
-            reject(error)
-            return
-          }
-          if ((error as { killed?: boolean }).killed && (error as { signal?: string }).signal === 'SIGTERM') {
-            reject(new GitError('Git operation timed out after ' + (opts.timeoutMs ?? 300_000) + ' ms.', 124, result.stderr, result.stdout))
-            return
-          }
-          // execFile reports non-zero exits as an Error carrying the exit code.
-          reject(new GitError(
-            (result.stderr.trim() || result.stdout.trim() || `git exited with code ${result.code}`),
-            result.code,
-            result.stderr,
-            result.stdout,
-          ))
-          return
-        }
-        resolve(result)
-      },
-    )
+    const stdout: Buffer[] = [], stderr: Buffer[] = []
+    let settled = false, timedOut = false
+    const child = spawn(gitPath, fullArgs, {
+      cwd: opts.cwd, env, signal: opts.signal, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    const timeoutMs = opts.timeoutMs ?? 300_000
+    const timer = timeoutMs > 0 ? setTimeout(() => { timedOut = true; child.kill('SIGTERM') }, timeoutMs) : undefined
+    timer?.unref()
+    const stop = () => { if (timer) clearTimeout(timer) }
+    child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk))
+    child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk))
+    child.on('error', error => {
+      if (settled) return
+      settled = true; stop()
+      const errno = (error as NodeJS.ErrnoException).code
+      reject(errno === 'ENOENT' ? new Error(`git executable not found: ${gitPath}`) : error)
+    })
+    child.on('close', (code, signal) => {
+      if (settled) return
+      settled = true; stop()
+      const result = { stdout: Buffer.concat(stdout).toString('utf8'), stderr: Buffer.concat(stderr).toString('utf8'), code: code ?? 128 }
+      if (timedOut) {
+        reject(new GitError('Git operation timed out after ' + timeoutMs + ' ms.', 124, result.stderr, result.stdout))
+      } else if (code !== 0) {
+        reject(new GitError(result.stderr.trim() || `git exited with ${signal ? 'signal ' + signal : 'code ' + result.code}`,
+          result.code, result.stderr, result.stdout))
+      } else resolve(result)
+    })
   })
 }
 

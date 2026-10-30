@@ -42,6 +42,10 @@ export class ServantApi {
           date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() }).optional() }).parse(raw)
         return this.options.query.view(input.assistantId, input.conversation)
       }
+      case 'foregroundProfile': {
+        const input = ScopeTarget.parse(raw)
+        return this.options.assistants.foregroundProfile(input.assistantId)
+      }
       case 'task': return this.options.query.task(Target.parse(raw).taskId)
       case 'send': {
         const input = ScopeTarget.extend({ messageId: Id, text: Text,
@@ -64,7 +68,6 @@ export class ServantApi {
         await task(input.taskId)
         const receipt = await this.options.tasks.execute(input.taskId, { type: 'task.control', commandId: input.commandId ?? `ui:${randomUUID()}`, source,
           intent: input.intent, ...(input.executionId ? { executionId: input.executionId } : {}) })
-        if (input.intent === 'resume' && receipt.status === 'applied') { await this.options.coordinator.recover(); this.options.coordinator.wake() }
         return receipt
       }
       case 'priority': {

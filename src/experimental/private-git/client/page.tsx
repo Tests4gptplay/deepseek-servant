@@ -10,7 +10,14 @@ export interface CoopControls {
   preset(value: string, onChange: (value: string) => void, disabled: boolean): ReactNode
   pickDirectory?: () => Promise<string | null>
 }
-export function CoopPage({ client, t, settingsOnly, controls, onOpenSettings }: { client: ModeClient; t: ModeText; settingsOnly?: boolean; controls?: CoopControls; onOpenSettings?: () => void }) {
+type CoopPageProps = { client: ModeClient; t: ModeText; settingsOnly?: boolean; controls?: CoopControls; onOpenSettings?: () => void }
+export function CoopPage(props: CoopPageProps) {
+  const { view } = useSyncExternalStore(props.client.subscribe, props.client.snapshot)
+  const scope = JSON.stringify([view?.connection?.repository.id, view?.connection?.identity.id, view?.settings.repositoryDirectory])
+  return <CoopPageScope key={scope} {...props} />
+}
+
+function CoopPageScope({ client, t, settingsOnly, controls, onOpenSettings }: CoopPageProps) {
   const { view } = useSyncExternalStore(client.subscribe, client.snapshot)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -44,9 +51,13 @@ export function CoopPage({ client, t, settingsOnly, controls, onOpenSettings }: 
     <input id={prefix + key} type={type} min={type === 'number' ? 1 : undefined}
       value={settings[key] ?? ''} disabled={busy} onChange={event => setSettings({ ...settings, [key]: type === 'number' ? Number(event.target.value) : event.target.value })} />
   </label>
+  // Member actions are bound to the identity the user actually reviewed.
+  // The Host checks it again; an account/repository switch cannot retarget a click.
+  const memberCall = (method: string, params: Record<string, unknown> = {}) => client.call(method, { ...params,
+    expectedRepositoryId: view.connection?.repository.id, expectedParticipantId: view.connection?.identity.id })
   const refreshMembers = async () => {
-    setMembers(await client.call('collaborators') as CoopCollaborator[])
-    if (view.connection?.repository.permissions.admin) setInvitations(await client.call('invitations') as CoopInvitation[])
+    setMembers(await memberCall('collaborators') as CoopCollaborator[])
+    if (view.connection?.repository.permissions.admin) setInvitations(await memberCall('invitations') as CoopInvitation[])
   }
   const send = async () => {
     const result = await client.call('send', { text, id: crypto.randomUUID() }) as { state: string; error?: string }
@@ -87,16 +98,16 @@ export function CoopPage({ client, t, settingsOnly, controls, onOpenSettings }: 
           <label>{t('username')} <input value={login} disabled={busy} autoComplete="off" onChange={event => { setLogin(event.target.value); setConfirm('') }} /></label>
           {confirm !== 'invite' ? <button disabled={busy || !login.trim()} onClick={() => setConfirm('invite')}>{t('invite')}</button> : <>
             <button disabled={busy} onClick={() => void run(async () => {
-              const result = await client.call('invite', { login: login.trim() }) as { status: 'pending' | 'accepted' }
+              const result = await memberCall('invite', { login: login.trim() }) as { status: 'pending' | 'accepted' }
               setNotice(t(result.status === 'pending' ? 'pendingInvitation' : 'accepted')); setConfirm(''); setLogin(''); await refreshMembers()
             })}>{t('confirmInvite')}</button><button onClick={() => setConfirm('')}>{t('cancel')}</button>
           </>}
         </div>}
         <ul className={css.list}>{invitations.map(invite => <li key={invite.id}><span>{invite.login} · {t('pendingInvitation')}</span>
-          <button disabled={busy} onClick={() => void run(async () => { await client.call('cancelInvitation', { id: invite.id }); await refreshMembers() })}>{t('revoke')}</button></li>)}
+          <button disabled={busy} onClick={() => void run(async () => { await memberCall('cancelInvitation', { id: invite.id }); await refreshMembers() })}>{t('revoke')}</button></li>)}
           {members.map(member => <li key={member.id}><span>{member.login} · {t('accepted')}</span>
             {view.connection?.repository.permissions.admin && member.id !== view.connection.identity.id && (confirm === 'remove-' + member.id
-              ? <><button disabled={busy} onClick={() => void run(async () => { await client.call('removeCollaborator', { login: member.login }); setConfirm(''); await refreshMembers() })}>{t('confirmRemove')}</button><button onClick={() => setConfirm('')}>{t('cancel')}</button></>
+              ? <><button disabled={busy} onClick={() => void run(async () => { await memberCall('removeCollaborator', { login: member.login }); setConfirm(''); await refreshMembers() })}>{t('confirmRemove')}</button><button onClick={() => setConfirm('')}>{t('cancel')}</button></>
               : <button disabled={busy} onClick={() => setConfirm('remove-' + member.id)}>{t('remove')}</button>)}
           </li>)}</ul>
       </section>

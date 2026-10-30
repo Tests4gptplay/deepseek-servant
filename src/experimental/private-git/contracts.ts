@@ -38,7 +38,7 @@ export interface GitReceipt { commit: string; replay: boolean }
 export interface RepoBinding { ownerRepo: string; repositoryId?: number; participantId?: number; branch?: string; repositoryDirectory?: string; instanceId?: string }
 export interface GitRepository {
   connect(): Promise<RepoConnection>
-  snapshot(): Promise<GitSnapshot>
+  snapshot(afterWrite?: boolean): Promise<GitSnapshot>
   read(snapshot: GitSnapshot, path: string): Promise<string | undefined>
   changes?(snapshot: GitSnapshot, from: string, ownInstance?: string): Promise<GitFileChange[]>
   at?(revision: string): Promise<GitSnapshot>
@@ -70,6 +70,7 @@ export const ForegroundProfileSchema = z.object({ workspace: z.string(), presetI
 export interface UserIntent {
   foreground?: z.infer<typeof ForegroundProfileSchema>
   contextPath?: string
+  contextHead?: string
   context?: Array<{ role: string; text: string; at?: string }>
   id: string
   participantId: string

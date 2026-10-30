@@ -75,10 +75,16 @@ export async function inspectPrivateRepo(session: GitHubSession, binding: RepoBi
 }
 
 /** Member actions are explicit UI operations; invitation acceptance stays on GitHub. */
+export interface MemberScope { expectedRepositoryId?: number; expectedParticipantId?: number }
 export class GitHubMembers {
   constructor(private readonly client: GitHubClient, private readonly binding: () => RepoBinding) {}
-  private async withRepo<T>(action: (session: GitHubSession, path: string, connection: RepoConnection) => Promise<T>): Promise<T> {
-    return this.client.session(async session => { const connection = await inspectPrivateRepo(session, this.binding()); return action(session, repositoryPath(connection.repository.fullName), connection) })
+  private async withRepo<T>(action: (session: GitHubSession, path: string, connection: RepoConnection) => Promise<T>, expected: MemberScope = {}): Promise<T> {
+    const binding = this.binding()
+    if (expected.expectedRepositoryId !== undefined && expected.expectedRepositoryId !== binding.repositoryId
+      || expected.expectedParticipantId !== undefined && expected.expectedParticipantId !== binding.participantId) {
+      throw new GitHubError(409, 'The GitHub account or repository changed. Refresh members and confirm the action again.')
+    }
+    return this.client.session(async session => { const connection = await inspectPrivateRepo(session, binding); return action(session, repositoryPath(connection.repository.fullName), connection) })
   }
   private async pages<T>(session: GitHubSession, path: string): Promise<T[]> {
     const result: T[] = []
@@ -88,27 +94,27 @@ export class GitHubMembers {
       if (batch.length < 100) return result
     }
   }
-  invitations(): Promise<CoopInvitation[]> {
+  invitations(expected?: MemberScope): Promise<CoopInvitation[]> {
     return this.withRepo(async (session, path) => (await this.pages<{ id: number; invitee: { login: string }; html_url?: string }>(session, path + '/invitations'))
-      .map(item => ({ id: item.id, login: item.invitee.login, status: 'pending', htmlUrl: item.html_url })))
+      .map(item => ({ id: item.id, login: item.invitee.login, status: 'pending', htmlUrl: item.html_url })), expected)
   }
-  collaborators(): Promise<CoopCollaborator[]> {
+  collaborators(expected?: MemberScope): Promise<CoopCollaborator[]> {
     return this.withRepo(async (session, path) => (await this.pages<{ id: number; login: string; permissions: Record<string, boolean> }>(session, path + '/collaborators'))
-      .map(item => ({ id: item.id, login: item.login, permissions: item.permissions, status: 'accepted' })))
+      .map(item => ({ id: item.id, login: item.login, permissions: item.permissions, status: 'accepted' })), expected)
   }
-  invite(login: string): Promise<{ status: 'pending' | 'accepted'; id?: number; login: string }> {
+  invite(login: string, expected?: MemberScope): Promise<{ status: 'pending' | 'accepted'; id?: number; login: string }> {
     if (!/^[A-Za-z0-9-]+$/.test(login)) throw new Error('Enter a GitHub username.')
     return this.withRepo(async (session, path, connection) => {
       if (!connection.repository.permissions.admin) throw new GitHubError(403, 'GitHub repository administration permission is required to invite members.')
       const result = await session.request<{ id: number } | undefined>('PUT', path + '/collaborators/' + encodeURIComponent(login), { permission: 'push' })
       return { status: result ? 'pending' : 'accepted', id: result?.id, login }
-    })
+    }, expected)
   }
-  cancelInvitation(id: number): Promise<void> {
-    return this.withRepo(async (session, path) => { await session.request('DELETE', path + '/invitations/' + id) })
+  cancelInvitation(id: number, expected?: MemberScope): Promise<void> {
+    return this.withRepo(async (session, path) => { await session.request('DELETE', path + '/invitations/' + id) }, expected)
   }
-  remove(login: string): Promise<void> {
+  remove(login: string, expected?: MemberScope): Promise<void> {
     if (!/^[A-Za-z0-9-]+$/.test(login)) throw new Error('Enter a GitHub username.')
-    return this.withRepo(async (session, path) => { await session.request('DELETE', path + '/collaborators/' + encodeURIComponent(login)) })
+    return this.withRepo(async (session, path) => { await session.request('DELETE', path + '/collaborators/' + encodeURIComponent(login)) }, expected)
   }
 }

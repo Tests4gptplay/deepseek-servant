@@ -1,7 +1,7 @@
 import type { ServantView, TaskView } from '../contracts/views.js'
 import type { CoopService } from '../experimental/private-git/service.js'
 import { readJson, readText } from '../experimental/private-git/journal.js'
-import { joinPath, taskPath, type Join, type ParticipantPlan, type RoleAction, type RoleOutcome, type RootPlan, type RootTask } from '../experimental/private-git/protocol.js'
+import { joinPath, taskPath, actionPath, type Join, type ParticipantPlan, type RoleAction, type RoleOutcome, type RootPlan, type RootTask } from '../experimental/private-git/protocol.js'
 import { loadPaths, repositoryUrl, toRepositoryPath } from '../experimental/private-git/repository-paths.js'
 import { recordPublished, readOutcome } from '../experimental/private-git/outcome.js'
 
@@ -14,7 +14,7 @@ export async function gitTaskViews(service: CoopService, base: ServantView): Pro
   if (!snapshot) return []
   const view = await service.view(), repo = service.repository, result: TaskView[] = []
   const participant = String(view.connection!.identity.id)
-  const link = (path: string) => repositoryUrl(view.settings.ownerRepo, view.connection!.repository.branch,
+  const link = (path: string) => repositoryUrl(view.settings.ownerRepo, snapshot.head,
     toRepositoryPath(view.settings.repositoryDirectory, path))
   for (const summary of view.tasks) {
     try {
@@ -34,6 +34,7 @@ export async function gitTaskViews(service: CoopService, base: ServantView): Pro
       needsPlanning: !plan?.works.length, priority: 0, children: {}, executions: {}, reports: {}, waits: {}, incidents: {}, decisions: [],
       createdAt: task?.createdAt ?? '', updatedAt: task?.updatedAt ?? '', pendingActionCount: 0, uncertainActionCount: 0,
       remote: { recordsUrl: link(archived ? 'dss-coop/records/' + summary.id : root), statusUrl: archived ? undefined : link('dss-coop/status/tasks/' + summary.id),
+        archived, executions: [], results: [],
         canControl: !!activeJoin && activeJoin.state !== 'left', canRevise: task?.originatingParticipantId === participant,
         canCancel: task?.originatingParticipantId === participant },
     }
@@ -44,18 +45,33 @@ export async function gitTaskViews(service: CoopService, base: ServantView): Pro
       for (const path of snapshot.files.keys()) {
         if (path.startsWith(root + '/actions/') && path.endsWith('.json')) {
           const action = await readJson<RoleAction>(repo, snapshot, path)
-          if (action) actions.push(action)
+          if (action?.binding?.taskId === task.id && action.id === action.binding.actionId && actionPath(action.binding) === path) actions.push(action)
         }
       }
+      projected.remote!.executions = actions.map(action => ({
+        executionId: action.binding.executionId, actionId: action.id, role: action.binding.role,
+        sessionId: action.binding.sessionId, participantId: action.binding.participantId, instanceId: action.binding.instanceId,
+        childId: action.binding.childId, childRevision: action.binding.childRevision, assignmentVersion: action.binding.assignmentVersion,
+        generation: action.binding.generation, state: action.state, createdAt: action.createdAt,
+        recordsUrl: link(actionPath(action.binding)),
+      }))
       for (const path of snapshot.files.keys()) {
         if (!path.startsWith(root + '/participants/') || !path.endsWith('/plan.json')) continue
         const localPlan = await readJson<ParticipantPlan>(repo, snapshot, path)
-        if (!localPlan || !await recordPublished(repo, snapshot, localPlan.writer)) continue
+        if (!localPlan) continue
+        if (!await recordPublished(repo, snapshot, localPlan.writer)) {
+          if (summary.status !== 'cancelled') projected.remote!.projectionUpdating = true
+          continue
+        }
         for (const child of localPlan.children) {
           const id = localPlan.writer.participantId + '/' + localPlan.writer.instanceId + '/' + child.id
           const owners = actions.filter(action => action.binding.role === 'worker' && action.binding.childId === child.id &&
             action.binding.participantId === localPlan.writer.participantId && action.binding.instanceId === localPlan.writer.instanceId)
-          const latest = owners.sort((a, b) => a.createdAt.localeCompare(b.createdAt)).at(-1)
+          const currentOwners = owners.filter(action => action.binding.childRevision === child.revision &&
+            action.binding.assignmentVersion === child.assignmentVersion)
+          const latest = child.state === 'accepted'
+            ? currentOwners.find(action => action.binding.outputPath === child.result)
+            : currentOwners.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.binding.generation - b.binding.generation).at(-1)
           const outcome = latest ? await readOutcome(repo, snapshot, latest.binding) : undefined
           projected.children[id] = { id, title: child.title, objective: child.direction, inputArtifacts: [], acceptanceCriteria: [child.acceptance],
             dependsOn: child.dependencies, writeScopes: [], resources: [], assignmentVersion: child.assignmentVersion,
@@ -64,9 +80,12 @@ export async function gitTaskViews(service: CoopService, base: ServantView): Pro
             currentResultId: outcome ? latest!.binding.executionId : undefined }
           if (outcome) {
             const executionId = latest!.binding.executionId
+            const summary = await readText(repo, snapshot, outcome.textPath)
+            if (child.state === 'accepted') projected.remote!.results!.push({ executionId, childId: id,
+              path: outcome.textPath, recordsUrl: link(outcome.textPath) })
             projected.reports[executionId] = { resultId: executionId, executionId, childId: id, assignmentVersion: child.assignmentVersion,
               goalRevision: task.goalRevision, outcome: outcome.resultStatus === 'failed' ? 'failed' : outcome.kind === 'continue' ? 'continue' : 'complete',
-              summary: await readText(repo, snapshot, outcome.textPath), artifacts: [], evidence: [], frontier: '',
+              summary, artifacts: [], evidence: [], frontier: '',
               receivedAt: outcome.createdAt, disposition: child.state === 'accepted' ? 'accepted' : 'unreviewed', commandId: outcome.operationId ?? executionId }
           }
         }

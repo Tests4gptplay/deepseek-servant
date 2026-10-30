@@ -60,7 +60,7 @@ async function running(t: TestContext) {
     assert.equal(result.status, 'applied', JSON.stringify(result))
   }
   await flush()
-  return { ...f, native, supervisor, owner, flush, complete }
+  return { ...f, native, supervisor, owner, flush, complete, errors }
 }
 
 test('owner reset force-stops active Agents and Jobs, clears queued/paused task state and preserves records', { timeout: 10000 }, async t => {
@@ -199,4 +199,88 @@ test('pending next-step input prevents disposal until the native queue drains', 
   assert.equal(f.native.disposals, 1)
   assert.equal(f.supervisor.get(id), undefined)
   assert.equal(Object.keys((await f.get()).incidents).length, 0)
+})
+
+test('existing exact supervisor owner refuses cancelled work without claiming native admission', async t => {
+  const f = await running(t)
+  const action = Object.values((await f.get()).pendingActions).find(a => a.kind === 'dispatch')!
+  const sent = f.native.sends
+  const receipt = await f.tasks.execute('one', { type: 'task.control', intent: 'cancel', commandId: 'cancel-before-readmission', source: { kind: 'user', id: 'owner' } })
+  assert.equal(receipt.status, 'applied')
+  assert.equal(await f.supervisor.start(await f.get(), action), false)
+  assert.equal(f.native.sends, sent)
+  assert.equal(f.native.disposals, 1)
+  assert.equal((await f.get()).executions[f.owner.executionId].physicalState, 'stopped')
+})
+
+test('supervisor propagates native send failure instead of returning successful admission', async t => {
+  const f = await running(t)
+  const action = Object.values((await f.get()).pendingActions).find(a => a.kind === 'dispatch')!
+  const failure = new Error('synthetic native flush failed')
+  f.native.send = async () => { throw failure }
+  await assert.rejects(f.supervisor.start(await f.get(), action), error => error === failure)
+  assert.equal(f.native.disposals, 0)
+  assert.equal(f.supervisor.get(f.owner.executionId), f.native)
+})
+
+test('ordinary resume retries a failed durable owner observation without requiring another native event', async t => {
+  const f = await running(t), id = f.owner.executionId
+  const planner = Object.values((await f.get()).executions).find(e => e.role === 'planner')!
+  await f.execute({ type: 'execution.observed', executionId: planner.executionId, physicalState: 'stopped', ownedJobIds: [] })
+  const sent = f.native.sends, errors: unknown[] = []
+  const coordinator = new RuntimeCoordinator({ tasks: f.tasks, supervisor: f.supervisor,
+    assistants: {} as any, knowledge: {} as any, sessions: {} as any, onError: error => errors.push(error) })
+  const options = (f.supervisor as unknown as { options: import('../src/runtime/agent-supervisor.js').SupervisorOptions }).options
+  const originalError = options.onError
+  options.onError = (error, scope) => { originalError(error, scope); coordinator.reportError(error, scope) }
+  options.onRecovered = scope => coordinator.recoverError(scope)
+  // Isolate the real resume subscription from unrelated new Planner dispatch.
+  // Recovery and Task storage remain real; no synthetic physical-state writes.
+  ;(coordinator as unknown as { wake(): void }).wake = () => undefined
+  await coordinator.start()
+  await f.complete()
+  const get = f.storage.get.bind(f.storage), failure = new Error('EEXIST: synthetic reversible Task record collision')
+  let blocked = true
+  f.storage.get = async key => { if (blocked && key === 'task:one') throw failure; return get(key) }
+  f.native.idle()
+  await f.flush()
+  assert.ok(f.errors.some(error => error === failure))
+  assert.equal(coordinator.status().status, 'degraded')
+  assert.equal(f.native.disposals, 0)
+  blocked = false
+  const before = await f.get()
+  assert.equal(before.executions[id].state, 'closed')
+  assert.equal(before.executions[id].physicalState, 'running', 'failed observation did not fabricate a persisted idle/stopped state')
+  assert.equal((await f.execute({ type: 'task.control', intent: 'resume' }, { kind: 'user', id: 'owner' })).status, 'applied')
+  await (coordinator as unknown as { reconcileTask(taskId: string): Promise<void> }).reconcileTask('one')
+  assert.ok(errors.length > 0 && errors.every(error => error === failure), 'the original storage failure remains reported, not swallowed')
+  assert.equal(coordinator.status().status, 'running', 'only successful exact-owner recovery clears its active fault')
+  assert.equal(f.native.disposals, 1)
+  assert.equal(f.supervisor.get(id), undefined)
+  assert.equal((await f.get()).executions[id].physicalState, 'stopped')
+  assert.equal((await f.get()).reports.finished.outcome, 'complete')
+  assert.equal(f.native.sends, sent, 'recovery observes/retires the original owner, never repeats its business input')
+  f.errors.length = 0 // Original storage errors were asserted, not swallowed.
+  await coordinator.dispose()
+})
+
+test('owner recovery still preserves actual running work, jobs and pending inbox despite a closed business report', async t => {
+  for (const guard of ['running', 'jobs', 'inbox'] as const) {
+    const f = await running(t), id = f.owner.executionId
+    const planner = Object.values((await f.get()).executions).find(e => e.role === 'planner')!
+    await f.execute({ type: 'execution.observed', executionId: planner.executionId, physicalState: 'stopped', ownedJobIds: [] })
+    await f.complete()
+    if (guard !== 'running') f.native.state = 'idle'
+    if (guard === 'jobs') f.native.jobs = [{ id: 'real-owned-job', status: 'running' }]
+    if (guard === 'inbox') f.native.actualAgent.inbox.nextStep.push({ id: 'pending-work' })
+    const errors: unknown[] = []
+    const coordinator = new RuntimeCoordinator({ tasks: f.tasks, supervisor: f.supervisor,
+      assistants: {} as any, knowledge: {} as any, sessions: {} as any, onError: error => errors.push(error) })
+    await coordinator.recover()
+    assert.deepEqual(errors, [])
+    assert.equal(f.native.disposals, 0, guard)
+    assert.equal(f.supervisor.get(id), f.native)
+    assert.notEqual((await f.get()).executions[id].physicalState, 'stopped')
+    await coordinator.dispose()
+  }
 })

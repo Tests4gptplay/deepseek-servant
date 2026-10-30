@@ -9,7 +9,7 @@ import { TaskArchiveStore } from './task-archive-store.js'
 import { exportTaskRecords } from './task-record-export.js'
 
 export interface TaskServiceOptions { clock?: Clock; id?: () => string; reviewEvery?: number; onNotificationError?: (error: unknown) => void }
-export type TaskListener = (task: Task, receipt: CommandReceipt) => void | Promise<void>
+export type TaskListener = (task: Task, receipt: CommandReceipt, command?: TaskCommand) => void | Promise<void>
 
 export class TaskService {
   private readonly queues = new Map<string, Promise<unknown>>()
@@ -62,7 +62,7 @@ export class TaskService {
           // Notifications are hints, never part of the storage commit or a reason
           // to roll back an accepted command. Recovery scans durable actions.
           try {
-            void Promise.resolve(listener(structuredClone(transition.task), structuredClone(transition.receipt)))
+            void Promise.resolve(listener(structuredClone(transition.task), structuredClone(transition.receipt), structuredClone(command)))
               .catch(error => this.options.onNotificationError?.(error))
           } catch (error) { this.options.onNotificationError?.(error) }
         }

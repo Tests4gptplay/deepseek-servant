@@ -1,5 +1,13 @@
 export const NS = 'dsh.servant'
 export const zh = {
+  'tasks.acceptedResultDocument': '已验收结果文档',
+  'tasks.noAcceptedResults': '尚无已验收结果',
+  'tasks.gitPlanUpdating': '计划更新中',
+  'tasks.gitResultsUpdating': '结果更新中',
+  'tasks.gitExecutions': 'Git 执行记录',
+  'tasks.gitExecutionOpen': '执行记录开放',
+  'tasks.gitExecutionClosed': '执行记录已关闭',
+  'tasks.noGitExecutions': '尚无执行记录',
   'panel': 'DeepSeek Servant', 'title': 'DeepSeek Servant', 'subtitle': '围绕你的目标，持续做事与积累经验',
   'tabs.label': '助理视图', 'tabs.conversation': '对话', 'tabs.tasks': '任务', 'tabs.knowledge': '经验', 'tabs.settings': '设置',
   'runtime.running': '后台已连接', 'runtime.stopping': '后台正在停止', 'runtime.degraded': '后台需要处理',
@@ -67,6 +75,8 @@ export const zh = {
   'settings.currentDirectory': '当前工作目录', 'settings.preset': '工作模式', 'settings.foreground': '前台模型',
   'settings.background': '后台模型', 'settings.provider': '提供方', 'settings.model': '模型', 'settings.hostDefault': 'Auto：跟随前台模型',
   'settings.save': '保存设置', 'settings.changed': '设置有未保存的修改', 'settings.modelHint': '沿用 DSH 已配置的模型与工具权限，设置变化只影响后续新执行',
+  'notice.interrupted': '连接已重置，尚未确认的操作未自动重发。请查看最新记录；消息草稿已保留。',
+  'notice.committedPendingRead': '消息已写入 Git，但回读尚未确认；草稿已保留，重试会核对同一条消息。',
   'notice.sent': '消息已提交', 'notice.settingsSaved': '设置已保存', 'notice.taskUpdated': '任务要求已更新',
   'notice.knowledgeUpdated': '经验已更新', 'notice.failed': '操作未完成',
   'notice.completed': '任务已完成', 'notice.recordsExported': '档案已导出', 'tasks.exportRecords': '导出 records 档案',
@@ -111,6 +121,14 @@ export const zh = {
 
 export type ServantLocaleKey = keyof typeof zh
 export const en: Record<ServantLocaleKey, string> = {
+  'tasks.acceptedResultDocument': 'Accepted result document',
+  'tasks.noAcceptedResults': 'No accepted results yet',
+  'tasks.gitPlanUpdating': 'Plan updating',
+  'tasks.gitResultsUpdating': 'Results updating',
+  'tasks.gitExecutions': 'Git execution records',
+  'tasks.gitExecutionOpen': 'Execution record open',
+  'tasks.gitExecutionClosed': 'Execution record closed',
+  'tasks.noGitExecutions': 'No execution records yet',
   'panel': 'DeepSeek Servant', 'title': 'DeepSeek Servant', 'subtitle': 'Work toward your goals and build reusable experience',
   'tabs.label': 'Assistant views', 'tabs.conversation': 'Conversation', 'tabs.tasks': 'Tasks', 'tabs.knowledge': 'Knowledge', 'tabs.settings': 'Settings',
   'runtime.running': 'Backend connected', 'runtime.stopping': 'Backend stopping', 'runtime.degraded': 'Backend needs attention',
@@ -178,6 +196,8 @@ export const en: Record<ServantLocaleKey, string> = {
   'settings.currentDirectory': 'Current directory', 'settings.preset': 'Working mode', 'settings.foreground': 'Foreground model',
   'settings.background': 'Background model', 'settings.provider': 'Provider', 'settings.model': 'Model', 'settings.hostDefault': 'Auto: follow the foreground model',
   'settings.save': 'Save settings', 'settings.changed': 'Settings have unsaved changes', 'settings.modelHint': 'Uses configured DSH models and tool permissions. Changes apply to new executions',
+  'notice.interrupted': 'Connection reset. Unconfirmed operations were not resent. Check the latest records; your message draft is retained.',
+  'notice.committedPendingRead': 'The message was written to Git but read-back is not confirmed. Your draft is retained; retry checks the same message.',
   'notice.sent': 'Message submitted', 'notice.settingsSaved': 'Settings saved', 'notice.taskUpdated': 'Task updated',
   'notice.knowledgeUpdated': 'Knowledge updated', 'notice.failed': 'The operation did not complete',
   'notice.completed': 'Task completed', 'notice.recordsExported': 'Records exported', 'tasks.exportRecords': 'Export records',

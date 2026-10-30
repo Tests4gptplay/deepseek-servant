@@ -4,7 +4,7 @@ import type { TaskService } from '../application/task-service.ts'
 import type { KnowledgeService } from '../application/knowledge-service.ts'
 import type { CommandReceipt, ExecutionBinding, PendingAction, Task, TaskCommand } from '../contracts/task.ts'
 import type { DshSessionReader } from '../adapters/dsh/sessions.ts'
-import type { AgentSupervisor } from './agent-supervisor.ts'
+import type { AgentSupervisor, RuntimeFaultScope } from './agent-supervisor.ts'
 import { Scheduler } from './scheduler.ts'
 
 export interface CoordinatorOptions {
@@ -28,18 +28,23 @@ export class RuntimeCoordinator {
   private readonly scheduler: Scheduler
   private readonly inflight = new Map<string, Promise<void>>()
   private readonly failed = new Map<string, string>()
+  private readonly recoveringTasks = new Map<string, Promise<void>>()
+  private readonly recoveryAgain = new Set<string>()
+  private readonly ownershipWatches = new Map<string, () => void>()
   private unsubscribe?: () => void
   private running = false
   private stopping = false
   private dirty = false
   private drainPromise?: Promise<void>
   private error?: string
+  private readonly ownerFaults = new Map<string, { scope: RuntimeFaultScope; error: unknown; message: string }>()
   private resetting?: Promise<{ resetTaskIds: string[] }>
 
   constructor(private readonly options: CoordinatorOptions) { this.scheduler = new Scheduler({ workerSeats: options.workerSeats }) }
   status(): { status: 'running' | 'stopping' | 'degraded'; message?: string; workerSeats: number } {
-    return { status: this.stopping ? 'stopping' : this.error ? 'degraded' : 'running',
-      ...(this.error ? { message: this.error } : {}), workerSeats: this.scheduler.workerSeats }
+    const message = [this.error, ...[...this.ownerFaults.values()].map(fault => fault.message)].filter(Boolean).join('\n')
+    return { status: this.stopping ? 'stopping' : message ? 'degraded' : 'running',
+      ...(message ? { message } : {}), workerSeats: this.scheduler.workerSeats }
   }
 
   setWorkerSeats(value: number): void { this.scheduler.setWorkerSeats(value); this.wake() }
@@ -47,7 +52,14 @@ export class RuntimeCoordinator {
 
   async start(): Promise<void> {
     if (this.running) return
-    this.unsubscribe = this.options.tasks.subscribe(() => this.wake())
+    this.unsubscribe = this.options.tasks.subscribe((task, receipt, command) => {
+      for (const execution of Object.values(task.executions)) if (['stopped', 'lost'].includes(execution.physicalState) && !execution.ownedJobIds.length)
+        this.unwatchOwnership(execution.executionId)
+      if (receipt.status === 'applied' && command?.type === 'task.control' && command.intent === 'resume') {
+        // All callers share the same persisted intent, including the Foreground tool.
+        void this.reconcileTask(task.id)
+      } else this.wake()
+    })
     await this.options.tasks.archives.resumeCleanup(error => this.reportError(error))
     await this.recover()
     this.running = true
@@ -64,9 +76,18 @@ export class RuntimeCoordinator {
       if (this.dirty && !this.stopping) this.wake()
     })
   }
-  reportError(error: unknown): void {
-    this.error = error instanceof Error ? error.message : String(error)
+  reportError(error: unknown, scope?: RuntimeFaultScope): void {
+    const message = error instanceof Error ? error.message : String(error)
+    if (scope) this.ownerFaults.set(JSON.stringify([scope.taskId, scope.executionId, scope.operation]), { scope, error, message })
+    else if ([...this.ownerFaults.values()].some(fault => fault.error === error)) return
+    else this.error = message
     this.options.onError?.(error); this.options.onChanged?.()
+  }
+  recoverError(scope: RuntimeFaultScope): void {
+    const key = JSON.stringify([scope.taskId, scope.executionId, scope.operation])
+    if (this.ownerFaults.get(key)?.scope.token !== scope.token) return
+    this.ownerFaults.delete(key)
+    this.options.onChanged?.()
   }
 
   private async command(taskId: string, input: TaskCommand): Promise<CommandReceipt> {
@@ -82,7 +103,7 @@ export class RuntimeCoordinator {
     const snapshot = await this.options.tasks.list()
     // Stop acknowledgements are observations, never inferred from a kill request.
     for (const task of snapshot) for (const action of Object.values(task.pendingActions)) {
-      if (action.kind !== 'stop' || action.status !== 'running') continue
+      if (action.kind !== 'stop' || !['running', 'uncertain'].includes(action.status)) continue
       const execution = task.executions[action.payload.executionId ?? '']
       if (execution && ['stopped', 'lost'].includes(execution.physicalState) && execution.ownedJobIds.length === 0) {
         await this.finish(task.id, action, `Exact owner ${execution.executionId} is ${execution.physicalState} with no owned jobs.`)
@@ -102,7 +123,7 @@ export class RuntimeCoordinator {
     for (const candidate of candidates) {
       if (this.stopping || this.resetting) return
       const key = `${candidate.task.id}/${candidate.action.id}`
-      if (this.inflight.has(key) || this.failed.has(key)) continue
+      if (this.inflight.has(key) || this.failed.has(key) || this.recoveringTasks.has(candidate.task.id)) continue
       const all = await this.options.tasks.list()
       const task = all.find(task => task.id === candidate.task.id)
       const action = task?.pendingActions[candidate.action.id]
@@ -129,10 +150,11 @@ export class RuntimeCoordinator {
       return
     }
     switch (action.kind) {
-      case 'plan': case 'evaluate': case 'dispatch':
-        await this.options.supervisor.start(task, action)
-        if (action.kind === 'dispatch') await this.finish(taskId, action, 'The exact native Agent admitted and durably flushed its stable input id.')
+      case 'plan': case 'evaluate': case 'dispatch': {
+        const admitted = await this.options.supervisor.start(task, action)
+        if (admitted && action.kind === 'dispatch') await this.finish(taskId, action, 'The exact native Agent admitted and durably flushed its stable input id.')
         break
+      }
       case 'recover': {
         const incident = task.incidents[action.payload.incidentId ?? '']
         const execution = incident && task.executions[incident.executionId]
@@ -153,11 +175,14 @@ export class RuntimeCoordinator {
         }
         await this.command(taskId, { type: 'recovery.restart', commandId: 'restart:' + incident.id, source,
           incidentId: incident.id, evidence: `Previous ${execution.role} ${execution.executionId} is ${previous.physicalState} with no owned jobs. Continue its saved work under the same role and assignment.` })
+        // Planner recovery reuses its semantic action under a new execution.
+        // An earlier attempt's in-memory failure must not veto that durable recovery.
+        this.failed.delete(`${taskId}/${execution.actionId}`)
         break
       }
       case 'continue':
-        await this.options.supervisor.continue(task, action)
-        await this.finish(taskId, action, 'The existing exact owner durably admitted this bounded continuation.')
+        if (await this.options.supervisor.continue(task, action))
+          await this.finish(taskId, action, 'The existing exact owner durably admitted this bounded continuation.')
         break
       case 'stop': {
         const execution = task.executions[action.payload.executionId ?? '']
@@ -223,7 +248,12 @@ export class RuntimeCoordinator {
   }
 
   private async finish(taskId: string, action: PendingAction, evidence: string, notificationId?: string): Promise<void> {
-    await this.command(taskId, { type: 'action.finish', commandId: `finish:${action.id}:${createHash('sha256').update(evidence).digest('hex').slice(0, 12)}`, source, actionId: action.id, evidence,
+    const current = ['dispatch', 'continue'].includes(action.kind) ? await this.options.tasks.get(taskId) : undefined
+    const executionId = action.kind === 'dispatch' ? current?.pendingActions[action.id]?.executionId
+      : action.kind === 'continue' ? action.payload.executionId : undefined
+    const admission = executionId ? { ownerId: this.ownerId, executionId } : undefined
+    const acknowledgement = admission ? JSON.stringify({ evidence, admission }) : evidence
+    await this.command(taskId, { type: 'action.finish', commandId: `finish:${action.id}:${createHash('sha256').update(acknowledgement).digest('hex').slice(0, 12)}`, source, actionId: action.id, evidence, ...(admission ? { admission } : {}),
       ...(notificationId ? { notificationId } : {}) })
   }
 
@@ -284,6 +314,38 @@ export class RuntimeCoordinator {
     return work
   }
 
+  /** Reconcile only the affected Task after explicit resume or exact native settlement. */
+  private reconcileTask(taskId: string): Promise<void> {
+    if (this.stopping) return Promise.resolve()
+    const previous = this.recoveringTasks.get(taskId)
+    if (previous) { this.recoveryAgain.add(taskId); return previous }
+    const work = Promise.resolve().then(async () => {
+      do {
+        this.recoveryAgain.delete(taskId)
+        // A resume must not turn an admitted but unfinished launch into a second one.
+        await Promise.allSettled([...this.inflight].filter(([key]) => key.startsWith(taskId + '/')).map(([, pending]) => pending))
+        if (this.stopping) return
+        const task = await this.options.tasks.get(taskId)
+        if (task) await this.recoverTask(task)
+      } while (this.recoveryAgain.has(taskId) && !this.stopping)
+    }).catch(error => this.reportError(error)).finally(() => {
+      this.recoveringTasks.delete(taskId)
+      this.wake()
+    })
+    this.recoveringTasks.set(taskId, work)
+    return work
+  }
+
+  private watchOwnership(task: Task, execution: ExecutionBinding): void {
+    if (this.ownershipWatches.has(execution.executionId) || !this.options.sessions.watchOwnership) return
+    this.ownershipWatches.set(execution.executionId, this.options.sessions.watchOwnership(execution.sessionId,
+      () => { void this.reconcileTask(task.id) }))
+  }
+  private unwatchOwnership(executionId: string): void {
+    this.ownershipWatches.get(executionId)?.()
+    this.ownershipWatches.delete(executionId)
+  }
+
   /** Cold evidence precedes resume. A stored job id is never treated as a surviving job. */
   async recover(): Promise<void> {
     for (const saved of await this.options.tasks.list()) {
@@ -299,7 +361,16 @@ export class RuntimeCoordinator {
       const task = await this.options.tasks.get(saved.id)
       if (!task) return
       for (const execution of Object.values(task.executions)) {
-        if (this.options.supervisor.get(execution.executionId)) continue
+        const owner = this.options.supervisor.get(execution.executionId)
+        if (owner) {
+          // A native disposal may have succeeded before its Task write failed.
+          // Retain that exact disposed handle until the durable observation commits.
+          if (owner.observe().state === 'stopped') await this.options.supervisor.retireExecution(execution.executionId)
+          else await this.options.supervisor.observeExecution(execution.executionId)
+          // Resume/recovery retries the original handle's durable observation.
+          // Its actual idle/inbox/job checks, not business completion, allow retirement.
+          continue
+        }
         try { await this.recoverExecution(task, execution) } catch (error) { this.reportError(error) }
       }
       const fresh = await this.options.tasks.get(task.id)
@@ -338,13 +409,17 @@ export class RuntimeCoordinator {
     // its saved shutdown state. An explicitly retired (superseded) owner already
     // has recovery evidence and does not replay stale native job registrations.
     if (execution.state !== 'active' && !unfinishedSemantic && !awaitingHandoff
-      && ['stopped', 'lost'].includes(execution.physicalState) && execution.ownedJobIds.length === 0) return
+      && ['stopped', 'lost'].includes(execution.physicalState) && execution.ownedJobIds.length === 0) { this.unwatchOwnership(execution.executionId); return }
+    // Subscribe before inspection so a settlement between read and subscription
+    // cannot be missed. This is scoped to exact unresolved owners, never polling.
+    this.watchOwnership(task, execution)
     const inspection = await this.options.sessions.inspect(execution.sessionId)
     const ownership = await this.options.sessions.probeOwnership(execution.sessionId)
     if (ownership === 'busy' || inspection.liveAgent || inspection.liveJobIds.length) {
       await this.uncertainExecution(task, execution, 'The native Agent, Session lease or current Job registry still has an owner; retain its execution until it settles.')
       return
     }
+    this.unwatchOwnership(execution.executionId)
     const unsettledJobs = inspection.jobs.filter(job => job.owner === execution.agentId && job.state === 'registered')
     const settledJobs = new Set(inspection.jobs.filter(job => job.owner === execution.agentId && job.state !== 'registered').map(job => job.id))
     const interruptedWork = execution.ownedJobIds.some(id => !settledJobs.has(id)) || unsettledJobs.length > 0
@@ -422,7 +497,10 @@ export class RuntimeCoordinator {
 
   async dispose(): Promise<void> {
     this.stopping = true; this.unsubscribe?.(); this.options.onChanged?.()
+    for (const unsubscribe of this.ownershipWatches.values()) unsubscribe()
+    this.ownershipWatches.clear()
     await this.drainPromise
+    await Promise.allSettled([...this.recoveringTasks.values()])
     await Promise.allSettled([...this.inflight.values()])
   }
 }

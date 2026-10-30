@@ -82,7 +82,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     recentExchanges: id => assistants.conversations.seed(id),
     onForegroundChanged: (id, sessionId) => { void assistants.advance(id, sessionId).catch(reportError) },
     workerCapacity: () => coordinator!.capacity(),
-    onError: error => { coordinator?.reportError(error); reportError(error) },
+    onError: (error, scope) => { coordinator?.reportError(error, scope); reportError(error) },
+    onRecovered: scope => coordinator?.recoverError(scope),
     setupRole: (scope, agent, binding) => installRoleTools(scope, agent, binding, { assistants, tasks, knowledge,
       memoryQuery: async (taskId, input, executionId) => {
         const task = await tasks.get(taskId)

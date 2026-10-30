@@ -14,6 +14,23 @@ export function isPushConflict(error: unknown): boolean {
   return error instanceof GitError && /\[rejected\].*(fetch first|non-fast-forward)|\[remote rejected\].*cannot lock ref .*is at [0-9a-f]+ but expected [0-9a-f]+/i.test(error.stderr)
 }
 interface GitEnvironment { cwd: string; env: NodeJS.ProcessEnv; connection: RepoConnection; directory: string; signal: AbortSignal }
+// Fetch and push both update the cache's remote-tracking refs. Separate adapter
+// instances may share that cache, but unrelated cache directories must not wait.
+const cacheRefOperations = new Map<string, Promise<void>>()
+
+function withCacheRefs<T>(e: GitEnvironment, operation: () => Promise<T>): Promise<T> {
+  const previous = cacheRefOperations.get(e.cwd) ?? Promise.resolve()
+  const scheduled = previous.then(() => { e.signal.throwIfAborted(); return operation() })
+  const settled = scheduled.then(() => {}, () => {})
+  cacheRefOperations.set(e.cwd, settled)
+  void settled.then(() => { if (cacheRefOperations.get(e.cwd) === settled) cacheRefOperations.delete(e.cwd) })
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(e.signal.reason)
+    e.signal.addEventListener('abort', abort, { once: true })
+    if (e.signal.aborted) abort()
+    void scheduled.then(resolve, reject).finally(() => e.signal.removeEventListener('abort', abort))
+  })
+}
 
 /** On-demand Git adapter. Only the Host sync owns a timer; this class never schedules work.
  * Reuses dsh-tool-git's MIT runner, without installing its model-tool safety hook.
@@ -40,6 +57,7 @@ export class GitHubRepository implements GitRepository {
     await this.snapshotPending?.catch(() => {})
     if (scope) {
       const ownedDirectory = join(this.cacheRoot, createHash('sha256').update(scope).digest('hex').slice(0, 24))
+      await cacheRefOperations.get(ownedDirectory)
       await rm(ownedDirectory, { recursive: true, force: true })
     }
     this.scope = undefined
@@ -69,7 +87,8 @@ export class GitHubRepository implements GitRepository {
       GIT_CONFIG_NOSYSTEM: '0', GIT_DIR: cwd, GIT_WORK_TREE: undefined, GIT_INDEX_FILE: undefined,
     }
     const result = { cwd, env, connection, directory, signal }
-    if (this.prepared !== scope) {
+    if (this.prepared !== scope) await withCacheRefs(result, async () => {
+      if (this.prepared === scope) return
       try { await this.git(result, ['rev-parse', '--git-dir']) }
       catch (error) {
         if (!(error instanceof GitError)) throw error
@@ -80,7 +99,7 @@ export class GitHubRepository implements GitRepository {
         await this.git(result, ['config', 'core.logAllRefUpdates', 'false'])
       }
       this.prepared = scope
-    }
+    })
     return result
   }
   private async git(e: GitEnvironment, args: string[], env?: NodeJS.ProcessEnv): Promise<string> {
@@ -92,16 +111,18 @@ export class GitHubRepository implements GitRepository {
     return (e.directory ? e.directory + '/' : '') + path.slice('dss-coop/'.length)
   }
   private async fetch(e: GitEnvironment): Promise<string> {
-    const branch = e.connection.repository.branch
-    try {
-      await this.git(e, ['fetch', '--no-tags', '--filter=blob:none', 'origin', '+refs/heads/' + branch + ':refs/remotes/origin/' + branch])
-    } catch (error) {
-      if (!(error instanceof GitError) || !/couldn't find remote ref/.test(error.stderr)) throw error
-      // A new empty repository has no branch yet. Do not reinterpret authentication or transport failures as empty.
-      if ((await this.git(e, ['ls-remote', '--heads', 'origin'])).trim()) throw error
-      return ''
-    }
-    return (await this.git(e, ['rev-parse', 'refs/remotes/origin/' + branch])).trim()
+    return withCacheRefs(e, async () => {
+      const branch = e.connection.repository.branch
+      try {
+        await this.git(e, ['fetch', '--no-tags', '--filter=blob:none', 'origin', '+refs/heads/' + branch + ':refs/remotes/origin/' + branch])
+      } catch (error) {
+        if (!(error instanceof GitError) || !/couldn't find remote ref/.test(error.stderr)) throw error
+        // A new empty repository has no branch yet. Do not reinterpret authentication or transport failures as empty.
+        if ((await this.git(e, ['ls-remote', '--heads', 'origin'])).trim()) throw error
+        return ''
+      }
+      return (await this.git(e, ['rev-parse', 'refs/remotes/origin/' + branch])).trim()
+    })
   }
   private async entries(e: GitEnvironment, head: string, path: string, recursive: boolean): Promise<Map<string, string>> {
     if (!head) return new Map()
@@ -113,7 +134,10 @@ export class GitHubRepository implements GitRepository {
     }
     return result
   }
-  snapshot(): Promise<GitSnapshot> {
+  snapshot(afterWrite = false): Promise<GitSnapshot> {
+    // A read-back after push must not reuse a fetch started before that push.
+    // Drain that exact in-flight fetch, then share a newly started fetch only.
+    if (afterWrite && this.snapshotPending) return this.snapshotPending.then(() => this.snapshot())
     this.snapshotPending ??= this.refresh().finally(() => { this.snapshotPending = undefined })
     return this.snapshotPending.then(source => {
       const snapshot = { ...source, reads: new Map<string, string | undefined>() }
@@ -174,8 +198,13 @@ export class GitHubRepository implements GitRepository {
     if (loaded.has(directory)) return
     const e = this.environments.get(snapshot) ?? await this.environment(), physical = this.physical(e, directory.slice(0, -1))
     const files = snapshot.files as Map<string, string>
+    // Snapshots of the same immutable head share lazy metadata. Publish a full
+    // successful enumeration synchronously: clearing before awaiting ls-tree
+    // makes overlapping readers mistake a still-active action for a missing one.
+    const entries = await this.entries(e, snapshot.head, physical ? physical + '/' : '.', true)
+    e.signal.throwIfAborted()
     for (const path of files.keys()) if (path.startsWith(directory)) files.delete(path)
-    for (const [path, sha] of await this.entries(e, snapshot.head, physical ? physical + '/' : '.', true)) files.set(path, sha)
+    for (const [path, sha] of entries) files.set(path, sha)
     loaded.add(directory)
   }
   async at(revision: string): Promise<GitSnapshot> {
@@ -263,7 +292,7 @@ export class GitHubRepository implements GitRepository {
       const name = e.connection.identity.login, email = e.connection.identity.id + '+' + name + '@users.noreply.github.com'
       const commit = (await this.git(e, ['commit-tree', tree, ...(head ? ['-p', head] : []), '-m', message + '\n\nDSS-cah-Instance: ' + (this.binding().instanceId ?? 'default')],
         { ...env, GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email })).trim()
-      try { await this.git(e, ['push', 'origin', commit + ':refs/heads/' + e.connection.repository.branch]) }
+      try { await withCacheRefs(e, () => this.git(e, ['push', 'origin', commit + ':refs/heads/' + e.connection.repository.branch])) }
       catch (error) {
         if (isPushConflict(error)) throw new GitConflictError('A concurrent commit changed the branch; retry this operation against it.')
         throw error

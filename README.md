@@ -1,5 +1,7 @@
 # DeepSeek Servant
 
+> 候选测试分支：[`安装包与安装步骤`](test-artifacts/INSTALL.md) · [`验收报告`](docs/testing/ACCEPTANCE.md) · [`变更依据`](docs/testing/CHANGES.md) · [`文档索引`](docs/testing/README.md)。本分支用于候选安装与下一轮本机验收，main 保持原发布版本。
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/Tests4gptplay/deepseek-servant/v0.3.0/docs/images/deepseek-servant-maids-duo.webp" alt="DeepSeek Servant 短裙与长裙女仆角色设计">
 </p>
@@ -8,7 +10,7 @@
 
 **设计逻辑源自 [Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness)。** DeepSeek Servant 延续 CAH 以目标为中心的 Agent 工作闭环：理解需求、制定计划、执行工作、评价成果、调整方法、跨会话接续、故障恢复与技能积累。Servant 将这套持续工作机制整合到 DeepSeek Harness 运行环境，复用宿主的模型、工具、Session、作业与 Skill 能力。
 
-**当前版本：** `0.3.6` · **测试宿主：** DSH `0.2.1-rc.3` · **项目形态：** 独立安装的社区插件
+**当前候选版本：** `0.3.6-uiqa.20261030.9` · **测试宿主：** DSH `0.2.1-rc.3` · **项目形态：** 独立安装的社区插件
 
 ## 核心能力
 

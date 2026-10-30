@@ -6,6 +6,7 @@ import type { ServantSnapshot, ServantSource } from './source.js'
 import type { ServantLocaleKey } from './locales.js'
 import type { RecordStorageView } from '../contracts/views.js'
 import { ManualTaskCleanup, ManualConversationCleanup } from './manual-cleanup.js'
+import { localizeServantError } from './error-text.js'
 import css from './page.module.css'
 
 type Translate = PropsLocale<'dsh.servant'>['t']
@@ -61,7 +62,7 @@ export function RetentionPanel({ stats, preview, outcome, busy, recordStorage, m
       </>}
       {outcome && <p role="status">{t('retention.actual', { bytes: bytes(outcome.reclaimedServantBytes) })}</p>}
       {!!outcome?.skipped.length && <details><summary>{t('retention.skipped', { count: outcome.skipped.length })}</summary>
-        <ul>{outcome.skipped.map((item, index) => <li key={`${item.id}:${index}`}><code>{item.id}</code> · {item.reason}</li>)}</ul>
+        <ul>{outcome.skipped.map((item, index) => <li key={`${item.id}:${index}`}><code>{item.id}</code> · {localizeServantError(item.reason, t)}</li>)}</ul>
       </details>}
     </details>
   </section>
@@ -110,7 +111,7 @@ function RecordLocation({ storage, busy, moving, onMove, onOpen, onPickDirectory
       </div>
     </div>
     <p className={css.muted}>{t('retention.directoryHint')}</p>
-    {storage.issues?.map(issue => <p key={issue} role="alert" className={css.errorDetail}>{issue}</p>)}
+    {storage.issues?.map(issue => <p key={localizeServantError(issue, t)} role="alert" className={css.errorDetail}>{localizeServantError(issue, t)}</p>)}
     {dirty && <>
       <p className={css.muted}>{t('retention.activeDirectory')} <code>{storage.directory}</code></p>
       <div className={css.recordLocationActions}>
@@ -118,7 +119,7 @@ function RecordLocation({ storage, busy, moving, onMove, onOpen, onPickDirectory
         <Button type="button" variant="outline" disabled={disabled} onClick={() => { setDirectory(storage.directory); setError(undefined) }}>{t('tasks.discard')}</Button>
       </div>
     </>}
-    {error && <p className={css.errorDetail} role="alert">{error}</p>}
+    {error && <p className={css.errorDetail} role="alert">{localizeServantError(error, t)}</p>}
     {storage.retainedSource && <p className={css.errorDetail} role="status">{t('retention.oldCopy', { path: storage.retainedSource })}</p>}
     <p className={css.muted}>{t('retention.logLocationHint')}</p>
     {storage.nativeDirectory && <details className={css.nativeLogDirectory}>
@@ -186,7 +187,7 @@ function RetentionPolicyEditor({ preview, busy, onRetention, t }: { preview: Ret
           .catch(fail).finally(() => setFileBusy(false))
       }} />
     </div>
-    {error && <p className={css.retentionPolicyHint} role="alert">{t('retention.policyError')} {error}</p>}
+    {error && <p className={css.retentionPolicyHint} role="alert">{t('retention.policyError')} {localizeServantError(error, t)}</p>}
     {notice && <p className={css.retentionPolicyHint} role="status">{t(notice)}</p>}
   </form>
 }

@@ -4,6 +4,7 @@ import type { CoopStore } from './cache.js'
 import type { GitChange, GitChangeNotice, GitRepository, GitSnapshot, RoleBinding, UserIntent } from './contracts.js'
 import { digest, GitJournal, json, readJson, readText, textChanges } from './journal.js'
 import { RoleWriter, plannerTrigger } from './role-writer.js'
+import { pendingWorkerResults, priorWorkerExecutions } from './worker-results.js'
 import { readOutcome, recordPublished } from './outcome.js'
 import { appendStatus, statusPath } from './status.js'
 import { actionPath, executionPath, joinPath, participantPath, planPath, sameBinding, StaleCoopWrite, taskPath,
@@ -29,6 +30,7 @@ export interface CoopEngineOptions {
   repo: GitRepository; cache: CoopStore; journal(): GitJournal; agents: CoopAgentPort
   wake(): void
 }
+class OutcomeArrivedDuringRecovery extends Error {}
 /** One confirmed snapshot drives this instance; a write receipt never enters dispatch(). */
 export class CoopConsumer {
   private writerValue?: { participant: string; value: RoleWriter }
@@ -144,6 +146,15 @@ export class CoopConsumer {
         }
         continue
       }
+      if (action.stateProtocol === 1) {
+        const prepared = await readJson<RoleOutcome>(repo, snapshot, b.outputPath)
+        if (prepared?.operationId && prepared.binding && sameBinding(prepared.binding, b)) {
+          // Publishing a body already committed under a valid fence is not new role work.
+          // Recover it even if a later pause/revision ended this execution in the meantime.
+          await this.writer.completeOutcome(b, prepared.operationId)
+          changed = true; continue
+        }
+      }
       try { await this.writer.current(snapshot, b) }
       catch (error) {
         if (!(error instanceof StaleCoopWrite)) throw error
@@ -159,22 +170,16 @@ export class CoopConsumer {
         })
         changed = true; continue
       }
-      if (action.stateProtocol === 1) {
-        const prepared = await readJson<RoleOutcome>(repo, snapshot, b.outputPath)
-        if (prepared?.operationId && prepared.binding && sameBinding(prepared.binding, b)) {
-          // A crash between the result and status commits can recover entirely from Git.
-          await this.writer.completeOutcome(b, prepared.operationId)
-          changed = true; continue
-        }
-      }
       if (physical?.finished && !physical.busy) {
         if (cache.drafts().some(draft => draft.kind === 'transaction' && (draft.payload as { binding?: RoleBinding }).binding?.executionId === b.executionId)) continue
         const incident = physical.error ?? 'The native turn ended before saving its role outcome.'
         const prior = cache.get<{ error: string; count: number }>('native-error/' + action.id)
         const count = (prior?.count ?? 0) + 1
         if (count > 3) { await cache.put('runtime-error', incident); continue }
-        await cache.put('native-error/' + action.id, { error: incident, count })
-        await this.replace(action, incident, undefined, physical); changed = true
+        if (await this.replace(action, incident, undefined, physical, true)) {
+          await cache.put('native-error/' + action.id, { error: incident, count })
+          changed = true
+        }
         continue
       }
       if (!physical) {
@@ -262,43 +267,48 @@ export class CoopConsumer {
       }
       const planFile = planPath(task.id, participantId, cache.instanceId)
       const plan = await readJson<ParticipantPlan>(repo, snapshot, planFile)
+      // A changed user goal must not dispatch directions confirmed for the old goal.
+      // Old records without this field are usable at goal 1 or after a Planner in
+      // the current participation epoch confirmed them; otherwise recover normally.
+      const planForGoal = plan && (plan.goalRevision === task.goalRevision
+        || plan.goalRevision === undefined && (task.goalRevision === 1 || plan.writer?.epoch === join.epoch))
+      const staleDirections = !!plan?.children.length && !planForGoal
+      const pendingResults = plan?.writer
+        ? await pendingWorkerResults(repo, snapshot, { ...plan.writer, epoch: join.epoch }) : []
       // A result arriving during a Planner turn was not necessarily read by that turn.
       // Schedule one turn that starts with this trigger, rather than treating commit time as observation.
       const currentTurnFinished = outcomes.some(outcome => taskActions.some(action =>
-        sameBinding(action.binding, outcome.binding) && action.trigger === trigger))
+        sameBinding(action.binding, outcome.binding) && action.trigger === trigger)
+        && !(outcome.kind === 'plan_ready' && (pendingResults.length || staleDirections)))
       const incompleteDispatch = !plan?.children.length && sharedPlan.works.some(work =>
         work.participantId === participantId && work.instanceId === cache.instanceId)
         && outcomes.some(outcome => outcome.kind === 'plan_ready') && !currentTurnFinished
-      let unreviewedResult = false
-      if (!activePlanner && !currentTurnFinished) {
-        for (const action of taskActions.filter(value => value.binding.role === 'worker' && value.binding.epoch === join.epoch)) {
-          const child = plan?.children.find(value => value.id === action.binding.childId)
-          if (!child || child.state !== 'pending' || child.revision !== action.binding.childRevision
-            || child.assignmentVersion !== action.binding.assignmentVersion) continue
-          if ((await readOutcome(repo, snapshot, action.binding))?.kind === 'result') { unreviewedResult = true; break }
-        }
-      }
-      if (!activePlanner && (incompleteDispatch || unreviewedResult || !outcomes.some(outcome => outcome.observedTrigger === trigger))) {
+      const unreviewedResult = !activePlanner && !currentTurnFinished && pendingResults.length > 0
+      if (!activePlanner && (incompleteDispatch || unreviewedResult || staleDirections && !currentTurnFinished
+        || !outcomes.some(outcome => outcome.observedTrigger === trigger))) {
         const actionId = 'plan-' + digest(task.id + trigger + join.epoch).slice(0, 36)
         const unfinished = taskActions.find(action => action.id === actionId && action.state === 'closed')
-        if (unfinished) await this.replace(unfinished, 'Resume unfinished planning turn')
+        if (unfinished) await this.replace(unfinished, staleDirections ? 'Review saved directions for the current user goal.' : 'Resume unfinished planning turn')
         else await this.stage({ role: 'planner', taskId: task.id, actionId,
           trigger, input: { taskId: task.id, joinPath: grant.joinPath,
-            ...(incompleteDispatch ? { remaining: 'Shared work is saved. Commit claim and participant_plan to create its Worker children before outcome done.' } : {}) }, epoch: join.epoch })
+            ...(incompleteDispatch ? { remaining: 'Shared work is saved. Commit participant_plan to create its bounded Worker children before outcome done.' }
+              : staleDirections ? { remaining: 'Review or update the saved directions for the current user goal, then finish this normal Planner turn with done/rework or a concrete wait.' } : {}) }, epoch: join.epoch })
         changed = true
       }
       // An interrupted plan must remain readable by its recovering Planner; only Worker dispatch waits for publication.
-      if (!planPublished || !plan) continue
+      if (!planPublished || !plan || !planForGoal) continue
       const planOutcome = await readOutcome(repo, snapshot, plan.writer)
       if (!planOutcome || planOutcome.kind !== 'plan_ready') continue
       const rootPlan = await this.writer.rootPlan(snapshot, task.id)
       for (const child of plan.children) {
         if (child.state !== 'pending' || stageSeats <= 0 || child.dependencies.some(id => plan.children.find(value => value.id === id)?.state !== 'accepted')) continue
+        if (pendingResults.some(result => result.childId === child.id && result.childRevision === child.revision)) continue
         const work = rootPlan.works.find(value => value.id === child.workId)
         const claimFile = participantPath(task.id, participantId) + '/instances/' + cache.instanceId + '/claims/' + child.workId + '.json'
-        const claim = await readJson<Claim>(repo, snapshot, claimFile)
-        if (!work || !claim || claim.joinRevision !== join.revision || work.version !== child.assignmentVersion
-          || claim.assignmentVersion !== work.version || work.participantId !== participantId || work.instanceId !== cache.instanceId || join.goalRevision !== task.goalRevision) continue
+        // The current user-authorized join and the Planner's bound child plan govern execution.
+        // A historical claim's copied join revision is provenance, not a second permission handshake.
+        if (!work || work.version !== child.assignmentVersion
+          || work.participantId !== participantId || work.instanceId !== cache.instanceId || join.goalRevision !== task.goalRevision) continue
         const actionId = 'work-' + digest(task.id + ':' + child.id + ':' + child.revision + ':' + work.version + ':' + join.epoch).slice(0, 36)
         if (taskActions.some(action => action.id === actionId)) continue
         await this.stage({ role: 'worker', taskId: task.id, actionId, trigger: snapshot.files.get(planFile)!,
@@ -358,7 +368,7 @@ export class CoopConsumer {
       await cache.remove('physical/' + action.binding.executionId)
     }
   }
-  private async replace(action: RoleAction, reason: string, outcome?: RoleOutcome, physical?: CoopPhysicalState): Promise<void> {
+  private async replace(action: RoleAction, reason: string, outcome?: RoleOutcome, physical?: CoopPhysicalState, requireMissingOutcome = false): Promise<boolean> {
     const { cache, repo, agents } = this.options, old = action.binding, path = actionPath(old)
     const pendingKey = 'replacement/' + old.executionId
     let replacement = cache.get<RoleAction>(pendingKey)
@@ -370,9 +380,19 @@ export class CoopConsumer {
     }
     const next = replacement
     await cache.put('transition/' + path, next)
-    await this.options.journal().transact('recover-' + old.executionId, { path, next: next.binding.executionId }, async snapshot => {
+    try { await this.options.journal().transact('recover-' + old.executionId, { path, next: next.binding.executionId }, async snapshot => {
       const current = await readJson<RoleAction>(repo, snapshot, path)
       if (!current || !sameBinding(current.binding, old)) throw new StaleCoopWrite('The recovery was superseded.')
+      if (requireMissingOutcome) {
+        // Native state can finish after consume() captured its snapshot. Check the
+        // transaction's confirmed head (also on every CAS retry), not that older
+        // snapshot, before replacing a supposedly result-less execution.
+        const prepared = current.stateProtocol === 1 ? await readJson<RoleOutcome>(repo, snapshot, old.outputPath) : undefined
+        if (await readOutcome(repo, snapshot, old) || prepared?.operationId && prepared.binding && sameBinding(prepared.binding, old)) {
+          throw new OutcomeArrivedDuringRecovery()
+        }
+        await this.writer.current(snapshot, old)
+      }
       const changes: GitChange[] = [{ path, content: json(next) }, { path: executionPath(next.binding) + '/binding.json', content: json(next.binding) },
         { path: executionPath(old) + '/incident.json', content: json({ reason, previous: old, replacement: next.binding, jobs: physical?.jobs, createdAt: new Date().toISOString() }) }]
       changes.push(...await appendStatus(this.options.journal(), snapshot, { version: 1, kind: 'replaced', binding: old,
@@ -383,8 +403,15 @@ export class CoopConsumer {
         changes.push({ path: executionPath(old) + '/physical-result.json', content: json({ jobs: physical.jobs, error: physical.error, settled: !physical.busy }) })
       }
       return changes
-    })
+    }) } catch (error) {
+      if (!(error instanceof OutcomeArrivedDuringRecovery)) throw error
+      await cache.remove(pendingKey)
+      await cache.remove('transition/' + path)
+      this.options.wake() // Normal next confirmed pass publishes/closes the result.
+      return false
+    }
     if (!physical?.busy) { await agents.release(old.executionId); await cache.remove('physical/' + old.executionId) }
+    return true
   }
   async context(snapshot: GitSnapshot, action: RoleAction): Promise<unknown> {
     const { cache } = this.options, b = action.binding
@@ -394,6 +421,9 @@ export class CoopConsumer {
       conversationPrefix: 'dss-coop/conversations/' + b.participantId + '/',
       tasksPrefix: 'dss-coop/tasks/', pathKind: 'record',
       roleRecordsPrefix: (b.taskId ? taskPath(b.taskId) : 'dss-coop/foreground') + '/executions/' + b.participantId + '/',
+      ...(b.role === 'planner' ? { pendingWorkerResults: await pendingWorkerResults(this.options.repo, snapshot, b) } : {}),
+      ...(b.role === 'worker' ? { priorWorkerExecutions: await priorWorkerExecutions(this.options.repo, snapshot, b) } : {}),
+      requestsPrefix: b.role === 'planner' && b.taskId ? taskPath(b.taskId) + '/requests/' + b.participantId + '/' : undefined,
       taskPath: b.taskId ? taskPath(b.taskId) + '/contract.json' : undefined,
       participationPath: b.taskId ? joinPath(b.taskId, b.participantId, b.instanceId) : undefined,
       planPath: b.taskId ? planPath(b.taskId, b.participantId, b.instanceId) : undefined }

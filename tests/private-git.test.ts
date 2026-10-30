@@ -958,7 +958,7 @@ test('a shared assignment needs Worker children and a saved incomplete dispatch 
   await write(target, planner, { op: 'root_plan', id: 'shared-only', expectedRevision: 0, works: [{
     id: 'part', title: 'Artifact', direction: 'Write artifact', acceptance: 'Read it', participantId: '1', instanceId: target.cache.instanceId, version: 1,
   }] })
-  await assert.rejects(write(target, planner, { op: 'outcome', id: 'premature', turn_signal: 'done', text: 'Shared assignment is ready', prerequisitePaths: [] }), /claim.*participant_plan/)
+  await assert.rejects(write(target, planner, { op: 'outcome', id: 'premature', turn_signal: 'done', text: 'Shared assignment is ready', prerequisitePaths: [] }), /participant_plan/)
   const saved: RoleOutcome = { binding: b, kind: 'plan_ready', turn_signal: 'done', textPath: executionPath(b) + '/memory', prerequisitePaths: [], createdAt: new Date().toISOString() }
   await repo.seed([{ path: b.outputPath, content: json(saved) },
     { path: statusPath(b, 'completed'), content: json({ version: 1, kind: 'completed', binding: b, turn_signal: 'done', outcomePath: b.outputPath }) }])
@@ -1154,7 +1154,7 @@ test('selected mode separates conversations and input context; Git input starts 
     tasks: [], knowledge: [], workspaces: [], runtime: { status: 'running', workerSeats: 2 }, recordStorage: { directory: process.cwd() },
     runtimeSettings: { revision: 1, workerSeats: 2 } } as ServantView
   let mode: 'LOCAL' | 'PRIVATE_GIT_EXPERIMENTAL' = 'LOCAL'
-  const shared = new SharedForeground({ call: async method => { localCalls.push(method); return method === 'view' ? base : { status: 'applied' } } }, async () => service, () => mode, () => true)
+  const shared = new SharedForeground({ call: async method => { localCalls.push(method); return method === 'view' ? base : method === 'foregroundProfile' ? base.assistant : { status: 'applied' } } }, async () => service, () => mode, () => true)
   await shared.call('send', { messageId: 'local-send', text: 'Discuss locally' })
   assert.equal(localCalls.filter(m => m === 'send').length, 1)
   mode = 'PRIVATE_GIT_EXPERIMENTAL'

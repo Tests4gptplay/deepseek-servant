@@ -56,6 +56,10 @@ DSS-cah 参照 [CAH 角色分工](https://github.com/Tests4gptplay/chat-agent-ha
 
 Planner 的子任务评审和纠正指令由 `review` / `participant_plan` 写入。三个角色的预设、工具 schema 和写入端共用这些职责约定。
 
+Planner 为当前参与范围内、明确分配给本实例的工作写入 `participant_plan` 时，同步记录工作接受信息；`claim` 可单独记录更具体的范围，不是创建 Worker 前的额外步骤。同一目标的继续请求直接交给 Planner，并保留正在执行的 Worker。真正修改目标后，Planner 按新目标复核或更新方向，正常提交 `done` / `rework` 即可继续。
+
+已发布但尚未评审的 Worker 结果会随暂停与恢复保留，Planner 获得其精确结果和正文引用。只保存了中间回复的执行仍是未完成状态；后继通过先前执行记录检查实际产物后接续。
+
 AI 业务正文、操作记录与启动/完成状态以新文件追加；两份 Foreground 工作随记维护可改写的当前内容。Host 维护当前 action、计划及指派索引；结束消费不再重写 AI Result。状态的工具引用位于 `dss-coop/status/` 对应任务/执行目录，任务封存时一并收入 records，再清理热记录。
 
 | 角色 | 信号与下一步 |

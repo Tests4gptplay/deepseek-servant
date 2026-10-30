@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import type { ModeEndpoint } from '../../mode-router/mode-router.js'
-import { ForegroundProfileSchema, CoopSettingsSchema, type CoopView, type GitChangeNotice, type GitSnapshot, type PendingDraft, type RepoBinding, type UserIntent } from './contracts.js'
+import { ForegroundProfileSchema, CoopSettingsSchema, type CoopView, type GitChangeNotice, type GitReceipt, type GitSnapshot, type PendingDraft, type RepoBinding, type UserIntent } from './contracts.js'
 import type { CoopStore } from './cache.js'
 import { CoopCredentials } from './credentials.js'
 import { GitHubClient, GitHubMembers, repositoryPath } from './github.js'
@@ -33,6 +33,9 @@ export class CoopService implements ModeEndpoint {
   }
   private syncing?: Promise<void>
   private latestSnapshot?: GitSnapshot
+  private snapshotOrder = 0
+  private publishedSnapshotOrder = 0
+  private snapshotPublication: Promise<void> = Promise.resolve()
   private consumedHead?: string
   private disposed = false
   private generation = 0
@@ -75,6 +78,10 @@ export class CoopService implements ModeEndpoint {
       const previous = this.cache.connection()
       if (previous && previous.identity.id !== connection.identity.id && (this.cache.drafts().length || this.cache.entries('physical/').length || (this.cache.get<number>('pending-tasks') ?? 0) > 0)) throw new Error('Finish or cancel this account’s pending work before connecting another GitHub account.')
       if (previous && (previous.identity.id !== connection.identity.id || previous.repository.id !== connection.repository.id)) {
+        ++this.generation
+        this.repository.cancel?.()
+        await this.snapshotPublication
+        this.latestSnapshot = undefined; this.consumedHead = undefined
         this.reportCleanup(await releaseScopeCaches(this.cache))
       }
       await this.cache.put('connection', connection)
@@ -99,6 +106,7 @@ export class CoopService implements ModeEndpoint {
     if (moving) { this.client.cancel(); this.repository.cancel?.() }
     if (moving) {
       await this.syncing?.catch(() => {})
+      await this.snapshotPublication
       await this.repository.releaseCache?.()
       this.reportCleanup(await releaseScopeCaches(this.cache))
     }
@@ -126,6 +134,7 @@ export class CoopService implements ModeEndpoint {
         await this.consumer?.writer?.retryDrafts()
         this.current(generation)
         let snapshot = await this.repository.snapshot()
+        let order = ++this.snapshotOrder
         if (this.cache.settings.remoteEnabled) {
           let from = this.cache.get<string>('watch-head')
           if (from === undefined) from = (await readJson<{ head: string }>(this.repository, snapshot, 'dss-coop/instances/' + this.cache.instanceId + '/watch.json'))?.head ?? ''
@@ -134,11 +143,10 @@ export class CoopService implements ModeEndpoint {
             await this.consumer?.notifyChanges?.({ from, to: snapshot.head, changes })
             await this.cache.put('watch-head', snapshot.head)
             snapshot = await this.repository.snapshot()
+            order = ++this.snapshotOrder
           } else await this.cache.put('watch-head', snapshot.head)
         }
-        this.latestSnapshot = snapshot
-        this.current(generation)
-        await this.cache.put('confirmed-head', snapshot.head)
+        await this.publishSnapshot(snapshot, generation, order)
         this.error = undefined
         if (this.consumedHead !== snapshot.head || this.consumer?.hasWork?.()) {
           await this.consumer?.consume(snapshot)
@@ -151,54 +159,107 @@ export class CoopService implements ModeEndpoint {
     return this.syncing
   }
   async send(params: Record<string, unknown>): Promise<unknown> {
+    const generation = this.generation
+    this.current(generation)
     const text = typeof params.text === 'string' ? params.text : ''
     if (!text.trim()) throw new Error('Enter a message.')
     const connection = this.cache.connection()
     if (!connection) throw new Error('Connect a private collaboration repository before sending.')
     const id = typeof params.id === 'string' ? segment(params.id) : randomUUID()
     const snapshot = await this.repository.snapshot()
+    const order = ++this.snapshotOrder
+    this.current(generation)
     const committed = await readIntent(this.repository, snapshot, String(connection.identity.id), id)
+    this.current(generation)
     if (committed) {
       if (committed.text !== text) throw new Error('A message identity was reused with different text.')
-      this.wake()
+      await this.cache.put('user-confirmed/' + id, { commit: snapshot.head, textHash: digest(text), participantId: String(connection.identity.id) })
+      this.current(generation)
+      await this.cache.remove('draft/' + id)
+      await this.publishSnapshot(snapshot, generation, order)
+      this.changed(); this.wake()
       return { id, state: 'CONFIRMED', commit: snapshot.head }
     }
     const existing = this.cache.get<UserIntent>('user-source/' + id)
     if (existing && existing.text !== text) throw new Error('A message identity was reused with different text.')
     const foreground = params.foreground === undefined ? undefined : ForegroundProfileSchema.parse(params.foreground)
-    const context = params.context === undefined ? undefined : z.array(z.object({ role: z.string(), text: z.string(), at: z.string().optional() })).parse(params.context)
+    const context = params.conversationContext === true ? await this.foregroundContext(snapshot, String(connection.identity.id))
+      : params.context === undefined ? undefined : z.array(z.object({ role: z.string(), text: z.string(), at: z.string().optional() })).parse(params.context)
+    this.current(generation)
     const intent: UserIntent = existing ?? { id, participantId: String(connection.identity.id), instanceId: this.cache.instanceId, text, createdAt: new Date().toISOString(),
-      foreground, ...(context?.length ? { context, contextPath: 'dss-coop/foreground/context/' + digest(json(context)) } : {}) }
+      foreground, ...(params.conversationContext === true ? { contextHead: snapshot.head } : {}), ...(context?.length ? { context, contextPath: 'dss-coop/foreground/context/' + digest(json(context)) } : {}) }
     await this.cache.put('user-source/' + id, intent)
+    this.current(generation)
     const draft: PendingDraft = { id, kind: 'user-input', createdAt: intent.createdAt, state: 'PENDING_UNCOMMITTED', payload: intent }
     await this.cache.put('draft/' + id, draft)
+    this.current(generation)
     await this.consumer?.retryNative?.()
+    this.current(generation)
+    let receipt: GitReceipt
     try {
-      await this.publishInput(intent)
+      receipt = await this.publishInput(intent, generation)
     } catch (error) {
+      this.current(generation)
       await this.cache.put('draft/' + id, { ...draft, error: error instanceof Error ? error.message : String(error) })
       this.changed(); this.wake()
       return { id, state: 'PENDING_UNCOMMITTED', error: error instanceof Error ? error.message : String(error) }
     }
     try {
-      await this.sync()
-      return { id, state: 'CONFIRMED', commit: this.cache.get<{ confirmedHead: string }>('projection')?.confirmedHead }
+      const confirmed = await this.repository.snapshot(true)
+      const confirmedOrder = ++this.snapshotOrder
+      this.current(generation)
+      const input = await readIntent(this.repository, confirmed, String(connection.identity.id), id)
+      this.current(generation)
+      if (!input || input.text !== text) throw new Error('The committed message has not yet been read back with matching text.')
+      await this.publishSnapshot(confirmed, generation, confirmedOrder)
+      return { id, state: 'CONFIRMED', commit: receipt.commit }
     } catch (error) {
-      return { id, state: 'COMMITTED_PENDING_READ', commit: this.cache.get<{ commit: string }>('user-confirmed/' + id)?.commit, error: error instanceof Error ? error.message : String(error) }
+      return { id, state: 'COMMITTED_PENDING_READ', commit: receipt.commit, error: error instanceof Error ? error.message : String(error) }
+    } finally {
+      // Dispatch, other pending writes and native startup belong to the existing
+      // background owner, not to the user's input-commit receipt.
+      this.changed(); this.wake()
     }
   }
-  private async publishInput(intent: UserIntent): Promise<void> {
+  private async foregroundContext(snapshot: GitSnapshot, participant: string): Promise<UserIntent['context']> {
+    const { messages } = await conversationPage(this.repository, this.cache, snapshot, participant)
+    const starts = messages.flatMap((message, index) => message.role === 'user' ? [index] : [])
+    return messages.slice(starts.at(-6) ?? 0).map(message => ({ role: message.role, text: message.text, at: message.createdAt }))
+  }
+  private publishSnapshot(snapshot: GitSnapshot, generation: number, order: number): Promise<void> {
+    // Read-back can await text while a later sync publishes a newer snapshot.
+    // Serialize only the small local projection publication, never Git/model work.
+    const publish = this.snapshotPublication.then(async () => {
+      this.current(generation)
+      if (order < this.publishedSnapshotOrder) return
+      await this.cache.put('confirmed-head', snapshot.head)
+      this.current(generation)
+      this.latestSnapshot = snapshot
+      this.publishedSnapshotOrder = order
+    })
+    this.snapshotPublication = publish.catch(() => {})
+    return publish
+  }
+  private async publishInput(intent: UserIntent, generation = this.generation): Promise<GitReceipt> {
     const root = 'dss-coop/conversations/' + intent.participantId + '/' + intent.createdAt.slice(0, 10) + '/' + intent.createdAt.replace(/\D/g, '') + '-' + intent.id
     const entry = { ...intent, text: undefined, context: undefined, foreground: undefined, role: 'user', textPath: root + '/text', textHash: digest(intent.text) }
-    const receipt = await this.getJournal().transact('input-' + intent.id, intent, async snapshot => [
-      ...await this.getJournal().immutable(snapshot, root + '/entry.json', json(entry)),
+    this.current(generation)
+    const journal = this.getJournal()
+    const receipt = await journal.transact('input-' + intent.id, intent, async snapshot => {
+      this.current(generation)
+      const immutable = await journal.immutable(snapshot, root + '/entry.json', json(entry))
+      this.current(generation)
+      return [
+      ...immutable,
       ...textChanges(root + '/text', intent.text),
       ...(intent.contextPath && intent.context ? textChanges(intent.contextPath, json(intent.context)) : []),
       { path: 'dss-coop/intents/' + intent.participantId + '/' + intent.id + '.json', content: json({ ...entry, conversationPath: root + '/entry.json' }) },
       { path: 'dss-coop/participants/' + intent.participantId + '/profile.json', content: json(this.cache.connection()!.identity) },
-    ])
+    ] })
+    this.current(generation)
     await this.cache.put('user-confirmed/' + intent.id, { commit: receipt.commit, textHash: digest(intent.text), participantId: intent.participantId })
     await this.cache.remove('draft/' + intent.id)
+    return receipt
   }
   private async publishGuide(): Promise<void> {
     const settings = this.cache.settings
@@ -276,6 +337,7 @@ export class CoopService implements ModeEndpoint {
   }
   async call(method: string, params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
     signal?.throwIfAborted()
+    const memberScope = () => z.object({ expectedRepositoryId: z.int().positive().optional(), expectedParticipantId: z.int().positive().optional() }).parse(params)
     switch (method) {
       case 'view': return this.view()
       case 'configure': return this.configure(params)
@@ -284,20 +346,20 @@ export class CoopService implements ModeEndpoint {
       case 'send': return this.send(params)
       case 'history': return conversationPage(this.repository, this.cache, await this.repository.snapshot(), String(this.cache.connection()!.identity.id), typeof params.before === 'string' ? params.before : undefined)
       case 'retryNative': await this.consumer?.retryNative?.(); this.wake(); return this.view()
-      case 'invite': return this.members.invite(String(params.login ?? ''))
-      case 'invitations': return this.members.invitations()
-      case 'collaborators': return this.members.collaborators()
+      case 'invite': return this.members.invite(String(params.login ?? ''), memberScope())
+      case 'invitations': return this.members.invitations(memberScope())
+      case 'collaborators': return this.members.collaborators(memberScope())
       case 'cancelInvitation': {
         const id = Number(params.id); if (!Number.isSafeInteger(id) || id <= 0) throw new Error('Invalid invitation identity.')
-        return this.members.cancelInvitation(id)
+        return this.members.cancelInvitation(id, memberScope())
       }
-      case 'removeCollaborator': return this.members.remove(String(params.login ?? ''))
+      case 'removeCollaborator': return this.members.remove(String(params.login ?? ''), memberScope())
       default: throw new Error('Unknown Git collaboration operation: ' + method)
     }
   }
   async dispose(): Promise<void> {
     this.disposed = true; ++this.generation; this.stopSync(); this.client.cancel(); this.repository.cancel?.()
-    await Promise.all([this.consumer?.dispose(), this.syncing?.catch(() => {}), this.configuration])
+    await Promise.all([this.consumer?.dispose(), this.syncing?.catch(() => {}), this.configuration, this.snapshotPublication])
     await this.cache.close(); this.listeners.clear()
   }
 }

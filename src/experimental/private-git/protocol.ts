@@ -43,7 +43,11 @@ export interface Claim {
   taskId: string; workId: string; assignmentVersion: number; participantId: string; instanceId: string
   scope: string; joinRevision: number; writer: RoleBinding
 }
-export interface ParticipantPlan { revision: number; children: ChildState[]; writer: RoleBinding }
+export interface ParticipantPlan {
+  revision: number; children: ChildState[]; writer: RoleBinding
+  /** Goal whose directions this Planner confirmed; absent in pre-upgrade records. */
+  goalRevision?: number
+}
 export interface RoleAction {
   id: string; binding: RoleBinding; trigger: string; input: unknown
   state: 'active' | 'closed'; createdAt: string; stateProtocol?: 1
@@ -74,10 +78,10 @@ export const CommandSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('join'), id: Id, ...SourceFields, taskId: Id, scope: Text, capabilities: z.string().default('') }),
   z.object({ op: z.literal('revise'), id: Id, ...SourceFields, taskId: Id, expectedRevision: Revision, goal: Text }),
   z.object({ op: z.literal('control'), id: Id, ...SourceFields, taskId: Id, expectedRevision: Revision, state: z.enum(['pause', 'resume', 'leave', 'cancel']) }),
-  z.object({ op: z.literal('root_plan').describe('Assign shared work. Follow with claim and participant_plan to create Workers.'), id: Id, expectedRevision: Revision, works: z.array(WorkSchema) }),
+  z.object({ op: z.literal('root_plan').describe('Assign shared work. Follow with participant_plan to create bounded Workers.'), id: Id, expectedRevision: Revision, works: z.array(WorkSchema) }),
   z.object({ op: z.literal('proposal'), id: Id, text: Text }),
   z.object({ op: z.literal('claim'), id: Id, workId: Id, assignmentVersion: z.int().positive(), scope: Text }),
-  z.object({ op: z.literal('participant_plan').describe('Create this instance’s bounded Worker children after claim; outcome done dispatches them.'), id: Id, expectedRevision: Revision, children: z.array(ChildSchema) }),
+  z.object({ op: z.literal('participant_plan').describe('Accept assigned work under the current participation and create bounded Worker children; outcome done dispatches them.'), id: Id, expectedRevision: Revision, children: z.array(ChildSchema) }),
   z.object({ op: z.literal('review'), id: Id, childId: Id, expectedRevision: Revision, resultExecutionId: Id,
     accepted: z.boolean(), review: ReviewSchema, nextDirection: z.string().optional() }),
   z.object({ op: z.literal('report'), id: Id, workId: Id, assignmentVersion: z.int().positive(), review: ReviewSchema, text: Text }),

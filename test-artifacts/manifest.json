@@ -1,0 +1,45 @@
+{
+  "version": "0.3.6-uiqa.20261030.9",
+  "file": "deepseek-servant-0.3.6-uiqa.20261030.9-copyclarity.tgz",
+  "bytes": 5600155,
+  "sha256": "11c4647101bcfb18a27e3a45095636ddaefd94b4c1cfd467f860c0357c3cbe08",
+  "originalFunctionalAcceptanceSha256": "e242bbd23536e3a6f60ff0ffa8baba96bba4627ffa3fb1d983a7eb9dbb678f9c",
+  "copyOnlyChanges": [
+    "package.json",
+    "PRIVATE_GIT.md",
+    "README.md",
+    "docs/USAGE.md"
+  ],
+  "runtimeAndAssetsByteIdentical": true,
+  "payloadSha256": {
+    "LICENSE": "79735a75d0274d2a5dcc240d11a0f81e34cfc3533939b7fce8e84e35a150a238",
+    "NOTICE": "f119872f43ec56f5f8fb99a347bfaf442e444537b6200443bed7ff2778697cbd",
+    "lib/client.js": "a3502bd0b143070a9f2dd3278527559ad58a9d89ee3850c9b58dbf51351cecf9",
+    "lib/host.js": "1a4504ed1e86d98c572cac8460afb7c1497e728e7d3cfd1775a1c80276d3f8ee",
+    "package.json": "47d058179ae0d24108de49fbc6f33ec27c7bb940481cb4b0b72bc63c82926839",
+    "IMPLEMENTATION.md": "cde3c72cf3b3f79d5c7de6a4d3b4f4c29838933516ce7461684f8e4d771648cd",
+    "docs/INSTALLATION.md": "74756ef5b567ff68873e7cf57eba18d50a0cc34ccd1e088721e4b0defd75664c",
+    "PRIVATE_GIT.md": "0afc52637c82efe3e5fcfbbb0bbd8216e988d35612a5296098197c8a63ce6b1c",
+    "README.md": "1d3b06c7821bc9b757ff94a06d6feb7c4b5473b21b2553519ffd366ad02c2801",
+    "RETENTION.md": "f34bc32ea73a87f35f68627045e87360f110089dd4ec39a3e901bdf6981ee7fb",
+    "SPONSOR.md": "17a3dfc7d5d3826d97418bb10de8370e41e694829ccde17af943c5ad66066ea0",
+    "THIRD_PARTY_NOTICES.md": "b1c9f2042bdbc94dd2c9750eb2892036b43ac5a56dac2b9d6394a429d68cd61f",
+    "docs/USAGE.md": "210197b1a5e71737686c518c6982b5a6d50ba915c674fce755f0eddcc345e602",
+    "icon.png": "7e7f540a765d4c9a5f69d80f38d3c451b7b9be26dabb70efeebd2445a2370d5f",
+    "assets/page-icon.png": "7e7f540a765d4c9a5f69d80f38d3c451b7b9be26dabb70efeebd2445a2370d5f",
+    "assets/statusbar-icon-black.png": "c69a4fc2750b3646b8567351252976917a85f58e494a8930db364c668a3fc2b8",
+    "assets/statusbar-icon.png": "90861567c9a21374de55f21e0ee00a56a16de2b42ef5efd69d1ec82a30dbd78d",
+    "assets/task-empty-character.png": "174ab2e69457f50ac5f835835fe77b9ad487320d1cb7be99afabdf3e9f293e32",
+    "assets/welcome-character.png": "54e644ea108b6e3fa5b573074028c2de1f48b7013331ded54ebe30118a34c1a1",
+    "cordis.patch.yml": "223667362d682e315d8e5f84c474f140589eeed220af4bbcf0bee25e9b24e1de"
+  },
+  "sourceTestsPassed": 312,
+  "actualHostScopes": {
+    "Local10": "PASS",
+    "Git10WithFaults": "PASS",
+    "LocalFiveRegressions": "PASS"
+  },
+  "platform": "Linux cloud DSH 0.2.1-rc.3",
+  "upstream": "Synthetic model provider; real cloud-local bare Git transport",
+  "nextAcceptance": "Windows installation and real configured upstream/network"
+}

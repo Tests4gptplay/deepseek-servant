@@ -49,15 +49,14 @@ export class SharedForeground implements ModeEndpoint {
 
   private async sendGit(params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
     const service = await this.coop()
-    const base = await this.local.call('view', {}, signal) as ServantView
-    const settings = base.assistant.settings
+    const profileSource = await this.local.call('foregroundProfile', {}, signal) as Pick<ServantView['assistant'], 'settings' | 'workspace'>
+    const settings = profileSource.settings
     const route = settings.foreground.provider && settings.foreground.model ? settings.foreground : params.autoModel ?? {}
     const profile: NonNullable<UserIntent['foreground']> = { ...(route as NonNullable<UserIntent['foreground']>),
-      workspace: base.assistant.workspace.directory, presetId: settings.presetId }
-    const remote = await service.view()
-    const starts = remote.messages.flatMap((message, index) => message.role === 'user' ? [index] : [])
-    const context = remote.messages.slice(starts.at(-6) ?? 0).map(message => ({ role: message.role, text: message.text, at: message.createdAt }))
-    return service.send({ ...params, id: params.messageId ?? params.id ?? randomUUID(), foreground: profile, context })
+      workspace: profileSource.workspace.directory, presetId: settings.presetId }
+    // Capture only the authoritative conversation at the send snapshot. Tasks,
+    // history and knowledge display projections are not input-admission work.
+    return service.send({ ...params, id: params.messageId ?? params.id ?? randomUUID(), foreground: profile, conversationContext: true })
   }
 
   async call(method: string, params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {

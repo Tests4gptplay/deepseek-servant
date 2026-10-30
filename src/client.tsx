@@ -13,6 +13,8 @@ import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ServantView } from './contracts/views.js'
 import { createServantNotices, createServantSource, type ServantClientApi } from './client/source.js'
 import { ServantNoticeOverlay, ServantSidebarIcon, type ServantInjected, type ServantNoticeInjected } from './client/page.js'
+import { createRequestLifecycle } from './client/request-lifecycle.js'
+import { subscribeEventStreams } from './client/event-streams.js'
 import { en, NS, zh } from './client/locales.js'
 import { ModeClient } from './mode-router/client.js'
 import { ModePage, ModeSettingsPage, type ModeInjected } from './mode-router/page.js'
@@ -45,54 +47,51 @@ export function apply(ctx: Context): void {
   // Cordis's same service key is Host-typed after declaration merging here.
   const connection = installedConnection as unknown as ConnectionHandle
   const notices = createServantNotices()
-  const call = async (method: string, params: Record<string, unknown>): Promise<unknown> => {
-    const result = await connection.rpc.call('/api', 'deepseek-servant-mode/shared', { method, params })
+  const requests = createRequestLifecycle()
+  // Abort obsolete unary reads/writes before notifying their consumers. This
+  // cancels client waiting only; it neither cancels Host tasks nor replays sends.
+  ctx.effect(() => {
+    const stop = ctx.on('connection/reset', requests.reset)
+    return () => { stop(); requests.dispose() }
+  }, 'servant.client.requests')
+  const rpc = (endpoint: string, params: Record<string, unknown>, signal?: AbortSignal) =>
+    requests.request(signal, active => connection.rpc.call('/api', endpoint, params, active))
+  const call = async (method: string, params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> => {
+    const result = await rpc('deepseek-servant-mode/shared', { method, params }, signal)
     if (!result.ok) throw new Error(result.error.message)
     return result.value
   }
   const api: ServantClientApi = {
-    view: async input => parseView(await call('view', input ?? {}), t('runtime.invalidResponse')),
-    send: input => call('send', input),
-    configure: input => call('configure', input),
-    configureRuntime: input => call('configureRuntime', input),
-    control: input => call('control', input),
-    priority: input => call('priority', input),
-    reconcile: input => call('reconcile', input),
-    answer: input => call('answer', input),
-    revise: input => call('revise', input),
-    knowledge: input => call('knowledge', input),
-    retention: input => call('retention', input),
-    moveRecords: input => call('moveRecords', input),
-    readDelivery: input => call('readDelivery', input),
-    exportRecords: async input => await call('exportRecords', input) as { path: string; sha256: string; bytes: number },
-    subscribeChanged(listener) {
-      const events = new EventSource(new URL('api/deepseek-servant/events', document.baseURI))
-      events.addEventListener('changed', listener)
-      // Re-read after connection establishment as well as after commits: an
-      // initial read or reconnect can otherwise miss an intervening write.
-      events.addEventListener('open', listener)
-      const modes = new EventSource(new URL('api/deepseek-servant-mode/events', document.baseURI))
-      modes.addEventListener('changed', listener); modes.addEventListener('open', listener)
-      return () => { events.close(); modes.close() }
-    },
-    subscribeReset: listener => ctx.on('connection/reset', listener),
+    view: async (input, signal) => parseView(await call('view', input ?? {}, signal), t('runtime.invalidResponse')),
+    send: (input, signal) => call('send', input, signal),
+    configure: (input, signal) => call('configure', input, signal),
+    configureRuntime: (input, signal) => call('configureRuntime', input, signal),
+    control: (input, signal) => call('control', input, signal),
+    priority: (input, signal) => call('priority', input, signal),
+    reconcile: (input, signal) => call('reconcile', input, signal),
+    answer: (input, signal) => call('answer', input, signal),
+    revise: (input, signal) => call('revise', input, signal),
+    knowledge: (input, signal) => call('knowledge', input, signal),
+    retention: (input, signal) => call('retention', input, signal),
+    moveRecords: (input, signal) => call('moveRecords', input, signal),
+    readDelivery: (input, signal) => call('readDelivery', input, signal),
+    exportRecords: async (input, signal) => await call('exportRecords', input, signal) as { path: string; sha256: string; bytes: number },
+    subscribeChanged: listener => subscribeEventStreams(['api/deepseek-servant/events', 'api/deepseek-servant-mode/events'], listener, requests.subscribeReset),
+    subscribeReset: requests.subscribeReset,
   }
   const modeRpc = async (method: string, params: Record<string, unknown>): Promise<unknown> => {
-    const result = await connection.rpc.call('/api', 'deepseek-servant-mode/' + method, params)
+    const result = await rpc('deepseek-servant-mode/' + method, params)
     if (!result.ok) throw new Error(result.error.message)
     return result.value
   }
-  const modeClient = new ModeClient(modeRpc, listener => {
-    const events = new EventSource(new URL('api/deepseek-servant-mode/events', document.baseURI))
-    events.addEventListener('changed', listener); events.addEventListener('open', listener)
-    const reset = ctx.on('connection/reset', listener)
-    return () => { events.close(); reset() }
-  })
+  const modeClient = new ModeClient(modeRpc, listener =>
+    subscribeEventStreams(['api/deepseek-servant-mode/events'], listener, requests.subscribeReset))
   ctx.effect(() => () => modeClient.dispose(), 'servant.client.modes')
   const source = createServantSource(api, notices.show)
+  ctx.effect(() => () => source.dispose(), 'servant.client.source')
   const models = createServantModels(ctx.get('sessions', true) as unknown as NativeModelSessions,
     ctx.get('modelDirectories', true) as unknown as NativeModelDirectories, async () => {
-      const response = await connection.rpc.call('/api', 'session/modelCatalog', {})
+      const response = await rpc('session/modelCatalog', {})
       if (!response.ok) throw new Error(response.error.message)
       return response.value as ModelCatalog
     })
@@ -100,7 +99,7 @@ export function apply(ctx: Context): void {
     agentPresets: { list(): Promise<{ ok: true; value: AgentPresetRoster } | { ok: false; error: { message: string } }> }
   }
   const onLoadPresets = async () => {
-    const response = await presetRemote.agentPresets.list()
+    const response = await requests.request(undefined, () => presetRemote.agentPresets.list())
     if (!response.ok) throw new Error(response.error.message)
     const roster = response.value as AgentPresetRoster
     const presetText = ctx.locale.bind('settings.agentPreset')

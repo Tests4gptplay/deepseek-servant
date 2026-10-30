@@ -105,42 +105,66 @@ export class DshAgentGateway {
         await this.ctx.sessions.flush(agent.session)
       } catch (error) { await native.dispose(); throw error }
     }
-    let disposed = false
+    let disposed = false, closing = false
+    let disposal: Promise<void> | undefined
+    const admissions = new Set<Promise<void>>()
+    // Only join admitted durability barriers, never a model turn. Once closing
+    // begins no new send/cancel may race native teardown's persistence close.
+    const admit = (operation: () => Promise<void>): Promise<void> => {
+      const pending = Promise.resolve().then(operation)
+      admissions.add(pending)
+      void pending.then(() => admissions.delete(pending), () => admissions.delete(pending))
+      return pending
+    }
     const jobs = () => agent.ctx.get('jobs')?.list(agent.id).filter(job => job.owner === agent.id) ?? []
     const handle: OwnedDshAgent = {
       sessionId: request.sessionId,
       actualAgent: agent,
       send: async (text, messageId, mode = 'followup', source = request.role === 'foreground' ? 'user' : 'deepseek-servant') => {
-        if (disposed) throw new Error(`Servant Agent is disposed: ${request.sessionId}`)
-        if (handle.hasMessage(messageId)) {
-          // A previous admission may have succeeded while its durability barrier failed.
-          // The retry must prove persistence before acknowledging the same stable id.
+        if (closing || disposed) throw new Error(`Servant Agent is closing or disposed: ${request.sessionId}`)
+        return admit(async () => {
+          if (handle.hasMessage(messageId)) {
+            // A previous admission may have succeeded while its durability barrier failed.
+            // The retry must prove persistence before acknowledging the same stable id.
+            await this.ctx.sessions.flush(agent.session)
+            return
+          }
+          lastError = undefined
+          const message = freezeMessage({
+            id: MessageId(messageId), role: 'user',
+            content: [{ type: 'text', text }], source: source === 'user' ? { kind: 'user' as const } : { kind: 'deepseek-servant' as const },
+          })
+          agent[mode](message)
           await this.ctx.sessions.flush(agent.session)
-          return
-        }
-        lastError = undefined
-        const message = freezeMessage({
-          id: MessageId(messageId), role: 'user',
-          content: [{ type: 'text', text }], source: source === 'user' ? { kind: 'user' as const } : { kind: 'deepseek-servant' as const },
         })
-        agent[mode](message)
-        await this.ctx.sessions.flush(agent.session)
       },
       cancel: async () => {
         if (disposed) return
-        agent.cancel({ kind: 'user' })
-        const registry = agent.ctx.get('jobs')
-        for (const job of jobs()) {
-          if (job.status === 'running' || job.status === 'stopping') registry?.kill(job.id, agent.id, 'Servant execution stop requested')
-        }
-        await this.ctx.sessions.flush(agent.session)
+        if (closing) return handle.dispose()
+        return admit(async () => {
+          agent.cancel({ kind: 'user' })
+          const registry = agent.ctx.get('jobs')
+          for (const job of jobs()) {
+            if (job.status === 'running' || job.status === 'stopping') registry?.kill(job.id, agent.id, 'Servant execution stop requested')
+          }
+          await this.ctx.sessions.flush(agent.session)
+        })
       },
       whenIdle: () => agent.whenIdle(),
       dispose: async () => {
         if (disposed) return
-        await native.dispose()
-        disposed = true
-        if (this.owned.get(request.sessionId) === handle) this.owned.delete(request.sessionId)
+        if (disposal) return disposal
+        closing = true
+        const pending = Promise.resolve().then(async () => {
+          // Their callers retain the original failures; a failed admission must
+          // not prevent native cleanup from draining/releasing its own resources.
+          await Promise.allSettled([...admissions])
+          await native.dispose()
+          disposed = true
+          if (this.owned.get(request.sessionId) === handle) this.owned.delete(request.sessionId)
+        })
+        disposal = pending
+        try { await pending } finally { if (disposal === pending) disposal = undefined }
       },
       observe: () => {
         if (disposed) return { state: 'stopped', jobs: [] }

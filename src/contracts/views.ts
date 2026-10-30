@@ -3,10 +3,17 @@ import type { Task, WorkspaceBinding } from './task.ts'
 import type { KnowledgeRecord } from './knowledge.ts'
 
 /** Read models omit command receipts and scheduler payloads. */
+export interface GitExecutionView {
+  executionId: string; actionId: string; role: 'foreground' | 'planner' | 'worker'
+  sessionId: string; participantId: string; instanceId: string; childId?: string
+  childRevision?: number; assignmentVersion?: number; generation: number
+  state: 'active' | 'closed'; createdAt: string; recordsUrl: string
+}
+export interface GitResultView { executionId: string; childId: string; path: string; recordsUrl: string }
 export type TaskView = Omit<Task, 'receipts' | 'pendingActions' | 'source' | 'foregroundEvaluator'> & {
   pendingActionCount: number
   uncertainActionCount: number
-  remote?: { recordsUrl: string; statusUrl?: string; canControl: boolean; canRevise: boolean; canCancel: boolean }
+  remote?: { recordsUrl: string; statusUrl?: string; canControl: boolean; canRevise: boolean; canCancel: boolean; archived?: boolean; projectionUpdating?: boolean; executions?: GitExecutionView[]; results?: GitResultView[] }
 }
 export interface AssistantView {
   id: string

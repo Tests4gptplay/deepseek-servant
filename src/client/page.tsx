@@ -17,12 +17,14 @@ import type { ServantView, TaskView } from '../contracts/views.js'
 import type { SkillRecord, SkillVersion } from '../contracts/knowledge.js'
 import type { ServantNotice, ServantSnapshot, ServantSource } from './source.js'
 import type { ServantLocaleKey } from './locales.js'
+import { GitExecutionRecords, GitResultDocuments } from './git-task-records.js'
 import { RetentionPanel } from './retention-panel.js'
 import { ModelPicker } from './model-picker.js'
 import { HistoryDatePicker } from './date-picker.js'
 import { PresetPicker, type ServantPreset } from './preset-picker.js'
 import type { ServantModels } from './models.js'
 import { isAutoModel, resolveModelRoute } from '../domain/model-route.js'
+import { localizeServantError } from './error-text.js'
 import css from './page.module.css'
 
 type Translate = PropsLocale<'dsh.servant'>['t']
@@ -88,10 +90,10 @@ export function ServantPage(props: ServantPageProps) {
       </div>}
     </div>
     {snapshot.status === 'error' && <div className={css.notice} role="alert">
-      <div><p>{t('runtime.error')}</p>{value && <p>{t('runtime.retained')}</p>}<p className={css.errorDetail}>{snapshot.error}</p></div>
+      <div><p>{t('runtime.error')}</p>{value && <p>{t('runtime.retained')}</p>}<p className={css.errorDetail}>{localizeServantError(snapshot.error, t)}</p></div>
       <Button size="sm" onClick={() => { void props.onRefresh() }}>{t('runtime.retry')}</Button>
     </div>}
-    {value?.runtime.message && <p className={css.notice} role="status">{value.runtime.message}</p>}
+    {value?.runtime.message && <p className={css.notice} role="status">{localizeServantError(value.runtime.message, t)}</p>}
     {!value && snapshot.status === 'loading' && <div className={css.empty} role="status" aria-label={t('runtime.loading')}><StateDot state="ongoing" size={26} /></div>}
     {value && <div id={`servant-tabs-${tab}-panel`} role="tabpanel" aria-labelledby={`servant-tabs-${tab}`} className={`${css.content} ${showCorner ? css.contentWithCorner : ''} `}>
       {tab === 'conversation' && <Conversation value={value} busy={snapshot.pending.includes('send')} onSend={props.onSend} t={t}
@@ -139,7 +141,7 @@ function ServantSettingsContent({ snapshot, models, actions, t, experimentalSett
   const value = snapshot.value
   return <div className={css.settingsSurface}>
     {snapshot.status === 'error' && <div className={css.notice} role="alert">
-      <p className={css.errorDetail}>{snapshot.error}</p>
+      <p className={css.errorDetail}>{localizeServantError(snapshot.error, t)}</p>
       <Button size="sm" onClick={() => { void actions.onRefresh() }}>{t('runtime.retry')}</Button>
     </div>}
     {!value && snapshot.status === 'loading' && <div className={css.empty} role="status" aria-label={t('runtime.loading')}><StateDot state="ongoing" size={26} /></div>}
@@ -152,7 +154,7 @@ function ServantSettingsContent({ snapshot, models, actions, t, experimentalSett
             models={models} onRefreshModels={actions.onRefreshModels} onLoadPresets={actions.onLoadPresets} onPickDirectory={actions.onPickDirectory} />
           <WorkerSeatsSettings value={value} busy={snapshot.pending.includes('configureRuntime')} onSave={actions.onConfigureRuntime} t={t} />
           {value.conversationMode !== 'PRIVATE_GIT_EXPERIMENTAL' && <>
-          {snapshot.storageError && <p className={css.errorDetail} role="alert">{snapshot.storageError}</p>}
+          {snapshot.storageError && <p className={css.errorDetail} role="alert">{localizeServantError(snapshot.storageError, t)}</p>}
           <RetentionPanel stats={snapshot.storageStats} preview={snapshot.retention} outcome={snapshot.lastCleanup} busy={snapshot.pending.includes('retention')}
             recordStorage={value.recordStorage} moving={snapshot.pending.includes('moveRecords')} onMoveRecords={actions.onMoveRecords}
             onPickDirectory={actions.onPickDirectory} onRetention={actions.onRetention} onOpenRecords={actions.onOpenRecords} t={t} />
@@ -238,10 +240,10 @@ function Conversation({ value, busy, onSend, models, modelBusy, onModelChange, o
       {value.messages.map(message => <article key={message.ref ?? message.id} className={`${css.message} ${message.role === 'user' ? css.userMessage : ''}`}>
         {(message.role !== 'user' || Boolean(value.assistant.settings.userName)) &&
           <div className={css.messageAuthor}>{message.role === 'user' ? value.assistant.settings.userName : value.assistant.settings.name || t('conversation.assistant')}</div>}
-        <div className={css.messageText}>{message.text}</div>
+        <div className={css.messageText}>{message.source === 'deepseek-servant-status' ? localizeServantError(message.text, t) : message.text}</div>
       </article>)}
       {value.assistant.pendingInputs.length > 0 && <p className={css.muted} role="status">{t('conversation.pending')}</p>}
-      {value.assistant.pendingInputs.filter(input => input.error).map(input => <p key={input.messageId} className={css.errorDetail} role="alert">{input.error}</p>)}
+      {value.assistant.pendingInputs.filter(input => input.error).map(input => <p key={input.messageId} className={css.errorDetail} role="alert">{localizeServantError(input.error, t)}</p>)}
     </div>
     <div className={css.composer}>
       <textarea aria-label={t('conversation.input')} placeholder={t('conversation.placeholder')} value={draft.text}
@@ -271,7 +273,7 @@ function Tasks({ value, pending, actions, t }: { value: ServantView, pending: st
         return <button key={task.id} type="button" className={`${css.taskRow} ${selectedId === task.id ? css.selected : ''}`} onClick={() => { setSelectedId(task.id) }} aria-pressed={selectedId === task.id}>
           <span className={css.taskRowTitle}>{task.goal.objective}</span>
           <span className={css.rowMeta}><StateDot state={task.phase === 'completed' ? 'done' : task.phase === 'cancelled' ? 'idle' : task.control === 'paused' || task.phase === 'waiting' ? 'warning' : 'ongoing'} />
-            {t(`phase.${task.phase}`)}{children.length > 0 && <span>{accepted} / {children.length}</span>}</span>
+            {t(`phase.${task.phase}`)}{children.length > 0 && <span>{accepted} / {children.length}</span>}{task.remote?.projectionUpdating && <span>{t('tasks.gitPlanUpdating')}</span>}</span>
         </button>
       })}
     </div>
@@ -302,6 +304,7 @@ function TaskDetails({ task, busy, actions, onBack, t }: { task: TaskView, busy:
     {task.goal.acceptanceCriteria.length > 0 && <Section title={t('tasks.criteria')}><ul>{task.goal.acceptanceCriteria.map((item, index) => <li key={`${index}:${item}`}>{item}</li>)}</ul></Section>}
     {task.plan.strategy && <Section title={t('tasks.strategy')}><p>{task.plan.strategy}</p></Section>}
     <Section title={t('tasks.children')}>
+      {task.remote?.projectionUpdating && <p className={css.muted}>{t('tasks.gitPlanUpdating')}</p>}
       {Object.values(task.children).map(child => {
         const report = child.currentResultId ? task.reports[child.currentResultId] : undefined
         return <div key={child.id} className={css.child}><div className={css.rowBetween}><h4>{child.title}</h4><span className={css.badge}>{t(`child.${child.status}`)}</span></div>
@@ -317,13 +320,15 @@ function TaskDetails({ task, busy, actions, onBack, t }: { task: TaskView, busy:
       {task.delivery && <p>{task.delivery.summary}</p>}
       {task.remote && <a className={css.artifact} href={task.remote.recordsUrl} target="_blank" rel="noreferrer">DSS-cah · {t('tasks.exportRecords')}</a>}
       {task.remote?.statusUrl && <a className={css.artifact} href={task.remote.statusUrl} target="_blank" rel="noreferrer">DSS-cah · {t('tasks.execution')}</a>}
-      {!uniqueArtifacts.length && <p className={css.muted}>{t('tasks.noArtifacts')}</p>}
+      {!task.remote && !uniqueArtifacts.length && <p className={css.muted}>{t('tasks.noArtifacts')}</p>}
+      {task.remote && <GitResultDocuments remote={task.remote} t={t} className={css.artifact} emptyClassName={css.muted} />}
       {uniqueArtifacts.map(artifact => <button key={artifact.id} type="button" className={css.artifact} onClick={() => { void actions.onOpenArtifact(task.id, artifact.id) }}>
         <span>{artifact.description || t('tasks.openArtifact')}</span><code>{artifact.path}</code>
       </button>)}
     </Section>
-    <Section title={t('tasks.execution')}>
-      {!executions.length && <p className={css.muted}>{t('tasks.noExecution')}</p>}
+    <Section title={t(task.remote ? 'tasks.gitExecutions' : 'tasks.execution')}>
+      {task.remote && <GitExecutionRecords remote={task.remote} t={t} className={css.execution} emptyClassName={css.muted} />}
+      {!task.remote && !executions.length && <p className={css.muted}>{t('tasks.noExecution')}</p>}
       {executions.map(execution => <div key={execution.executionId}>
         <div className={css.execution}>
           <div><span>{t(`role.${execution.role}`)}</span><span className={css.muted}> · {t(`physical.${execution.physicalState}`)}</span>
@@ -497,7 +502,7 @@ function Settings({ value, busy, onSave, models, onRefreshModels, onLoadPresets,
           }).catch(error => { setDirectoryError(error instanceof Error ? error.message : String(error)) }).finally(() => { setPicking(false) })
         }}>{t(picking ? 'settings.directoryPicking' : 'settings.browseDirectory')}</Button>}
         <p className={css.muted}>{t('settings.customWorkspaceHint')}</p>
-        {directoryError && <p className={css.errorDetail} role="alert">{directoryError}</p>}
+        {directoryError && <p className={css.errorDetail} role="alert">{localizeServantError(directoryError, t)}</p>}
       </div>}
       <p className={css.muted}>{t('settings.workspaceHint')}</p><span className={css.muted}>{t('settings.currentDirectory')}</span><code>{value.assistant.workspace.directory}</code>
     </ControlField>
@@ -578,5 +583,5 @@ export function ServantNoticeOverlay({ useNotice, dismiss, t }: ServantNoticePro
   const notice = useNotice(value => value)
   if (!notice) return null
   const key: ServantLocaleKey = `notice.${notice.key}`
-  return <Toast key={notice.sequence} text={`${t(key)}${notice.detail ? `：${notice.detail}` : ''}`} tone={notice.kind === 'success' ? 'success' : undefined} onDone={dismiss} />
+  return <Toast key={notice.sequence} text={`${t(key)}${notice.detail ? `: ${notice.kind === 'error' ? localizeServantError(notice.detail, t) : notice.detail}` : ''}`} tone={notice.kind === 'success' ? 'success' : undefined} onDone={dismiss} />
 }

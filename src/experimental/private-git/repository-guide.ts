@@ -43,7 +43,8 @@ export function repositoryGuide(settings: CoopSettings): string {
 | \`tasks/<task>/contract.json\` | 任务 ID、标题、目标版本、协调参与者及 active / waiting / accepted / cancelled 状态。 |
 | \`tasks/<task>/plan.json\`、\`assignments/*.json\` | 跨参与者分工、方向与验收要求。 |
 | \`tasks/<task>/participants/<participant>/instances/<instance>/join.json\` | 本实例参与范围、目标版本及 active / paused / left 状态。 |
-| 同级 \`plan.json\` | 本实例子任务、依赖、执行方向和 Planner 验收结论。 |
+| 同级 \`plan.json\` | 本实例子任务、依赖、执行方向、对应的 goalRevision 和 Planner 验收结论。 |
+| \`tasks/<task>/requests/<participant>/<instance>/\` | 同一目标的继续请求及原始输入、前台回复的引用；无需重新加入参与范围。 |
 | \`tasks/<task>/actions/\`、\`foreground/actions/\` | 绑定的角色、原生 Session、执行身份和动作状态。 |
 | \`tasks/<task>/executions/\`、\`foreground/executions/\` | 中间业务记录、角色输出及原生执行收尾信息。 |
 | 执行目录中的 \`entries/\` | Foreground Reply、Planner Memory / Note、Worker Child Reply，以及交接、证据和成果路径。 |

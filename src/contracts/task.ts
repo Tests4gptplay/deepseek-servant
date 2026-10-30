@@ -82,6 +82,8 @@ export interface ExecutionBinding {
 export type WaitKind = 'user' | 'configuration' | 'resource' | 'job' | 'recovery'
 export interface WaitSpec { id: string; kind: WaitKind; reason: string; condition: string; resume: string; jobId?: string; question?: string }
 export interface WaitRecord extends WaitSpec {
+  /** Runtime-created retry pause, not a model/user configuration dependency. */
+  runtimeReason?: 'repeated-fault'
   executionId?: string
   childId?: string
   actionId?: string
@@ -129,6 +131,8 @@ export interface Incident {
   errors: Array<{ operation: string; message: string; at: string }>
   /** Saved work/configuration identity; repeated faults only block an unchanged frontier. */
   frontier?: string
+  /** Matching faults observed at this frontier, including this incident. */
+  repeatCount?: number
   resolution?: string
   helperExecutionId?: string
   interruption?: InterruptionEvidence
@@ -262,7 +266,7 @@ export type TaskCommand = CommandBase & (
   | { type: 'recovery.restart'; incidentId: string; evidence: string }
   | { type: 'recovery.legacy' }
   | { type: 'action.claim'; actionId: string; ownerId: string }
-  | { type: 'action.finish'; actionId: string; evidence?: string; notificationId?: string }
+  | { type: 'action.finish'; actionId: string; evidence?: string; notificationId?: string; admission?: { ownerId: string; executionId: string } }
   | { type: 'action.reconcile'; actionId: string; resolution: 'not_started' | 'completed' | 'unknown'; evidence: string; notificationId?: string }
   | { type: 'delivery.read' }
   | ArchiveTaskCommand

@@ -293,3 +293,25 @@ test('Interrupted conversation deletion resumes from the exact cleanup list with
   assert.deepEqual((await restarted.conversation()).map(message => message.text), ['New original'])
 })
 
+
+test('Git foreground profile reads persisted configuration without Local conversation cleanup or legacy migration', async () => {
+  const { service, store, native } = fixture()
+  const assistant = await service.get()
+  await store.set('assistant/default', { ...assistant, historyMigrated: false })
+  const get = store.get.bind(store), reads: string[] = []
+  store.get = async <T>(key: string): Promise<T | undefined> => { reads.push(key); assert.equal(key, 'assistant/default', 'profile must not inspect/await Local maintenance'); return get<T>(key) }
+  native.capture = async () => { throw new Error('Legacy conversation migration is unavailable') }
+  const profile = await service.foregroundProfile()
+  assert.deepEqual(profile, { settings: assistant.settings, workspace: assistant.workspace })
+  assert.deepEqual(reads, ['assistant/default'])
+  profile.settings.name = 'caller mutation'
+  assert.equal((await service.foregroundProfile()).settings.name, assistant.settings.name)
+})
+
+test('first-use foreground profile retains existing assistant/workspace initialization', async () => {
+  const { service, store } = fixture()
+  const profile = await service.foregroundProfile()
+  assert.deepEqual(profile, { settings: defaults, workspace })
+  assert.equal((await store.get<Assistant>('assistant/default'))?.historyMigrated, true)
+  assert.deepEqual((await service.get()).workspace, profile.workspace)
+})

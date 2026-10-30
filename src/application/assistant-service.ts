@@ -193,6 +193,11 @@ export class AssistantService {
     await this.save(assistant)
     return assistant
   }
+  /** Git input needs configuration, not Local conversation migration/cleanup. */
+  async foregroundProfile(id = 'default'): Promise<Pick<Assistant, 'settings' | 'workspace'>> {
+    const assistant = await this.options.store.get<Assistant>(this.key(id)) ?? await this.get(id)
+    return structuredClone({ settings: assistant.settings, workspace: assistant.workspace })
+  }
   async get(id = 'default'): Promise<Assistant> {
     if (await this.options.store.get(this.cleanupKey(id))) await this.serial(id, () => this.finishConversationCleanup(id))
     const existing = await this.options.store.get<Assistant>(this.key(id))

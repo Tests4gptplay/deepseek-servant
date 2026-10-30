@@ -121,18 +121,22 @@ export function applyTaskCommand(current: Task | undefined, command: TaskCommand
             : task.decisions.filter(entry => ['plan', 'evaluation', 'checkpoint'].includes(entry.kind ?? '')).at(-1)?.commandId])
         existing = { id, executionId, childId: execution.childId, state: 'open', errors: [], frontier }
         task.incidents[id] = existing
-        const repeated = !interruption && values(task.incidents).some(entry => entry.id !== id && entry.state === 'resolved'
+        const previousFaults = interruption ? [] : values(task.incidents).filter(entry => entry.id !== id && entry.state === 'resolved'
           && task.executions[entry.executionId]?.role === execution.role && entry.childId === execution.childId
           && task.executions[entry.executionId]?.assignmentVersion === execution.assignmentVersion
           && (entry.frontier === undefined || entry.frontier === frontier)
           && entry.errors.some(error => error.operation === operation && error.message === message))
-        if (repeated) {
+        existing.repeatCount = previousFaults.length + 1
+        if (previousFaults.length) {
+          // Repetition can keep restarting unchanged work; it does not prove a configuration fault.
+          // Keep the existing second-failure stopping point; ordinary resume retries it.
           existing.state = 'waiting'
-          const waitId = id + ':configuration'
-          addWait({ id: waitId, kind: 'configuration', reason: message,
-            condition: 'Correct the reported fault or confirm a changed environment before another attempt.',
-            resume: 'Continue the same role from the preserved checkpoint after this condition is explicitly resolved.' }, execution)
+          const waitId = id + ':retry'
+          addWait({ id: waitId, kind: 'recovery', reason: message,
+            condition: 'The same failure repeated at an unchanged work frontier. Resume to retry; no configuration-change assertion is required.',
+            resume: 'Retry the same role from its saved work after resume.' }, execution)
           task.waits[waitId].incidentId = id
+          task.waits[waitId].runtimeReason = 'repeated-fault'
         } else addAction('recover', { incidentId: id, executionId, childId: execution.childId, reason: message })
       }
       if (interruption) existing.interruption = { ...structuredClone(interruption),
@@ -359,6 +363,29 @@ export function applyTaskCommand(current: Task | undefined, command: TaskCommand
         if (command.intent === 'pause') { requireNotTerminal(task); task.control = 'paused' }
         else if (command.intent === 'resume') {
           requireNotTerminal(task); task.control = 'running'
+          for (const wait of values(task.waits)) {
+            const entry = wait.incidentId ? task.incidents[wait.incidentId] : undefined
+            // The exact old generated record is recognized for an existing 0.3.6
+            // task; genuine model/user configuration dependencies are untouched.
+            const legacyRetry = entry && wait.id === entry.id + ':configuration' && wait.kind === 'configuration'
+              && wait.executionId === entry.executionId
+              && wait.condition === 'Correct the reported fault or confirm a changed environment before another attempt.'
+              && wait.resume === 'Continue the same role from the preserved checkpoint after this condition is explicitly resolved.'
+            if (wait.state !== 'waiting' || !entry || entry.state !== 'waiting'
+              || wait.runtimeReason !== 'repeated-fault' && !legacyRetry) continue
+            wait.kind = 'recovery'; wait.runtimeReason = 'repeated-fault'
+            wait.state = 'resolved'; wait.resolvedAt = env.now
+            wait.answer = 'The user resumed this task and requested another attempt from saved work.'
+            remember({ kind: 'wait-resolution', summary: 'Resumed the runtime retry pause without asserting a configuration change.',
+              resolvedWait: structuredClone(wait), executionId: entry.executionId, incidentId: entry.id,
+              ...(entry.childId ? { childId: entry.childId } : {}) })
+            if (!values(task.waits).some(other => other.incidentId === entry.id && other.state === 'waiting')) {
+              entry.state = 'open'
+              if (!actionExists('recover', action => action.payload.incidentId === entry.id))
+                addAction('recover', { incidentId: entry.id, executionId: entry.executionId, childId: entry.childId,
+                  reason: 'The user resumed the interrupted work after its repeated-fault pause.' })
+            }
+          }
           if (task.needsPlanning) plan('Resume current-goal planning.')
           else {
             const results = values(task.reports).filter(r => r.disposition === 'unreviewed' && ['complete', 'failed'].includes(r.outcome) && task.children[r.childId]?.assignmentVersion === r.assignmentVersion).map(r => r.resultId)
@@ -679,6 +706,17 @@ export function applyTaskCommand(current: Task | undefined, command: TaskCommand
       case 'action.finish': {
         requireRuntime(command.source); const action = mustAction(task, command.actionId)
         if (action.status === 'done') return duplicate('This action has already been observed complete.')
+        // A user fence can supersede an already bound native admission while its
+        // durability barrier is returning. Acknowledge only that obsolete ACK;
+        // never revive the action or infer execution/stop completion from it.
+        if (action.status === 'superseded' && ['dispatch', 'continue'].includes(action.kind) && command.admission) {
+          const executionId = action.kind === 'dispatch' ? action.executionId : action.payload.executionId
+          const execution = executionId && task.executions[executionId]
+          check(command.admission.ownerId === action.ownerId && !!action.startedAt, 'ADMISSION_OWNER_MISMATCH', 'Late admission acknowledgement must belong to the exact claimed runtime.')
+          check(execution && execution.executionId === command.admission.executionId
+            && (action.kind !== 'dispatch' || execution.actionId === action.id), 'ADMISSION_BINDING_MISMATCH', 'Late admission acknowledgement must identify the exact bound execution.')
+          return duplicate('The bound admission was superseded; its execution remains governed by the saved ownership fence.')
+        }
         check(['running', 'uncertain'].includes(action.status), 'ACTION_NOT_RUNNING', 'Only an admitted action may be acknowledged.')
         check(runtimeKinds.has(action.kind), 'SEMANTIC_ACTION', 'An idle Agent is not a semantic planning/recovery result.')
         finishRuntimeAction(task, action, env.now, command.evidence, command.notificationId)
@@ -810,7 +848,16 @@ function requireEvaluator(task: Task, source: CommandSource, actionId?: string):
 }
 function childSpec(child: ChildSpec): ChildSpec { return { id: child.id, title: child.title, objective: child.objective, inputArtifacts: child.inputArtifacts, acceptanceCriteria: child.acceptanceCriteria, dependsOn: child.dependsOn, writeScopes: child.writeScopes, resources: child.resources } }
 function sameSpec(left: ChildSpec, right: ChildSpec): boolean { return JSON.stringify(childSpec(left)) === JSON.stringify(childSpec(right)) }
-function sameReport(left: ExecutionReportInput, right: ExecutionReportInput): boolean { return JSON.stringify({ resultId: left.resultId, assignmentVersion: left.assignmentVersion, outcome: left.outcome, summary: left.summary, artifacts: left.artifacts, evidence: left.evidence, frontier: left.frontier, wait: left.wait, checkpoint: left.checkpoint }) === JSON.stringify({ resultId: right.resultId, assignmentVersion: right.assignmentVersion, outcome: right.outcome, summary: right.summary, artifacts: right.artifacts, evidence: right.evidence, frontier: right.frontier, wait: right.wait, checkpoint: right.checkpoint }) }
+function sameReport(left: ExecutionReportInput, right: ExecutionReportInput): boolean {
+  // Cold journal records sort object keys. Compare JSON content, not insertion
+  // order, while retaining array order, scalar types and optional-field omission.
+  const content = (report: ExecutionReportInput) => JSON.stringify({
+    resultId: report.resultId, assignmentVersion: report.assignmentVersion, outcome: report.outcome, summary: report.summary,
+    artifacts: report.artifacts, evidence: report.evidence, frontier: report.frontier, wait: report.wait, checkpoint: report.checkpoint,
+  }, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value)
+    ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : value)
+  return content(left) === content(right)
+}
 function hasCycle(children: ChildSpec[]): boolean {
   const map = new Map(children.map(child => [child.id, child.dependsOn])); const visiting = new Set<string>(); const visited = new Set<string>()
   const visit = (id: string): boolean => { if (visiting.has(id)) return true; if (visited.has(id)) return false; visiting.add(id); for (const dep of map.get(id) ?? []) if (visit(dep)) return true; visiting.delete(id); visited.add(id); return false }

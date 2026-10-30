@@ -107,7 +107,7 @@ test('fifth-segment review survives a later checkpoint and recovery', async () =
   assert.equal((await f.get()).children.a.progressSegments, 5)
 })
 
-test('unchanged repeated faults wait for an explicit environment change', async () => {
+test('unchanged repeated faults pause hot retries without claiming a configuration fault', async () => {
   const f = await planned()
   const first = await fault(f, f.worker.execution.executionId)
   await settle(f, f.worker.execution.executionId)
@@ -117,7 +117,7 @@ test('unchanged repeated faults wait for an explicit environment change', async 
   assert.equal(repeated.state, 'waiting')
   const task = await f.get()
   assert.equal(pending(task, 'recover').length, 0)
-  assert.ok(Object.values(task.waits).some(wait => wait.kind === 'configuration' && wait.state === 'waiting'))
+  assert.ok(Object.values(task.waits).some(wait => wait.kind === 'recovery' && wait.runtimeReason === 'repeated-fault' && wait.state === 'waiting'))
   await settle(f, next.execution.executionId)
   assert.equal((await restart(f, repeated.id)).code, 'RECOVERY_WAITING')
 })

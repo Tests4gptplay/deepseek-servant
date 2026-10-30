@@ -24,5 +24,7 @@ test('New durable deliveries raise the native success notice once; existing unre
   assert.equal(notices.length, 1)
   await source.readDeliveries(['old', 'new'])
   assert.deepEqual(acknowledged, ['old', 'new'])
+  // Mutation receipts settle independently of the follow-up read.
+  await source.refresh()
   assert.ok(source.source.getSnapshot().value?.tasks.every(task => task.delivery?.readAt))
 })

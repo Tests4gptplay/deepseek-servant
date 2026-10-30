@@ -138,6 +138,17 @@ export class DshSessionReader {
         liveSession: this.ctx.sessions.get(item.header.id) !== undefined, archived: archived.has(item.header.id) }))
   }
 
+  /** Observe only real lifecycle changes of this exact unresolved native owner. */
+  watchOwnership(sessionId: string, listener: () => void): () => void {
+    const id = SessionId(sessionId)
+    const onAgent = this.ctx.on('agent/disposed', ({ agent }) => { if (agent.id === id) listener() })
+    const onSession = this.ctx.on('session/disposed', session => { if (session.id === id) listener() })
+    const onJob = this.ctx.jobs.events.subscribe({ owner: id }, event => {
+      if ((event.type === 'settled' || event.type === 'removed') && event.job.owner === id) listener()
+    })
+    return () => { onAgent(); onSession(); onJob() }
+  }
+
   /** rc.2 supports archival, not erasing/truncating its append-only Session log. */
   async probeOwnership(sessionId: string): Promise<'absent' | 'exclusive' | 'busy'> {
     const id = SessionId(sessionId)

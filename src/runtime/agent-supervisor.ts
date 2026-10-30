@@ -4,7 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { MessageId, freezeMessage } from '@deepseek-ai/dsh-llm'
 import type { Assistant } from '../contracts/assistant.ts'
-import type { ExecutionBinding, PendingAction, PhysicalState, Role, RuntimeProfile, Task } from '../contracts/task.ts'
+import type { CommandReceipt, ExecutionBinding, PendingAction, PhysicalState, Role, RuntimeProfile, Task } from '../contracts/task.ts'
 import type { TaskService } from '../application/task-service.ts'
 import { TaskRecordAccess } from '../application/task-record-access.ts'
 import type { KnowledgeService } from '../application/knowledge-service.ts'
@@ -22,6 +22,12 @@ export interface RoleBinding {
   taskId?: string
   executionId?: string
 }
+export interface RuntimeFaultScope {
+  taskId: string
+  executionId: string
+  operation: 'observation' | 'settlement' | 'release'
+  token: number
+}
 export interface SupervisorOptions {
   gateway: DshAgentGateway
   tasks: TaskService
@@ -32,7 +38,8 @@ export interface SupervisorOptions {
   onChanged?(): void
   onForegroundChanged?(assistantId: string, sessionId: string): void
   recentExchanges?(assistantId: string): Promise<import('../contracts/assistant.js').ConversationMessage[][]>
-  onError(error: unknown): void
+  onError(error: unknown, scope?: RuntimeFaultScope): void
+  onRecovered?(scope: RuntimeFaultScope): void
 }
 interface OwnedExecution { taskId: string; executionId: string; handle: OwnedDshAgent; unsubscribe: () => void }
 function hasPendingInput(handle: OwnedDshAgent): boolean {
@@ -53,6 +60,8 @@ export class AgentSupervisor {
   private readonly watches = new Map<string, Promise<void>>()
   private readonly watchAgain = new Set<string>()
   private readonly releases = new Map<string, Promise<boolean>>()
+  private faultSequence = 0
+  private readonly faults = new Map<string, { scope: RuntimeFaultScope; error: unknown }>()
   private stopping = false
 
   constructor(private readonly options: SupervisorOptions) {}
@@ -67,7 +76,36 @@ export class AgentSupervisor {
 
   async observeExecution(executionId: string): Promise<void> {
     const owner = this.owners.get(executionId)
-    if (owner) await this.observe(owner)
+    if (!owner) return
+    await this.observe(owner)
+    if (this.faults.has(this.faultKey(owner, 'settlement'))) await this.settle(owner)
+  }
+
+  private faultKey(owner: OwnedExecution, operation: RuntimeFaultScope['operation']): string {
+    return JSON.stringify([owner.taskId, owner.executionId, operation])
+  }
+  private recovered(scope: RuntimeFaultScope | undefined): void {
+    if (!scope) return
+    const key = JSON.stringify([scope.taskId, scope.executionId, scope.operation])
+    if (this.faults.get(key)?.scope.token !== scope.token) return
+    this.faults.delete(key)
+    this.options.onRecovered?.(scope)
+  }
+  private failedOwner(owner: OwnedExecution, operation: RuntimeFaultScope['operation'], error: unknown, since = this.faultSequence): void {
+    // An observation nested in settlement keeps its original attribution/error.
+    if ([...this.faults.values()].some(fault => fault.error === error && fault.scope.taskId === owner.taskId && fault.scope.executionId === owner.executionId && fault.scope.token > since)) return
+    const scope = { taskId: owner.taskId, executionId: owner.executionId, operation, token: ++this.faultSequence }
+    this.faults.set(this.faultKey(owner, operation), { scope, error })
+    this.options.onError(error, scope)
+  }
+  private async ownedOperation(owner: OwnedExecution, operation: RuntimeFaultScope['operation'], work: () => Promise<boolean>): Promise<boolean> {
+    const previous = this.faults.get(this.faultKey(owner, operation))?.scope
+    const since = this.faultSequence
+    try {
+      const complete = await work()
+      if (complete) this.recovered(previous)
+      return complete
+    } catch (error) { this.failedOwner(owner, operation, error, since); throw error }
   }
 
   async ensureForeground(assistant: Assistant): Promise<OwnedDshAgent> {
@@ -173,7 +211,7 @@ export class AgentSupervisor {
     return handle
   }
 
-  async start(task: Task, action: PendingAction): Promise<void> {
+  async start(task: Task, action: PendingAction): Promise<boolean> {
     if (this.stopping) throw new Error('Servant is stopping')
     if (!['dispatch', 'plan', 'evaluate'].includes(action.kind)) throw new Error('Only Worker and Planner actions create native Agents.')
     const role = action.kind === 'dispatch' ? 'worker' as const : 'planner' as const
@@ -191,27 +229,29 @@ export class AgentSupervisor {
     if (existing) {
       const current = (await this.options.tasks.get(task.id))!
       // The adapter deduplicates the stable id and rechecks its persistence barrier.
-      await this.sendWork(existing, current, action)
+      const admitted = await this.sendWork(existing, current, action)
       this.requestObservation(existing); this.watch(existing)
-      return
+      return admitted
     }
     // An existing Session at this point is an interrupted launch, not permission to replay it.
     if (await this.options.gateway.exists(sessionId)) throw new Error(`Execution already has a native Session and needs reconciliation: ${sessionId}`)
     const current = (await this.options.tasks.get(task.id))!
     const owner = await this.openOwner(current, current.executions[executionId]!, false)
-    await this.sendWork(owner, current, action)
+    const admitted = await this.sendWork(owner, current, action)
     await this.observe(owner)
     this.watch(owner)
+    return admitted
   }
 
-  private async sendWork(owner: OwnedExecution, task: Task, action: PendingAction): Promise<void> {
+  private async sendWork(owner: OwnedExecution, task: Task, action: PendingAction): Promise<boolean> {
     const prompt = await this.prompt(task, action, task.executions[owner.executionId]!)
     const latest = await this.options.tasks.get(task.id)
     if (!latest || latest.control === 'cancelled' || latest.executions[owner.executionId]?.stopRequested) {
       await this.forceStopTasks([task.id])
-      return
+      return false
     }
     await owner.handle.send(prompt, `servant-action-${action.id}`, 'followup', 'deepseek-servant')
+    return true
   }
 
   /** Only the recovery classifier may call this after proving a closed native turn and empty inbox. */
@@ -254,13 +294,14 @@ export class AgentSupervisor {
     return owner
   }
 
-  async continue(task: Task, action: PendingAction): Promise<void> {
+  async continue(task: Task, action: PendingAction): Promise<boolean> {
     const id = action.payload.executionId
     const owner = id && this.owners.get(id)
     if (!owner || !id) throw new Error('Cannot continue an execution without its exact live owner')
-    await this.sendWork(owner, task, action)
+    const admitted = await this.sendWork(owner, task, action)
     await this.observe(owner)
     this.watch(owner)
+    return admitted
   }
 
   async stop(executionId: string): Promise<void> {
@@ -277,12 +318,17 @@ export class AgentSupervisor {
     const results = await Promise.allSettled([...this.owners.values()].filter(owner => selected.has(owner.taskId)).map(async owner => {
       const releasing = this.releases.get(owner.executionId)
       if (releasing) { await releasing; if (this.owners.get(owner.executionId) !== owner) return }
+      const previousFaults = (['observation', 'settlement', 'release'] as const).map(operation => this.faults.get(this.faultKey(owner, operation))?.scope)
       const work = (async () => {
         try { await owner.handle.cancel() } finally { await owner.handle.dispose() }
+        const receipt = await this.options.tasks.execute(owner.taskId, { type: 'execution.observed', commandId: `reset-stop:${owner.executionId}`,
+          source: { kind: 'runtime', id: 'deepseek-servant' }, executionId: owner.executionId, physicalState: 'stopped', ownedJobIds: [] })
+        if (receipt.status !== 'applied' && !(receipt.status === 'duplicate' && receipt.originalStatus === 'applied')) {
+          throw new Error(`Native owner stopped but its durable observation was refused: ${receipt.code ?? receipt.status}`)
+        }
         owner.unsubscribe()
         this.owners.delete(owner.executionId)
-        await this.options.tasks.execute(owner.taskId, { type: 'execution.observed', commandId: `reset-stop:${randomUUID()}`,
-          source: { kind: 'runtime', id: 'deepseek-servant' }, executionId: owner.executionId, physicalState: 'stopped', ownedJobIds: [] })
+        for (const scope of previousFaults) this.recovered(scope)
         return true
       })().finally(() => this.releases.delete(owner.executionId))
       this.releases.set(owner.executionId, work)
@@ -318,7 +364,7 @@ export class AgentSupervisor {
         this.observationAgain.delete(owner.executionId)
         await this.observe(owner)
       } while (this.observationAgain.has(owner.executionId) && !this.stopping && this.owners.get(owner.executionId) === owner)
-    }).catch(error => this.options.onError(error))
+    }).catch(() => { /* observe has already reported the exact scoped failure. */ })
       .finally(() => {
         this.observationChains.delete(owner.executionId)
         // Native status, inbox and Job events re-arm completion; no polling.
@@ -330,76 +376,90 @@ export class AgentSupervisor {
   private watch(owner: OwnedExecution): void {
     if (this.stopping || this.owners.get(owner.executionId) !== owner) return
     if (this.watches.has(owner.executionId)) { this.watchAgain.add(owner.executionId); return }
-    const work = owner.handle.whenIdle().then(async () => {
-      if (this.stopping || this.owners.get(owner.executionId) !== owner) return
+    const work = owner.handle.whenIdle().then(async () => { await this.settle(owner) }, error => this.failedOwner(owner, 'settlement', error))
+      .catch(() => { /* settle has already reported the exact scoped failure. */ }).finally(() => {
+        this.watches.delete(owner.executionId)
+        if (this.watchAgain.delete(owner.executionId) && !this.stopping && this.owners.get(owner.executionId) === owner) this.watch(owner)
+      })
+    this.watches.set(owner.executionId, work)
+  }
+
+  private settle(owner: OwnedExecution): Promise<boolean> {
+    return this.ownedOperation(owner, 'settlement', async () => {
+      if (this.stopping || this.owners.get(owner.executionId) !== owner) return false
       await this.observe(owner)
       const task = await this.options.tasks.get(owner.taskId)
       const binding = task?.executions[owner.executionId]
-      if (!task || !binding || this.stopping || this.owners.get(owner.executionId) !== owner) return
+      if (!task || !binding || this.stopping || this.owners.get(owner.executionId) !== owner) return false
       const observation = owner.handle.observe()
       if (!['idle', 'stopped'].includes(observation.state) || hasPendingInput(owner.handle)
-        || observation.jobs.some(job => job.status === 'running' || job.status === 'stopping')) return
-      if (binding.stopRequested || binding.state !== 'active') {
-        await this.release(owner)
-        return
-      }
-      if (observation.error) {
-        await this.incident(owner, 'native Agent error', observation.error.message)
-        return
-      }
+        || observation.jobs.some(job => job.status === 'running' || job.status === 'stopping')) return false
+      if (binding.stopRequested || binding.state !== 'active') return this.release(owner)
+      if (observation.error) return this.incident(owner, 'native Agent error', observation.error.message)
       const waiting = Object.values(task.waits).some(wait => wait.executionId === binding.executionId && wait.state === 'waiting')
         || Object.values(task.incidents).some(incident => incident.executionId === binding.executionId && incident.state !== 'resolved')
         || Object.values(task.pendingActions).some(action => ['pending', 'running'].includes(action.status)
           && ((action.kind === 'continue' && action.payload.executionId === binding.executionId)
             || (action.kind === 'evaluate' && (action.payload.resultIds ?? []).some(id => task.reports[id]?.executionId === binding.executionId))))
-      if (!waiting && task.control === 'running') {
-        await this.incident(owner, 'missing execution report', 'The native Agent became idle without its required bounded report. Inspect its actual Session and artifacts, then repair the same work frontier.')
-      }
-    }).catch(error => this.options.onError(error)).finally(() => {
-      this.watches.delete(owner.executionId)
-      if (this.watchAgain.delete(owner.executionId) && !this.stopping && this.owners.get(owner.executionId) === owner) this.watch(owner)
+      if (!waiting && task.control === 'running')
+        return this.incident(owner, 'missing execution report', 'The native Agent became idle without its required bounded report. Inspect its actual Session and artifacts, then repair the same work frontier.')
+      return false
     })
-    this.watches.set(owner.executionId, work)
   }
 
   private async observe(owner: OwnedExecution): Promise<void> {
-    if (this.stopping || this.owners.get(owner.executionId) !== owner) return
+    await this.ownedOperation(owner, 'observation', () => this.observeOwned(owner))
+  }
+  private async observeOwned(owner: OwnedExecution): Promise<boolean> {
+    if (this.stopping || this.owners.get(owner.executionId) !== owner) return false
     const task = await this.options.tasks.get(owner.taskId)
-    if (this.stopping || this.owners.get(owner.executionId) !== owner) return
+    if (this.stopping || this.owners.get(owner.executionId) !== owner) return false
     const binding = task?.executions[owner.executionId]
-    if (!task || !binding) return
+    if (!task || !binding) return false
     const observation = owner.handle.observe()
     const jobs = observation.jobs.filter(job => job.status === 'running' || job.status === 'stopping')
     const physicalState: PhysicalState = observation.state === 'waiting' ? 'idle' : observation.state
     const ownedJobIds = jobs.map(job => job.id).sort()
     if (binding.physicalState !== physicalState || JSON.stringify([...binding.ownedJobIds].sort()) !== JSON.stringify(ownedJobIds)) {
-      await this.options.tasks.execute(task.id, { type: 'execution.observed', commandId: `observe:${randomUUID()}`,
+      const receipt = await this.options.tasks.execute(task.id, { type: 'execution.observed', commandId: `observe:${randomUUID()}`,
         source: { kind: 'runtime', id: 'deepseek-servant' }, executionId: binding.executionId, physicalState, ownedJobIds })
+      this.requireObserved(receipt)
     }
     for (const wait of Object.values(task.waits)) {
       if (wait.state !== 'waiting' || wait.kind !== 'job' || wait.executionId !== binding.executionId) continue
       const job = observation.jobs.find(job => job.id === wait.jobId)
       if (job && job.status !== 'running' && job.status !== 'stopping') {
-        await this.options.tasks.execute(task.id, { type: 'wait.resolve', commandId: `job-observed:${wait.id}:${job.id}:${job.status}:${task.revision}`,
+        const receipt = await this.options.tasks.execute(task.id, { type: 'wait.resolve', commandId: `job-observed:${wait.id}:${job.id}:${job.status}:${task.revision}`,
           source: { kind: 'runtime', id: 'deepseek-servant' }, waitId: wait.id, evidence: `Exact owner ${binding.sessionId} observed job ${job.id} in ${job.status} state.` })
+        this.requireObserved(receipt)
       }
     }
     if (observation.state === 'idle' && jobs.length === 0 && (binding.state !== 'active' || binding.stopRequested)) await this.release(owner)
     this.options.onChanged?.()
+    return true
   }
 
-  private async incident(owner: OwnedExecution, operation: string, message: string): Promise<void> {
-    if (this.stopping) return
+  private requireObserved(receipt: CommandReceipt): void {
+    if (receipt.status !== 'applied' && !(receipt.status === 'duplicate' && receipt.originalStatus !== 'rejected' && receipt.originalStatus !== 'stale'))
+      throw new Error(`Native observation was refused: ${receipt.code ?? receipt.status}: ${receipt.reason ?? ''}`)
+  }
+  private async incident(owner: OwnedExecution, operation: string, message: string): Promise<boolean> {
+    if (this.stopping) return false
     const task = await this.options.tasks.get(owner.taskId)
     const execution = task?.executions[owner.executionId]
-    if (!execution || execution.role === 'helper' || this.owners.get(owner.executionId) !== owner) return
+    if (!execution || execution.role === 'helper' || this.owners.get(owner.executionId) !== owner) return false
     if (Object.values(task!.incidents).some(entry => entry.executionId === owner.executionId && entry.state !== 'resolved'
-      && entry.errors.some(error => error.operation === operation && error.message === message))) return
-    await this.options.tasks.execute(owner.taskId, { type: 'incident.open', commandId: `incident:${owner.executionId}:${task?.revision}:${createHash('sha256').update(operation + message).digest('hex').slice(0, 16)}`,
+      && entry.errors.some(error => error.operation === operation && error.message === message))) return true
+    const receipt = await this.options.tasks.execute(owner.taskId, { type: 'incident.open', commandId: `incident:${owner.executionId}:${task?.revision}:${createHash('sha256').update(operation + message).digest('hex').slice(0, 16)}`,
       source: { kind: 'runtime', id: 'deepseek-servant' }, executionId: owner.executionId, operation, message })
+    this.requireObserved(receipt)
+    return true
   }
 
-  private async release(owner: OwnedExecution): Promise<boolean> {
+  private release(owner: OwnedExecution): Promise<boolean> {
+    return this.ownedOperation(owner, 'release', () => this.releaseOwned(owner))
+  }
+  private async releaseOwned(owner: OwnedExecution): Promise<boolean> {
     const currentRelease = this.releases.get(owner.executionId)
     if (currentRelease) return currentRelease
     if (this.owners.get(owner.executionId) !== owner) return true
@@ -408,12 +468,20 @@ export class AgentSupervisor {
     const observation = owner.handle.observe()
     if (!['idle', 'stopped'].includes(observation.state) || hasPendingInput(owner.handle)
       || observation.jobs.some(job => job.status === 'running' || job.status === 'stopping')) return false
+    const previousFaults = (['observation', 'settlement', 'release'] as const).map(operation => this.faults.get(this.faultKey(owner, operation))?.scope)
     const work = (async () => {
       await owner.handle.dispose()
+      // Disposal is idempotent, but a failed durable observation is not completion.
+      // Keep the exact stopped handle available to a later resume/settlement retry.
+      const receipt = await this.options.tasks.execute(owner.taskId, { type: 'execution.observed', commandId: `released:${owner.executionId}`,
+        source: { kind: 'runtime', id: 'deepseek-servant' }, executionId: owner.executionId, physicalState: 'stopped', ownedJobIds: [] })
+      if (receipt.status !== 'applied' && !(receipt.status === 'duplicate' && receipt.originalStatus === 'applied')) {
+        throw new Error(`Native owner retired but its durable observation was refused: ${receipt.code ?? receipt.status}`)
+      }
       owner.unsubscribe()
       this.owners.delete(owner.executionId)
-      await this.options.tasks.execute(owner.taskId, { type: 'execution.observed', commandId: `released:${owner.executionId}`,
-        source: { kind: 'runtime', id: 'deepseek-servant' }, executionId: owner.executionId, physicalState: 'stopped', ownedJobIds: [] })
+      for (const scope of previousFaults) this.recovered(scope)
+      this.options.onChanged?.()
       return true
     })().finally(() => this.releases.delete(owner.executionId))
     this.releases.set(owner.executionId, work)
