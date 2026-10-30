@@ -40,7 +40,7 @@ function useNativeControls(props: ServantPageProps | ServantSettingsProps): Coop
   const mode = props as ServantPageProps & ModeInjected
   const state = useSyncExternalStore(mode.modeClient.subscribe, mode.modeClient.snapshot)
   const autoModel = state.view?.defaultModel
-  return { model: (value, onChange, disabled) => <ModelPicker value={value} onChange={onChange} disabled={disabled} models={{ ...models, current: autoModel?.provider && autoModel?.model ? { provider: autoModel.provider, model: autoModel.model, reasoningEffort: autoModel.reasoningEffort } as typeof models.current : null }} autoHint={mode.modeText('autoModelHint')} onRefresh={props.onRefreshModels} t={props.t} label={props.t('settings.model')} />,
+  return { model: (value, onChange, disabled) => <ModelPicker value={value} onChange={onChange} disabled={disabled} models={{ ...models, current: autoModel?.provider && autoModel?.model ? { provider: autoModel.provider, model: autoModel.model, reasoningEffort: autoModel.reasoningEffort } as typeof models.current : null }} autoLabel={mode.modeText('autoModel')} autoHint={mode.modeText('autoModelHint')} onRefresh={props.onRefreshModels} t={props.t} label={props.t('settings.model')} />,
     preset: (value, onChange, disabled) => <PresetPicker value={value} onChange={onChange} disabled={disabled} onLoad={props.onLoadPresets} t={props.t} />,
     pickDirectory: props.onPickDirectory }
 }

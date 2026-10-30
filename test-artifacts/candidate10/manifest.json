@@ -1,0 +1,121 @@
+{
+  "version": "0.3.6-uiqa.20261030.10",
+  "baseCommit": "c9f3253f9f7ad3a3f9c16971e112eb5c70eddf8b",
+  "status": "cloud regression and package verification passed; not Windows installation tested",
+  "packages": [
+    {
+      "name": "deepseek-servant-0.3.6-uiqa.20261030.10.tgz",
+      "bytes": 5585911,
+      "sha256": "e09d3fd7a3c126438feb960bbe0176c70fd7f9f2d44caf4dd9d4f86700a6b4d8"
+    },
+    {
+      "name": "DSS-local-0.3.6-uiqa.20261030.10-model-auto-fix.zip",
+      "bytes": 5608958,
+      "sha256": "088c3a8f11592a736b2f5830ecffba339788d952d675aa8e7f1f3fea87fd804b"
+    }
+  ],
+  "fileCount": 20,
+  "files": [
+    {
+      "path": "IMPLEMENTATION.md",
+      "bytes": 33530,
+      "sha256": "4633af0e87d0964d57c52e251542d5d8a611c15ebb4443885fc4fcc54f6a6a93"
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 34020,
+      "sha256": "d8a6cc31abc16b6748c7a21f21611f5a1ec33f67d22ca23d7da1c19b95496bee"
+    },
+    {
+      "path": "NOTICE",
+      "bytes": 1037,
+      "sha256": "4b79ad85ac136dad309b9c4c624bd47b8853add94e5420e6d51dfb2ec8e7924c"
+    },
+    {
+      "path": "PRIVATE_GIT.md",
+      "bytes": 9432,
+      "sha256": "0afc52637c82efe3e5fcfbbb0bbd8216e988d35612a5296098197c8a63ce6b1c"
+    },
+    {
+      "path": "README.md",
+      "bytes": 11671,
+      "sha256": "6a160def16f1f37543e8086db3af4168d9948c2a2da54238b831f96b20c6bfed"
+    },
+    {
+      "path": "RETENTION.md",
+      "bytes": 11056,
+      "sha256": "18ca856932c82bee7d44e8a2419d6d0f44a071b6f4dd4e970a845880cff658da"
+    },
+    {
+      "path": "SPONSOR.md",
+      "bytes": 1365,
+      "sha256": "064c92c860aaee1c6a4f1c95dfe5899f6ed2ebec14c9cacbba6c1bf41ede6d1a"
+    },
+    {
+      "path": "THIRD_PARTY_NOTICES.md",
+      "bytes": 6167,
+      "sha256": "d82ea8fb51c9d144578639ed555647ad1a1981e75430de4059a4b0158b52ce0c"
+    },
+    {
+      "path": "assets/page-icon.png",
+      "bytes": 73404,
+      "sha256": "7e7f540a765d4c9a5f69d80f38d3c451b7b9be26dabb70efeebd2445a2370d5f"
+    },
+    {
+      "path": "assets/statusbar-icon-black.png",
+      "bytes": 2134,
+      "sha256": "c69a4fc2750b3646b8567351252976917a85f58e494a8930db364c668a3fc2b8"
+    },
+    {
+      "path": "assets/statusbar-icon.png",
+      "bytes": 2331,
+      "sha256": "90861567c9a21374de55f21e0ee00a56a16de2b42ef5efd69d1ec82a30dbd78d"
+    },
+    {
+      "path": "assets/task-empty-character.png",
+      "bytes": 1973481,
+      "sha256": "174ab2e69457f50ac5f835835fe77b9ad487320d1cb7be99afabdf3e9f293e32"
+    },
+    {
+      "path": "assets/welcome-character.png",
+      "bytes": 581139,
+      "sha256": "54e644ea108b6e3fa5b573074028c2de1f48b7013331ded54ebe30118a34c1a1"
+    },
+    {
+      "path": "cordis.patch.yml",
+      "bytes": 132,
+      "sha256": "223667362d682e315d8e5f84c474f140589eeed220af4bbcf0bee25e9b24e1de"
+    },
+    {
+      "path": "docs/INSTALLATION.md",
+      "bytes": 2347,
+      "sha256": "c22aea92292c052a0c68635f174e54440702cafe35c5ee3658188ead56d60ad6"
+    },
+    {
+      "path": "docs/USAGE.md",
+      "bytes": 5224,
+      "sha256": "210197b1a5e71737686c518c6982b5a6d50ba915c674fce755f0eddcc345e602"
+    },
+    {
+      "path": "icon.png",
+      "bytes": 73404,
+      "sha256": "7e7f540a765d4c9a5f69d80f38d3c451b7b9be26dabb70efeebd2445a2370d5f"
+    },
+    {
+      "path": "lib/client.js",
+      "bytes": 3766489,
+      "sha256": "76da8994f6bff2de91304e02d24819a1d321536a21783efffd19ae782483113f"
+    },
+    {
+      "path": "lib/host.js",
+      "bytes": 691768,
+      "sha256": "1afbc39639f2c0a89e015e49e47f6787cd92ced63943eb2ad4ce362daba94553"
+    },
+    {
+      "path": "package.json",
+      "bytes": 4755,
+      "sha256": "b7c9f2ff0446cd94c76cd50dd257b790ac3877ebbb59d854e86dbe4a475db596"
+    }
+  ],
+  "publicationPackagingNote": "Only README download/verification links changed versus the first cloud-delivered candidate10 package; executable bundles are byte-identical. Publication continues the existing test/windows-native-20261030-candidate9 branch as requested; package version remains candidate10."
+}

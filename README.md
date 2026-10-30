@@ -99,6 +99,13 @@ DeepSeek Servant 由 [Chat Agent Harness（CAH）](https://github.com/Tests4gptp
 
 项目版权声明见 [NOTICE](NOTICE)，美术范围、来源与第三方依赖许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
+## 候选10设置修复 / Candidate 10 settings fix
+
+`0.3.6-uiqa.20261030.10` 修复 DSS-cah 模型切回 Auto 后旧覆盖未清除的问题，并更新模型选择文案。云端相关回归已通过；Windows 宿主增量验证待执行。
+
+- [候选10下载安装与校验 / Download, install and verify](https://github.com/Tests4gptplay/deepseek-servant/blob/test/windows-native-20261030-candidate9/test-artifacts/candidate10/INSTALL.md)
+- [修改与验证记录 / Changes and verification](https://github.com/Tests4gptplay/deepseek-servant/blob/test/windows-native-20261030-candidate9/docs/testing/MODEL-AUTO-CANDIDATE10.md)
+
 ## 支持项目 / Support
 
 [GitHub Sponsors](https://github.com/sponsors/Tests4gptplay) · [Ko-fi](https://ko-fi.com/kou392350) · [Patreon](https://www.patreon.com/cw/Kou848) · [爱发电 / Afdian](https://afdian.com/a/kkt_ifd1) · [支付宝 / Alipay](SPONSOR.md)

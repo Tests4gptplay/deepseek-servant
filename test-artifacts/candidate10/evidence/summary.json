@@ -1,0 +1,49 @@
+{
+  "baseCommit": "c9f3253f9f7ad3a3f9c16971e112eb5c70eddf8b",
+  "version": "0.3.6-uiqa.20261030.10",
+  "typecheck": "PASS",
+  "build": "PASS",
+  "sourceTests": {
+    "passed": 312,
+    "failed": 0
+  },
+  "modelRouteTests": {
+    "passed": 5,
+    "failed": 0
+  },
+  "localLifecycleUI": "PASS",
+  "candidate9RedControl": "EXPECTED_FAIL_OLD_ROUTE_RETAINED",
+  "modelSettingsIntegration": "PASS_REAL_REACT_SERVICE_NATIVE_JSON_STORAGE",
+  "realModelCalls": false,
+  "userMachineAccess": false,
+  "logs": [
+    {
+      "name": "build.log",
+      "sha256": "8f05bf646939a6f9e5838e37e4412bee12f3c92b50034c632eec338adf919f97"
+    },
+    {
+      "name": "full-test.log",
+      "sha256": "8f4bb76a91e27184fda4fbd70503cc0d3dabfa241a71d6b6eb4e1b27c2d50f06"
+    },
+    {
+      "name": "lifecycle-ui.log",
+      "sha256": "1a5082cc06910aac407c342ff9cb8b9e26a003ec18e1f21326af31f25a91ef35"
+    },
+    {
+      "name": "model-route-test.log",
+      "sha256": "8a101c0e66aa4426da610ec01d55d135c4de73065ec74f1375c9b97760066c79"
+    },
+    {
+      "name": "model-settings-baseline-red.log",
+      "sha256": "31a4ed378e1102ba4c24032c4cf918e9bb100c75264ce9928a56c84fa3620e2c"
+    },
+    {
+      "name": "model-settings-test.log",
+      "sha256": "f2a0434e722cc3f66a56397858093aea94ff67a38949457a70b2d7efda3f680b"
+    },
+    {
+      "name": "typecheck.log",
+      "sha256": "4d6473ad193ed47a2f3346ffe1779a232d3dc9078621199e31185fcbdb4f7099"
+    }
+  ]
+}

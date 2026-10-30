@@ -98,7 +98,13 @@ export class CoopService implements ModeEndpoint {
   }
   async configure(params: Record<string, unknown>): Promise<unknown> {
     return this.serialConfiguration(async () => {
-    const settings = CoopSettingsSchema.parse({ ...this.cache.settings, ...params })
+    // Omitted keys are partial updates; explicit null clears an optional model
+    // override across JSON RPC (undefined would disappear in transport).
+    const patch = { ...params }
+    for (const key of ['provider', 'model', 'reasoningEffort']) {
+      if (patch[key] === null) patch[key] = undefined
+    }
+    const settings = CoopSettingsSchema.parse({ ...this.cache.settings, ...patch })
     if (settings.ownerRepo) settings.ownerRepo = repositoryPath(settings.ownerRepo).slice('/repos/'.length)
     const moving = settings.ownerRepo !== this.cache.settings.ownerRepo || settings.repositoryDirectory !== this.cache.settings.repositoryDirectory
     if (moving && (this.cache.drafts().length || this.cache.entries('physical/').length || (this.cache.get<number>('pending-tasks') ?? 0) > 0)) throw new Error('Finish or cancel this repository’s pending work before changing repositories.')

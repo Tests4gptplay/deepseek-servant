@@ -46,7 +46,11 @@ function CoopPageScope({ client, t, settingsOnly, controls, onOpenSettings }: Co
   const errorText = error || view.error || ''
   const cliError = errorText.includes(GITHUB_CLI_SETUP_REQUIRED) || errorText.includes(GITHUB_CLI_ACCESS_REQUIRED)
   const displayError = errorText.replace(GITHUB_CLI_SETUP_REQUIRED, t('githubCliSetup')).replace(GITHUB_CLI_ACCESS_REQUIRED, t('githubCliAccess'))
-  const connect = async () => { await client.call('configure', settings); await client.call('connect') }
+  // This form submits a complete model route. null survives JSON RPC and
+  // explicitly removes Auto/unsupported-effort overrides on the Host.
+  const save = () => client.call('configure', { ...settings,
+    provider: settings.provider ?? null, model: settings.model ?? null, reasoningEffort: settings.reasoningEffort ?? null })
+  const connect = async () => { await save(); await client.call('connect') }
   const field = (key: Exclude<keyof CoopSettings, 'remoteEnabled'>, label: string, type = 'text') => <label className={css.field} htmlFor={prefix + key}>{label}
     <input id={prefix + key} type={type} min={type === 'number' ? 1 : undefined}
       value={settings[key] ?? ''} disabled={busy} onChange={event => setSettings({ ...settings, [key]: type === 'number' ? Number(event.target.value) : event.target.value })} />
@@ -87,7 +91,7 @@ function CoopPageScope({ client, t, settingsOnly, controls, onOpenSettings }: Co
           <div className={css.field}>{t('model')}{controls.model(settings, value => setSettings({ ...settings, provider: value.provider, model: value.model, reasoningEffort: value.reasoningEffort }), busy)}</div></>
           : <>{field('presetId', t('preset'))}{field('provider', t('provider'))}{field('model', t('model'))}{field('reasoningEffort', t('effort'))}</>}
       </div><label className={css.hint}><input type="checkbox" checked={settings.remoteEnabled} disabled={busy} onChange={event => setSettings({ ...settings, remoteEnabled: event.target.checked })} /> {t('remoteEnabled')}</label><p className={css.hint}>{t('remoteHint')}</p><div className={css.actions}>
-        <button disabled={busy} onClick={() => void run(() => client.call('configure', settings), t('saved'))}>{t('save')}</button>
+        <button disabled={busy} onClick={() => void run(save, t('saved'))}>{t('save')}</button>
         <button disabled={busy || !settings.ownerRepo.trim()} onClick={() => void run(connect)}>{t('connect')}</button>
       </div>
       <section className={css.members}>

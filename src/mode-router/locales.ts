@@ -1,6 +1,7 @@
 export const MODE_NS = 'dsh.servant.modes'
 export const modeZh = {
   mode: '运行模式', local: '标准模式', git: 'DSS-cah 模式',
+  autoModel: 'Auto／跟随宿主',
   autoModelHint: '跟随宿主默认模型；后台运行与这里显示的选择一致。',
   remoteEnabled: '接收远端任务与控制指令', remoteHint: 'Host 以 1 秒正常间隔增量同步，读回独立远端状态后调度角色；各角色先保存业务记录，再单独提交最终信号。',
   inbox: '远端投递目录',
@@ -16,7 +17,7 @@ export const modeZh = {
   subtitle: '每个参与者保留自己的前台、规划者和 Worker；通过已确认的私有 Git 记录协作。',
   settings: 'DSS-cah 配置', repository: '私有仓库 owner/repo',
   workspace: '本实例工作目录',
-  pickDirectory: '选择目录', preset: 'Agent 预设', provider: '模型供应商（留空跟随宿主）', model: '模型 ID（留空跟随宿主）',
+  pickDirectory: '选择目录', preset: 'Agent 预设', provider: '模型供应商（留空跟随宿主）', model: '模型',
   effort: '推理强度（可选）', seats: '本实例 Worker 席位', save: '保存设置', connect: '连接私有仓库',
   refresh: '同步 Git', account: '当前 GitHub 账户', head: '已确认提交', connected: '已连接',
   unconfigured: '待连接', offline: '同步待恢复', conversation: '协作对话', send: '提交到 Git',
@@ -32,6 +33,7 @@ export const modeZh = {
 export type ModeTextKey = keyof typeof modeZh
 export const modeEn: Record<ModeTextKey, string> = {
   mode: 'Execution mode', local: 'Standard', git: 'DSS-cah mode',
+  autoModel: 'Auto / Follow host',
   autoModelHint: 'Follow the host default model, used by background execution too.',
   remoteEnabled: 'Receive remote tasks and controls', remoteHint: 'The Host syncs incrementally at a normal one-second interval and dispatches from confirmed remote status. Each role saves its work records before separately submitting its final signal.',
   inbox: 'Remote inbox directory',
@@ -47,7 +49,7 @@ export const modeEn: Record<ModeTextKey, string> = {
   subtitle: 'Each participant keeps their own foreground, planner and workers, coordinated through confirmed private Git records.',
   settings: 'DSS-cah configuration', repository: 'Private repository owner/repo',
   workspace: 'This instance’s working directory',
-  pickDirectory: 'Choose directory', preset: 'Agent preset', provider: 'Provider (blank follows host)', model: 'Model ID (blank follows host)',
+  pickDirectory: 'Choose directory', preset: 'Agent preset', provider: 'Provider (blank follows host)', model: 'Model',
   effort: 'Reasoning effort (optional)', seats: 'This instance’s worker seats', save: 'Save settings', connect: 'Connect private repository',
   refresh: 'Sync Git', account: 'GitHub account', head: 'Confirmed commit', connected: 'Connected',
   unconfigured: 'Not connected', offline: 'Sync pending', conversation: 'Collaboration conversation', send: 'Commit to Git',

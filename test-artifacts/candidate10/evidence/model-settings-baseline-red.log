@@ -1,0 +1,24 @@
+node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+
+AssertionError [ERR_ASSERTION]: Auto cleared the real CoopCache
++ actual - expected
+
++ {
++   model: 'old-model',
++   provider: 'fixture',
++   reasoningEffort: 'low'
++ }
+- {}
+
+    at file://<cloud-workspace>/scripts/test-private-git-model-settings.mjs:102:10 {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: { provider: 'fixture', model: 'old-model', reasoningEffort: 'low' },
+  expected: {},
+  operator: 'deepStrictEqual',
+  diff: 'simple'
+}
+
+Node.js v24.22.1

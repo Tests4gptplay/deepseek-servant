@@ -1,0 +1,7 @@
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> deepseek-servant@0.3.6-uiqa.20261030.10 test:model-settings
+> node scripts/test-private-git-model-settings.mjs
+
+PASS: real React CoopPage + ModelPicker, ModeClient JSON transport boundary, real CoopService + CoopCache + native DomainFacility/JsonStorageBackend persistence; explicit→Auto→save→reopen→new service readback; explicit save; provider switch clears effort; unrelated partial save preserves route; repeated save; zh/en labels. No model, GitHub, user machine or credentials used.
+Isolated native storage evidence: <isolated-test-path>

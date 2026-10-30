@@ -1,0 +1,6 @@
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> deepseek-servant@0.3.6-uiqa.20261030.10 test:lifecycle-ui
+> node scripts/test-lifecycle-ui.mjs
+
+PASS: actual React composer/source ACK vs stalled read, lifecycle reset before/after ACK, stable ID explicit retry, no automatic replay, stale callback isolation, preserved newer draft.

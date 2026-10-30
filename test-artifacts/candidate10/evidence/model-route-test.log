@@ -1,0 +1,13 @@
+✔ background Auto follows the Servant foreground model and reasoning, not the ordinary DSH chat (1.962867ms)
+✔ the first concrete foreground choice is saved; later host selections do not replace it (23.360073ms)
+✔ composer presents the foreground model without Auto and keeps the reasoning selector (0.923361ms)
+✔ background Auto keeps the foreground caption and opens the complete model list directly (1.816552ms)
+✔ an uninitialized foreground displays its initial concrete choice without Auto (0.243086ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 38.597885

@@ -7,9 +7,9 @@ import type { ServantModels } from './models.ts'
 import css from './page.module.css'
 
 type Translate = PropsLocale<'dsh.servant'>['t']
-export function ModelPicker({ value, models, onChange, onRefresh, disabled, label, composer, followModel, autoHint, t }: {
+export function ModelPicker({ value, models, onChange, onRefresh, disabled, label, composer, followModel, autoHint, autoLabel, t }: {
   value: ModelRoute; models: ServantModels; onChange(value: ModelRoute): void; onRefresh(): Promise<void>
-  disabled?: boolean; label: string; composer?: boolean; followModel?: ModelRoute; autoHint?: string; t: Translate
+  disabled?: boolean; label: string; composer?: boolean; followModel?: ModelRoute; autoHint?: string; autoLabel?: string; t: Translate
 }) {
   const [open, setOpen] = useState(false)
   const homePane = composer ? 'root' : 'model'
@@ -34,7 +34,7 @@ export function ModelPicker({ value, models, onChange, onRefresh, disabled, labe
       for (const choice of selectedModel?.reasoning?.efforts ?? []) items.push({ id: 'effort:' + choice.id, label: choice.name })
     } else {
       if (!composer) {
-        items.push({ id: 'auto', label: <span className={css.modelOption}><span>Auto</span><small>{(autoHint ?? t('model.autoHint'))}</small></span> })
+        items.push({ id: 'auto', label: <span className={css.modelOption}><span>{autoLabel ?? 'Auto'}</span><small>{(autoHint ?? t('model.autoHint'))}</small></span> })
         if (!auto && selectedModel?.reasoning) items.push({ id: 'effort', label: <span className={css.modelMenuRow}><span>{t('model.effort')}</span><span>{effortName ?? t('model.providerDefault')}</span></span> })
         items.push({ type: 'separator', id: 'model-options-divider' })
       }
