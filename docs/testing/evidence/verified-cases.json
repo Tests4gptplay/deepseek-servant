@@ -1,0 +1,103 @@
+{
+  "environment": "Linux DSH0.2.1-rc.3 actual Host; synthetic model; cloud-local bare Git with real git commands",
+  "testedPackageSha256": "e242bbd23536e3a6f60ff0ffa8baba96bba4627ffa3fb1d983a7eb9dbb678f9c",
+  "local10": {
+    "status": "PASS_ACTUAL_DSH_HOST_LOCAL10_WITH_SAME_PAGE_NATURAL_DELIVERY",
+    "sameOriginalTabAcrossRestarts": true,
+    "noRefreshOrResubmit": true,
+    "naturalFinalBodyAt": "2026-10-30T05:05:21Z",
+    "product20Unchanged": true
+  },
+  "git10": {
+    "status": "PASS_SCOPED_ACTUAL_HOST_GIT_TEN_FAULT_RECOVERY_AND_UPDATING_UI",
+    "rounds": 10,
+    "acceptedArtifacts": 20,
+    "createdArtifacts": 21,
+    "reusedArtifacts": 2,
+    "kills": [
+      {
+        "at": "2026-10-30T04:56:26.089689+00:00",
+        "reason": "r02-artifact-before-report",
+        "pidfdExitConfirmed": true
+      },
+      {
+        "at": "2026-10-30T05:09:07.763255+00:00",
+        "reason": "r07-planner-before-plan",
+        "pidfdExitConfirmed": true
+      }
+    ],
+    "faults": [
+      {
+        "case": "cas",
+        "actualGitExit": 1
+      },
+      {
+        "case": "unavailable-fetch",
+        "actualGitExit": 128
+      },
+      {
+        "case": "unavailable-push",
+        "actualGitExit": 128
+      }
+    ],
+    "actualGitInFlightCrashCovered": false
+  },
+  "localRegressions": [
+    {
+      "scenario": "cancel",
+      "finalRevision": 36,
+      "phase": "cancelled",
+      "allOwnersSettled": true,
+      "uncertainActions": 0,
+      "UIOwnerConfirmed": true
+    },
+    {
+      "scenario": "revise",
+      "finalRevision": 62,
+      "phase": "completed",
+      "allOwnersSettled": true,
+      "uncertainActions": 0,
+      "UIOwnerConfirmed": true
+    },
+    {
+      "scenario": "duplicate",
+      "finalRevision": 46,
+      "phase": "completed",
+      "allOwnersSettled": true,
+      "uncertainActions": 0,
+      "UIOwnerConfirmed": true
+    },
+    {
+      "scenario": "crash",
+      "finalRevision": 57,
+      "phase": "completed",
+      "allOwnersSettled": true,
+      "uncertainActions": 0,
+      "UIOwnerConfirmed": true
+    },
+    {
+      "scenario": "storage",
+      "finalRevision": 44,
+      "phase": "completed",
+      "allOwnersSettled": true,
+      "uncertainActions": 0,
+      "UIOwnerConfirmed": true
+    }
+  ],
+  "provenance": [
+    {
+      "file": "LOCAL10-ACCEPTANCE.json",
+      "sha256": "68731cec4be33f534b377b866c9ecc8db835773d676e6ca213aa03116c9aeabb"
+    },
+    {
+      "file": "ACTUAL-GIT10-FINAL-CROSSCHECK.json",
+      "sha256": "c8626174608050c1fbef8a8411f7d36b3d64e0772227a769e539c0bf5247fa6f"
+    },
+    {
+      "file": "FIVE-REGRESSION-ACCEPTANCE.json",
+      "sha256": "519ac84308352788cb1b4fcfc53a831ea6cfb6680622175ed317bc283e837af3"
+    }
+  ],
+  "sourceCommit": "5671c7f23fabb1dec04e8724e2da437ff60adacb",
+  "format": "Public sanitized evidence extract; not raw logs"
+}
