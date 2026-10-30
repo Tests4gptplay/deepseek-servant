@@ -1,6 +1,6 @@
 # DeepSeek Servant
 
-> 候选测试分支：[`安装包与安装步骤`](test-artifacts/INSTALL.md) · [`验收报告`](docs/testing/ACCEPTANCE.md) · [`变更依据`](docs/testing/CHANGES.md) · [`文档索引`](docs/testing/README.md)。本分支用于候选安装与下一轮本机验收，main 保持原发布版本。
+> 正式版本 **0.4.0** · [安装与升级](docs/INSTALLATION.md) · [版本摘要](CHANGELOG.md) · [验证记录](docs/testing/EVIDENCE.md)。
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Tests4gptplay/deepseek-servant/v0.3.0/docs/images/deepseek-servant-maids-duo.webp" alt="DeepSeek Servant 短裙与长裙女仆角色设计">
@@ -10,7 +10,7 @@
 
 **设计逻辑源自 [Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness)。** DeepSeek Servant 延续 CAH 以目标为中心的 Agent 工作闭环：理解需求、制定计划、执行工作、评价成果、调整方法、跨会话接续、故障恢复与技能积累。Servant 将这套持续工作机制整合到 DeepSeek Harness 运行环境，复用宿主的模型、工具、Session、作业与 Skill 能力。
 
-**当前候选版本：** `0.3.6-uiqa.20261030.9` · **测试宿主：** DSH `0.2.1-rc.3` · **项目形态：** 独立安装的社区插件
+**当前版本：** `0.4.0` · **最近增量验证宿主：** Windows Desktop `0.2.1-rc.5` · **项目形态：** 独立安装的社区插件
 
 ## 核心能力
 
@@ -38,7 +38,7 @@
 
 长任务验证处理了 **16 批、64 条合成事件**，包括 **3 次周期评审、2 次正常 Worker 换代**、跨代历史回查和最终独立核对。32 行最终账本与 16 批累计快照均与预先保存的独立答案一致；任务完成后执行了正式清理，成果文件哈希保持一致。
 
-更多实测过程、运行条件及清理结果见[实现与验证记录](IMPLEMENTATION.md)；历次候选与整理范围见[版本摘要](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.6/CHANGELOG.md)。
+更多实测过程、运行条件及清理结果见[实现与验证记录](IMPLEMENTATION.md)；历次候选与整理范围见[版本摘要](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.4.0/CHANGELOG.md)。
 
 ## 架构
 
@@ -58,10 +58,10 @@
 
 ## 安装与使用
 
-正式版在 DSH Desktop 的“插件 → 添加插件”中输入固定来源 `github:Tests4gptplay/deepseek-servant#v0.3.6`，安装并启用。Web profile 使用：
+正式版在 DSH Desktop 的“插件 → 添加插件”中输入固定来源 `github:Tests4gptplay/deepseek-servant#v0.4.0`，安装并启用。Web profile 使用：
 
 ```sh
-dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.3.6'
+dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.4.0'
 ```
 
 模型提供者、工具权限和凭据沿用 DSH 配置。进入侧栏 DeepSeek Servant，选择前台模型与工作区即可开始；后台 `Auto` 跟随本页前台模型，Worker 席位默认 2，可在设置中调整。
@@ -71,14 +71,14 @@ dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.3.6'
 
 ## 兼容性与数据存储
 
-**已验证宿主版本：** 当前升级使用 Windows / DSH `0.2.1-rc.3` 原生 SDK profile；此前功能基线使用 Linux / DSH `0.2.1-rc.2`。插件从宿主获取 DSH 组件，按实际接口运行，无 DSH 版本号硬性准入限制。已确认的 Desktop UI、侧栏行为和美术资源继续保留。
+**已验证宿主版本：** 最近模型设置增量在 Windows Desktop `0.2.1-rc.5` 完成；此前任务与原生 SDK 验证使用 Windows / DSH `0.2.1-rc.3`，早期功能基线使用 Linux / DSH `0.2.1-rc.2`。插件从宿主获取 DSH 组件，按实际接口运行，无 DSH 版本号硬性准入限制。已确认的 Desktop UI、侧栏行为和美术资源继续保留。
 
 任务、助理、知识、完整对话与 records 档案通过原生 `storageDomain` 保存。在“Servant 记录管理”中可迁移整个记录目录；迁移完成后立即使用新位置，不改变任务工作区。大小统计按记录目录内真实文件字节计量，包含 JSON 封装、格式化和备份；其他文件与备份单列。历史任务索引计入“已完成任务档案”；“工作规划记录 / Work Planning Notes”独立统计 Foreground_List 与 Foreground_Cache，并提供单独清理入口。清理聊天保留规划记录。相对所选记录存储位置，规划记录位于 `deepseek_servant/work-planning/`，完整档案及历史索引位于 `deepseek_servant/archives/`。DSH 原生 Session 日志使用宿主单独配置的存储位置。详见 [数据保留与清理](RETENTION.md)。
 
 ## 开发文档
 
 - [当前架构](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/DESIGN.md)
-- [版本与验收摘要](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.6/CHANGELOG.md)
+- [版本与验收摘要](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.4.0/CHANGELOG.md)
 - [alpha.40 协作开发验收](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/docs/acceptance-private-git-20261026.md)
 - [alpha.39 验收记录](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/docs/acceptance-20261026.md)
 - [实现与验证记录](IMPLEMENTATION.md)
@@ -99,12 +99,14 @@ DeepSeek Servant 由 [Chat Agent Harness（CAH）](https://github.com/Tests4gptp
 
 项目版权声明见 [NOTICE](NOTICE)，美术范围、来源与第三方依赖许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-## 候选10设置修复 / Candidate 10 settings fix
+## 0.4.0：稳定性与模型设置修复
 
-`0.3.6-uiqa.20261030.10` 修复 DSS-cah 模型切回 Auto 后旧覆盖未清除的问题，并更新模型选择文案。云端相关回归已通过；Windows 宿主增量验证待执行。
+- Git 任务页显示已提交的执行进度与成果，在新计划或结果发布期间显示更新中。
+- 修复任务生命周期、恢复及重复结果判定问题，Git 输出改为流式接收。
+- DSS-cah 模型切回 Auto 后，保存会清除旧 provider、model、reasoningEffort 覆盖；切换到不提供推理强度的模型时清除旧强度。Local 模型行为不变。
+- Windows Desktop `0.2.1-rc.5` 的六项设置增量验证通过，包括保存重开、插件重载及实际进程重启；这轮仅验证设置，没有发起模型推理请求。
 
-- [候选10下载安装与校验 / Download, install and verify](https://github.com/Tests4gptplay/deepseek-servant/blob/test/windows-native-20261030-candidate9/test-artifacts/candidate10/INSTALL.md)
-- [修改与验证记录 / Changes and verification](https://github.com/Tests4gptplay/deepseek-servant/blob/test/windows-native-20261030-candidate9/docs/testing/MODEL-AUTO-CANDIDATE10.md)
+本版沿用已测运行实现，保留现有 Git 协作协议。详见 [0.4.0 发布说明](docs/releases/0.4.0.md) 与[历史候选修改及验证记录](docs/testing/MODEL-AUTO-CANDIDATE10.md)。
 
 ## 支持项目 / Support
 
