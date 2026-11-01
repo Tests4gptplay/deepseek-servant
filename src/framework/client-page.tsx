@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { Button, Input, Modal, SegmentedControl, StateDot, IconSettingsOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import { FrameworkClientController, getFrameworkClientController, frameworkScopeKey, type FrameworkClientApi, type FrameworkClientSettings, type FrameworkClientModel, type FrameworkClientView, type FrameworkClientRole, type FrameworkLegacyTask } from './client-contracts.js'
 import css from '../client/page.module.css'
@@ -67,6 +67,56 @@ export function FrameworkPage(props: FrameworkPageProps) {
     finally { if (request === documentRequest.current) setDocumentLoading(false) }
   }
   const pending = snapshot.drafts.filter(item => frameworkScopeKey(item.input.mode, item.input.collaborationId, item.input.storageScope) === scope && (item.state !== 'confirmed' || !view?.messages.some(message => message.id === item.input.id)))
+  const messages = useRef<HTMLDivElement>(null), followBottom = useRef(true), previousTop = useRef(0)
+  const historyOperation = useRef<object>(), renderedScope = useRef(scope); renderedScope.current = scope
+  const prepend = useRef<{ id?: string; offset: number; top: number; first?: string; done: boolean }>()
+  const anchor = () => {
+    const element = messages.current!
+    const top = element.getBoundingClientRect().top
+    const row = Array.from(element.querySelectorAll<HTMLElement>('[data-message-id]')).find(row => row.getBoundingClientRect().bottom > top)
+    return { id: row?.dataset.messageId, offset: row ? row.getBoundingClientRect().top - top : 0, top: element.scrollTop }
+  }
+  const history = (operation: () => Promise<void>, older = false) => {
+    if (older && (historyOperation.current || !view?.pageBefore)) return
+    const owner = historyOperation.current = {}, requestScope = scope
+    if (older && messages.current) prepend.current = { ...anchor(), first: view?.messages[0]?.id, done: false }
+    else { prepend.current = undefined; followBottom.current = true }
+    setHistoryBusy(true); setError('')
+    void operation().catch(reason => {
+      if (historyOperation.current === owner && renderedScope.current === requestScope) setError(reason instanceof Error ? reason.message : String(reason))
+    }).finally(() => {
+      if (historyOperation.current !== owner || renderedScope.current !== requestScope) return
+      historyOperation.current = undefined
+      if (prepend.current) prepend.current.done = true
+      setHistoryBusy(false)
+    })
+  }
+  const loadOlder = () => { if (messages.current && view?.pageBefore) { followBottom.current = false; history(() => controller.older(50), true) } }
+  useLayoutEffect(() => {
+    historyOperation.current = undefined; prepend.current = undefined; followBottom.current = true; previousTop.current = 0
+    setHistoryBusy(false); setHistoryDate('')
+  }, [scope])
+  useLayoutEffect(() => {
+    const element = messages.current
+    if (!element) return
+    const saved = prepend.current
+    if (saved && view?.messages[0]?.id !== saved.first) {
+      const row = Array.from(element.querySelectorAll<HTMLElement>('[data-message-id]')).find(row => row.dataset.messageId === saved.id)
+      element.scrollTop = row ? element.scrollTop + row.getBoundingClientRect().top - element.getBoundingClientRect().top - saved.offset : saved.top
+      prepend.current = undefined
+    } else if (followBottom.current) element.scrollTop = element.scrollHeight
+    if (prepend.current?.done) prepend.current = undefined
+    previousTop.current = element.scrollTop
+  }, [view?.messages, snapshot.drafts, historyBusy, scope, tab])
+  const onScroll = () => {
+    const element = messages.current
+    if (!element) return
+    const upward = element.scrollTop < previousTop.current
+    previousTop.current = element.scrollTop
+    if (prepend.current) Object.assign(prepend.current, anchor())
+    followBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight < 48
+    if (upward && element.scrollTop < element.clientHeight / 2) loadOlder()
+  }
   const task = view?.tasks.find(item => item.taskId === selectedTask)
   const empty = !view || (tab === 'conversation' ? !view.messages.length : tab === 'tasks' ? !view.tasks.length : false)
   return <section className={css.page} aria-label="DeepSeek Servant">
@@ -90,17 +140,16 @@ export function FrameworkPage(props: FrameworkPageProps) {
     {(error || snapshot.error || view?.connection.detail) && <div className={css.notice} role={error || snapshot.error ? 'alert' : 'status'}>{error || snapshot.error || view?.connection.detail}</div>}
     <div className={`${css.content} ${!empty && view?.settings.showCornerCharacter !== false ? css.contentWithCorner : ''}`}>
       {tab === 'conversation' && <div className={css.conversation}>
-        <div className={css.historyNavigation}>{view?.pageBefore && <Button size="sm" disabled={historyBusy} onClick={() => {
-          setHistoryBusy(true); run(controller.older(50).finally(() => setHistoryBusy(false)))
-        }}>{tr('读取更早消息', 'Load earlier messages')}</Button>}
+        <div className={css.historyNavigation}>{view?.pageBefore && <Button size="sm" disabled={historyBusy} onClick={loadOlder}>{tr('读取更早消息', 'Load earlier messages')}</Button>}
           <label>{tr('保存日期（UTC）', 'Saved date (UTC)')}<input type="date" aria-label={tr('保存日期（UTC）', 'Saved date (UTC)')} value={historyDate} onChange={event => setHistoryDate(event.target.value)} /></label>
-          <Button size="sm" disabled={historyBusy || !historyDate} onClick={() => { setHistoryBusy(true); run(controller.navigateHistory({ date: historyDate, limit: 50 }).finally(() => setHistoryBusy(false))) }}>{tr('按日期读取', 'Browse date')}</Button>
-          {view?.pageAfter && <Button size="sm" disabled={historyBusy} onClick={() => { setHistoryBusy(true); run(controller.navigateHistory({ date: view.historyDate, afterId: view.pageAfter, limit: 50 }).finally(() => setHistoryBusy(false))) }}>{tr('较新消息', 'Newer messages')}</Button>}
-          <Button size="sm" disabled={historyBusy} onClick={() => { setHistoryDate(''); run(controller.latest()) }}>{tr('跳到最新', 'Jump to latest')}</Button>
+          <Button size="sm" disabled={!historyDate} onClick={() => history(() => controller.navigateHistory({ date: historyDate, limit: 50 }))}>{tr('按日期读取', 'Browse date')}</Button>
+          {view?.pageAfter && <Button size="sm" disabled={historyBusy} onClick={() => history(() => controller.navigateHistory({ date: view.historyDate, afterId: view.pageAfter, limit: 50 }))}>{tr('较新消息', 'Newer messages')}</Button>}
+          <Button size="sm" onClick={() => { setHistoryDate(''); history(() => controller.latest()) }}>{tr('跳到最新', 'Jump to latest')}</Button>
         </div>
-        <div className={css.messages} role="log" aria-live="polite">
+        <div ref={messages} className={css.messages} role="log" aria-live="polite" aria-busy={historyBusy}
+          onScroll={onScroll} onWheel={event => { if (event.deltaY < 0 && event.currentTarget.scrollTop < event.currentTarget.clientHeight / 2) loadOlder() }}>
           {empty && <div className={css.welcome}><img className={css.welcomeIcon} src={view?.settings.swapPageIllustrations ? __SERVANT_TASK_EMPTY_CHARACTER_DATA_URI__ : __SERVANT_WELCOME_CHARACTER_DATA_URI__} alt="" /><h2>{tr('从这里开始', 'Start here')}</h2></div>}
-          {view?.messages.filter(message => message.role !== 'system' || message.source === 'deepseek-servant-status').map(message => <article key={message.id} className={`${css.message} ${message.role === 'user' ? css.userMessage : ''}`}>
+          {view?.messages.filter(message => message.role !== 'system' || message.source === 'deepseek-servant-status').map(message => <article key={message.id} data-message-id={message.id} className={`${css.message} ${message.role === 'user' ? css.userMessage : ''}`}>
             <div className={css.messageAuthor}>{message.participantId} · {message.role} · {message.createdAt}{message.device ? ' · ' + message.device : ''}{message.model ? ' · ' + message.model : ''}{message.modelVersion ? ' · ' + message.modelVersion : ''}</div>
             {message.replyTo && <p className={css.muted}>{tr('回复', 'Reply to')} {message.replyTo}</p>}
             <div className={css.messageText}>{message.text}</div>

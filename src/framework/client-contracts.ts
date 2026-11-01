@@ -93,6 +93,8 @@ export class FrameworkClientController {
   private current: FrameworkClientSnapshot = { loading: false, drafts: [] }
   private readonly listeners = new Set<() => void>()
   private generation = 0
+  private historyGeneration = 0
+  private readonly olderRequests = new Map<string, Promise<void>>()
   private requestedMode?: FrameworkMode
   private navigation?: symbol
   private readonly expandedHistory = new Set<string>()
@@ -114,7 +116,10 @@ export class FrameworkClientController {
   }
   snapshot = (): FrameworkClientSnapshot => this.current
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
-  private publish(change: Partial<FrameworkClientSnapshot>): void { this.current = { ...this.current, ...change }; for (const listener of this.listeners) listener() }
+  private publish(change: Partial<FrameworkClientSnapshot>): void {
+    const before = this.current.value, after = change.value
+    if (before && after && frameworkScopeKey(before.activeMode, before.collaborationId, before.storageScope) !== frameworkScopeKey(after.activeMode, after.collaborationId, after.storageScope)) this.historyGeneration++
+    this.current = { ...this.current, ...change }; for (const listener of this.listeners) listener() }
   private async load(operation: () => Promise<FrameworkClientView>, scopedMode?: FrameworkMode): Promise<void> {
     // An action still belongs to its original scope, but its result must not
     // replace a newer mode/settings navigation. Do not cancel the Host action.
@@ -126,6 +131,7 @@ export class FrameworkClientController {
   }
   private async navigate(operation: () => Promise<FrameworkClientView>, mode: FrameworkMode): Promise<void> {
     if (this.requestedMode && mode !== this.requestedMode) { await operation(); return }
+    this.historyGeneration++
     const navigation = this.navigation = Symbol()
     ++this.generation
     this.publish({ loading: true, error: undefined })
@@ -161,32 +167,48 @@ export class FrameworkClientController {
   configure = (input: Parameters<FrameworkClientApi['configure']>[0]): Promise<void> => this.navigate(() => this.api.configure(input), input.mode)
   async navigateHistory(input: { date?: string; beforeId?: string; afterId?: string; limit: number }): Promise<void> {
     const value = this.current.value
-    if (!value) return
+    if (!value || this.navigation) return
+    const generation = ++this.historyGeneration
     const key = frameworkScopeKey(value.activeMode, value.collaborationId, value.storageScope)
-    await this.load(async () => {
+    const owns = () => generation === this.historyGeneration && !this.navigation && this.current.value !== undefined
+      && frameworkScopeKey(this.current.value.activeMode, this.current.value.collaborationId, this.current.value.storageScope) === key
+    this.publish({ loading: true, error: undefined })
+    try {
       const page = await this.api.history({ mode: value.activeMode, collaborationId: value.collaborationId, storageScope: value.storageScope, ...input })
+      if (!owns()) return
       this.expandedHistory.delete(key)
-      return { ...value, messages: page.messages, pageBefore: page.moreBefore, pageAfter: page.moreAfter, historyDate: input.date, historyWindow: true }
-    }, value.activeMode)
+      this.publish({ loading: false, value: { ...this.current.value!, messages: page.messages, pageBefore: page.moreBefore,
+        pageAfter: page.moreAfter, historyDate: input.date, historyWindow: true } })
+    } catch (error) {
+      if (owns()) this.publish({ loading: false, error: error instanceof Error ? error.message : String(error) })
+      throw error
+    }
   }
   latest = (): Promise<void> => {
-    const value = this.current.value
+    const value = this.current.value, mode = this.requestedMode ?? value?.activeMode ?? 'local'
     if (value) this.expandedHistory.delete(frameworkScopeKey(value.activeMode, value.collaborationId, value.storageScope))
-    return this.load(() => this.api.view({ mode: this.requestedMode ?? value?.activeMode }))
+    return this.navigate(() => this.api.view({ mode }), mode)
   }
-  async older(limit: number): Promise<void> {
+  older(limit: number): Promise<void> {
     const value = this.current.value
-    if (!value?.pageBefore) return
-    if (value.historyWindow) return this.navigateHistory({ date: value.historyDate, beforeId: value.pageBefore, limit })
-    const navigation = this.navigation
-    const generation = this.generation, key = frameworkScopeKey(value.activeMode, value.collaborationId, value.storageScope)
-    const page = await this.api.history({ mode: value.activeMode, collaborationId: value.collaborationId, storageScope: value.storageScope, beforeId: value.pageBefore, limit })
-    const current = this.current.value
-    if (!current || navigation || generation !== this.generation || frameworkScopeKey(current.activeMode, current.collaborationId, current.storageScope) !== key) return
+    if (!value?.pageBefore || this.navigation) return Promise.resolve()
+    const generation = this.historyGeneration, key = frameworkScopeKey(value.activeMode, value.collaborationId, value.storageScope)
+    const requestKey = JSON.stringify([generation, key, value.historyDate, value.pageBefore])
+    const existing = this.olderRequests.get(requestKey)
+    if (existing) return existing
+    // Preserve already displayed rows if a live refresh arrives during this read.
     this.expandedHistory.add(key)
-    const seen = new Set<string>()
-    const messages = [...page.messages, ...current.messages].filter(message => !seen.has(message.id) && !!seen.add(message.id))
-    this.publish({ value: { ...current, messages, pageBefore: page.moreBefore } })
+    const operation = this.api.history({ mode: value.activeMode, collaborationId: value.collaborationId, storageScope: value.storageScope,
+      date: value.historyDate, beforeId: value.pageBefore, limit }).then(page => {
+      const current = this.current.value
+      if (!current || this.navigation || generation !== this.historyGeneration || frameworkScopeKey(current.activeMode, current.collaborationId, current.storageScope) !== key) return
+      const seen = new Set<string>()
+      const messages = [...page.messages, ...current.messages].filter(message => !seen.has(message.id) && !!seen.add(message.id))
+      this.publish({ value: { ...current, messages, pageBefore: page.moreBefore } })
+    })
+    this.olderRequests.set(requestKey, operation)
+    void operation.finally(() => { if (this.olderRequests.get(requestKey) === operation) this.olderRequests.delete(requestKey) }).catch(() => {})
+    return operation
   }
   retain(input: FrameworkSendInput): void {
     const existing = this.current.drafts.find(draft => draft.input.id === input.id)
