@@ -1,15 +1,21 @@
+import { createHash } from 'node:crypto'
 import type { CoopCollaborator, CoopInvitation, RepoBinding, RepoConnection } from './contracts.js'
 
 export const GITHUB_CLI_SETUP_REQUIRED = 'Configure GitHub CLI: install gh and run gh auth login --hostname github.com.'
 export const GITHUB_CLI_ACCESS_REQUIRED = 'Configure GitHub CLI and verify access to this repository.'
 
 export interface ResolvedToken { value: string; source: string }
-export type TokenSource = () => Promise<ResolvedToken | undefined>
+export type TokenSource = (signal?: AbortSignal) => Promise<ResolvedToken | undefined>
 export type GitHubFetch = (input: string, init?: RequestInit) => Promise<Response>
-export interface GitHubSession { request<T>(method: string, path: string, body?: unknown): Promise<T> }
+export interface GitHubSession {
+  /** Process-local credential identity; never contains an authenticating value. */
+  readonly authorizationScope: object
+  request<T>(method: string, path: string, body?: unknown): Promise<T>
+  head(path: string, knownHead?: string): Promise<string>
+}
 
 export class GitHubError extends Error {
-  constructor(readonly status: number, message: string, readonly retryAfter?: number) { super(message); this.name = 'GitHubError' }
+  constructor(readonly status: number, message: string, readonly retryAfter?: number, readonly retryAt?: number, readonly rateLimit?: object) { super(message); this.name = 'GitHubError' }
 }
 export class GitConflictError extends Error {
   constructor(message = 'Git HEAD changed. Read the latest snapshot before retrying this transaction.') { super(message); this.name = 'GitConflictError' }
@@ -20,24 +26,46 @@ export function repositoryPath(ownerRepo: string): string {
   return '/repos/' + parts.map(encodeURIComponent).join('/')
 }
 
-/** Secrets exist only inside one operation; no credential is returned or cached. */
+/** Raw secrets exist only inside one operation; no credential is returned or cached.
+ * A one-way, process-local fingerprint detects provider changes without another
+ * /user handshake on every observation. Neither it nor its opaque scope is saved.
+ */
 export class GitHubClient {
   private requests = new AbortController()
+  private signal: AbortSignal
+  private authorization?: { fingerprint: string; scope: object; limits: Map<string, GitHubError>; secondaryFailure?: { request: string; delay: number } }
   constructor(private readonly tokenSource: TokenSource, private readonly fetcher: GitHubFetch = fetch,
-    private readonly requestTimeoutMs = 60_000) {}
-  cancel(): void { this.requests.abort(); this.requests = new AbortController() }
+    options?: { signal?: AbortSignal }) {
+    // Opening belongs to its caller. After cancellation, a new explicit epoch
+    // may finish disconnect bookkeeping without inheriting the closed opener.
+    this.signal = options?.signal ? AbortSignal.any([this.requests.signal, options.signal]) : this.requests.signal
+  }
+  cancel(): void { this.requests.abort(); this.requests = new AbortController(); this.signal = this.requests.signal }
   async session<T>(operation: (session: GitHubSession) => Promise<T>): Promise<T> {
-    const signal = this.requests.signal
-    const token = await this.tokenSource()
+    const signal = this.signal
+    signal.throwIfAborted()
+    const token = await this.tokenSource(signal)
     signal.throwIfAborted()
     if (!token?.value) throw new GitHubError(401, GITHUB_CLI_SETUP_REQUIRED)
-    const request = async <R>(method: string, path: string, body?: unknown): Promise<R> => {
+    const fingerprint = createHash('sha256').update(token.value).digest('hex')
+    if (this.authorization?.fingerprint !== fingerprint) this.authorization = { fingerprint, scope: {}, limits: new Map() }
+    const authorization = this.authorization
+    for (const [key, error] of authorization.limits) if (error.retryAt !== undefined && error.retryAt <= Date.now()) authorization.limits.delete(key)
+    const request = async <R>(method: string, path: string, body?: unknown, sha?: { knownHead?: string }): Promise<R> => {
       signal.throwIfAborted()
       if (!path.startsWith('/') || path.startsWith('//') || path.includes('://')) throw new Error('Invalid GitHub API path.')
+      // All REST endpoints used by this adapter consume core; GraphQL has its
+      // own primary bucket. A secondary limit can span REST and GraphQL, so no
+      // per-repository exemption is inferred. Local/other credentials are separate.
+      const resource = path === '/graphql' ? 'graphql' : 'core', requestKey = method + ' ' + path
+      const limited = [authorization.limits.get('*'), authorization.limits.get(resource)]
+        .filter((error): error is GitHubError => error?.retryAt !== undefined && error.retryAt > Date.now())
+        .sort((a, b) => b.retryAt! - a.retryAt!)[0]
+      if (limited) throw new GitHubError(limited.status, limited.message, (limited.retryAt! - Date.now()) / 1000, limited.retryAt, limited.rateLimit)
       let response: Response
       try {
         response = await this.fetcher('https://api.github.com' + path, {
-          method, signal: AbortSignal.any([signal, AbortSignal.timeout(this.requestTimeoutMs)]), headers: { Accept: 'application/vnd.github+json', Authorization: 'Bearer ' + token.value,
+          method, signal, headers: { Accept: sha ? 'application/vnd.github.sha' : 'application/vnd.github+json', ...(sha?.knownHead ? { 'If-None-Match': '"' + sha.knownHead + '"' } : {}), Authorization: 'Bearer ' + token.value,
             'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'DeepSeek-Servant-Coop', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         })
@@ -45,18 +73,59 @@ export class GitHubClient {
         signal.throwIfAborted()
         throw new GitHubError(0, (error instanceof Error ? error.message : 'GitHub network request failed.').split(token.value).join('[redacted]'))
       }
+      signal.throwIfAborted()
+      if (response.status === 304) {
+        if (sha?.knownHead) { if (authorization.secondaryFailure?.request === requestKey) authorization.secondaryFailure = undefined; return sha.knownHead as R }
+        throw new GitHubError(304, 'GitHub returned 304 without a previously observed HEAD.')
+      }
       if (!response.ok) {
         const data = await response.json().catch(() => ({})) as { message?: string }
+        signal.throwIfAborted()
         const message = String(data.message ?? response.statusText).split(token.value).join('[redacted]')
-        const seconds = Number(response.headers.get('retry-after')) || (response.headers.get('x-ratelimit-remaining') === '0' ? Math.max(1, Number(response.headers.get('x-ratelimit-reset')) - Math.floor(Date.now() / 1000)) : 0)
-        const hint = token.source === 'GitHub CLI' && [401, 403, 404].includes(response.status) ? GITHUB_CLI_ACCESS_REQUIRED + ' ' : ''
-        throw new GitHubError(response.status, hint + 'GitHub ' + response.status + ': ' + message + ' (' + method + ' ' + path + '; authorization: ' + token.source + ')', seconds > 0 ? seconds : undefined)
+        const now = Date.now(), retry = response.headers.get('retry-after'), reset = response.headers.get('x-ratelimit-reset')
+        let retryTime = retry === null ? NaN : /^\d+(?:\.\d+)?$/.test(retry.trim()) ? now + Number(retry) * 1000 : Date.parse(retry)
+        const resetTime = response.headers.get('x-ratelimit-remaining') === '0' && reset !== null ? Number(reset) * 1000 : NaN
+        if ([403, 429].includes(response.status) && /\bsecondary rate limit\b/i.test(message)
+          && !(retryTime > now) && !(resetTime > now)) {
+          // GitHub prescribes at least one minute, then exponential increases.
+          // Doubling is this client's engineering choice, not a quoted GitHub factor.
+          // Only a new upstream response advances it; no automatic retry or cutoff.
+          const delay = authorization.secondaryFailure === undefined ? 60_000 : authorization.secondaryFailure.delay * 2
+          authorization.secondaryFailure = { request: requestKey, delay }
+          retryTime = now + delay
+        }
+        const until = Math.max(Number.isFinite(retryTime) ? retryTime : 0, Number.isFinite(resetTime) ? resetTime : 0)
+        const retryAt = [403, 429].includes(response.status) && until > now ? until : undefined
+        const hint = token.source === 'GitHub CLI' && [401, 403, 404].includes(response.status) && retryAt === undefined ? GITHUB_CLI_ACCESS_REQUIRED + ' ' : ''
+        const error = new GitHubError(response.status, hint + 'GitHub ' + response.status + ': ' + message + ' (' + method + ' ' + path + '; authorization: ' + token.source + ')', retryAt === undefined ? undefined : (retryAt - now) / 1000, retryAt, retryAt === undefined ? undefined : {})
+        if (retryAt !== undefined) {
+          // https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api
+          const retain = (key: string, deadline: number) => {
+            if (Number.isFinite(deadline) && deadline > now && (authorization.limits.get(key)?.retryAt ?? 0) < deadline) {
+              authorization.limits.set(key, new GitHubError(error.status, error.message, (deadline - now) / 1000, deadline, error.rateLimit))
+            }
+          }
+          // A response may declare both limits. Keep their real scopes/deadlines
+          // separately: a longer core reset must not extend GraphQL's Retry-After.
+          retain('*', retryTime)
+          retain(response.headers.get('x-ratelimit-resource') || resource, resetTime)
+        }
+        throw error
       }
-      const result = response.status === 204 ? undefined : await response.json()
+      // An unrelated successful observation (for example HEAD304) is not proof
+      // that a still-failing mutation recovered. Keep only the current failure,
+      // not an accumulating per-URL history.
+      if (authorization.secondaryFailure?.request === requestKey) authorization.secondaryFailure = undefined
+      const result = response.status === 204 ? undefined : sha ? (await response.text()).trim() : await response.json()
+      if (sha && (typeof result !== 'string' || !/^[0-9a-f]{40}$/.test(result))) throw new GitHubError(502, 'GitHub returned an invalid commit SHA.')
       signal.throwIfAborted()
       return result as R
     }
-    return operation({ request })
+    return operation({ authorizationScope: authorization.scope, request,
+      // Official Get a commit SHA media type permits the local SHA as its ETag:
+      // https://docs.github.com/en/rest/commits/commits#get-a-commit
+      head: (path, knownHead) => request<string>('GET', path, undefined, { knownHead }),
+    })
   }
 }
 

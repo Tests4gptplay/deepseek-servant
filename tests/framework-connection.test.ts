@@ -81,6 +81,13 @@ class Remote {
       return this.inviteStatus === 204 ? new Response(null, { status: 204 }) : Response.json({ id: 901 }, { status: 201 })
     }
     if (this.failReads && method === 'GET') throw new Error('Synthetic read outage')
+    if (path.startsWith('/repos/example/private/commits/heads/')) {
+      assert.equal(new Headers(init?.headers).get('accept'), 'application/vnd.github.sha')
+      const branch = path.slice('/repos/example/private/commits/heads/'.length).split('/').map(decodeURIComponent).join('/')
+      if (branch !== this.branch || !this.head) return Response.json({ message: 'Reference not found' }, { status: 404 })
+      return new Headers(init?.headers).get('if-none-match') === `"${this.head}"`
+        ? new Response(null, { status: 304 }) : new Response(this.head + '\n')
+    }
     if (path.startsWith('/repos/example/private/git/ref/heads/')) {
       if (path.endsWith('/' + this.branch) && this.head) return Response.json({ object: { sha: this.head } })
       return Response.json({ message: 'Reference not found' }, { status: 404 })
@@ -584,4 +591,57 @@ test('connection: unknown hot seat change does not report success and retries th
       assert.deepEqual(JSON.parse((await connection.files.read(snapshot, resolved.path))!), pending.heartbeat)
     })
   } finally { remote.failReads = false; remote.mutationMode = 'normal'; await connection.close() }
+})
+
+test('connection lends its own snapshot to members but rejects other scopes and disconnected access', async t => {
+  const a = await openFrameworkConnection({mode:'local',directory:await directory(t),workerSeats:2}, {storage:memory()})
+  const b = await openFrameworkConnection({mode:'local',directory:await directory(t),workerSeats:2}, {storage:memory()})
+  try {
+    await withSnapshot(a.files, async snapshot => {
+      assert.equal((await a.members(snapshot)).length, 1)
+      assert.notEqual(await a.files.read(snapshot, a.registration.path), undefined)
+      await assert.rejects(b.members(snapshot), /snapshot/i)
+    })
+    await b.close()
+    await assert.rejects(b.members(), /closed/)
+  } finally { await a.close(); await b.close() }
+})
+
+test('connection cancellation aborts only its pending HTTP and preserves separate frontend and peer handles', async () => {
+  const remote=new Remote(), base=dependencies(remote), started=Promise.withResolvers<void>()
+  let hold=false, aborted=0
+  const connection=await openFrameworkConnection(gitSettings,{...base,fetch:async(url,init)=>{
+    if(hold && url.includes('/commits/heads/')) { started.resolve();return new Promise<Response>((_resolve,reject)=>{
+      init!.signal!.addEventListener('abort',()=>{aborted++;reject(init!.signal!.reason)},{once:true})
+    }) }
+    return remote.fetch(url,init)
+  }})
+  const front=await openFrameworkStorage(gitSettings,dependencies(remote))
+  const peer=await openFrameworkConnection(gitSettings,dependencies(remote))
+  try {
+    hold=true
+    const pending=connection.files.snapshot().then(()=>({cancelled:false}),error=>({cancelled:error.name==='AbortError'}))
+    await started.promise;connection.cancelPending()
+    assert.deepEqual(await pending,{cancelled:true});assert.equal(aborted,1)
+    await withSnapshot(front.files,async snapshot=>assert.ok(snapshot.revision))
+    await withSnapshot(front.files,snapshot=>front.files.commit(snapshot,[{path:'foreground/owned-chat.txt',content:'front remains writable'}],'independent frontend write'))
+    assert.equal((await peer.members()).length,2)
+    hold=false;await connection.close()
+    const observed=await peer.members()
+    assert.equal(observed.find(row=>row.instanceUUID===connection.registration.instanceUUID)!.availability,'stopped')
+    assert.notEqual(observed.find(row=>row.instanceUUID===peer.registration.instanceUUID)!.availability,'stopped')
+  } finally {hold=false;connection.cancelPending();await connection.close();await front.close();await peer.close()}
+})
+
+test('cancelled opening propagates ownership into token acquisition before any remote mutation', async () => {
+  const remote=new Remote(), controller=new AbortController(), entered=Promise.withResolvers<void>()
+  let aborted=0
+  const pending=openFrameworkConnection(gitSettings,{...dependencies(remote),signal:controller.signal,
+    credentials:{resolve:async signal=>{assert.ok(signal);entered.resolve();await new Promise<void>((_resolve,reject)=>signal.addEventListener('abort',()=>{aborted++;reject(signal.reason)},{once:true}));throw new Error('unreachable')}}})
+    .then(()=>({cancelled:false}),error=>({cancelled:error.name==='AbortError'}))
+  await entered.promise;controller.abort()
+  assert.deepEqual(await pending,{cancelled:true});assert.equal(aborted,1)
+  assert.equal(remote.requests.length,0)
+  await assert.rejects(openFrameworkConnection(gitSettings,{...dependencies(remote),signal:controller.signal}),{name:'AbortError'})
+  assert.equal(remote.requests.length,0)
 })

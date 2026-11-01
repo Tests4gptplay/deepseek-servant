@@ -78,6 +78,13 @@ class Remote {
       return this.inviteStatus === 204 ? new Response(null, { status: 204 }) : Response.json({ id: 901 }, { status: 201 })
     }
     if (this.failReads && method === 'GET') throw new Error('Synthetic read outage')
+    if (path.startsWith('/repos/example/private/commits/heads/')) {
+      assert.equal(new Headers(init?.headers).get('accept'), 'application/vnd.github.sha')
+      const branch = path.slice('/repos/example/private/commits/heads/'.length).split('/').map(decodeURIComponent).join('/')
+      if (branch !== this.branch || !this.head) return Response.json({ message: 'Reference not found' }, { status: 404 })
+      return new Headers(init?.headers).get('if-none-match') === `"${this.head}"`
+        ? new Response(null, { status: 304 }) : new Response(this.head + '\n')
+    }
     if (path.startsWith('/repos/example/private/git/ref/heads/')) {
       if (path.endsWith('/' + this.branch) && this.head) return Response.json({ object: { sha: this.head } })
       return Response.json({ message: 'Reference not found' }, { status: 404 })

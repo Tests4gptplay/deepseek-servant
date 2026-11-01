@@ -59,6 +59,13 @@ class IdentityTransport {
     if (path === '/user') return Response.json(this.account)
     if (path === '/repos/alice/private') return Response.json({ id: 77, full_name: 'alice/private', private: true, default_branch: 'main', permissions: { pull: true, push: true } })
     if (path === '/repos/alice/private/branches') return Response.json(this.empty ? [] : [{ name: 'main' }])
+    if (path === '/repos/alice/private/commits/heads/main') {
+      assert.equal(new Headers(init?.headers).get('accept'), 'application/vnd.github.sha')
+      if (this.empty) return Response.json({ message: 'not found' }, { status: 404 })
+      const sha = 'a'.repeat(40)
+      return new Headers(init?.headers).get('if-none-match') === `"${sha}"`
+        ? new Response(null, { status: 304 }) : new Response(sha + '\n')
+    }
     if (this.empty && path === '/repos/alice/private/git/ref/heads/main') return Response.json({ message: 'not found' }, { status: 404 })
     if (path === '/repos/alice/private/git/ref/heads/main') return Response.json({ object: { sha: 'a'.repeat(40) } })
     if (path === '/repos/alice/private/git/commits/' + 'a'.repeat(40)) return Response.json({ sha: 'a'.repeat(40), tree: { sha: 'b'.repeat(40) }, parents: [], message: 'initial' })

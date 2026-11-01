@@ -10,7 +10,7 @@ test('GitHub CLI is the only connection source and legacy source settings are di
   assert.equal('tokenRef' in settings, false)
   let cliReads = 0
   const credentials = new CoopCredentials(async () => { cliReads++; return 'cli-fixture' })
-  const client = new GitHubClient(() => credentials.resolve(), async (url, options) => {
+  const client = new GitHubClient(signal => credentials.resolve(signal), async (url, options) => {
     assert.equal((options?.headers as Record<string, string>).Authorization, 'Bearer cli-fixture')
     if (url.endsWith('/user')) return Response.json({ id: 1, login: 'owner' })
     return Response.json({ id: 77, full_name: 'example/private', default_branch: 'main', private: true, permissions: { pull: true, push: true } })
@@ -23,7 +23,7 @@ test('GitHub CLI is the only connection source and legacy source settings are di
 test('missing GitHub CLI or login returns setup instructions before sending a request', async () => {
   const credentials = new CoopCredentials(async () => undefined)
   let requests = 0
-  const client = new GitHubClient(() => credentials.resolve(), async () => { requests++; return Response.json({}) })
+  const client = new GitHubClient(signal => credentials.resolve(signal), async () => { requests++; return Response.json({}) })
   await assert.rejects(client.session(session => session.request('GET', '/user')), { message: GITHUB_CLI_SETUP_REQUIRED })
   assert.equal(requests, 0)
 })

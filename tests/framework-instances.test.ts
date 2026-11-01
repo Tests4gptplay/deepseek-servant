@@ -10,6 +10,64 @@ import { FilesConflictError, withSnapshot } from '../src/framework/transactions.
 import { InstanceRegistration, loadOrCreateInstanceUuid, type InstanceConfig } from '../src/framework/instances.js'
 const UUID = '00000000-0000-4000-8000-000000000001'
 const UUID2 = '00000000-0000-4000-8000-000000000002'
+
+test('unchanged heartbeat versions reuse parsed observations without inventing progress', async t => {
+  const f = await fixture(t), writer = f.create(), registered = await writer.register()
+  const observer = f.create()
+  const read = f.files.read.bind(f.files)
+  let reads = 0
+  f.files.read = async (snapshot, path) => { if (path === registered.path) reads++; return read(snapshot, path) }
+  const first = await observer.observe()
+  assert.equal(reads, 1)
+  first[0]!.heartbeat!.sequence = 999 // Returned views do not own the observer's cached value.
+  f.time(30_000)
+  assert.equal((await observer.observe())[0]!.heartbeat!.sequence, 1)
+  await withSnapshot(f.files, snapshot => f.files.commit(snapshot, [{ path: 'unrelated.txt', content: 'changed' }], 'unrelated metadata'))
+  f.time(180_000)
+  assert.equal((await observer.observe())[0]!.availability, 'offline')
+  assert.equal(reads, 1, 'unchanged immutable heartbeat version needs no new body read')
+  await withSnapshot(f.files, snapshot => f.files.commit(snapshot, [{ path: registered.path,
+    content: JSON.stringify({ sequence: 2, updatedAt: '1970-01-01T00:03:00.000Z', status: 'running' }) }], 'real sequence advance'))
+  assert.equal((await observer.observe())[0]!.availability, 'online')
+  assert.equal(reads, 2)
+})
+
+test('heartbeat observation cache follows changed invalid records, removal and reappearance', async t => {
+  const f = await fixture(t), registered = await f.create().register(), observer = f.create()
+  const read = f.files.read.bind(f.files)
+  let reads = 0
+  f.files.read = async (snapshot, path) => { if (path === registered.path) reads++; return read(snapshot, path) }
+  await observer.observe()
+  await withSnapshot(f.files, snapshot => f.files.commit(snapshot, [{ path: registered.path, content: 'invalid-json' }], 'invalid fixture'))
+  assert.match((await observer.observe())[0]!.error!, /Invalid heartbeat/)
+  assert.match((await observer.observe())[0]!.error!, /Invalid heartbeat/)
+  assert.equal(reads, 2, 'the same invalid version is not fetched each poll')
+  await withSnapshot(f.files, snapshot => f.files.commit(snapshot, [{ path: registered.path, content: null }], 'remove fixture'))
+  assert.deepEqual(await observer.observe(), [])
+  await withSnapshot(f.files, snapshot => f.files.commit(snapshot, [{ path: registered.path, content: 'invalid-json' }], 'reappear fixture'))
+  assert.match((await observer.observe())[0]!.error!, /Invalid heartbeat/)
+  assert.equal(reads, 3, 'removed path entries are evicted even when the same bytes reappear')
+})
+
+test('cached heartbeats never bypass a failed current listing or invent continuity after reconnection', async t => {
+  const f = await fixture(t), writer = f.create(), registered = await writer.register(), observer = f.create()
+  await observer.observe()
+  f.time(30_000); await writer.tick()
+  assert.equal((await observer.observe())[0]!.availability, 'online')
+  const list = f.files.listDirectory.bind(f.files)
+  let fail = true
+  f.files.listDirectory = async (snapshot, path) => {
+    if (fail && path === 'instances/') throw new Error('synthetic listing interrupted')
+    return list(snapshot, path)
+  }
+  await assert.rejects(observer.observe(), /synthetic listing interrupted/)
+  fail = false; f.time(1_000_000)
+  const restored = await observer.observe()
+  assert.equal(restored[0]!.path, registered.path)
+  assert.equal(restored[0]!.availability, 'unknown')
+  f.time(1_180_000)
+  assert.equal((await observer.observe())[0]!.availability, 'offline')
+})
 function memory(): StoragePort {
   const rows = new Map<string, unknown>()
   return {
@@ -326,4 +384,72 @@ for (const pending of [false, true]) test('proven old invited owner-name collisi
     assert.equal(snapshot.revision, revision)
     assert.ok(await f.files.read(snapshot, oldPath))
   })
+})
+
+test('borrowed heartbeat snapshot stays owned by caller and never crosses storage scopes', async t => {
+  const f = await fixture(t), g = await fixture(t), observer = f.create()
+  const registered = await observer.register()
+  let acquisitions = 0
+  const snapshot = f.files.snapshot.bind(f.files)
+  f.files.snapshot = async () => { acquisitions++; return snapshot() }
+  await withSnapshot(f.files, async current => {
+    assert.equal((await observer.observe(current))[0]!.member, registered.member)
+    assert.notEqual(await f.files.read(current, registered.path), undefined, 'observer did not release borrowed view')
+  })
+  assert.equal(acquisitions, 1)
+  await withSnapshot(g.files, current => assert.rejects(observer.observe(current), /snapshot/i))
+  assert.equal((await observer.observe())[0]!.availability, 'unknown')
+})
+
+test('confirmed heartbeat readback supplies the next observation without rereading the same body', async t => {
+  const f = await fixture(t), writer = f.create()
+  let reads = 0
+  const read = f.files.read.bind(f.files)
+  f.files.read = async (snapshot,path) => { if (path.startsWith('instances/')) reads++; return read(snapshot,path) }
+  await writer.register()
+  const registeredReads = reads
+  await writer.observe()
+  assert.equal(reads, registeredReads, 'the same registration already read back these exact bytes')
+  f.time(30_000)
+  await writer.tick()
+  const publishedReads = reads
+  const current = await writer.observe()
+  assert.equal(current[0]!.heartbeat!.sequence, 2)
+  assert.equal(current[0]!.availability, 'online', 'readback reuse does not bypass real sequence observation')
+  assert.equal(reads, publishedReads)
+})
+
+
+for (const failure of ['unavailable', 'different'] as const) test('unconfirmed heartbeat readback never supplies an observation: '+failure, async t => {
+  const f=await fixture(t), writer=f.create(), read=f.files.read.bind(f.files)
+  f.files.read=async(snapshot,path)=>{
+    const body=await read(snapshot,path)
+    if(path.startsWith('instances/') && body!==undefined) {
+      if(failure==='unavailable') throw new Error('readback unavailable')
+      return JSON.stringify({...JSON.parse(body),sequence:999})
+    }
+    return body
+  }
+  await assert.rejects(writer.register(), /readback unavailable|read-back differs/)
+  let reads=0
+  f.files.read=async(snapshot,path)=>{if(path.startsWith('instances/'))reads++;return read(snapshot,path)}
+  const observed=await writer.observe()
+  assert.equal(reads,1)
+  assert.equal(observed[0]!.heartbeat!.sequence,1)
+  assert.ok((await f.storage.list<any>('framework-instance/'))[0]!.value.pending)
+})
+
+test('another writer version and registration rename invalidate the verified readback handoff', async t => {
+  const f=await fixture(t), writer=f.create(), original=await writer.register(), read=f.files.read.bind(f.files)
+  let reads=0
+  f.files.read=async(snapshot,path)=>{if(path.startsWith('instances/'))reads++;return read(snapshot,path)}
+  await withSnapshot(f.files,snapshot=>f.files.commit(snapshot,[{path:original.path,content:JSON.stringify({sequence:7,updatedAt:'2026-11-01T00:00:00Z',status:'stopped'})}],'another real writer'))
+  assert.equal((await writer.observe())[0]!.availability,'stopped')
+  assert.equal(reads,1)
+  const renamed=original.path.replace('Workers2','Workers3')
+  await withSnapshot(f.files,snapshot=>f.files.commit(snapshot,[{path:original.path,content:null},{path:renamed,content:JSON.stringify({sequence:8,updatedAt:'2026-11-01T00:00:00Z',status:'running'})}],'rename registration'))
+  assert.equal((await writer.observe())[0]!.workerSeats,3)
+  assert.equal(reads,2)
+  await withSnapshot(f.files,snapshot=>f.files.commit(snapshot,[{path:renamed,content:null}],'remove registration'))
+  assert.deepEqual(await writer.observe(),[])
 })

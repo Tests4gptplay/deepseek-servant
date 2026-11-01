@@ -35,10 +35,25 @@ export class GitCommitOutcomeUnknownError extends Error {
     this.expectedHead = operation.expectedHead
   }
 }
-interface RemoteScope { connection: RepoConnection; directory: string; path: string; generation: number }
+interface RemoteScope { connection: RepoConnection; directory: string; path: string; generation: number; metadata: ScopeMetadata }
 interface TreeEntry { path: string; type: 'blob' | 'tree' | 'commit'; sha: string; size?: number }
 interface RemoteCommit { sha: string; tree: { sha: string }; parents: Array<{ sha: string }>; message: string }
-interface SnapshotState { scope: RemoteScope; trees: Map<string, Promise<TreeEntry[]>>; loaded: Set<string> }
+interface ScopeMetadata {
+  key: string
+  authorizationScope: object
+  head?: string
+  latestTree?: { head: string; tree: string }
+  view?: TreeNode
+}
+interface TreeNode {
+  sha: string
+  entries?: TreeEntry[]
+  pending?: Promise<TreeEntry[]>
+  children: Map<string, TreeNode>
+  /** Last expanded view of this path, until its replacement is actually read. */
+  previous?: TreeNode
+}
+interface SnapshotState { scope: RemoteScope; head: string; root: TreeNode; nodes: Map<string, TreeNode>; loaded: Set<string> }
 const sha256 = (value: string | Uint8Array) => createHash('sha256').update(value).digest('hex')
 function changeBytes(change: GitChange): Buffer | null {
   if (change.bytes !== undefined) {
@@ -52,23 +67,24 @@ function changeBytes(change: GitChange): Buffer | null {
 const encodePath = (path: string) => path.split('/').map(encodeURIComponent).join('/')
 
 /** Remote-only authoritative storage. No worktree, bare repository or body mirror.
- * Immutable tree metadata is retained only for the lifetime of a caller's snapshot.
+ * Only immutable tree metadata is shared in memory within an authenticated scope;
+ * each snapshot retains separate file/read sets. No business body is cached.
  * expectedHeadOid covers file reads AND empty directory predicates: never reparent
  * a checked transaction. Conflicts return to the caller for business re-evaluation.
  */
 export class GitHubRepository implements GitRepository {
   private generation = 0
-  private checked?: { key: string; connection: RepoConnection }
-  private latestTree?: { scopeKey: string; head: string; tree: string }
+  private checked?: { key: string; authorizationScope: object; connection: RepoConnection }
+  private metadata?: ScopeMetadata
   private states = new WeakMap<GitSnapshot, SnapshotState>()
   constructor(private readonly client: GitHubClient, private readonly binding: () => RepoBinding,
     _tokens?: TokenSource, _legacyCacheRoot?: string) {}
-  cancel(): void { this.generation++; this.checked = undefined; this.latestTree = undefined; this.client.cancel() }
+  cancel(): void { this.generation++; this.checked = undefined; this.metadata = undefined; this.client.cancel() }
   async releaseCache(): Promise<void> { this.cancel(); this.states = new WeakMap() }
   private async session<T>(operation: (session: GitHubSession) => Promise<T>): Promise<T> {
     try { return await this.client.session(operation) }
     catch (error) {
-      if (error instanceof GitHubError && [401, 403].includes(error.status)) this.checked = undefined
+      if (error instanceof GitHubError && [401, 403].includes(error.status) && error.retryAt === undefined) { this.checked = undefined; this.metadata = undefined }
       throw error
     }
   }
@@ -78,17 +94,21 @@ export class GitHubRepository implements GitRepository {
   private async scope(session: GitHubSession, recheck = false, connect = false): Promise<RemoteScope> {
     const generation = this.generation, binding = this.binding()
     const key = JSON.stringify([binding.ownerRepo, binding.repositoryId, binding.participantId, binding.branch, binding.repositoryDirectory])
-    let connection = !recheck && this.checked?.key === key ? this.checked.connection : undefined
+    let connection = !recheck && this.checked?.key === key && this.checked.authorizationScope === session.authorizationScope ? this.checked.connection : undefined
     // Connection/account changes and writes recheck identity. Ordinary polling uses
     // GitHub authorization on each HEAD request, not a second /user handshake timer.
     if (!connection) {
       connection = await inspectPrivateRepo(session, connect ? { ...binding, participantId: undefined } : binding)
       this.check({ generation } as RemoteScope)
-      this.checked = { key, connection }
+      this.checked = { key, authorizationScope: session.authorizationScope, connection }
     }
     const directory = binding.repositoryDirectory ?? 'dss-coop'
     if (directory && (!validCoopPath('dss-coop/' + directory) || directory.startsWith('/'))) throw new Error('Use a directory inside the Git repository.')
-    return { connection, directory, path: repositoryPath(connection.repository.fullName), generation }
+    const metadataKey = JSON.stringify([key, connection.identity.id, connection.repository.id, connection.repository.fullName, connection.repository.branch, directory])
+    if (this.metadata?.key !== metadataKey || this.metadata.authorizationScope !== session.authorizationScope) {
+      this.metadata = { key: metadataKey, authorizationScope: session.authorizationScope }
+    }
+    return { connection, directory, path: repositoryPath(connection.repository.fullName), generation, metadata: this.metadata }
   }
   private check(scope: RemoteScope): void {
     if (scope.generation !== this.generation) throw new DOMException('Repository operation canceled.', 'AbortError')
@@ -100,9 +120,13 @@ export class GitHubRepository implements GitRepository {
   }
   private async head(session: GitHubSession, scope: RemoteScope): Promise<string> {
     try {
-      return (await session.request<{ object: { sha: string } }>('GET', scope.path + '/git/ref/heads/' + encodePath(scope.connection.repository.branch))).object.sha
+      const head = await session.head(scope.path + '/commits/heads/' + encodePath(scope.connection.repository.branch), scope.metadata.head)
+      this.check(scope)
+      scope.metadata.head = head
+      return head
     } catch (error) {
       if (!(error instanceof GitHubError) || ![404, 409].includes(error.status)) throw error
+      scope.metadata.head = undefined
       // Do not reinterpret a wrong branch, removed access, or network failure as an
       // empty repository. This successful branch listing establishes the empty case.
       const branches = await session.request<Array<{ name: string }>>('GET', scope.path + '/branches?per_page=1')
@@ -111,18 +135,29 @@ export class GitHubRepository implements GitRepository {
     }
   }
   private async makeSnapshot(session: GitHubSession, scope: RemoteScope, head: string): Promise<GitSnapshot> {
-    const scopeKey = scope.path + '/' + scope.directory
-    let tree = this.latestTree?.scopeKey === scopeKey && this.latestTree.head === head ? this.latestTree.tree : undefined
+    let tree = scope.metadata.latestTree?.head === head ? scope.metadata.latestTree.tree : undefined
     if (tree === undefined) tree = head ? (await session.request<RemoteCommit>('GET', scope.path + '/git/commits/' + head)).tree.sha : ''
     this.check(scope)
-    this.latestTree = { scopeKey, head, tree }
+    if (head === scope.metadata.head) scope.metadata.latestTree = { head, tree }
+    // Observing a HEAD does not replace directory ownership. Only an actually
+    // expanded root publishes a new view; historical snapshots own their roots.
+    const view = scope.metadata.view
+    const root: TreeNode = view?.sha === tree ? view : { sha: tree, children: new Map(), previous: view }
+    const nodes = new Map<string, TreeNode>()
+    const index = (node: TreeNode): void => {
+      if (nodes.has(node.sha)) return
+      nodes.set(node.sha, node)
+      for (const child of node.children.values()) index(child)
+      if (node.previous) index(node.previous)
+    }
+    index(root)
     const snapshot: GitSnapshot = { head, tree, files: new Map(), reads: new Map() }
-    this.states.set(snapshot, { scope, trees: new Map(), loaded: new Set() })
+    this.states.set(snapshot, { scope, head, root, nodes, loaded: new Set() })
     return snapshot
   }
   snapshot(_afterWrite = false): Promise<GitSnapshot> {
     // Each invocation reads the remote branch; no pre-write request is reused by
-    // read-back, and immutable snapshots never borrow mutable metadata from others.
+    // read-back. Only immutable tree responses may be shared across snapshots.
     return this.session(async session => {
       const scope = await this.scope(session)
       return this.makeSnapshot(session, scope, await this.head(session, scope))
@@ -138,32 +173,48 @@ export class GitHubRepository implements GitRepository {
     this.check(state.scope)
     return state
   }
-  private tree(session: GitHubSession, state: SnapshotState, sha: string): Promise<TreeEntry[]> {
-    let pending = state.trees.get(sha)
-    if (!pending) {
-      pending = session.request<{ tree: TreeEntry[]; truncated: boolean }>('GET', state.scope.path + '/git/trees/' + sha).then(result => {
+  private async tree(session: GitHubSession, state: SnapshotState, node: TreeNode): Promise<TreeEntry[]> {
+    if (!node.entries && !node.pending) {
+      node.pending = session.request<{ tree: TreeEntry[]; truncated: boolean }>('GET', state.scope.path + '/git/trees/' + node.sha).then(result => {
         this.check(state.scope)
         // Non-recursive trees avoid the recursive API's 100,000 entry/7 MB cap.
-        // Never silently interpret a truncated response as a complete directory.
-        if (result.truncated) throw new Error('GitHub returned a truncated directory tree: ' + sha)
+        if (result.truncated) throw new Error('GitHub returned a truncated directory tree: ' + node.sha)
+        for (const child of result.tree.filter(entry => entry.type === 'tree')) {
+          let next = state.nodes.get(child.sha)
+          if (!next) {
+            const prior = node.previous?.children.get(child.path)
+            // Unexpanded revisions are not history: keep only the last expanded
+            // view of a changed path until its real children become known.
+            next = { sha: child.sha, children: new Map(), previous: prior?.entries ? prior : prior?.previous }
+            state.nodes.set(child.sha, next)
+          }
+          node.children.set(child.path, next)
+        }
+        node.entries = result.tree
+        node.previous = undefined
         return result.tree
-      }).catch(error => { state.trees.delete(sha); throw error })
-      state.trees.set(sha, pending)
+      }).catch(error => { node.pending = undefined; throw error })
     }
-    return pending
+    const entries = node.entries ?? await node.pending!
+    this.check(state.scope)
+    // Replacing the root releases deleted/unreachable branches from the active
+    // view. Other fixed snapshots alone retain any older graph they still use.
+    if (node === state.root && state.head === state.scope.metadata.head) state.scope.metadata.view = node
+    return entries
   }
-  private async entry(session: GitHubSession, snapshot: GitSnapshot, physical: string): Promise<TreeEntry | undefined> {
+  private async entry(session: GitHubSession, snapshot: GitSnapshot, physical: string): Promise<(TreeEntry & { node?: TreeNode }) | undefined> {
     const state = this.state(snapshot)
+    if (session.authorizationScope !== state.scope.metadata.authorizationScope) throw new GitHubError(409, 'The GitHub authorization changed. Read a new snapshot before continuing.')
     if (!snapshot.tree) return
-    if (!physical) return { path: '', type: 'tree', sha: snapshot.tree }
-    let sha = snapshot.tree
+    if (!physical) return { path: '', type: 'tree', sha: snapshot.tree, node: state.root }
+    let node = state.root
     const parts = physical.split('/')
     for (let i = 0; i < parts.length; i++) {
-      const found = (await this.tree(session, state, sha)).find(item => item.path === parts[i])
+      const found = (await this.tree(session, state, node)).find(item => item.path === parts[i])
       if (!found) return
-      if (i === parts.length - 1) return found
+      if (i === parts.length - 1) return found.type === 'tree' ? { ...found, node: node.children.get(found.path)! } : found
       if (found.type !== 'tree') return
-      sha = found.sha
+      node = node.children.get(found.path)!
     }
   }
   /** Direct children only: Host can inspect root signals without watching other
@@ -176,7 +227,7 @@ export class GitHubRepository implements GitRepository {
     return this.session(async session => {
       const entry = await this.entry(session, snapshot, this.physical(state.scope, root))
       if (!entry || entry.type !== 'tree') return []
-      const children = await this.tree(session, state, entry.sha)
+      const children = await this.tree(session, state, entry.node!)
       this.check(state.scope)
       return children.map(child => ({ ...child, path: root + '/' + child.path }))
     })
@@ -186,7 +237,7 @@ export class GitHubRepository implements GitRepository {
     return this.session(async session => {
       const entry = await this.entry(session, snapshot, this.physical(state.scope, root))
       if (!entry || entry.type !== 'tree') return []
-      return (await this.tree(session, state, entry.sha)).filter(item => item.type === 'tree').map(item => root + '/' + item.path + '/')
+      return (await this.tree(session, state, entry.node!)).filter(item => item.type === 'tree').map(item => root + '/' + item.path + '/')
     })
   }
   async list(snapshot: GitSnapshot, prefix: string): Promise<void> {
@@ -194,13 +245,13 @@ export class GitHubRepository implements GitRepository {
     if (state.loaded.has(root)) return
     await this.session(async session => {
       const entry = await this.entry(session, snapshot, this.physical(state.scope, root)), files = new Map<string, string>()
-      const visit = async (sha: string, logical: string): Promise<void> => {
-        for (const child of await this.tree(session, state, sha)) {
-          if (child.type === 'tree') await visit(child.sha, logical + '/' + child.path)
+      const visit = async (node: TreeNode, logical: string): Promise<void> => {
+        for (const child of await this.tree(session, state, node)) {
+          if (child.type === 'tree') await visit(node.children.get(child.path)!, logical + '/' + child.path)
           else if (child.type === 'blob') files.set(logical + '/' + child.path, child.sha)
         }
       }
-      if (entry?.type === 'tree') await visit(entry.sha, root)
+      if (entry?.type === 'tree') await visit(entry.node!, root)
       this.check(state.scope)
       // Publish only a successful, complete enumeration; overlapping readers never
       // see a temporarily emptied collection while a remote request is in flight.
@@ -379,7 +430,7 @@ export class GitHubRepository implements GitRepository {
         result = await session.request('POST', '/graphql', { query: 'mutation DSSCommit($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }', variables: { input } })
       } catch (error) {
         if (error instanceof GitHubError && [401, 403].includes(error.status)) {
-          this.checked = undefined
+          if (error.retryAt === undefined) this.checked = undefined
           // An explicit authorization rejection is not a transport-unknown write.
           // Preserve its exact upstream status so revocation remains visible.
           throw error

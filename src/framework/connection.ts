@@ -7,7 +7,7 @@ import { GitHubRepository } from '../experimental/private-git/git-repository.js'
 import { FrameworkTransactions } from './command-transactions.js'
 import { InstanceRegistration, loadOrCreateInstanceUuid, type ObservedInstance, type RegisteredInstance } from './instances.js'
 import { LocalFiles } from './local-files.js'
-import { GitFiles, type FilesStore, type GitOperationRecord, type GitOperationStore } from './transactions.js'
+import { GitFiles, type FilesStore, type FilesSnapshot, type GitOperationRecord, type GitOperationStore } from './transactions.js'
 
 export type FrameworkConnectionSettings =
   | { mode: 'local'; directory: string; login?: string; workerSeats: number }
@@ -17,6 +17,8 @@ export interface FrameworkConnectionDependencies {
   credentials?: Pick<CoopCredentials, 'resolve'>
   fetch?: GitHubFetch
   now?: () => number
+  /** Cancellation owned by this acquisition, not another mode or storage handle. */
+  signal?: AbortSignal
 }
 export interface FrameworkStorage {
   readonly files: FilesStore
@@ -32,6 +34,7 @@ export interface FrameworkStorage {
   gitMemberAction?(action: { action: 'cancelInvitation'; invitationId: number } | { action: 'remove'; username: string }): Promise<void>
   invite?(username: string): Promise<{ status: 'pending' | 'accepted'; id?: number; login: string }>
   /** Releases resources only: does not publish instance registration or status. */
+  cancelPending(): void
   close(): Promise<void>
 }
 export interface FrameworkConnection {
@@ -42,10 +45,11 @@ export interface FrameworkConnection {
   readonly repository?: RepoConnection
   /** Full registered roster, including unknown/offline/stopped instances. */
   updateWorkerSeats(workerSeats: number): Promise<RegisteredInstance>
-  members(): Promise<ObservedInstance[]>
+  members(snapshot?: FilesSnapshot): Promise<ObservedInstance[]>
   /** Called by the existing Host loop; owns no independent timer. */
   tick(): Promise<void>
   observationInterrupted(): void
+  cancelPending(): void
   close(): Promise<void>
 }
 const digest = (value: string) => createHash('sha256').update(value).digest('hex')
@@ -65,12 +69,15 @@ function operations(storage: StoragePort, scope: string): GitOperationStore {
 export async function openFrameworkStorage(input: FrameworkConnectionSettings,
   dependencies: FrameworkConnectionDependencies): Promise<FrameworkStorage> {
   const { storage } = dependencies
+  dependencies.signal?.throwIfAborted()
   const settings: FrameworkConnectionSettings = input.mode === 'git'
     ? { ...input, repositoryDirectory: RepositoryDirectorySchema.parse(input.repositoryDirectory) } : { ...input }
   if (!Number.isSafeInteger(settings.workerSeats) || settings.workerSeats < 0) throw new Error('Worker seats must be a nonnegative integer.')
   const instanceUUID = await loadOrCreateInstanceUuid(storage)
+  dependencies.signal?.throwIfAborted()
   let invite: FrameworkStorage['invite'], gitMembers: FrameworkStorage['gitMembers'], gitMemberAction: FrameworkStorage['gitMemberAction']
   let release: (() => Promise<void>) | undefined
+  let cancelPending = () => {}
   try {
     let files: FilesStore, scope: string, login: string, owner: string, repositoryId: string | number
     let repository: RepoConnection | undefined
@@ -90,11 +97,13 @@ export async function openFrameworkStorage(input: FrameworkConnectionSettings,
         ? label : 'local-' + instanceUUID
     } else {
       const credentials = dependencies.credentials ?? new CoopCredentials()
-      const client = new GitHubClient(() => credentials.resolve(), dependencies.fetch)
+      const client = new GitHubClient(signal => credentials.resolve(signal), dependencies.fetch, { signal: dependencies.signal })
       let binding: RepoBinding = { ownerRepo: settings.ownerRepo, repositoryDirectory: settings.repositoryDirectory }
       const remote = new GitHubRepository(client, () => binding)
       release = () => remote.releaseCache()
+      cancelPending = () => remote.cancel()
       repository = await remote.connect()
+      dependencies.signal?.throwIfAborted()
       binding = { ...binding, ownerRepo: repository.repository.fullName, repositoryId: repository.repository.id,
         participantId: repository.identity.id, branch: repository.repository.branch }
       scope = JSON.stringify(['git', repository.repository.id, repository.repository.branch, settings.repositoryDirectory])
@@ -112,13 +121,15 @@ export async function openFrameworkStorage(input: FrameworkConnectionSettings,
       initializeWrite = async () => { await remote.ensureBranch() }
       files = new GitFiles(remote, operations(storage, scope))
     }
+    dependencies.signal?.throwIfAborted()
     // This records requested nonsecret settings, not an assertion of successful connection.
     await storage.set('framework-connection-settings/' + digest(scope), settings)
+    dependencies.signal?.throwIfAborted()
     const transactions = new FrameworkTransactions(files, storage, scope)
     let closed = false, closing: Promise<void> | undefined, preparing: Promise<void> | undefined
     const assertOpen = () => { if (closed) throw new Error('Framework storage is closed.') }
     return {
-      files, transactions, scope, repository, invite, gitMembers, gitMemberAction, identity: { login, owner, instanceUUID, repositoryId },
+      files, transactions, scope, repository, invite, gitMembers, gitMemberAction, cancelPending, identity: { login, owner, instanceUUID, repositoryId },
       prepareWrite: async () => {
         assertOpen()
         if (!preparing) {
@@ -144,20 +155,24 @@ export async function openFrameworkConnection(settings: FrameworkConnectionSetti
   dependencies: FrameworkConnectionDependencies): Promise<FrameworkConnection> {
   const access = await openFrameworkStorage(settings, dependencies)
   try {
+    dependencies.signal?.throwIfAborted()
     const { files, transactions, scope, repository, identity } = access
     const instances = new InstanceRegistration(files, transactions, dependencies.storage,
       { ...(repository ? { accountId: repository.identity.id } : {}), repositoryId: identity.repositoryId, repositoryOwner: identity.owner, login: identity.login,
         instanceUUID: identity.instanceUUID, workerSeats: settings.workerSeats }, dependencies.now)
     await instances.assertAccountIdentity()
+    dependencies.signal?.throwIfAborted()
     await access.prepareWrite()
+    dependencies.signal?.throwIfAborted()
     const principal = (value: RegisteredInstance): RegisteredInstance => settings.mode === 'local' ? { ...value, primary: true } : value
     let registration = principal(await instances.register())
+    dependencies.signal?.throwIfAborted()
     let closed = false, closing: Promise<void> | undefined
     const assertOpen = () => { if (closed) throw new Error('Framework connection is closed.') }
     return {
-      files, transactions, get registration() { return registration }, scope, repository,
+      files, transactions, cancelPending: () => access.cancelPending(), get registration() { return registration }, scope, repository,
       updateWorkerSeats: async workerSeats => { assertOpen(); registration = principal(await instances.updateWorkerSeats(workerSeats)); return registration },
-      members: async () => { assertOpen(); const rows = await instances.observe(); return settings.mode === 'local'
+      members: async snapshot => { assertOpen(); const rows = await instances.observe(snapshot); return settings.mode === 'local'
         ? rows.map(row => ({ ...row, primary: row.instanceUUID === identity.instanceUUID })) : rows },
       tick: async () => {
         assertOpen()

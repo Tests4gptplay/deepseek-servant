@@ -354,3 +354,76 @@ test('two Hosts retire T1 while T2 member work survives byte-for-byte and remain
     assert.deepEqual(errors, [])
   } finally { await a.stop(); await b.stop() }
 }))
+
+
+test('one poll lends a single post-maintenance snapshot to discovery and task decisions', () => fixture(async f => {
+  let count = 0, lent: unknown
+  const snapshot = f.files.snapshot.bind(f.files)
+  f.files.snapshot = async () => { count++; return snapshot() }
+  f.hooks.observe = async () => {
+    await put(f.files, 'state/Worker_A_Direct_after-maintenance', '')
+  }
+  ;(f.hooks as any).discover = async (current: any) => {
+    lent = current
+    assert.equal(await f.files.read(current, 'state/Worker_A_Direct_after-maintenance'), '')
+  }
+  const list = f.files.listDirectory.bind(f.files)
+  f.files.listDirectory = async (current, path) => {
+    if (path === 'tasks/' || path === 'state/') assert.equal(current, lent)
+    return list(current, path)
+  }
+  await f.loop.poll()
+  assert.equal(count, 2, 'one maintenance write snapshot and one shared observation snapshot')
+  assert.equal(f.wakes[0]?.workerId, 'after-maintenance')
+  await assert.rejects(f.files.read(lent as any, 'state/Worker_A_Direct_after-maintenance'), /snapshot/i)
+}))
+
+
+test('failed acquisition reports the lost discovery interval instead of calling discovery with a stale view', () => fixture(async f => {
+  const snapshot = f.files.snapshot.bind(f.files)
+  let interrupted = 0, discoveries = 0
+  f.hooks.discoveryInterrupted = () => { interrupted++ }
+  f.hooks.discover = async () => { discoveries++ }
+  f.files.snapshot = async () => { throw new Error('remote unavailable') }
+  await assert.rejects(f.loop.poll(), /remote unavailable/)
+  assert.equal(interrupted, 1)
+  assert.equal(discoveries, 0)
+  f.files.snapshot = snapshot
+  await f.loop.poll()
+  assert.equal(discoveries, 1)
+}))
+
+test('busy Organizer completion discovery uses signal metadata, not empty marker bodies', () => fixture(async f => {
+  const taskId='completion-metadata'
+  await put(f.files,paths.task(taskId),encodeJson({version:1,taskId,route:'O',owner:'A',sourcePath:'tasks/completion_O.md',status:'running',members:['A','B']}))
+  await put(f.files,paths.state('A',taskId)+'/complete','')
+  await put(f.files,paths.state('B',taskId)+'/complete','')
+  const read=f.files.read.bind(f.files); let bodyReads=0
+  f.files.read=async(snapshot,path)=>{if(path.endsWith('/complete'))bodyReads++;return read(snapshot,path)}
+  f.busy(true); await f.loop.poll(); await f.loop.poll()
+  assert.equal(bodyReads,0)
+  f.busy(false); await f.loop.poll()
+  assert.equal(f.wakes.find(row=>row.role==='Organizer')?.sources.length,2)
+  assert.equal(bodyReads,0)
+}))
+
+test('stopping during maintenance prevents a new discovery request after maintenance settles', () => fixture(async f => {
+  let release!:()=>void, entered!:()=>void
+  const gate=new Promise<void>(r=>{release=r}), started=new Promise<void>(r=>{entered=r})
+  f.hooks.observe=async()=>{entered();await gate}
+  let snapshots=0;const snapshot=f.files.snapshot.bind(f.files)
+  f.files.snapshot=async()=>{snapshots++;return snapshot()}
+  const poll=f.loop.poll();await started
+  const stopped=f.loop.stop();release();await Promise.all([poll,stopped])
+  assert.equal(snapshots,0)
+}))
+
+test('stopping during shared discovery does not start task enumeration afterwards',()=>fixture(async f=>{
+  const entered=Promise.withResolvers<void>(),release=Promise.withResolvers<void>()
+  f.hooks.discover=async()=>{entered.resolve();await release.promise}
+  let lists=0;const list=f.files.listDirectory.bind(f.files)
+  f.files.listDirectory=async(snapshot,path)=>{lists++;return list(snapshot,path)}
+  const polling=f.loop.poll();await entered.promise
+  const stopped=f.loop.stop();release.resolve();await Promise.all([polling,stopped])
+  assert.equal(lists,0)
+}))

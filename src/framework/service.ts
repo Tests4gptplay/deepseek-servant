@@ -38,7 +38,10 @@ interface Running {
 /** Both modes use one business implementation; selecting a page does not own either runtime. */
 export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChanged'> {
     private readonly accesses = new Map<FrameworkMode, Promise<Access>>();
+    private readonly stopping = new WeakMap<Running, Promise<void>>();
     private readonly running = new Map<FrameworkMode, Running>();
+    private readonly accessOpening = new Map<FrameworkMode, AbortController>();
+    private readonly backgroundOpening = new Map<FrameworkMode, AbortController>();
     private readonly opening = new Map<FrameworkMode, Promise<Running>>();
     private readonly archiveViews = new Map<FrameworkMode, FrameworkClientView['archives']>();
     private readonly errors = new Map<FrameworkMode, string>();
@@ -113,8 +116,10 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         if (this.closed) return Promise.reject(new Error('Framework service is disposed.'));
         const prior = this.accesses.get(mode); if (prior) return prior;
         const settings = this.config(mode).settings;
+        const controller = new AbortController();
+        this.accessOpening.set(mode, controller);
         const pending = openFrameworkStorage(mode === 'local' ? { mode, directory: settings.localDirectory, login: settings.userName, workerSeats: settings.workerSeats }
-            : { mode, ownerRepo: settings.ownerRepo, repositoryDirectory: settings.repositoryDirectory, workerSeats: settings.workerSeats }, { storage: this.storage })
+            : { mode, ownerRepo: settings.ownerRepo, repositoryDirectory: settings.repositoryDirectory, workerSeats: settings.workerSeats }, { storage: this.storage, signal: controller.signal })
           .then(async connection => {
             if (this.closed) {
                 try { await connection.close(); } catch (error) { this.cleanupFailure(mode, error); throw error; }
@@ -123,6 +128,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             return { connection, conversation: new FrameworkConversation(connection.files, connection.transactions, { mode, collaborationId: settings.collaborationId }) };
           });
         this.accesses.set(mode,pending);
+        void pending.finally(() => { if (this.accessOpening.get(mode) === controller) this.accessOpening.delete(mode); }).catch(() => {});
         void pending.catch(() => { if(this.accesses.get(mode) === pending) this.accesses.delete(mode); });
         return pending;
     }
@@ -136,18 +142,20 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         const pending = this.opening.get(mode);
         if (pending)
             return pending;
-        const operation = this.open(mode);
+        const controller = new AbortController();
+        this.backgroundOpening.set(mode, controller);
+        const operation = this.open(mode, controller.signal);
         this.opening.set(mode, operation);
-        void operation.finally(() => { if (this.opening.get(mode) === operation)
+        void operation.finally(() => { if (this.backgroundOpening.get(mode) === controller) this.backgroundOpening.delete(mode); if (this.opening.get(mode) === operation)
             this.opening.delete(mode); }).catch(() => { });
         return operation;
     }
-    private async open(mode: FrameworkMode): Promise<Running> {
+    private async open(mode: FrameworkMode, signal?: AbortSignal): Promise<Running> {
         const settings = this.config(mode).settings;
         const workspace = await new DshWorkspaceAdapter(this.ctx).resolve(undefined, settings.workspace || undefined);
         this.assertOpen();
         const connection = await openFrameworkConnection(mode === 'local' ? { mode, directory: settings.localDirectory, login: settings.userName, workerSeats: settings.workerSeats }
-            : { mode, ownerRepo: settings.ownerRepo, repositoryDirectory: settings.repositoryDirectory, workerSeats: settings.workerSeats }, { storage: this.storage });
+            : { mode, ownerRepo: settings.ownerRepo, repositoryDirectory: settings.repositoryDirectory, workerSeats: settings.workerSeats }, { storage: this.storage, signal });
         let resources: ObservedInstance[];
         try {
             this.assertOpen();
@@ -201,10 +209,11 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 foreground: settings.foreground, background: settings.background,
             }, { members: () => resource.resources.map(row => row.member), resources: () => resource.resources, capacity: createRecorderCapacity(connection.files),
                 changed: () => this.changed(), restored: () => { this.errors.delete(mode); this.reportedErrors.delete(mode); this.changed(); },
-                heartbeat: async () => {
+                cancelPending: () => connection.cancelPending(), heartbeat: async () => {
                     await connection.tick();
                     resource.runtime.updateWorkerSeats(connection.registration.workerSeats);
-                    const next = await connection.members();
+                }, observationInterrupted: () => connection.observationInterrupted(), observeResources: async snapshot => {
+                    const next = await connection.members(snapshot);
                     const visible = (rows: ObservedInstance[]) => JSON.stringify(rows.map(row => ({ member: row.member, workerSeats: row.workerSeats, availability: row.availability, error: row.error })));
                     const changed = visible(next) !== visible(resource.resources);
                     resource.resources = next;
@@ -328,7 +337,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             const controls = this.controls(access, active);
             await controls.setTask(input.commandId, input.taskId, z.enum(['running', 'paused', 'cancelled']).parse(input.intent));
             if (active) {
-                await active.runtime.applyUserControls();
+                await active.runtime.applyUserControls(true, { taskId: input.taskId });
                 const current = await controls.task(input.taskId);
                 if (current?.commandId === input.commandId && current.intent === 'running') await active.runtime.resumeTask(input.taskId, input.commandId);
             }
@@ -399,8 +408,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 value.collaborationId, value.workspace, value.presetId, value.foreground, value.background]);
             const hot = !!running && executionSettings(previous.settings) === executionSettings(settings);
             if (running && !hot) {
-                await running.runtime.dispose();
-                await running.connection.close();
+                await this.stopRunning(running);
                 this.running.delete(mode);
             }
             if (!hot) {
@@ -487,7 +495,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             const mode = z.enum(['local','git']).parse(input.mode), enabled = z.boolean().parse(input.enabled);
             await this.storage.set('framework-participation/' + mode, enabled);
             if(enabled) await this.connect(mode);
-            else { const running = this.running.get(mode); if(running) { try { await running.runtime.dispose(); await running.connection.close(); } finally { this.running.delete(mode); } } }
+            else { const running = this.running.get(mode); if(running) { try { await this.stopRunning(running); } finally { this.running.delete(mode); } } }
             this.changed(); return this.view({mode});
         });
         this.configuration = operation.catch(() => {}); return operation;
@@ -517,18 +525,39 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
     }
     async download(mode: FrameworkMode, path: string, storageScope?: string): Promise<Uint8Array> { const active = await this.access(mode); this.checkScope(active, storageScope); return withSnapshot(active.connection.files, async (snapshot) => { const bytes = await active.connection.files.readBytes(snapshot, path); if (bytes === undefined)
         throw new Error('File does not exist.'); return bytes; }); }
+    private stopRunning(active: Running): Promise<void> {
+        const prior = this.stopping.get(active);
+        if (prior) return prior;
+        const operation = (async () => {
+            const failures: unknown[] = [];
+            try { await active.runtime.dispose(); } catch (error) { failures.push(error); }
+            try { await active.connection.close(); } catch (error) { failures.push(error); }
+            if (failures.length === 1) throw failures[0];
+            if (failures.length) throw new AggregateError(failures, 'Runtime and connection disposal failed.');
+        })();
+        this.stopping.set(active, operation);
+        return operation;
+    }
     dispose(): Promise<void> {
         if (this.disposal) return this.disposal;
         this.closed = true;
+        for (const controller of [...this.accessOpening.values(), ...this.backgroundOpening.values()]) controller.abort();
         // Pending acquisitions remain owned until they settle. Their publication
         // guards close late resources instead of allowing a post-dispose Host.
         const accesses = [...this.accesses.values()];
         this.disposal = (async () => {
+            // Start each owned shutdown before waiting for configuration: a hot
+            // update may itself be waiting on this connection's HTTP request.
+            const stopping = [...this.running].map(([mode, active]) => this.stopRunning(active).catch(error => this.cleanupFailure(mode, error)));
+            const cancellingAccess = accesses.map(pending => pending.then(access => {
+                try { access.connection.cancelPending(); } catch (error) { this.disposalErrors.push(error); }
+            }, () => {}));
             await Promise.allSettled([this.starting, this.configuration]);
             await Promise.allSettled([...this.opening.values()]);
+            await Promise.all(stopping);
+            await Promise.all(cancellingAccess);
             for (const [mode, active] of this.running) {
-                try { await active.runtime.dispose(); } catch (error) { this.cleanupFailure(mode, error); }
-                try { await active.connection.close(); } catch (error) { this.cleanupFailure(mode, error); }
+                if (!this.stopping.has(active)) try { await this.stopRunning(active); } catch (error) { this.cleanupFailure(mode, error); }
             }
             this.running.clear();
             for (const pending of accesses) {

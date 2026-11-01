@@ -6,7 +6,7 @@ import { cleanupRecordPath, type CleanupRecord } from './cleaner.js'
 import type { RecoveryRole } from './recovery.js'
 import type { FrameworkTransactions } from './command-transactions.js'
 import { discoverInbox, initializeTask, paths, readJson, type TaskMetadata } from './task-files.js'
-import { FilesConflictError, type FileEntry, type FilesSnapshot, type FilesStore, withSnapshot } from './transactions.js'
+import { FilesConflictError, type FileEntry, type FilesSnapshot, type FilesStore } from './transactions.js'
 
 export interface RoleWake {
   id: string
@@ -30,6 +30,9 @@ export interface HostLoopActions {
   startup(): Promise<void>
   /** Existing loop owns heartbeat and execution observation checks. */
   observe(): Promise<void>
+  /** Borrow this poll's post-maintenance view; do not release it or reuse it after writes. */
+  discover?(snapshot: FilesSnapshot): Promise<void>
+  discoveryInterrupted?(): void
   error(error: unknown): void
   changed?(): void
 }
@@ -49,6 +52,7 @@ export class FrameworkHostLoop {
   private timer?: ReturnType<typeof setTimeout>
   private running?: Promise<void>
   private connected = false
+  private stopping = false
   private readonly key: string
   constructor(readonly files: FilesStore, private readonly transactions: FrameworkTransactions,
     private readonly storage: StoragePort, private readonly identity: { member: string; primary: boolean; scope: string },
@@ -58,8 +62,11 @@ export class FrameworkHostLoop {
   }
   async start(): Promise<void> {
     if (this.connected) return
+    this.stopping = false
     this.record = await this.storage.get<LoopRecord>(this.key) ?? { initial: {}, completed: {} }
+    if (this.stopping) return
     await this.actions.startup()
+    if (this.stopping) return
     this.connected = true
     try { await this.poll() } catch (error) { this.actions.error(error) }
     this.schedule()
@@ -72,12 +79,14 @@ export class FrameworkHostLoop {
     }, 1_000)
   }
   async stop(): Promise<void> {
+    this.stopping = true
     this.connected = false
     if (this.timer) clearTimeout(this.timer)
     this.timer = undefined
     await this.running
   }
   poll(): Promise<void> {
+    if (this.stopping) return Promise.resolve()
     if (this.running) return this.running
     const operation = this.runPoll()
     this.running = operation
@@ -86,15 +95,20 @@ export class FrameworkHostLoop {
   }
   private async save(): Promise<void> { await this.storage.set(this.key, this.record) }
   private async wake(role: RecoveryRole, snapshot: FilesSnapshot, sources: FileEntry[], taskId?: string, workerId?: string): Promise<void> {
-    if (!sources.length || this.actions.executing(role, singleton(role) ? undefined : taskId, workerId)) return
+    if (this.stopping || !sources.length || this.actions.executing(role, singleton(role) ? undefined : taskId, workerId)) return
     await this.actions.wake({ id: digest(JSON.stringify([role, taskId, workerId, snapshot.revision, sources.map(source => source.path)])),
       role, taskId, workerId, sources: sources.map(({ path, version }) => ({ path, version })), reason: 'notification' })
   }
   private async runPoll(): Promise<void> {
     try { await this.actions.observe() } catch (error) { this.actions.error(error) }
-    await withSnapshot(this.files, async snapshot => {
+    if (this.stopping) return
+    const snapshot = await this.files.snapshot().catch(error => { this.actions.discoveryInterrupted?.(); throw error })
+    try {
+      try { await this.actions.discover?.(snapshot) } catch (error) { this.actions.error(error) }
+      if (this.stopping) return
       const entries = await this.files.listDirectory(snapshot, 'tasks/')
       const tasks = await this.metadata.list(snapshot, entries)
+      if (this.stopping) return
       if (this.identity.primary) {
         for (const entry of entries.filter(entry => /_(P|O)\.md$/.test(entry.path))) {
           if (this.seenSources.get(entry.path) === entry.version) continue
@@ -105,6 +119,7 @@ export class FrameworkHostLoop {
             this.record.initial[command] = assignment
             await this.save()
           }
+          if (this.stopping) return
           let mutated: boolean | undefined
           try {
             await this.transactions.run(command, { source: entry.path, ...assignment }, { snapshot, expectedRevision: snapshot.revision, reevaluate: true },
@@ -128,6 +143,7 @@ export class FrameworkHostLoop {
         await this.wake(direct.role, snapshot, [source], undefined, direct.role === 'Worker' ? direct.id : undefined)
       }
       for (const task of tasks) {
+        if (this.stopping) return
         try {
         if (task.status === 'complete') {
           const completion = this.record.completed[task.taskId] ??= {}
@@ -179,12 +195,14 @@ export class FrameworkHostLoop {
           const organizer = signals.filter(entry => entry.path.split('/').at(-1)!.startsWith('Organizer_'))
           for (const member of task.members ?? this.members()) {
             const path = paths.state(member, task.taskId) + '/complete'
-            if (await this.files.read(snapshot, path) !== undefined) organizer.push({ path, version: snapshot.revision })
+            const memberSignals = member === this.identity.member ? signals : await this.files.listDirectory(snapshot, paths.state(member, task.taskId))
+            const completion = memberSignals.find(entry => entry.path === path)
+            if (completion) organizer.push(completion)
           }
           await this.wake('Organizer', snapshot, organizer, task.taskId)
         }
         } catch (error) { this.actions.error(error) }
       }
-    })
+    } finally { await snapshot.release() }
   }
 }

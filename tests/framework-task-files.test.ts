@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { LocalFiles } from '../src/framework/local-files.js'
 import { withSnapshot } from '../src/framework/transactions.js'
-import { initializeTask, paths, readJson, discoverInbox, deliverMember, completeMember, claimSignals, type MemberStatus } from '../src/framework/task-files.js'
+import { initializeTask, paths, readJson, discoverInbox, clearInboxDiscoveryCache, deliverMember, completeMember, claimSignals, type MemberStatus } from '../src/framework/task-files.js'
 async function fixture(t: test.TestContext, route: 'P' | 'O') {
   const root = await mkdtemp(join(tmpdir(), 'dss-task-files-')), store = await LocalFiles.open(root)
   t.after(async () => { await store.close(); await rm(root, { recursive: true, force: true }) })
@@ -79,4 +79,61 @@ test('ordinary claims preserve recovery and unrelated Task state', async t => {
     assert.equal(await store.read(snapshot, 'state/A/other/Planner_Worker'), '')
     assert.equal(await store.read(snapshot, root + '/Planner_Worker'), undefined)
   })
+})
+
+test('unchanged consumed Inbox metadata avoids repeated status/cursor bodies but never suppresses a changed delivery', async t => {
+  const { store, task } = await fixture(t, 'P')
+  await withSnapshot(store, async snapshot => store.commit(snapshot, await discoverInbox(store, snapshot, task.taskId, 'A'), 'discover initial delivery'))
+  const reads: string[] = [], original = store.read.bind(store)
+  store.read = async (snapshot, path) => { reads.push(path); return original(snapshot, path) }
+  const check = () => withSnapshot(store, snapshot => discoverInbox(store, snapshot, task.taskId, 'A'))
+  assert.deepEqual(await check(), [])
+  const initial = [...reads]
+  assert.ok(initial.includes(paths.memberStatus(task.taskId, 'A')))
+  assert.ok(initial.includes(paths.inboxCursor(task.taskId, 'A')))
+  await withSnapshot(store, snapshot => store.commit(snapshot, [{ path: 'instances/other.json', content: 'unrelated heartbeat' }], 'unrelated H'))
+  assert.deepEqual(await check(), [])
+  assert.deepEqual(reads, initial, 'same immutable metadata does not re-read business/cursor bodies')
+  await withSnapshot(store, async snapshot => store.commit(snapshot, await deliverMember(store, snapshot, task, 'A', 'new delivery'), 'redelivery'))
+  const changed = await check()
+  assert.equal(changed.length, 2)
+  assert.ok(reads.length > initial.length)
+  const beforePendingRetry = reads.length
+  assert.equal((await check()).length, 2, 'uncommitted discovery remains pending on every checked snapshot')
+  assert.ok(reads.length > beforePendingRetry)
+  await withSnapshot(store, snapshot => store.commit(snapshot, changed, 'confirm discovery'))
+  assert.deepEqual(await check(), [])
+  const settledReads = reads.length
+  assert.deepEqual(await check(), []); assert.equal(reads.length, settledReads)
+  await withSnapshot(store, snapshot => store.commit(snapshot, [{ path: paths.inboxCursor(task.taskId, 'A'), content: null }], 'lost cursor'))
+  assert.equal((await check()).length, 2, 'missing cursor is not hidden by prior metadata')
+})
+
+
+test('Inbox no-op metadata cache invalidates status changes, deletion, release and storage boundaries', async t => {
+  const { store, task } = await fixture(t, 'P')
+  await withSnapshot(store, async snapshot => store.commit(snapshot, await discoverInbox(store, snapshot, task.taskId, 'A'), 'discover'))
+  const check = () => withSnapshot(store, snapshot => discoverInbox(store, snapshot, task.taskId, 'A'))
+  assert.deepEqual(await check(), [])
+  let reads = 0; const read = store.read.bind(store)
+  store.read = async (snapshot, path) => { reads++; return read(snapshot, path) }
+  await withSnapshot(store, snapshot => store.commit(snapshot, [{ path: paths.memberStatus(task.taskId, 'A'), content: '{malformed' }], 'changed invalid status'))
+  await assert.rejects(check(), (error: unknown) => { assert.ok(error instanceof Error); assert.match(error.message, /Cannot read member status/); assert.ok(error.cause instanceof SyntaxError); return true })
+  await withSnapshot(store, async snapshot => store.commit(snapshot, await deliverMember(store, snapshot, task, 'A', 'repair delivery'), 'repair status'))
+  await withSnapshot(store, async snapshot => store.commit(snapshot, await discoverInbox(store, snapshot, task.taskId, 'A'), 'discover repaired delivery'))
+  assert.deepEqual(await check(), []); const settled = reads
+  clearInboxDiscoveryCache(store, 'unrelated-task')
+  assert.deepEqual(await check(), []); assert.equal(reads, settled)
+  clearInboxDiscoveryCache(store, task.taskId)
+  assert.deepEqual(await check(), []); assert.ok(reads > settled)
+  const root = await mkdtemp(join(tmpdir(), 'dss-inbox-other-store-')), other = await LocalFiles.open(root)
+  t.after(async () => { await other.close(); await rm(root, { recursive: true, force: true }) })
+  const copied = await withSnapshot(store, async snapshot => Promise.all((await store.list(snapshot, 'task-runs/')).map(async entry => ({ path: entry.path, content: (await store.read(snapshot, entry.path))! }))))
+  await withSnapshot(other, snapshot => other.commit(snapshot, copied, 'same logical paths in another storage'))
+  let otherReads = 0; const otherRead = other.read.bind(other)
+  other.read = async (snapshot, path) => { otherReads++; return otherRead(snapshot, path) }
+  await withSnapshot(other, async snapshot => assert.deepEqual(await discoverInbox(other, snapshot, task.taskId, 'A'), []))
+  assert.equal(otherReads, 2, 'another store must independently prove the no-op')
+  await withSnapshot(store, snapshot => store.commit(snapshot, [{ path: paths.inbox(task.taskId, 'A'), content: null }], 'remove Inbox'))
+  assert.deepEqual(await check(), [])
 })

@@ -42,6 +42,7 @@ export const currentSuites = [
   'native-progress.test.ts',
   'native-recovery-input.test.ts',
   'private-git-credentials.test.ts',
+  'private-git-cancellation.test.ts',
 ]
 
 export const historicalSuites = [

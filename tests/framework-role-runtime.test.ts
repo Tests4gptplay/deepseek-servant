@@ -9,6 +9,7 @@ function queue() {
   const rows = new Map<string, any>()
   const runtime = Object.create(FrameworkRoleRuntime.prototype) as any
   runtime.prefix = 'test/'
+  runtime.environment = {}
   runtime.records = { get: async (key: string) => structuredClone(rows.get(key)),
     set: async (key: string, value: unknown) => { rows.set(key, structuredClone(value)) },
     list: async (prefix: string) => [...rows].filter(([key]) => key.startsWith(prefix)).map(([key,value]) => ({key,value:structuredClone(value)})) }
@@ -127,6 +128,9 @@ test('member completion winning before recovery publication prevents a new marke
   }}
   await storage.set(runtime.prefix+'restores/command',{commandId:'one',createdAt:'2026-10-31T00:00:00Z',input:{target:record.identity,facts:'interrupted',hypotheses:'unknown',actionsTaken:'saved',continuation:'continue'},complete:false})
   await runtime.processRestores()
+  await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise))
+  await runtime.processRestores()
+  assert.equal((await storage.get<any>(runtime.prefix+'restores/command')).complete,true)
   await withSnapshot(files,async snapshot=>assert.equal(await files.read(snapshot,paths.state('A',taskId)+'/recovery'),undefined))
 })
 
@@ -349,6 +353,8 @@ test('host restoration remains incomplete while stop evidence is unresolved and 
   assert.ok([...rows.values()].some(row => row.request?.role === 'Helper' && row.request.context?.hostRestoration === 'unconfirmed'))
   await withSnapshot(files, async snapshot => assert.equal(await files.read(snapshot, 'state/A/T/recovery'), ''))
   history.events.push({ type: 'job/settled', data: { owner: 'cold-session', jobId: 'owned-job', producerReported: true } })
+  await runtime.processHostRestores()
+  await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise))
   await runtime.processHostRestores()
   assert.equal((await storage.get<any>(key)).complete, true)
   assert.equal(restored, 1)
@@ -1709,4 +1715,335 @@ test('durable exact stop confirmation arriving after superseded settlement unblo
   await runtime.saveRole({...old,stopped:true})
   await runtime.saveRole({...old,identity:{...old.identity,executionId:'e2'},generation:2,stopped:true})
   assert.equal(runtime.businessStopped('T'),true)
+})
+
+test('runtime shutdown drains admitted Host and Helper diagnostics before service storage closes', async () => {
+  const { DshStorageAdapter } = await import('../src/adapters/dsh/storage.js')
+  const { FrameworkService } = await import('../src/framework/service.js')
+  const { disposeResources } = await import('../src/framework/dispose-resources.js')
+  const { runtime, rows } = queue(), entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+  const events: string[] = [], reported: unknown[] = [], owner = { chain: Promise.resolve() }
+  let closed = false, block = true
+  const serial = <T>(run: () => Promise<T>): Promise<T> => (DshStorageAdapter.prototype as any).serial.call(owner, run)
+  const guard = () => assert.equal(closed, false, 'admitted diagnostic cannot access closed storage')
+  runtime.records = {
+    get: (key: string) => serial(async () => { guard(); return structuredClone(rows.get(key)) }),
+    set: (key: string, value: unknown) => serial(async () => { guard(); rows.set(key, structuredClone(value)); events.push('diagnostic-saved') }),
+    list: (prefix: string) => serial(async () => { guard(); if (block) { block = false; entered.resolve(); await release.promise }
+      return [...rows].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value: structuredClone(value) })) }),
+  }
+  runtime.roleRecords = new Map(); runtime.errorTail = Promise.resolve(); runtime.closed = false
+  runtime.environment = { error: (error: unknown) => reported.push(error) }
+  runtime.loop = { stop: async () => { events.push('loop-stopped') } }
+  runtime.observations = { dispose: async () => { events.push('observations-disposed') } }
+  runtime.error(new Error('accepted Host fault'), { role: 'Worker' })
+  runtime.error(new Error('accepted Helper fault'), { role: 'Helper' })
+  await entered.promise
+  const service = Object.create(FrameworkService.prototype) as any
+  Object.assign(service, { closed: false, configuration: Promise.resolve(), opening: new Map(), stopping: new WeakMap(), accessOpening: new Map(), backgroundOpening: new Map(), accesses: new Map(), listeners: new Set(), disposalErrors: [],
+    running: new Map([['local', { runtime, connection: { close: async () => { events.push('connection-closed') } } }]]) })
+  const shutdown = disposeResources([() => service.dispose(), () => serial(async () => { closed = true; events.push('storage-closed') })])
+  try {
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(events.includes('connection-closed'), false, 'service owns accepted diagnostic work until persisted')
+  } finally { release.resolve(); await shutdown; await runtime.errorTail }
+  assert.equal([...rows.values()].filter(row => row.request?.role === 'Helper').length, 1)
+  assert.equal([...rows.keys()].filter(key => key.includes('/helper-errors/')).length, 1)
+  assert.equal(reported.length, 2, 'Helper error is retained without recursively waking Helper')
+  assert.ok(events.lastIndexOf('diagnostic-saved') < events.indexOf('connection-closed'))
+  assert.ok(events.indexOf('connection-closed') < events.indexOf('storage-closed'))
+  runtime.error(new Error('after close'), { role: 'Worker' }); await runtime.errorTail
+  assert.equal(rows.size, 2, 'errors arriving after close do not create new persistence work')
+})
+
+test('a native disposal failure does not abandon previously admitted diagnostic persistence', async () => {
+  const { runtime } = queue(), gate = Promise.withResolvers<void>(), failure = new Error('observation disposal failed')
+  let persisted = false, settled = false
+  runtime.roleRecords = new Map(); runtime.loop = { stop: async () => undefined }
+  runtime.observations = { dispose: async () => { throw failure } }
+  runtime.errorTail = gate.promise.then(() => { persisted = true })
+  const disposal = runtime.dispose().finally(() => { settled = true })
+  const rejected = assert.rejects(disposal, (error: unknown) => error === failure)
+  try { await new Promise(resolve => setImmediate(resolve)); assert.equal(settled, false) }
+  finally { gate.resolve(); await rejected }
+  assert.equal(persisted, true)
+})
+
+test('runtime disposal preserves both shutdown and diagnostic drain failures', async () => {
+  const { runtime } = queue(), stopFailure = new Error('native stop failed'), diagnosticFailure = new Error('diagnostic persistence failed')
+  runtime.roleRecords = new Map(); runtime.loop = { stop: async () => { throw stopFailure } }
+  runtime.errorTail = Promise.resolve().then(() => { throw diagnosticFailure })
+  await assert.rejects(runtime.dispose(), (error: unknown) => {
+    assert.ok(error instanceof AggregateError)
+    assert.deepEqual(error.errors, [stopFailure, diagnosticFailure])
+    return true
+  })
+})
+
+test('Helper exact restore preserves pending stop responsibility without blocking another restore command', async t => {
+  const {runtime,storage}=await runtimeFixture(t),gate=Promise.withResolvers<void>(),stops:string[]=[],arranged:string[]=[]
+  const one={identity:{workId:'one',executionId:'e1',role:'Recorder',taskId:'T1'},sessionId:'s1',generation:1}
+  const two={identity:{workId:'two',executionId:'e2',role:'Recorder',taskId:'T2'},sessionId:'s2',generation:1}
+  runtime.roleRecords.set('one',one);runtime.roleRecords.set('two',two)
+  runtime.stopOwnedRecord=async(record:any)=>{stops.push(record.identity.executionId);if(record.identity.executionId==='e1')await gate.promise;return{status:'stopped'}}
+  runtime.arrangeNativeContinuation=async(record:any,_input:any,_inspection:any,id:string)=>{arranged.push(record.identity.executionId+':'+id)}
+  for(const [commandId,record] of [['one',one],['two',two]] as const)await storage.set(runtime.prefix+'restores/'+commandId,{commandId,createdAt:'2026-11-01T00:00:00Z',input:{target:record.identity,facts:'retained facts',hypotheses:'unknown',actionsTaken:'preserved',continuation:'continue'},complete:false})
+  let returned=false;const first=runtime.processRestores().then(()=>{returned=true})
+  try{
+    await new Promise(resolve=>setImmediate(resolve))
+    assert.equal(returned,true,'the first unresolved stop must not block processing the next command')
+    await runtime.processRestores();await runtime.processRestores()
+    assert.deepEqual(stops,['e1','e2']);assert.deepEqual(arranged,['e2:restore-role:two'])
+    assert.equal((await storage.get<any>(runtime.prefix+'restores/one')).complete,false)
+    assert.equal((await storage.get<any>(runtime.prefix+'restores/two')).complete,true)
+  }finally{gate.resolve();await first;await Promise.all([...(runtime.stopOperations?.values()??[])].map((stop:any)=>stop.promise))}
+  await runtime.processRestores();assert.deepEqual(arranged.sort(),['e1:restore-role:one','e2:restore-role:two'])
+})
+
+test('Helper restore skips busy work without taking its lock or losing the original command',async t=>{
+  const {runtime,storage}=await runtimeFixture(t),record={identity:{workId:'w',executionId:'e',role:'Recorder',taskId:'T'},sessionId:'s',generation:1}
+  runtime.roleRecords.set('w',record);runtime.workOperations=new Map([['w',new Promise(()=>{})]])
+  let stops=0,arranged=0;runtime.stopOwnedRecord=async()=>{stops++;return{status:'stopped'}};runtime.arrangeNativeContinuation=async()=>{arranged++}
+  const key=runtime.prefix+'restores/c';await storage.set(key,{commandId:'c',createdAt:'2026-11-01T00:00:00Z',input:{target:record.identity,facts:'facts'},complete:false})
+  await runtime.processRestores();assert.equal(stops,0);assert.equal((await storage.get<any>(key)).complete,false)
+  runtime.workOperations.delete('w');await runtime.processRestores();await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise));await runtime.processRestores()
+  assert.equal(stops,1);assert.equal(arranged,1);assert.equal((await storage.get<any>(key)).complete,true)
+})
+
+test('Helper restore rechecks exact execution after its durable debug write before requesting stop',async t=>{
+  const {runtime,storage}=await runtimeFixture(t),record={identity:{workId:'w',executionId:'old',role:'Recorder',taskId:'T'},sessionId:'s',generation:1}
+  runtime.roleRecords.set('w',record);let stops=0;runtime.stopOwnedRecord=async()=>{stops++;return{status:'stopped'}}
+  const original=runtime.transactions.run.bind(runtime.transactions)
+  runtime.transactions.run=async(...args:any[])=>{const result=await original(...args);if(args[0]==='restore-debug:c')await runtime.saveRole({...record,identity:{...record.identity,executionId:'new'},generation:2});return result}
+  const key=runtime.prefix+'restores/c';await storage.set(key,{commandId:'c',createdAt:'2026-11-01T00:00:00Z',input:{target:record.identity,facts:'facts'},complete:false})
+  await runtime.processRestores();assert.equal(stops,0);assert.equal(runtime.roleRecords.get('w').identity.executionId,'new');assert.equal(runtime.roleRecords.get('w').stopped,undefined)
+  await runtime.processRestores();assert.equal((await storage.get<any>(key)).complete,true);assert.equal(stops,0)
+})
+
+test('Helper overall restoration durably owns exact targets and does not wait for one producer before another target',async t=>{
+  const {runtime,storage}=await runtimeFixture(t),gate=Promise.withResolvers<void>(),arranged:string[]=[]
+  const one={identity:{workId:'one',executionId:'e1',role:'Recorder',taskId:'T1'},sessionId:'s1',generation:1,stopUnknown:{reason:'pending producer',jobs:['j1']}}
+  const two={identity:{workId:'two',executionId:'e2',role:'Recorder',taskId:'T2'},sessionId:'s2',generation:1,stopUnknown:{reason:'pending producer',jobs:['j2']}}
+  runtime.roleRecords.set('one',one);runtime.roleRecords.set('two',two)
+  const key=runtime.prefix+'host-restores/overall';await storage.set(key,{commandId:'overall',createdAt:'2026-11-01T00:00:00Z',input:{facts:'preserved',hypotheses:'unknown',actionsTaken:'saved',continuation:'inspect'},complete:false})
+  runtime.stopOwnedRecord=async(record:any)=>{assert.equal((await storage.get<any>(key)).targets.length,2,'target ownership must persist before stopping');if(record.identity.executionId==='e1')await gate.promise;return{status:'stopped'}}
+  runtime.arrangeNativeContinuation=async(record:any)=>{arranged.push(record.identity.executionId)}
+  let returned=false;const first=runtime.processHostRestores().then(()=>{returned=true})
+  try{await new Promise(resolve=>setImmediate(resolve));assert.equal(returned,true);await runtime.processHostRestores();assert.deepEqual(arranged,['e2']);assert.equal((await storage.get<any>(key)).complete,false)}
+  finally{gate.resolve();await first;await Promise.all([...(runtime.stopOperations?.values()??[])].map((stop:any)=>stop.promise))}
+  await runtime.processHostRestores();assert.deepEqual(arranged.sort(),['e1','e2']);assert.equal((await storage.get<any>(key)).complete,true)
+})
+
+for(const point of ['after-stop','after-arrange','after-target-receipt'] as const)test('overall restore resumes exact target across crash '+point,async t=>{
+  const {runtime,storage,files,rows}=await runtimeFixture(t),workId=runtime.roleKey('Recorder','T'),key=runtime.prefix+'host-restores/crash'
+  const record={identity:{workId,executionId:'old',role:'Recorder',taskId:'T'},sessionId:'s',generation:1,stopUnknown:{reason:'old producer',jobs:['j']},lastWake:{id:'original',role:'Recorder',taskId:'T',reason:'business-complete',sources:[]}}
+  await runtime.saveRole(record);let stops=0;runtime.stopOwnedRecord=async()=>{stops++;return{status:'stopped'}}
+  await storage.set(key,{commandId:'crash',createdAt:'2026-11-01T00:00:00Z',input:{facts:'saved',hypotheses:'unknown',actionsTaken:'saved',continuation:'inspect'},complete:false})
+  await runtime.processHostRestores();await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise))
+  const set=storage.set.bind(storage)
+  if(point!=='after-stop'){
+    let fail=true;storage.set=async(k:string,value:any)=>{if(fail&&k===key&&(point==='after-arrange'?value.targets?.[0]?.complete&&!value.complete:value.complete)){fail=false;throw Error('simulated crash boundary')}return set(k,value)}
+    await assert.rejects(runtime.processHostRestores(),/simulated crash boundary/);storage.set=set
+  }
+  const restarted=new FrameworkRoleRuntime(runtime.ctx,files,storage,runtime.config,runtime.environment) as any
+  for(const row of await storage.list<any>(runtime.prefix+'roles/'))restarted.roleRecords.set(row.value.identity.workId,row.value)
+  restarted.stopOwnedRecord=async()=>{throw Error('confirmed old execution must not be killed again')}
+  await restarted.saveRole({identity:{workId:'new-task',executionId:'new',role:'Worker',taskId:'T-new'},sessionId:'new-session',generation:1,stopUnknown:{reason:'new fault',jobs:['new-job']}})
+  await restarted.processHostRestores()
+  const saved=await storage.get<any>(key);assert.equal(saved.complete,true);assert.equal(saved.targets.length,1);assert.equal(saved.targets[0].outcome,'arranged');assert.equal(stops,1)
+  assert.equal([...rows.values()].filter(row=>row.request?.id==='host-restored:crash:old').length,1)
+})
+
+for(const disposition of ['user-stop','new-generation'] as const)test('overall fixed target respects '+disposition+' instead of reviving old input',async t=>{
+  const {runtime,storage}=await runtimeFixture(t),workId=runtime.roleKey('Recorder','T'),key=runtime.prefix+'host-restores/control'
+  const record={identity:{workId,executionId:'old',role:'Recorder',taskId:'T'},sessionId:'s',generation:1,stopUnknown:{reason:'producer',jobs:['j']},lastWake:{id:'original',role:'Recorder',taskId:'T',reason:'business-complete',sources:[]}}
+  await runtime.saveRole(record);runtime.stopOwnedRecord=async()=>({status:'stopped'})
+  await storage.set(key,{commandId:'control',createdAt:'2026-11-01T00:00:00Z',input:{facts:'saved'},complete:false})
+  await runtime.processHostRestores();await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise))
+  if(disposition==='user-stop')await runtime.controls.requestExecutionStop('user',{workId,executionId:'old',taskId:'T'})
+  else await runtime.saveRole({...record,identity:{...record.identity,executionId:'new'},generation:2,stopUnknown:undefined})
+  let resumed=0;runtime.arrangeNativeContinuation=async()=>{resumed++}
+  await runtime.processHostRestores();const saved=await storage.get<any>(key)
+  assert.equal(saved.complete,true);assert.equal(resumed,0);assert.equal(saved.targets[0].outcome,disposition==='user-stop'?'user-stopped':'superseded')
+})
+
+test('tick user controls do not await an owned producer but the explicit control caller still waits for real settlement',async t=>{
+  const {runtime}=await runtimeFixture(t),gate=Promise.withResolvers<void>(),record={identity:{workId:'w',executionId:'e',role:'Worker',taskId:'T'},sessionId:'s',generation:1}
+  runtime.roleRecords.set('w',record);let stops=0;runtime.stopOwnedRecord=async()=>{stops++;await gate.promise;return{status:'stopped'}}
+  await runtime.controls.setTask('pause','T','paused')
+  let tickReturned=false,userReturned=false
+  const tick=runtime.applyUserControls(false).then(()=>{tickReturned=true})
+  try{await new Promise(resolve=>setImmediate(resolve));assert.equal(tickReturned,true);const user=runtime.applyUserControls().then(()=>{userReturned=true});await new Promise(resolve=>setImmediate(resolve));assert.equal(userReturned,false);assert.equal(stops,1);gate.resolve();await user;assert.equal(runtime.roleRecords.get('w').stopped,true)}finally{gate.resolve();await tick}
+})
+
+test('explicit Task and execution control waits exclude another Task pending producer',async t=>{
+  const {runtime}=await runtimeFixture(t),gate=Promise.withResolvers<void>(),stops:string[]=[]
+  for(const task of ['A','B'])runtime.roleRecords.set(task,{identity:{workId:task,executionId:task,role:'Worker',taskId:task},sessionId:task,generation:1})
+  runtime.stopOwnedRecord=async(record:any)=>{stops.push(record.identity.workId);if(record.identity.workId==='A')await gate.promise;return{status:'stopped'}}
+  await runtime.controls.setTask('pause-A','A','paused');await runtime.applyUserControls(false)
+  await runtime.controls.setTask('pause-B','B','paused')
+  try{
+    let done=false;const own=runtime.applyUserControls(true,{taskId:'B'}).then(()=>{done=true})
+    await new Promise(resolve=>setImmediate(resolve));assert.equal(done,true);await own
+    assert.equal(runtime.roleRecords.get('A').stopped,undefined);assert.equal(runtime.roleRecords.get('B').stopped,true)
+    await runtime.requestExecutionStop('exact-B','B','B');assert.equal((await runtime.controls.execution('B')).result.state,'stopped')
+    assert.deepEqual(stops.sort(),['A','B'])
+  }finally{gate.resolve();await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise))}
+})
+
+test('exact stop stays pending during producer wait and records actual unconfirmed outcome rather than stopped',async t=>{
+  const {runtime}=await runtimeFixture(t),gate=Promise.withResolvers<void>(),record={identity:{workId:'w',executionId:'e',role:'Worker',taskId:'T'},sessionId:'s',generation:1}
+  runtime.roleRecords.set('w',record);runtime.error=()=>undefined;runtime.stopOwnedRecord=async()=>{await gate.promise;return{status:'unconfirmed',reason:'producer incomplete',jobs:['j']}}
+  const user=runtime.requestExecutionStop('c','w','e');await new Promise(resolve=>setImmediate(resolve))
+  assert.equal((await runtime.controls.execution('e')).result,undefined);assert.equal(runtime.roleRecords.get('w').stopped,undefined)
+  await runtime.applyUserControls(false);gate.resolve();await user
+  assert.equal((await runtime.controls.execution('e')).result.state,'unconfirmed');assert.equal(runtime.roleRecords.get('w').stopped,undefined)
+})
+
+test('owned stop prevents idle Organizer new admission before stop-intent persistence without blocking another work',async t=>{
+  const {runtime}=await runtimeFixture(t),gate=Promise.withResolvers<void>(),sent:string[]=[]
+  const key=runtime.roleKey('Organizer'),record={identity:{workId:key,executionId:'old',role:'Organizer'},sessionId:'s',generation:1,lastWake:{taskId:'A'}}
+  runtime.roleRecords.set(key,record);runtime.active=()=>false;runtime.gateway={exists:async()=>false};runtime.native={get:()=>undefined,open:async()=>({send:async(text:string)=>sent.push(JSON.parse(text).taskId)})}
+  runtime.stopOwnedRecord=async()=>{await gate.promise;return{status:'stopped'}};runtime.trackedStop(record)
+  await runtime.wake({id:'new-B',role:'Organizer',taskId:'B',reason:'user-resume',sources:[]});await runtime.wake({id:'free-C',role:'Worker',taskId:'C',workerId:'c',reason:'user-resume',sources:[]})
+  try{await runtime.runQueue();assert.deepEqual(sent,['C']);assert.equal(runtime.roleRecords.get(key).identity.executionId,'old')}
+  finally{gate.resolve();await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise))}
+  await runtime.runQueue();assert.deepEqual(sent,['C','B']);assert.notEqual(runtime.roleRecords.get(key).identity.executionId,'old')
+})
+
+test('tick exact stop is not starved by its own same-pass Task hold inspection',async t=>{
+  const {runtime}=await runtimeFixture(t),record={identity:{workId:'w',executionId:'e',role:'Worker',taskId:'T'},sessionId:'s',generation:1}
+  runtime.roleRecords.set('w',record);let stops=0;runtime.stopOwnedRecord=async()=>{stops++;return{status:'stopped'}}
+  await runtime.controls.requestExecutionStop('saved-before-crash',{workId:'w',executionId:'e',taskId:'T'})
+  await runtime.applyUserControls(false);await new Promise(resolve=>setImmediate(resolve));await runtime.applyUserControls(false)
+  assert.equal(stops,1);assert.equal((await runtime.controls.execution('e')).result.state,'stopped')
+})
+
+test('a new explicit stop command rechecks a prior unconfirmed execution while same-command replay retains its result',async t=>{
+  const {runtime}=await runtimeFixture(t),record={identity:{workId:'w',executionId:'e',role:'Worker',taskId:'T'},sessionId:'s',generation:1}
+  runtime.roleRecords.set('w',record);runtime.error=()=>undefined;let calls=0
+  runtime.stopOwnedRecord=async()=>++calls===1?{status:'unconfirmed',reason:'producer pending',jobs:['j']}:{status:'stopped'}
+  await runtime.requestExecutionStop('first','w','e');assert.equal((await runtime.controls.execution('e')).result.state,'unconfirmed')
+  await runtime.requestExecutionStop('first','w','e');assert.equal(calls,1,'the completed original command remains an idempotent receipt')
+  await runtime.requestExecutionStop('second','w','e');assert.equal(calls,2,'new explicit intent must inspect later producer evidence')
+  assert.equal((await runtime.controls.execution('e')).result.state,'stopped');assert.equal(runtime.roleRecords.get('w').stopped,true)
+})
+
+test('one server rate-limit fact does not reassign Helper after its diagnostic was delivered', async () => {
+  const { GitHubError } = await import('../src/experimental/private-git/github.js')
+  const { runtime, rows } = queue(), fact = {}, reported: unknown[] = []
+  runtime.closed = false; runtime.errorTail = Promise.resolve(); runtime.environment = { error: (error: unknown) => reported.push(error) }
+  const limit = (identity: object) => new GitHubError(429, 'same server limit', 120, 120000, identity)
+  const deliver = () => { for (const [key, row] of rows) if (row.request) rows.set(key, { ...row, delivered: true }) }
+  runtime.error(limit(fact)); await runtime.errorTail; deliver()
+  runtime.error(limit(fact)); await runtime.errorTail
+  assert.equal([...rows.values()].filter(row => row.request).length, 1)
+  runtime.error(limit({})); await runtime.errorTail; deliver()
+  assert.equal([...rows.values()].filter(row => row.request).length, 2, 'a new upstream limit response is a new fact')
+  runtime.error(new Error('unrelated failure')); await runtime.errorTail; deliver()
+  runtime.error(new Error('unrelated failure')); await runtime.errorTail
+  assert.equal([...rows.values()].filter(row => row.request).length, 4, 'ordinary later errors retain their existing event semantics')
+  assert.equal(reported.length, 5, 'UI still receives each actual error observation')
+})
+
+test('failed diagnostic persistence does not permanently suppress the same server limit fact', async () => {
+  const { GitHubError } = await import('../src/experimental/private-git/github.js')
+  const { runtime, rows } = queue(), fact = {}, set = runtime.records.set
+  runtime.closed = false; runtime.errorTail = Promise.resolve(); runtime.environment = { error: () => undefined }
+  let fail = true
+  runtime.records.set = async (...args: unknown[]) => { if (fail) { fail = false; throw new Error('diagnostic storage unavailable') }; return set(...args) }
+  const error = new GitHubError(429, 'server limit', 120, 120000, fact)
+  runtime.error(error); await runtime.errorTail; assert.equal(rows.size, 0)
+  runtime.error(error); runtime.error(error); await runtime.errorTail
+  assert.equal([...rows.values()].filter(row => row.request).length, 1)
+})
+
+
+test('marker discovery uses the supplied view and does not acquire per-Task snapshots for absent markers', async t => {
+  const { runtime, files } = await runtimeFixture(t)
+  runtime.taskMetadata = async () => Array.from({ length: 3 }, (_, i) => ({ taskId: 'no-marker-' + i, status: 'running' }))
+  const snapshot = files.snapshot.bind(files)
+  let reads = 0
+  files.snapshot = async () => { reads++; return snapshot() }
+  await withSnapshot(files, current => runtime.observeRecoveryMarkers(current))
+  assert.equal(reads, 1)
+})
+
+test('whole runtime poll shares one post-maintenance view for roster, tasks and absent recovery markers', async t => {
+  const { runtime, files, storage, errors } = await runtimeFixture(t)
+  const { InstanceRegistration } = await import('../src/framework/instances.js')
+  const registration = new InstanceRegistration(files, runtime.transactions, storage, {repositoryId:'local',repositoryOwner:'A',login:'A',instanceUUID:'00000000-0000-4000-8000-000000000001',workerSeats:2})
+  await registration.register()
+  await withSnapshot(files, snapshot => files.commit(snapshot, Array.from({length:3}, (_,i) => ({path:paths.task('running-'+i),content:encodeJson({version:1,taskId:'running-'+i,route:'P',owner:'A',sourcePath:'tasks/source'+i+'_P.md',status:'running'})})), 'existing tasks'))
+  let acquisitions = 0, resources = 0
+  const snapshot = files.snapshot.bind(files)
+  files.snapshot = async () => { acquisitions++; return snapshot() }
+  runtime.environment.observeResources = async (current: any) => { resources++; assert.equal((await registration.observe(current)).length,1) }
+  await runtime.loop.poll()
+  assert.equal(acquisitions, 1)
+  assert.equal(resources,1)
+  assert.deepEqual(errors,[])
+})
+
+test('a marker appearing after the fixed view is discovered next poll rather than guessed into the old view', async t => {
+  const {runtime, files, rows} = await runtimeFixture(t)
+  const taskId='new-marker', marker=paths.state('A',taskId)+'/recovery'
+  runtime.taskMetadata = async () => [{taskId,status:'running'}]
+  await withSnapshot(files, async old => {
+    await withSnapshot(files, fresh => files.commit(fresh,[{path:marker,content:''}],'new actual marker'))
+    await runtime.observeRecoveryMarkers(old)
+    assert.equal(rows.get(runtime.watchKey(taskId,'A')),undefined)
+  })
+  await runtime.observeRecoveryMarkers()
+  assert.ok(rows.get(runtime.watchKey(taskId,'A'))?.watch)
+})
+
+test('Organizer notification enumeration uses exact marker metadata without fetching empty bodies', async t => {
+  const {runtime,files}=await runtimeFixture(t),taskId='completion-metadata'
+  const complete=paths.state('B',taskId)+'/complete'
+  await withSnapshot(files,snapshot=>files.commit(snapshot,[{path:paths.task(taskId),content:encodeJson({version:1,taskId,route:'O',owner:'A',sourcePath:'tasks/c_O.md',status:'running',members:['A','B']})},{path:complete,content:''}],'completed member'))
+  const read=files.read.bind(files);let bodyReads=0
+  files.read=async(snapshot,path)=>{if(path.endsWith('/complete'))bodyReads++;return read(snapshot,path)}
+  await withSnapshot(files,async snapshot=>assert.deepEqual(await runtime.notifications(snapshot,{role:'Organizer',workId:'o',executionId:'e',owner:'A'},taskId),[complete]))
+  assert.equal(bodyReads,0)
+})
+
+test('busy native work retains its queued notification without acquiring a remote admission view', async t => {
+  const {runtime,files,rows}=await runtimeFixture(t)
+  const request={id:'busy-signal',role:'Planner',taskId:'T',reason:'notification',sources:[{path:paths.state('A','T')+'/Planner_Inbox',version:'v'}]}
+  await withSnapshot(files,snapshot=>files.commit(snapshot,[{path:request.sources[0]!.path,content:''}],'pending notification'))
+  const workId=runtime.requestKey(request)
+  runtime.roleRecords.set(workId,{identity:{workId,executionId:'busy',role:'Planner',taskId:'T',member:'A'},sessionId:'busy-session',generation:1})
+  runtime.native={get:()=>({observe:()=>({state:'running'})})}
+  let snapshots=0
+  const snapshot=files.snapshot.bind(files)
+  files.snapshot=async()=>{snapshots++;return snapshot()}
+  await runtime.wake(request);await runtime.runQueue();await runtime.runQueue()
+  assert.equal(snapshots,0)
+  assert.equal(Boolean([...rows.values()].find((row:any)=>row.request?.id===request.id)?.delivered),false)
+})
+
+test('ready admission checks signal existence and ended Task in one fresh view without fetching signal bytes', async t => {
+  const {runtime,files,rows}=await runtimeFixture(t),taskId='ended-admission',signal=paths.state('A',taskId)+'/Planner_Inbox'
+  await withSnapshot(files,snapshot=>files.commit(snapshot,[{path:signal,content:''},{path:paths.task(taskId),content:encodeJson({version:1,taskId,route:'P',owner:'A',sourcePath:'tasks/end_P.md',status:'complete'})}],'already ended'))
+  let snapshots=0,signalReads=0
+  const snapshot=files.snapshot.bind(files),read=files.readBytes.bind(files)
+  files.snapshot=async()=>{snapshots++;return snapshot()}
+  files.readBytes=async(current,path)=>{if(path===signal)signalReads++;return read(current,path)}
+  await runtime.wake({id:'ended-signal',role:'Planner',taskId,reason:'notification',sources:[{path:signal,version:'old'}]})
+  await runtime.runQueue()
+  assert.equal(snapshots,1)
+  assert.equal(signalReads,0)
+  assert.equal([...rows.values()].find((row:any)=>row.request?.id==='ended-signal')?.delivered,true)
+})
+
+test('runtime closes admission and cancels its owned transport before waiting for the active poll',async t=>{
+  const {runtime}=await runtimeFixture(t)
+  let release!:()=>void,cancelled=0
+  const blocked=new Promise<void>(r=>{release=r})
+  runtime.loop={stop:async()=>{await blocked}}
+  runtime.environment.cancelPending=()=>{assert.equal(runtime.closed,true);cancelled++;release()}
+  const disposing=runtime.dispose()
+  try {await new Promise(r=>setImmediate(r));assert.equal(cancelled,1)}
+  finally {release();await disposing}
 })

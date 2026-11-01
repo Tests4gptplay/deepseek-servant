@@ -27,7 +27,7 @@ async function fixture(t: test.TestContext) {
   const lifecycle = { closes: 0, disposes: 0, opens: 0, invalidations: 0 }
   const running = (mode: 'local' | 'git') => {
     const files = mode === 'local' ? local : gitSeam, transactions = new FrameworkTransactions(files, storage, mode)
-    const connection = { files, transactions, scope: mode, identity: { login: mode === 'local' ? 'User' : 'Owner', owner: 'Owner', instanceUUID: '00000000-0000-4000-8000-000000000002', repositoryId: mode }, prepareWrite: async () => {}, repository: mode === 'git' ? { identity: { login: 'Owner', id: 42 } } : undefined, close: async () => {} }
+    const connection = { files, transactions, scope: mode, identity: { login: mode === 'local' ? 'User' : 'Owner', owner: 'Owner', instanceUUID: '00000000-0000-4000-8000-000000000002', repositoryId: mode }, prepareWrite: async () => {}, cancelPending: () => {}, repository: mode === 'git' ? { identity: { login: 'Owner', id: 42 } } : undefined, close: async () => {} }
     const conversation = new FrameworkConversation(files, transactions, { mode, collaborationId: internal.saved.get(mode).settings.collaborationId })
     internal.accesses.set(mode, Promise.resolve({ connection, conversation }))
     const registration = { member: mode === 'local' ? 'User-1' : 'Owner-2', workerSeats: internal.saved.get(mode).settings.workerSeats }
@@ -237,8 +237,8 @@ test('actual legacy user wait exposes its question and explicit answer enters re
 
 test('real service persists Host task controls, rejects completed/foreign tasks and does not replay stale resume', async t => {
   const { service, local } = await fixture(t), runtime = (service as any).running.get('local').runtime
-  const resumes: string[] = []; let applied = 0
-  runtime.applyUserControls = async () => { applied++ }
+  const resumes: string[] = []; const applied: unknown[][] = []
+  runtime.applyUserControls = async (...args: unknown[]) => { applied.push(args) }
   runtime.resumeTask = async (taskId: string) => { resumes.push(taskId) }
   await withSnapshot(local, snapshot => local.commit(snapshot, [
     { path: paths.task('T'), content: JSON.stringify({ version: 1, taskId: 'T', route: 'P', owner: 'User-1', sourcePath: 'tasks/task_P.md', status: 'running' }) },
@@ -249,7 +249,7 @@ test('real service persists Host task controls, rejects completed/foreign tasks 
   await service.taskControl({ ...base, commandId: 'resume', intent: 'running' })
   await service.taskControl({ ...base, commandId: 'pause', intent: 'paused' })
   await service.taskControl({ ...base, commandId: 'resume', intent: 'running' })
-  assert.deepEqual(resumes, ['T']); assert.equal(applied, 3)
+  assert.deepEqual(resumes, ['T']); assert.deepEqual(applied, Array.from({ length: 3 }, () => [true, { taskId: 'T' }]))
   assert.equal((await service.view({ mode: 'local' })).tasks.find(task => task.taskId === 'T')?.control, 'paused')
   await assert.rejects(service.taskControl({ ...base, taskId: 'C', commandId: 'complete', intent: 'running' }), /completed/)
   await assert.rejects(service.taskControl({ ...base, taskId: 'F', commandId: 'foreign', intent: 'paused' }), /execution domain/)
@@ -606,4 +606,25 @@ test('late frontend storage acquisition is closed during service disposal withou
     assert.equal(internal.accesses.size, 0)
     assert.deepEqual(await storage.list('framework-instance/'), [], 'frontend acquisition never starts backend registration')
   } finally { release(); await access; await service.dispose(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('service disposal cancels its admitted background opener before awaiting acquisition', async t => {
+  const {service}=await fixture(t), internal=service as any, entered=Promise.withResolvers<void>()
+  internal.running.clear()
+  let cancelled=0
+  internal.open=async (_mode:unknown,signal:AbortSignal)=>{assert.ok(signal);entered.resolve();await new Promise<void>((_resolve,reject)=>signal.addEventListener('abort',()=>{cancelled++;reject(signal.reason)},{once:true}))}
+  const opening=internal.connect('git').then(()=>false,(error:Error)=>error.name==='AbortError')
+  await entered.promise;await service.dispose()
+  assert.equal(await opening,true);assert.equal(cancelled,1)
+  assert.equal(internal.running.size,0)
+})
+
+test('service closes active request owners before waiting for a hot settings operation blocked on that request', async t => {
+  const {service}=await fixture(t),internal=service as any,active=internal.running.get('git'),entered=Promise.withResolvers<void>()
+  const request=Promise.withResolvers<never>();let stopped=0
+  active.connection.updateWorkerSeats=async()=>{entered.resolve();return request.promise}
+  active.runtime.dispose=async()=>{stopped++;request.reject(new DOMException('owned request cancelled','AbortError'))}
+  const operation=service.configure({mode:'git',commandId:'hot-while-close',expectedRevision:'git-settings',settings:{...settings,workerSeats:2}}).then(()=>false,()=>true)
+  await entered.promise;await service.dispose()
+  assert.equal(await operation,true);assert.equal(stopped,1)
 })

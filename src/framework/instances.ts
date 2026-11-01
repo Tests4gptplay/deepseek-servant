@@ -52,6 +52,7 @@ export class InstanceAccountError extends Error {
   }
 }
 interface Observation { sequence: number; advancedAt: number; confirmed: boolean; status: Heartbeat['status'] }
+interface HeartbeatObservation { version: string; heartbeat?: Heartbeat; error?: string }
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const uuidCreations = new WeakMap<StoragePort, Promise<string>>()
@@ -93,6 +94,9 @@ export class InstanceRegistration {
   private readonly key: string
   private stopped = false
   private observations = new Map<string, Observation>()
+  // Only parsed heartbeat observations, scoped to this registration. Immutable
+  // file versions avoid rereading unchanged signals; elapsed time still advances.
+  private heartbeatObservations = new Map<string, HeartbeatObservation>()
   private interrupted = false
   private tail: Promise<void> = Promise.resolve()
   constructor(private readonly files: FilesStore, private readonly transactions: FrameworkTransactions,
@@ -141,15 +145,23 @@ export class InstanceRegistration {
   }
   private async rows(snapshot: FilesSnapshot): Promise<Array<{ registration: Omit<RegisteredInstance, 'primary'>; heartbeat?: Heartbeat; error?: string }>> {
     const rows = []
+    const current = new Map<string, HeartbeatObservation>()
     for (const entry of await this.files.listDirectory(snapshot, 'instances/')) {
       const registration = parseInstancePath(entry.path)
       if (!registration) continue
-      const body = await this.files.read(snapshot, entry.path)
-      if (body !== undefined) {
-        try { rows.push({ registration, heartbeat: heartbeat(body) }) }
-        catch { rows.push({ registration, error: 'Invalid heartbeat record: ' + entry.path }) }
+      let observed = this.heartbeatObservations.get(entry.path)
+      if (observed?.version !== entry.version) {
+        const body = await this.files.read(snapshot, entry.path)
+        if (body === undefined) continue
+        try { observed = { version: entry.version, heartbeat: heartbeat(body) } }
+        catch { observed = { version: entry.version, error: 'Invalid heartbeat record: ' + entry.path } }
       }
+      current.set(entry.path, observed)
+      rows.push({ registration, ...(observed.heartbeat ? { heartbeat: { ...observed.heartbeat } } : {}),
+        ...(observed.error ? { error: observed.error } : {}) })
     }
+    // A removed or renamed path must not retain an observation indefinitely.
+    this.heartbeatObservations = current
     return rows
   }
   private async publishRunning(): Promise<RegisteredInstance> {
@@ -256,18 +268,23 @@ export class InstanceRegistration {
     }
     await withSnapshot(this.files, async snapshot => {
       const body = await this.files.read(snapshot, prepared.registration.path)
-      if (body === undefined || JSON.stringify(heartbeat(body)) !== JSON.stringify(prepared.heartbeat)) {
+      const confirmed = body === undefined ? undefined : heartbeat(body)
+      if (confirmed === undefined || JSON.stringify(confirmed) !== JSON.stringify(prepared.heartbeat)) {
         throw new Error('Instance heartbeat read-back differs; preserve the pending publication for inspection.')
       }
+      // Hand the already verified readback to this observer. Its next discovery
+      // still compares the authoritative entry version before using this value.
+      const entry = (await this.files.listDirectory(snapshot, 'instances/')).find(row => row.path === prepared.registration.path)
+      if (entry) this.heartbeatObservations.set(entry.path, { version: entry.version, heartbeat: confirmed })
     })
     await this.storage.set(this.key, { ...(saved.accountId === undefined ? {} : { accountId: saved.accountId }), member: prepared.registration.member, sequence: saved.sequence, lastPublishedAt: this.now() } satisfies Saved)
     return prepared.registration
   }
   /** Losing observation continuity discards time-based claims, not remote records. */
   observationInterrupted(): void { this.interrupted = true }
-  async observe(): Promise<ObservedInstance[]> {
+  async observe(borrowed?: FilesSnapshot): Promise<ObservedInstance[]> {
     try {
-      return await withSnapshot(this.files, async snapshot => {
+      const inspect = async (snapshot: FilesSnapshot) => {
         const rows = await this.rows(snapshot), now = this.now()
         if (this.interrupted) {
           // Reset elapsed continuity, not the highest sequence already established.
@@ -292,7 +309,8 @@ export class InstanceRegistration {
             heartbeat: current, availability })
         }
         return output
-      })
+      }
+      return await (borrowed ? inspect(borrowed) : withSnapshot(this.files, inspect))
     } catch (error) { this.interrupted = true; throw error }
   }
 }

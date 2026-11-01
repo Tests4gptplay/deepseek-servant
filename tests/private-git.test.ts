@@ -326,17 +326,20 @@ test('three independent participants execute through readback, review, seal and 
   }
 })
 
-test('GitHub requests abort stalled transport at the operation deadline', async () => {
-  let observed: AbortSignal | undefined
-  const client = new GitHubClient(async () => ({ value: 'test-token', source: 'test' }), async (_url, init) => {
-    observed = init?.signal ?? undefined
-    return await new Promise<Response>((_resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Test transport exceeded its bounded wait')), 100)
-      observed?.addEventListener('abort', () => { clearTimeout(timer); reject(observed!.reason) }, { once: true })
+test('GitHub requests abort stalled transport when the operation owner cancels', async () => {
+  let observed: AbortSignal | undefined, requests = 0
+  const entered = Promise.withResolvers<void>()
+  const client = new GitHubClient(async () => ({ value: 'synthetic-not-a-secret', source: 'fixture' }), async (_url, init) => {
+    requests++; observed = init?.signal ?? undefined; entered.resolve()
+    return new Promise<Response>((_resolve, reject) => {
+      observed!.addEventListener('abort', () => reject(observed!.reason), { once: true })
     })
-  }, 10)
-  await assert.rejects(client.session(session => session.request('GET', '/user')), /timeout/i)
+  })
+  const pending = client.session(session => session.request('GET', '/user'))
+  const rejected = assert.rejects(pending, { name: 'AbortError' })
+  await entered.promise; client.cancel(); await rejected
   assert.equal(observed?.aborted, true)
+  assert.equal(requests, 1, 'cancellation does not retry or infer a server outcome')
 })
 
 test('failed native admission does not leave a phantom physical owner', async () => {

@@ -115,16 +115,35 @@ export async function deliverMember(store: FilesStore, snapshot: FilesSnapshot, 
     content: encodeJson({ state: 'running', deliveryId } satisfies MemberStatus) })
   return [...changes.values()]
 }
+const observedInboxes = new WeakMap<FilesStore, Map<string, string>>()
+/** Drop only the completed Task's short-lived metadata observations. */
+export function clearInboxDiscoveryCache(store: FilesStore, taskId: string): void {
+  const entries = observedInboxes.get(store), prefix = paths.run(taskId) + '/'
+  for (const path of entries?.keys() ?? []) if (path.startsWith(prefix)) entries!.delete(path)
+}
 /** Discovery is based on the fixed Inbox file's version and explicit delivery identity.
  * Updating completion state alone is not another delivery. Empty Inbox is not completion.
  */
 export async function discoverInbox(store: FilesStore, snapshot: FilesSnapshot, taskId: string, member: string): Promise<FileChange[]> {
   const inbox = paths.inbox(taskId, member)
-  const entry = (await store.listDirectory(snapshot, inbox.slice(0, inbox.lastIndexOf('/') + 1))).find(entry => entry.path === inbox)
-  if (!entry || entry.empty || entry.bytes === 0) return []
-  const status = await readMemberStatus(store, snapshot, paths.memberStatus(taskId, member))
+  const directory = await store.listDirectory(snapshot, inbox.slice(0, inbox.lastIndexOf('/') + 1))
+  const entry = directory.find(entry => entry.path === inbox)
+  const cached = observedInboxes.get(store)
+  if (!entry || entry.empty || entry.bytes === 0) { cached?.delete(inbox); return [] }
+  const statusPath = paths.memberStatus(taskId, member), cursorPath = paths.inboxCursor(taskId, member)
+  const cursor = (await store.listDirectory(snapshot, paths.member(taskId, member) + '/')).find(entry => entry.path === cursorPath)
+  const signature = JSON.stringify([entry.version, directory.find(entry => entry.path === statusPath)?.version ?? null, cursor?.version ?? null])
+  // Only a previously verified no-op can be reused; pending discovery writes
+  // are never cached. All three versions belong to this current fixed snapshot.
+  if (cached?.get(inbox) === signature) return []
+  cached?.delete(inbox)
+  const status = await readMemberStatus(store, snapshot, statusPath)
   const version = encodeJson({ version: entry.version, deliveryId: status?.deliveryId ?? '' })
-  if (await store.read(snapshot, paths.inboxCursor(taskId, member)) === version) return []
+  if (await store.read(snapshot, cursorPath) === version) {
+    const observations = cached ?? new Map<string, string>()
+    observations.set(inbox, signature); observedInboxes.set(store, observations)
+    return []
+  }
   return [
     { path: paths.inboxCursor(taskId, member), content: version },
     { path: paths.state(member, taskId) + '/Planner_Inbox', content: '' },
