@@ -25,7 +25,7 @@ import { FrameworkConversation, type ConversationSend } from './conversation.js'
 import { FrameworkHostLoop, type RoleWake } from './host-loop.js'
 import { installFrameworkRoleTools, parseDirectSignal, signalWorkerId, workerPaths, type FrameworkRoleBinding, type FrameworkRoleServices } from './role-tools.js'
 import { clearInboxDiscoveryCache, paths, readJson, readMemberStatus, type TaskMetadata, type MemberStatus } from './task-files.js'
-import { withSnapshot, type FilesStore, type FilesSnapshot } from './transactions.js'
+import { FilesOutcomeUnknownError, withSnapshot, type FilesStore, type FilesSnapshot } from './transactions.js'
 import { scanMemberRecovery, createRecoveryWatch, dueRecoveryWatch,
   completeHealthyRecoveryCycle, type RecoveryWatch, type MemberRecoveryInput, type WorkIdentity, type RecoveryRole } from './recovery.js'
 
@@ -572,7 +572,10 @@ export class FrameworkRoleRuntime {
           createdAt: final.at, text: final.text, source: 'model', recipient: 'human',
           ...(final.model ? { model: final.model } : {}), ...(replyTo ? { replyTo } : {}) }
         await this.ownForegroundMessage(record, message)
-        await this.conversation.send('native-capture/' + id, message)
+        // The native answer and message identity are already fixed. After a
+        // proven CAS conflict rebuild only its append against the current index;
+        // unknown submissions still reconcile their original operation receipt.
+        await this.conversation.send('native-capture/' + id, message, { reevaluate: true })
       }
       await this.saveRole({ ...record, completedRound: true })
       record = this.roleRecords.get(record.identity.workId)!
@@ -955,7 +958,7 @@ export class FrameworkRoleRuntime {
     if (this.closed) return
     try { await this.processObservations() } catch (error) { this.error(error) }
     if (this.closed) return
-    try { await this.processHostRestores() } catch (error) { this.error(error) }
+    try { await this.processHostRestores((error, context) => this.error(error, context)) } catch (error) { this.error(error) }
     if (this.closed) return
     await this.processSealedBusiness()
     if (this.closed) return
@@ -1193,86 +1196,115 @@ export class FrameworkRoleRuntime {
   private recoveryInputPath(taskId: string, member: string, role: RecoveryRole): string {
     return 'technical/recovery-inputs/' + paths.member(taskId, member).slice('task-runs/'.length) + '/' + role + '.json'
   }
-  private async processHostRestores(): Promise<void> {
+  private async processHostRestores(onError?: (error: unknown, context: Record<string, unknown>) => void): Promise<void> {
     type HostRestore = { commandId: string; input: { facts: string; hypotheses: string; actionsTaken: string; continuation: string }; createdAt: string; complete: boolean; targets?: Array<{ identity: WorkIdentity; sessionId: string; complete?: boolean; outcome?: 'superseded' | 'released' | 'user-stopped' | 'arranged' | 'no-continuation' }> }
     for (const row of await this.records.list<HostRestore>(this.prefix + 'host-restores/')) {
+      if (this.closed) return
       if (row.value.complete) continue
       const { commandId, input, createdAt } = row.value
-      if (!row.value.targets) {
-        row.value.targets = [...this.roleRecords.values()].filter(record => !record.released && !record.stopped
-          && (record.stopUnknown || record.stopIntent)).map(record => ({ identity: record.identity, sessionId: record.sessionId }))
-        // Target ownership precedes native stop. Later polls must still arrange
-        // continuation after that exact execution has become stopped.
-        await this.records.set(row.key, row.value)
+      let phase = 'targets'
+      let activeTarget: string | undefined
+      const report = (error: unknown) => {
+        if (!onError) throw error
+        onError(error, { hostRestorationCommandId: commandId, phase,
+          ...(error instanceof Error ? { errorName: error.name } : {}),
+          ...(error instanceof FilesOutcomeUnknownError ? { operationId: error.operationId } : {}),
+          ...(activeTarget ? { activeTarget } : {}), targets: structuredClone(row.value.targets ?? []) })
       }
-      await this.transactions.run('host-restore:' + commandId, { input, createdAt }, { reevaluate: true }, async snapshot => {
-        const writes = new Map<string, string>()
-        for (const task of await this.taskMetadata(snapshot)) {
-          if (task.status !== 'running' || await this.manuallyCleared(task.taskId, snapshot)) continue
-          let relevant = false
-          for (const member of (task.members ?? [task.owner]).filter(member => this.config.primary || member === this.config.member)) {
-            const status = await readMemberStatus(this.files, snapshot, paths.memberStatus(task.taskId, member))
-            const inbox = await this.files.read(snapshot, paths.inbox(task.taskId, member))
-            if (status?.state === 'complete' || !inbox?.length) continue
-            relevant = true
-            writes.set(paths.state(member, task.taskId) + '/recovery', '')
-            writes.set(paths.state(member, task.taskId) + '/Planner_Helper', '')
-            writes.set(this.recoveryInputPath(task.taskId, member, 'Planner'), JSON.stringify({ ...input, at: createdAt, debugPath: 'debug/' + createdAt.slice(0,10) + '.md' }))
+      try {
+        if (!row.value.targets) {
+          row.value.targets = [...this.roleRecords.values()].filter(record => !record.released && !record.stopped
+            && (record.stopUnknown || record.stopIntent)).map(record => ({ identity: record.identity, sessionId: record.sessionId }))
+          // Target ownership precedes native stop. Later polls must still arrange
+          // continuation after that exact execution has become stopped.
+          await this.records.set(row.key, row.value)
+        }
+        phase = 'publication'
+        await this.transactions.run('host-restore:' + commandId, { input, createdAt }, { reevaluate: true }, async snapshot => {
+          const writes = new Map<string, string>()
+          for (const task of await this.taskMetadata(snapshot)) {
+            if (task.status !== 'running' || await this.manuallyCleared(task.taskId, snapshot)) continue
+            let relevant = false
+            for (const member of (task.members ?? [task.owner]).filter(member => this.config.primary || member === this.config.member)) {
+              const status = await readMemberStatus(this.files, snapshot, paths.memberStatus(task.taskId, member))
+              const inbox = await this.files.read(snapshot, paths.inbox(task.taskId, member))
+              if (status?.state === 'complete' || !inbox?.length) continue
+              relevant = true
+              writes.set(paths.state(member, task.taskId) + '/recovery', '')
+              writes.set(paths.state(member, task.taskId) + '/Planner_Helper', '')
+              writes.set(this.recoveryInputPath(task.taskId, member, 'Planner'), JSON.stringify({ ...input, at: createdAt, debugPath: 'debug/' + createdAt.slice(0,10) + '.md' }))
+            }
+            if (relevant && task.route === 'O' && this.config.primary) {
+              writes.set(paths.state(task.owner, task.taskId) + '/Organizer_Helper', '')
+              writes.set(this.recoveryInputPath(task.taskId, task.owner, 'Organizer'), JSON.stringify({ ...input, at: createdAt, debugPath: 'debug/' + createdAt.slice(0,10) + '.md' }))
+            }
           }
-          if (relevant && task.route === 'O' && this.config.primary) {
-            writes.set(paths.state(task.owner, task.taskId) + '/Organizer_Helper', '')
-            writes.set(this.recoveryInputPath(task.taskId, task.owner, 'Organizer'), JSON.stringify({ ...input, at: createdAt, debugPath: 'debug/' + createdAt.slice(0,10) + '.md' }))
+          const debug = 'debug/' + createdAt.slice(0,10) + '.md'
+          writes.set(debug, (await this.files.read(snapshot, debug) ?? '') + '\n' + JSON.stringify({ at: createdAt, mode: 'host-restoration', ...input, managers: [...writes.keys()] }) + '\n')
+          return [...writes].map(([path,content]) => ({path,content}))
+        })
+        const unresolved: Array<{ identity: WorkIdentity; sessionId: string; reason: string; jobs: string[] }> = []
+        phase = 'continuations'
+        let targetFailed = false
+        for (const target of row.value.targets) {
+          if (this.closed) return
+          if (target.complete) continue
+          activeTarget = target.identity.executionId
+          const pending = (record: RoleRecord | undefined, reason: string) => unresolved.push({ identity: target.identity,
+            sessionId: target.sessionId, reason, jobs: record?.stopUnknown?.jobs ?? record?.stopIntent?.jobs ?? [] })
+          if (this.workOperations?.has(target.identity.workId)) {
+            pending(this.roleRecords.get(target.identity.workId), 'This execution still owns an in-progress operation.')
+            continue
+          }
+          try {
+            await this.serialWork(target.identity.workId, async () => {
+              if (this.closed) return
+              let record = this.roleRecords.get(target.identity.workId)
+              if (!record || record.released || record.identity.executionId !== target.identity.executionId) {
+                target.outcome = record?.released ? 'released' : 'superseded'
+                target.complete = true
+                await this.records.set(row.key, row.value)
+                return
+              }
+              if (!this.trackedStop(record)) {
+                pending(record, record.stopUnknown?.reason ?? 'Native stop confirmation is pending.')
+                return
+              }
+              record = this.roleRecords.get(target.identity.workId)
+              if (!record || record.identity.executionId !== target.identity.executionId || !record.stopped) {
+                pending(record, 'The exact stopped execution changed before continuation could be checked.')
+                return
+              }
+              if (await this.controls.execution(record.identity.executionId)) target.outcome = 'user-stopped'
+              else {
+                const continuation = await this.arrangeNativeContinuation(record, { ...input, facts: input.facts }, undefined,
+                  'host-restored:' + commandId + ':' + target.identity.executionId)
+                target.outcome = continuation ? 'arranged' : 'no-continuation'
+              }
+              target.complete = true
+              await this.records.set(row.key, row.value)
+            })
+            if (this.closed) return
+          } catch (error) {
+            targetFailed = true
+            report(error)
           }
         }
-        const debug = 'debug/' + createdAt.slice(0,10) + '.md'
-        writes.set(debug, (await this.files.read(snapshot, debug) ?? '') + '\n' + JSON.stringify({ at: createdAt, mode: 'host-restoration', ...input, managers: [...writes.keys()] }) + '\n')
-        return [...writes].map(([path,content]) => ({path,content}))
-      })
-      const unresolved: Array<{ identity: WorkIdentity; sessionId: string; reason: string; jobs: string[] }> = []
-      for (const target of row.value.targets) {
-        if (target.complete) continue
-        const pending = (record: RoleRecord | undefined, reason: string) => unresolved.push({ identity: target.identity,
-          sessionId: target.sessionId, reason, jobs: record?.stopUnknown?.jobs ?? record?.stopIntent?.jobs ?? [] })
-        if (this.workOperations?.has(target.identity.workId)) {
-          pending(this.roleRecords.get(target.identity.workId), 'This execution still owns an in-progress operation.')
+        phase = 'settlement'
+        activeTarget = undefined
+        if (unresolved.length) {
+          await this.records.set(row.key, { ...row.value, unresolved, complete: false })
+          await this.wake({ id: 'host-restoration-unresolved:' + commandId + ':' + hash(JSON.stringify(unresolved)), role: 'Helper', reason: 'helper', sources: [], context: { hostRestoration: 'unconfirmed', unresolved } })
           continue
         }
-        await this.serialWork(target.identity.workId, async () => {
-          let record = this.roleRecords.get(target.identity.workId)
-          if (!record || record.released || record.identity.executionId !== target.identity.executionId) {
-            target.outcome = record?.released ? 'released' : 'superseded'
-            target.complete = true
-            await this.records.set(row.key, row.value)
-            return
-          }
-          if (!this.trackedStop(record)) {
-            pending(record, record.stopUnknown?.reason ?? 'Native stop confirmation is pending.')
-            return
-          }
-          record = this.roleRecords.get(target.identity.workId)
-          if (!record || record.identity.executionId !== target.identity.executionId || !record.stopped) {
-            pending(record, 'The exact stopped execution changed before continuation could be checked.')
-            return
-          }
-          if (await this.controls.execution(record.identity.executionId)) target.outcome = 'user-stopped'
-          else {
-            const continuation = await this.arrangeNativeContinuation(record, { ...input, facts: input.facts }, undefined,
-              'host-restored:' + commandId + ':' + target.identity.executionId)
-            target.outcome = continuation ? 'arranged' : 'no-continuation'
-          }
-          target.complete = true
-          await this.records.set(row.key, row.value)
-        })
+        if (targetFailed) continue
+        // Recovered handles may resume only through the original queued input and
+        // its normal current-signal/Task checks. Observation stages are not erased.
+        await this.records.set(row.key, { ...row.value, complete: true })
+        this.environment.restored?.()
+      } catch (error) {
+        report(error)
       }
-      if (unresolved.length) {
-        await this.records.set(row.key, { ...row.value, unresolved, complete: false })
-        await this.wake({ id: 'host-restoration-unresolved:' + commandId + ':' + hash(JSON.stringify(unresolved)), role: 'Helper', reason: 'helper', sources: [], context: { hostRestoration: 'unconfirmed', unresolved } })
-        continue
-      }
-      // Recovered handles may resume only through the original queued input and
-      // its normal current-signal/Task checks. Observation stages are not erased.
-      await this.records.set(row.key, { ...row.value, complete: true })
-      this.environment.restored?.()
     }
   }
   private async processRestores(): Promise<void> {
@@ -1329,7 +1361,12 @@ export class FrameworkRoleRuntime {
     // tick. Ordinary later errors keep their existing event semantics.
     const facts = error instanceof Error ? error.message : String(error)
     this.errorTail = this.errorTail.then(async () => {
-      const signature = hash(JSON.stringify([facts, context]))
+      // A different target progressing is not a new failure of this execution.
+      // Keep the complete observed context for inspection, but scope deduplication
+      // to the failed target and its own current progress.
+      const diagnosticContext = typeof context?.hostRestorationCommandId === 'string' && typeof context.activeTarget === 'string' && Array.isArray(context.targets)
+        ? { ...context, targets: context.targets.filter(target => target?.identity?.executionId === context.activeTarget) } : context
+      const signature = hash(JSON.stringify([facts, diagnosticContext]))
       if ((context?.identity as WorkIdentity | undefined)?.role === 'Helper' || context?.role === 'Helper') {
         // Preserve the native failure, but an error handler must not recursively
         // assign its own failed diagnostic Agent another identical responsibility.
@@ -1338,7 +1375,9 @@ export class FrameworkRoleRuntime {
         return
       }
       const pending = (await this.records.list<WakeRecord>(this.prefix + 'wakes/')).some(row => !row.value.delivered && row.value.request.context?.errorSignature === signature)
-      if (!pending) await this.wake({ id: 'host-error:' + randomUUID(), role: 'Helper', reason: 'helper', sources: [],
+      const diagnosticId = typeof context?.hostRestorationCommandId === 'string'
+        ? 'host-restore-error:' + signature : 'host-error:' + randomUUID()
+      if (!pending) await this.wake({ id: diagnosticId, role: 'Helper', reason: 'helper', sources: [],
         context: { errorSignature: signature, facts, ...(context ?? {}) } })
     }).then(() => {
       if (rateLimit) this.rateLimitDiagnostics!.set(rateLimit, 'recorded')

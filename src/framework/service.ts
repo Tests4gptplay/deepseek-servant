@@ -1,3 +1,4 @@
+import { omitAbsentFields } from '../adapters/dsh/json-record.js'
 import { FrameworkRecordMove, type RecordMoveReceipt, type RecordMovePhysicalStore } from './record-move.js'
 import { isDeepStrictEqual } from 'node:util'
 import { listLegacyRecordExports, readLegacyRecordExport, type LegacyRecordExportIdentity } from './legacy-record-export.js'
@@ -139,8 +140,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 }
                 saved = { revision: randomUUID(), settings };
             }
-            await this.storage.set(key, saved);
-            this.saved.set(mode, saved);
+            await this.persistSettings(mode, saved);
         }
         const physical = this.storage as StoragePort & Partial<RecordMovePhysicalStore>;
         if (physical.moveRecords && physical.storageView) {
@@ -395,6 +395,18 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             this.archiveViews.set(mode, base.archives);
         return base;
     }
+    private async persistSettings(mode: FrameworkMode, saved: Saved): Promise<Saved> {
+        const key = 'framework-settings/' + mode;
+        await this.storage.set(key, saved);
+        const stored = await this.storage.get<Saved>(key);
+        // Native JSON storage omits absent optional fields. Cache the confirmed
+        // representation used by durable move receipts and later comparisons.
+        if (!stored || !isDeepStrictEqual(omitAbsentFields(stored), omitAbsentFields(saved))) {
+            throw new Error('Saved settings could not be confirmed by storage readback.');
+        }
+        this.saved.set(mode, stored);
+        return stored;
+    }
     private mover(): FrameworkRecordMove {
         if (this.recordMover) return this.recordMover;
         const physical = this.storage as StoragePort & Partial<RecordMovePhysicalStore>;
@@ -405,9 +417,8 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 const current = await this.storage.get<Saved>('framework-settings/local');
                 if (!isDeepStrictEqual(current, receipt.settingsAfter)) {
                     if (!isDeepStrictEqual(current, receipt.settingsBefore)) throw new Error('Local settings changed outside the retained record move.');
-                    await this.storage.set('framework-settings/local', receipt.settingsAfter);
-                }
-                this.saved.set('local', structuredClone(receipt.settingsAfter));
+                    await this.persistSettings('local', receipt.settingsAfter);
+                } else this.saved.set('local', current!);
             },
             reopen: async (_receipt, signal) => {
                 this.recordMoving = undefined;
@@ -771,8 +782,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             signal.throwIfAborted();
             const next = { revision: old?.revision ?? randomUUID(), settings };
             await this.storage.set(key, { signature, revision: next.revision });
-            await this.storage.set('framework-settings/' + mode, next);
-            this.saved.set(mode, next);
+            await this.persistSettings(mode, next);
             finishAccessTransition?.(); finishAccessTransition = undefined;
             signal.throwIfAborted();
             await this.storage.set('framework-participation/' + mode, true);

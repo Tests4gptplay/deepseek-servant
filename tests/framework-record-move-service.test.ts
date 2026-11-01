@@ -269,3 +269,64 @@ for (const sameScope of [true, false]) test(`cold ${sameScope ? 'same configured
   assert.equal(f.copies(), 0); assert.equal(f.active(), f.source)
   assert.equal((await f.port.get<any>('framework-runtime/' + hash + '/roles/exact-old-work'))!.stopped, false)
 })
+
+for (const scenario of ['move', 'external-change', 'invalid-readback']) test(`first-start defaults use native persisted settings for relocation: ${scenario}`, async t => {
+  const externalChange = scenario === 'external-change'
+  const { Context } = await import('@deepseek-ai/cordis')
+  const { default: Storage } = await import('@deepseek-ai/dsh-storage')
+  const StorageJson = await import('@deepseek-ai/dsh-storage-json')
+  const StorageDomain = await import('@deepseek-ai/dsh-storage-domain')
+  const { DshStorageAdapter } = await import('../src/adapters/dsh/storage.js')
+  const root = await mkdtemp(join(tmpdir(), 'dss-first-start-move-')), ctx = new Context()
+  await ctx.plugin(Storage); await ctx.plugin(StorageJson, { root: join(root, 'native') }); await ctx.plugin(StorageDomain, { backend: 'json' })
+  const port = await DshStorageAdapter.open(ctx)
+  const localDirectory = join(port.storageView().directory, 'deepseek_servant', 'framework')
+  const defaults = { name: 'DSS', userName: 'alice', localDirectory, ownerRepo: '', repositoryDirectory: '', collaborationId: 'team', workerSeats: 1, workspace: root,
+    foreground: undefined, background: { provider: 'fixture-provider', model: 'fixture-model', reasoningEffort: undefined } }
+  const service = new FrameworkService(ctx, port, defaults), internal = service as any
+  let stops = 0
+  // Only native execution/registration is a seam. Storage serialization, startup,
+  // Local SQLite, physical relocation and settings publication are real.
+  internal.connect = async (mode: string) => {
+    assert.equal(mode, 'local')
+    if (internal.running.has(mode)) return internal.running.get(mode)
+    const access = await internal.access(mode)
+    const active = { connection: { ...access.connection, registration: { member: 'alice', workerSeats: 1 } }, resources: [],
+      runtime: { settleForStorageMove: async () => { stops++ }, dispose: async () => {}, executionViews: () => [] } }
+    internal.running.set(mode, active); return active
+  }
+  t.after(async () => { await service.dispose(); await port.close(); await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
+  if (scenario === 'invalid-readback') {
+    const get = port.get.bind(port)
+    port.get = async <T>(key: string): Promise<T | undefined> => {
+      const value = await get<any>(key)
+      return key === 'framework-settings/local' && value ? { ...value, settings: { ...value.settings, userName: 'wrong-same-revision-readback' } } : value
+    }
+    await assert.rejects(service.start(), /settings could not be confirmed/)
+    assert.equal(internal.saved.has('local'), false)
+    assert.equal((await get<any>('framework-settings/local')).settings.userName, 'alice')
+    assert.equal(await get(recordMoveKey), undefined)
+    return
+  }
+  await service.start()
+  const view = await service.view({ mode: 'local' }), before = await port.get<any>('framework-settings/local')
+  assert.equal(Object.hasOwn(before.settings, 'foreground'), false, 'actual native adapter omits absent optional fields')
+  assert.equal(Object.hasOwn(before.settings.background, 'reasoningEffort'), false, 'nested absent fields use the same native storage contract')
+  const access = await internal.access('local')
+  await withSnapshot(access.connection.files, s => access.connection.files.commit(s, [{ path: 'archives/kept/records.md', content: 'Exact first-profile record 🙂' }], 'retained record'))
+  const request = { mode: 'local' as const, storageScope: view.storageScope!, expectedRevision: view.revision, commandId: 'first-profile-move', directory: join(root, 'moved') }
+  if (externalChange) {
+    await port.set('framework-settings/local', { ...before, revision: 'external-revision', settings: { ...before.settings, userName: 'external-user' } })
+    await assert.rejects(service.moveRecords(request), /Local settings changed outside/)
+    assert.equal((await port.get<any>('framework-settings/local')).settings.userName, 'external-user')
+    assert.equal((await port.get<any>(recordMoveKey)).receipts[0].phase, 'published')
+  } else {
+    const moved = await service.moveRecords(request)
+    assert.equal(moved.storageScope, view.storageScope)
+    assert.equal(moved.settings.localDirectory, join(root, 'moved', 'deepseek_servant', 'framework'))
+    assert.deepEqual(internal.saved.get('local'), await port.get('framework-settings/local'))
+    assert.equal((await service.readFile({ mode: 'local', storageScope: view.storageScope, path: 'archives/kept/records.md' })).text, 'Exact first-profile record 🙂')
+    await service.moveRecords(request); assert.equal(stops, 1)
+    assert.equal((await port.get<any>(recordMoveKey)).receipts[0].phase, 'applied')
+  }
+})

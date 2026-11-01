@@ -89,7 +89,8 @@ AGPL-3.0-only.
 
 `src/experimental/private-git/vendor/git-runner.ts` is copied from
 [lxj808624/dsh-tool-git v0.1.3](https://github.com/lxj808624/dsh-tool-git/tree/v0.1.3)
-and bundled into the Host, with operation timeouts and explicit timeout errors added.
+and retained as historical source attribution, with operation timeouts and explicit
+timeout errors added. It is not included in the current Framework Host bundle.
 
 MIT License
 

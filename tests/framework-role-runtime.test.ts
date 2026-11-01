@@ -2100,7 +2100,7 @@ test('Foreground capture UNKNOWN preserves the original session until the same n
   const originalSend=runtime.conversation.send.bind(runtime.conversation), commands:string[]=[]
   let first=true, stops=0
   runtime.stopOwnedRecord=async()=>{stops++;return{status:'stopped'}}
-  runtime.conversation.send=async(command:string,message:any)=>{commands.push(command);const receipt=await originalSend(command,message);if(first){first=false;throw new FilesOutcomeUnknownError('capture-original-op',undefined,receipt)}return receipt}
+  runtime.conversation.send=async(command:string,message:any,options:any)=>{commands.push(command);const receipt=await originalSend(command,message,options);if(first){first=false;throw new FilesOutcomeUnknownError('capture-original-op',undefined,receipt)}return receipt}
   await assert.rejects(runtime.finishForegroundRound(record),FilesOutcomeUnknownError)
   assert.equal(stops,0);assert.equal(runtime.roleRecords.get(record.identity.workId).completedRound,undefined)
   assert.equal((await runtime.conversation.page(20)).messages.filter((message:any)=>message.role==='assistant').length,1)
@@ -2253,4 +2253,148 @@ test('overall restoration does not recreate a manually retired namespace when it
     assert.equal(await files.read(snapshot,paths.state('A',live)+'/recovery'),'');
     assert.equal(await files.read(snapshot,paths.state('A',live)+'/Planner_Helper'),'');
   });
+});
+
+test('native Foreground capture reevaluates a proven append conflict without losing a newer user message or changing reply identity', async t=>{
+  const {runtime,files,record}=await completedForegroundFixture(t);
+  const commit=files.commit.bind(files); let race=true, stops=0;
+  runtime.stopOwnedRecord=async()=>{stops++;return{status:'stopped'}};
+  files.commit=async(snapshot,changes,message)=>{
+    if(race && changes.some(change=>change.path===runtime.conversation.indexPath)){
+      race=false;
+      await runtime.conversation.send('new-human',{id:'next-human',role:'user',participantId:'human',createdAt:'2026-11-01T00:00:01.000Z',text:'New question while the previous answer is being saved',recipient:'ai'});
+    }
+    return commit(snapshot,changes,message);
+  };
+  await assert.rejects(runtime.finishForegroundRound(record),FilesConflictError);
+  assert.equal(stops,0);assert.equal(runtime.roleRecords.get(record.identity.workId).completedRound,undefined);
+  await runtime.finishForegroundRound(runtime.roleRecords.get(record.identity.workId));
+  await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise));
+  const page=await runtime.conversation.page(20), replies=page.messages.filter((message:any)=>message.role==='assistant');
+  assert.equal(replies.length,1);assert.equal(replies[0].text,'  actual answer\n原文');assert.equal(replies[0].replyTo,'human');
+  assert.equal(page.messages.find((message:any)=>message.id==='next-human')?.text,'New question while the previous answer is being saved');
+  assert.equal(stops,1);assert.equal(runtime.roleRecords.get(record.identity.workId).completedRound,true);
+  assert.equal((await runtime.conversation.pendingForeground()).messages.some((message:any)=>message.id==='next-human'),true,'capture must not claim the new question');
+});
+
+test('overall restoration failure keeps one delivered diagnostic responsibility across a cold runtime while distinct commands and facts remain visible', async t=>{
+  const {runtime,files,storage,rows,errors}=await runtimeFixture(t);
+  const command={commandId:'failed-overall',createdAt:'2026-11-01T00:00:00Z',input:{facts:'saved failure',hypotheses:'inspect',actionsTaken:'preserved',continuation:'continue'},complete:false};
+  await storage.set(runtime.prefix+'host-restores/failed',command);
+  let failure:Error=new Error('restore publication unavailable');
+  const inject=(target:any)=>{target.transactions.run=async()=>{throw failure}};
+  const tick=async(target:any)=>{try{await target.processHostRestores((error:unknown,context:any)=>target.error(error,context))}catch(error){target.error(error)}await target.errorTail};
+  inject(runtime);await tick(runtime);
+  const diagnostics=()=>[...rows].filter(([key,row])=>key.startsWith(runtime.prefix+'wakes/')&&row.request?.reason==='helper');
+  assert.equal(diagnostics().length,1);
+  for(const [key,value] of diagnostics())await storage.set(key,{...value,delivered:true});
+  await tick(runtime);assert.equal(diagnostics().length,1,'one unchanged failed command must not dispatch a fresh Helper after delivery');
+  const cold=new FrameworkRoleRuntime(runtime.ctx,files,storage,runtime.config,runtime.environment) as any;
+  inject(cold);await tick(cold);assert.equal(diagnostics().length,1,'persisted wake identity survives a new runtime, not an in-memory blacklist');
+  await storage.set(runtime.prefix+'host-restores/other',{...command,commandId:'independent-overall'});
+  await tick(cold);assert.equal(diagnostics().length,2,'same text from another command is a distinct recovery responsibility');
+  failure=new FilesOutcomeUnknownError('actual-unknown-operation');await tick(cold);
+  assert.equal(diagnostics().length,4,'new actual failure facts remain visible for each original command');
+  assert.equal(errors.at(-1),failure,'UNKNOWN must reach diagnostics unchanged, not become a proven failure');
+  assert.equal(diagnostics().at(-1)![1].request.context.operationId,'actual-unknown-operation');
+  failure=new FilesOutcomeUnknownError('different-unknown-operation');await tick(cold);
+  assert.equal(diagnostics().length,6,'a different real UNKNOWN operation is not hidden by identical error wording');
+  assert.equal((await storage.get<any>(runtime.prefix+'host-restores/failed')).complete,false);
+});
+
+test('overall restoration failure does not block another command and completed commands cannot recreate diagnostics', async t=>{
+  const {runtime,storage,rows}=await runtimeFixture(t), original=runtime.transactions.run.bind(runtime.transactions);
+  const command={createdAt:'2026-11-01T00:00:00Z',input:{facts:'saved',hypotheses:'inspect',actionsTaken:'preserved',continuation:'continue'},complete:false};
+  await storage.set(runtime.prefix+'host-restores/failed',{...command,commandId:'failed'});
+  await storage.set(runtime.prefix+'host-restores/healthy',{...command,commandId:'healthy'});
+  let attempts=0;
+  runtime.transactions.run=async(id:string,...args:any[])=>{if(id==='host-restore:failed'){attempts++;throw Error('same service failure')}return original(id,...args)};
+  const tick=async()=>{try{await runtime.processHostRestores((error:unknown,context:any)=>runtime.error(error,context))}catch(error){runtime.error(error)}await runtime.errorTail};
+  await tick();assert.equal((await storage.get<any>(runtime.prefix+'host-restores/healthy')).complete,true,'an unrelated owned restoration continues');
+  const failed=await storage.get<any>(runtime.prefix+'host-restores/failed');await storage.set(runtime.prefix+'host-restores/failed',{...failed,complete:true});
+  const count=[...rows.values()].filter(row=>row.request).length;await tick();
+  assert.equal(attempts,1);assert.equal([...rows.values()].filter(row=>row.request).length,count);
+});
+
+test('the same restoration command reports an actual later-phase failure even when its error text is unchanged',async t=>{
+  const {runtime,storage,rows}=await runtimeFixture(t),identity={workId:'stopped-recorder',executionId:'original-execution',role:'Recorder',taskId:'T'};
+  await runtime.saveRole({identity,sessionId:'original-session',generation:1,stopped:true});
+  const key=runtime.prefix+'host-restores/progress';
+  await storage.set(key,{commandId:'progress',createdAt:'2026-11-01T00:00:00Z',input:{facts:'preserved'},complete:false,targets:[{identity,sessionId:'original-session'}]});
+  const original=runtime.transactions.run.bind(runtime.transactions),failure=new Error('same transport failure');let publicationFailed=true;
+  runtime.transactions.run=async(...args:any[])=>{if(publicationFailed)throw failure;return original(...args)};
+  runtime.arrangeNativeContinuation=async()=>{throw failure};
+  const tick=async()=>{await runtime.processHostRestores((error:unknown,context:any)=>runtime.error(error,context));await runtime.errorTail};
+  await tick();
+  for(const [key,row] of [...rows])if(row.request)await storage.set(key,{...row,delivered:true});
+  publicationFailed=false;await tick();
+  const diagnostics=[...rows.values()].filter(row=>row.request?.reason==='helper');
+  assert.equal(diagnostics.length,2);assert.deepEqual(diagnostics.map(row=>row.request.context.phase),['publication','continuations']);
+  assert.equal(diagnostics[1].request.context.activeTarget,identity.executionId);
+  assert.equal((await storage.get<any>(key)).complete,false);
+  runtime.arrangeNativeContinuation=async()=>true;await tick();
+  assert.equal((await storage.get<any>(key)).complete,true);
+  await tick();assert.equal([...rows.values()].filter(row=>row.request?.reason==='helper').length,2);
+});
+
+test('a target-specific native session failure must not block a different Task target inside the same host-restoration command',async t=>{
+ const {runtime,storage,rows}=await runtimeFixture(t);
+ const first={identity:{workId:'one',executionId:'e1',role:'Recorder',taskId:'T1'},sessionId:'session-1',generation:1,stopped:true,
+ delivery:{request:{id:'in-1',role:'Recorder',taskId:'T1',reason:'business-complete',sources:[]},messageId:'message-1',confirmed:true}};
+ const second={identity:{workId:'two',executionId:'e2',role:'Recorder',taskId:'T2'},sessionId:'session-2',generation:1,stopped:true,
+ lastWake:{id:'in-2',role:'Recorder',taskId:'T2',reason:'business-complete',sources:[]}};
+ await runtime.saveRole(first);await runtime.saveRole(second);
+ const key=runtime.prefix+'host-restores/multi';await storage.set(key,{commandId:'multi',input:{facts:'preserved'},createdAt:'2026-11-01T00:00:00Z',complete:false,targets:[first,second].map(({identity,sessionId})=>({identity,sessionId}))});
+ runtime.ctx.sessions={get:()=>undefined};const failure=new Error('native session-1 cannot be read');
+ runtime.ctx.get=(name:string)=>name==='sessionPersistence'?{stat:async(id:string)=>{assert.equal(id,'session-1');throw failure}}:undefined;
+ const tick=async()=>{await runtime.processHostRestores((error:unknown,context:any)=>runtime.error(error,context));await runtime.errorTail};
+ await tick();for(const [key,row] of rows)if(row.request)await storage.set(key,{...row,delivered:true});await tick();
+ const saved=await storage.get<any>(key);
+ assert.equal(saved.complete,false);assert.equal([...rows.values()].filter(row=>row.request?.id.startsWith('host-restore-error:')).length,1);
+ assert.equal(saved.targets[1].complete,true,'independent T2 continuation must not be blocked by T1 session read failure');
+ assert.ok([...rows.values()].some(v=>v.request?.id==='host-restored:multi:e2'));
+});
+
+test('native continuation healthy control reaches the independent second target',async t=>{
+ const {runtime,storage,rows}=await runtimeFixture(t);
+ const records=[1,2].map(n=>({identity:{workId:'w'+n,executionId:'e'+n,role:'Recorder',taskId:'T'+n},sessionId:'s'+n,generation:1,stopped:true,lastWake:{id:'in-'+n,role:'Recorder',taskId:'T'+n,reason:'business-complete',sources:[]}}));
+ for(const record of records)await runtime.saveRole(record);
+ const key=runtime.prefix+'host-restores/control';await storage.set(key,{commandId:'control',input:{facts:'preserved'},createdAt:'2026-11-01T00:00:00Z',complete:false,targets:records.map(({identity,sessionId})=>({identity,sessionId}))});
+ await runtime.processHostRestores((error:unknown,context:any)=>runtime.error(error,context));await runtime.errorTail;const saved=await storage.get<any>(key);
+ assert.equal(saved.complete,true);assert.ok(saved.targets.every((v:any)=>v.complete));
+ assert.ok([...rows.values()].some(v=>v.request?.id==='host-restored:control:e2'));
+});
+
+test('shutdown cancellation during the first restore must not admit a fresh later command',async t=>{
+ const {runtime,storage,files,errors}=await runtimeFixture(t),entered=Promise.withResolvers<void>(),cancelled=Promise.withResolvers<never>();
+ const first=runtime.prefix+'host-restores/closing',second=runtime.prefix+'host-restores/after-close';
+ const command=(commandId:string)=>({commandId,input:{facts:'preserved'},createdAt:'2026-11-01T00:00:00Z',complete:false,targets:[]});
+ await storage.set(first,command('closing'));await storage.set(second,command('after-close'));
+ const original=runtime.transactions.run.bind(runtime.transactions);const admitted:string[]=[];
+ runtime.transactions.run=async(id:string,...args:any[])=>{admitted.push(id);if(id==='host-restore:closing'){entered.resolve();return cancelled.promise}return original(id,...args)};
+ runtime.environment.cancelPending=(reason:unknown)=>cancelled.reject(reason);
+ const poll=runtime.loop.poll();await entered.promise;const dispose=runtime.dispose();await Promise.all([poll,dispose]);
+ assert.equal(errors.length,0,'owned shutdown abort itself is not a new failure');
+ const saved=await storage.get<any>(second);
+ const body=await withSnapshot(files,(s:any)=>files.read(s,'debug/2026-11-01.md'));
+ assert.deepEqual(admitted,['host-restore:closing'],'no unstarted later restoration should be admitted after shutdown');
+ assert.equal(saved.complete,false);assert.equal(body,undefined);
+});
+
+test('serialWork admitted microtask rechecks closed before starting its target callback',async t=>{
+ const {runtime,storage,rows}=await runtimeFixture(t);
+ const record={identity:{workId:'one',executionId:'e1',role:'Recorder',taskId:'T1'},sessionId:'session-1',generation:1,stopped:true,
+ lastWake:{id:'in-1',role:'Recorder',taskId:'T1',reason:'business-complete',sources:[]}};
+ await runtime.saveRole(record);const key=runtime.prefix+'host-restores/queued-target';await storage.set(key,{commandId:'queued-target',input:{facts:'preserved'},createdAt:'2026-11-01T00:00:00Z',complete:false,targets:[{identity:record.identity,sessionId:record.sessionId}]});
+ const original=runtime.serialWork.bind(runtime),closing=Promise.withResolvers<void>();let observedClosed=false;
+ runtime.serialWork=(id:string,op:()=>Promise<void>)=>{
+  const result=original(id,async()=>{observedClosed=runtime.closed;return op()});
+  if(id==='one')queueMicrotask(()=>{void runtime.dispose().then(closing.resolve,closing.reject)});
+  return result;
+ };
+ await runtime.loop.poll();await closing.promise;
+ assert.equal(observedClosed,true,'schedule actually places shutdown before the original target callback');
+ const saved=await storage.get<any>(key),wakes=[...rows.values()].filter(v=>v.request?.id==='host-restored:queued-target:e1');
+ assert.equal(wakes.length,0,'no new continuation may be published by callback first starting after closed');
+ assert.equal(saved.complete,false);assert.equal(saved.targets[0].complete,undefined);
 });
