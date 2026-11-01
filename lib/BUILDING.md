@@ -1,4 +1,4 @@
-# Generated runtime bundles
+# Building runtime bundles
 
 This development branch contains product source and tests. The generated `host.js` and `client.js` bundles are omitted from this source-only synchronization.
 

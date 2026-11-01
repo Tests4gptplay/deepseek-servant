@@ -10,6 +10,12 @@ adapters, conversation/event adapters, credentials, remote Git contracts and
 command transaction regressions remain in the current run.
 There are no old role-prompt build definitions in this runner.
 
+`native-model-selection` mounts the official Agent loop, default-model service and
+system-prompt registry for all six roles. It checks Auto and explicit model routes
+before rendering a persona containing `{{model}}`, then verifies native admission
+reaches the deliberately unconfigured provider error. It makes no model API request;
+real Web request admission and provider responses are separate validation steps.
+
 ## Historical implementation
 
 Run `node scripts/test-historical.mjs`. It requires local Git commit
