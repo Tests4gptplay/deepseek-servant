@@ -34,7 +34,7 @@ export interface FrameworkStorage {
   gitMemberAction?(action: { action: 'cancelInvitation'; invitationId: number } | { action: 'remove'; username: string }): Promise<void>
   invite?(username: string): Promise<{ status: 'pending' | 'accepted'; id?: number; login: string }>
   /** Releases resources only: does not publish instance registration or status. */
-  cancelPending(): void
+  cancelPending(reason?: unknown): void
   close(): Promise<void>
 }
 export interface FrameworkConnection {
@@ -49,7 +49,7 @@ export interface FrameworkConnection {
   /** Called by the existing Host loop; owns no independent timer. */
   tick(): Promise<void>
   observationInterrupted(): void
-  cancelPending(): void
+  cancelPending(reason?: unknown): void
   close(): Promise<void>
 }
 const digest = (value: string) => createHash('sha256').update(value).digest('hex')
@@ -77,7 +77,7 @@ export async function openFrameworkStorage(input: FrameworkConnectionSettings,
   dependencies.signal?.throwIfAborted()
   let invite: FrameworkStorage['invite'], gitMembers: FrameworkStorage['gitMembers'], gitMemberAction: FrameworkStorage['gitMemberAction']
   let release: (() => Promise<void>) | undefined
-  let cancelPending = () => {}
+  let cancelPending = (_reason?: unknown) => {}
   try {
     let files: FilesStore, scope: string, login: string, owner: string, repositoryId: string | number
     let repository: RepoConnection | undefined
@@ -101,7 +101,7 @@ export async function openFrameworkStorage(input: FrameworkConnectionSettings,
       let binding: RepoBinding = { ownerRepo: settings.ownerRepo, repositoryDirectory: settings.repositoryDirectory }
       const remote = new GitHubRepository(client, () => binding)
       release = () => remote.releaseCache()
-      cancelPending = () => remote.cancel()
+      cancelPending = reason => remote.cancel(reason)
       repository = await remote.connect()
       dependencies.signal?.throwIfAborted()
       binding = { ...binding, ownerRepo: repository.repository.fullName, repositoryId: repository.repository.id,
@@ -165,12 +165,12 @@ export async function openFrameworkConnection(settings: FrameworkConnectionSetti
     await access.prepareWrite()
     dependencies.signal?.throwIfAborted()
     const principal = (value: RegisteredInstance): RegisteredInstance => settings.mode === 'local' ? { ...value, primary: true } : value
-    let registration = principal(await instances.register())
+    let registration = principal(await instances.register(dependencies.signal))
     dependencies.signal?.throwIfAborted()
     let closed = false, closing: Promise<void> | undefined
     const assertOpen = () => { if (closed) throw new Error('Framework connection is closed.') }
     return {
-      files, transactions, cancelPending: () => access.cancelPending(), get registration() { return registration }, scope, repository,
+      files, transactions, cancelPending: reason => access.cancelPending(reason), get registration() { return registration }, scope, repository,
       updateWorkerSeats: async workerSeats => { assertOpen(); registration = principal(await instances.updateWorkerSeats(workerSeats)); return registration },
       members: async snapshot => { assertOpen(); const rows = await instances.observe(snapshot); return settings.mode === 'local'
         ? rows.map(row => ({ ...row, primary: row.instanceUUID === identity.instanceUUID })) : rows },

@@ -6,7 +6,7 @@ import { mkdtemp, readFile, writeFile, chmod, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { setTimeout as delay } from 'node:timers/promises'
-import { GitHubClient } from '../src/experimental/private-git/github.js'
+import { GitHubClient, GitHubError } from '../src/experimental/private-git/github.js'
 import { CoopCredentials, ghToken } from '../src/experimental/private-git/credentials.js'
 
 const token = async () => ({ value: 'synthetic-fixture-only', source: 'fixture' })
@@ -60,7 +60,7 @@ test('credentials preserve cancellation instead of converting it to missing logi
   assert.equal(reads, 1, 'pre-aborted credentials never invoke CLI')
 })
 
-for (const phase of ['headers', 'body', 'error-body'] as const) test('actual Node fetch cancels stalled ' + phase + ' without affecting another client', { timeout: 5_000 }, async () => {
+for (const explicitReason of [false, true]) for (const phase of ['headers', 'body', 'error-body'] as const) test('actual Node fetch cancels stalled ' + phase + (explicitReason ? ' with exact owner reason' : '') + ' without affecting another client', { timeout: 5_000 }, async () => {
   const received = Promise.withResolvers<void>(), headers = Promise.withResolvers<void>()
   const server = createServer((_request, response) => {
     received.resolve()
@@ -82,9 +82,11 @@ for (const phase of ['headers', 'body', 'error-body'] as const) test('actual Nod
   try {
     await Promise.race([received.promise, outcome.then(result => { throw 'error' in result ? result.error : new Error('Unexpected early response') })])
     if (phase !== 'headers') await headers.promise
-    client.cancel()
+    const reason = new DOMException('Connection owner withdrew this operation', 'AbortError')
+    client.cancel(explicitReason ? reason : undefined)
     const result = await outcome
     assert.ok('error' in result); assert.equal(result.error.name, 'AbortError')
+    if (explicitReason) assert.ok(result.error === reason || result.error.cause === reason, 'native fetch retains this exact owner cause, not merely an AbortError name')
     assert.deepEqual(await independent.session(session => session.request('GET', '/user')), { independent: true })
   } finally { client.cancel(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) }
 })
@@ -109,7 +111,7 @@ test('progressing response uses only the actual owner signal, not a synthetic to
   } finally { client.cancel(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) }
 })
 
-test('real ghToken execFile cancels only its own synthetic CLI child and does not expose its output', { timeout: 8_000, skip: process.platform === 'win32' }, async () => {
+for (const explicitReason of [false, true]) test('real ghToken execFile cancels only its own synthetic CLI child and does not expose its output' + (explicitReason ? ' with exact owner reason' : ''), { timeout: 8_000, skip: process.platform === 'win32' }, async () => {
   // A private executable on an isolated PATH, never the installed gh or account.
   const directory = await mkdtemp(join(tmpdir(), 'dss-gh-cancellation-'))
   const started = join(directory, 'started.json'), stopped = join(directory, 'stopped')
@@ -133,10 +135,12 @@ setTimeout(() => { fs.writeFileSync(${JSON.stringify(stopped)}, 'guard'); proces
     const pending = ghToken(owner.signal)
     const outcome = pending.then(value => ({ value }), error => ({ error }))
     assert.deepEqual(JSON.parse(await waitFor(started)), ['auth', 'token', '--hostname', 'github.com'])
-    owner.abort()
+    const reason = new DOMException('Credential acquisition owner withdrew this operation', 'AbortError')
+    owner.abort(explicitReason ? reason : undefined)
     const result = await outcome
     assert.ok('error' in result, 'cancelled token acquisition must reject, not yield partial output')
     assert.equal(result.error.name, 'AbortError')
+    if (explicitReason) assert.ok(result.error === reason || result.error.cause === reason, 'CLI cancellation preserves the exact owner cause')
     assert.equal(String(result.error).includes('synthetic-output-never-a-real-token'), false)
     assert.equal(await waitFor(stopped), 'cancelled', 'the real child_process signal handler ran')
   } finally {
@@ -166,4 +170,108 @@ test('shared credentials do not share cancellation between two independent clien
   readers[1]!.resolve('synthetic-independent')
   assert.deepEqual(await independent, { name: 'independent' })
   assert.deepEqual(calls, ['independent'])
+})
+
+
+test('independent transport AbortError is not reassigned to a later owner cancellation before catch runs', async () => {
+  const independent = new DOMException('Independent transport abort, not this owner', 'AbortError')
+  const owner = new DOMException('Later owner cancellation', 'AbortError')
+  const client = new GitHubClient(token, () => {
+    const failed = Promise.reject(independent)
+    client.cancel(owner)
+    return failed
+  })
+  await assert.rejects(client.session(session => session.request('GET', '/user')), error => {
+    assert.notEqual(error, owner)
+    assert.match(String(error), /Independent transport abort/)
+    assert.equal((error as Error).cause, undefined, 'no fabricated owner cause')
+    return true
+  })
+})
+
+
+for (const status of [200, 403]) test('independent response body AbortError remains independent when owner aborts later: ' + status, async () => {
+  const independent = new DOMException('Independent body abort, not this owner', 'AbortError')
+  const owner = new DOMException('Later body owner cancellation', 'AbortError')
+  const client = new GitHubClient(token, async () => {
+    const response = Response.json({ message: 'not used' }, { status })
+    response.json = () => {
+      const failed = Promise.reject(independent)
+      client.cancel(owner)
+      return failed
+    }
+    return response
+  })
+  await assert.rejects(client.session(session => session.request('GET', '/user')), error => {
+    assert.notEqual(error, owner)
+    assert.match(String(error), /Independent body abort/)
+    assert.notEqual((error as Error).cause, owner)
+    return true
+  })
+})
+
+for (const status of [200, 403]) test('independent body TypeError is not reassigned to a later owner cancellation: ' + status, async () => {
+  const independent = new TypeError('Independent body transport failed')
+  const owner = new Error('Later owner cancellation')
+  const client = new GitHubClient(token, async () => {
+    const response = Response.json({ message: 'not used' }, { status })
+    response.json = () => {
+      const failed = Promise.reject(independent)
+      client.cancel(owner)
+      return failed
+    }
+    return response
+  })
+  await assert.rejects(client.session(session => session.request('GET', '/user')), error => error === independent)
+})
+
+for (const body of ['', '<html>upstream unavailable</html>']) test('non-JSON error response preserves its actual HTTP status fallback: ' + JSON.stringify(body), async () => {
+  const client = new GitHubClient(token, async () => new Response(body, { status: 503, statusText: 'Service Unavailable' }))
+  await assert.rejects(client.session(session => session.request('GET', '/user')), error =>
+    error instanceof GitHubError && error.status === 503 && error.message.includes('Service Unavailable'))
+})
+
+test('actual Node fetch body socket failure retains its TypeError before later owner cancellation', { timeout: 5_000 }, async () => {
+  const socket = Promise.withResolvers<import('node:net').Socket>()
+  const server = createServer((request, response) => {
+    response.writeHead(403, { 'content-type': 'application/json' })
+    response.write('{"message":"'); response.flushHeaders()
+    socket.resolve(request.socket)
+  })
+  server.listen(0, '127.0.0.1'); await once(server, 'listening')
+  const port = (server.address() as { port: number }).port
+  let observed: unknown
+  const owner = new Error('Later body owner cancellation')
+  const client = new GitHubClient(token, async (_url, init) => {
+    const response = await fetch('http://127.0.0.1:' + port + '/', init)
+    const read = response.json.bind(response)
+    response.json = () => {
+      const pending = read().catch(error => {
+        observed = error
+        client.cancel(owner)
+        throw error
+      })
+      void socket.promise.then(connection => connection.destroy()) // Only this test's accepted socket.
+      return pending
+    }
+    return response
+  })
+  try {
+    await assert.rejects(client.session(session => session.request('GET', '/user')), error => {
+      assert.ok(observed instanceof TypeError, 'the failure was produced by actual native body consumption')
+      assert.equal(error, observed)
+      assert.notEqual(error, owner)
+      return true
+    })
+  } finally { client.cancel(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) }
+})
+
+test('error response body retains a non-AbortError owner reason', async () => {
+  const owner = new Error('Custom owner withdrawal')
+  const client = new GitHubClient(token, async () => {
+    const response = Response.json({ message: 'not used' }, { status: 403 })
+    response.json = () => { client.cancel(owner); return Promise.reject(owner) }
+    return response
+  })
+  await assert.rejects(client.session(session => session.request('GET', '/user')), error => error === owner)
 })

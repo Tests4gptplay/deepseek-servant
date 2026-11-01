@@ -164,18 +164,27 @@ export class InstanceRegistration {
     this.heartbeatObservations = current
     return rows
   }
-  private async publishRunning(): Promise<RegisteredInstance> {
+  private async publishRunning(signal?: AbortSignal, reevaluateConflict = false): Promise<RegisteredInstance> {
+    signal?.throwIfAborted()
     await this.assertAccountIdentity()
     const prior = await this.storage.get<Saved>(this.key)
-    const result = await this.publish('running')
+    const result = await this.publish('running', signal, reevaluateConflict)
     // Resolve the original uncertain publication before applying a new seat count.
-    if (prior?.pending && (prior.pending.heartbeat.status !== 'running'
-      || result.workerSeats !== this.config.workerSeats)) return this.publish('running')
+    // A proven-conflict reevaluation may already have published a fresh running
+    // sequence; do not follow that success with a duplicate heartbeat merely
+    // because the rejected original pending publication was stopped.
+    if (prior?.pending) {
+      const resolvedStop = prior.pending.heartbeat.status !== 'running'
+        && (await this.storage.get<Saved>(this.key))?.sequence === prior.pending.heartbeat.sequence
+      if (resolvedStop || result.workerSeats !== this.config.workerSeats) return this.publish('running', signal, reevaluateConflict)
+    }
+    signal?.throwIfAborted()
     return result
   }
-  register(): Promise<RegisteredInstance> {
+  register(signal?: AbortSignal): Promise<RegisteredInstance> {
+    if (signal?.aborted) return Promise.reject(signal.reason)
     this.stopped = false
-    return this.serial(() => this.publishRunning())
+    return this.serial(() => this.publishRunning(signal, true))
   }
   updateWorkerSeats(workerSeats: number): Promise<RegisteredInstance> {
     if (!Number.isSafeInteger(workerSeats) || workerSeats < 0) return Promise.reject(new Error('Worker seats must be a nonnegative integer.'))
@@ -205,80 +214,100 @@ export class InstanceRegistration {
       await this.publish('stopped')
     })
   }
-  private async publish(status: Heartbeat['status']): Promise<RegisteredInstance> {
-    await this.assertAccountIdentity()
-    let saved = await this.storage.get<Saved>(this.key) ?? { sequence: 0 }
-    this.assertAccount(saved)
-    if (!saved.pending) {
-      await withSnapshot(this.files, async snapshot => {
-        // Name occupancy is path metadata. An unrelated damaged body must not
-        // prevent this Host from saving its own valid registration.
-        const registrations = (await this.files.listDirectory(snapshot, 'instances/'))
-          .map(entry => parseInstancePath(entry.path)).filter((entry): entry is Omit<RegisteredInstance, 'primary'> => entry !== undefined)
-        this.assertAccount(saved, registrations.some(row => row.instanceUUID === this.config.instanceUUID),
-          registrations.filter(row => row.instanceUUID === this.config.instanceUUID).map(row => row.member))
-        const own = []
-        for (const registration of registrations.filter(row => row.instanceUUID === this.config.instanceUUID)) {
-          const body = await this.files.read(snapshot, registration.path)
-          if (body !== undefined) own.push({ registration, heartbeat: heartbeat(body) })
-        }
-        const occupied = new Set(registrations.filter(row => row.instanceUUID !== this.config.instanceUUID).map(row => row.member.toLowerCase()))
-        let member = saved.member ?? own[0]?.registration.member
-        if (member && occupied.has(member.toLowerCase())) throw new Error('The saved instance name belongs to another instance; inspect the registration.')
-        if (!member) {
-          member = this.config.login
-          let suffix = 0
-          // Numbered aliases must not consume the real repository owner's exact
-          // login before its principal instance arrives. The owner's own login
-          // remains valid, and another owner instance still receives a suffix.
-          // Existing aliases are deliberately not renamed or adopted here:
-          // heartbeat metadata cannot authenticate an older alias's account.
-          const owner = this.config.repositoryOwner.toLowerCase()
-          const invited = this.config.login.toLowerCase() !== owner
-          while (occupied.has(member.toLowerCase()) || (invited && member.toLowerCase() === owner)) {
-            member = this.config.login + (++suffix)
+  private async publish(status: Heartbeat['status'], signal?: AbortSignal, reevaluateConflict = false): Promise<RegisteredInstance> {
+    for (;;) {
+      signal?.throwIfAborted()
+      await this.assertAccountIdentity()
+      signal?.throwIfAborted()
+      let saved = await this.storage.get<Saved>(this.key) ?? { sequence: 0 }
+      signal?.throwIfAborted()
+      this.assertAccount(saved)
+      if (!saved.pending) {
+        await withSnapshot(this.files, async snapshot => {
+          signal?.throwIfAborted()
+          // Name occupancy is path metadata. An unrelated damaged body must not
+          // prevent this Host from saving its own valid registration.
+          const registrations = (await this.files.listDirectory(snapshot, 'instances/'))
+            .map(entry => parseInstancePath(entry.path)).filter((entry): entry is Omit<RegisteredInstance, 'primary'> => entry !== undefined)
+          this.assertAccount(saved, registrations.some(row => row.instanceUUID === this.config.instanceUUID),
+            registrations.filter(row => row.instanceUUID === this.config.instanceUUID).map(row => row.member))
+          const own = []
+          for (const registration of registrations.filter(row => row.instanceUUID === this.config.instanceUUID)) {
+            const body = await this.files.read(snapshot, registration.path)
+            if (body !== undefined) own.push({ registration, heartbeat: heartbeat(body) })
+          }
+          const occupied = new Set(registrations.filter(row => row.instanceUUID !== this.config.instanceUUID).map(row => row.member.toLowerCase()))
+          let member = saved.member ?? own[0]?.registration.member
+          if (member && occupied.has(member.toLowerCase())) throw new Error('The saved instance name belongs to another instance; inspect the registration.')
+          if (!member) {
+            member = this.config.login
+            let suffix = 0
+            // Numbered aliases must not consume the real repository owner's exact
+            // login before its principal instance arrives. The owner's own login
+            // remains valid, and another owner instance still receives a suffix.
+            // Existing aliases are deliberately not renamed or adopted here:
+            // heartbeat metadata cannot authenticate an older alias's account.
+            const owner = this.config.repositoryOwner.toLowerCase()
+            const invited = this.config.login.toLowerCase() !== owner
+            while (occupied.has(member.toLowerCase()) || (invited && member.toLowerCase() === owner)) {
+              member = this.config.login + (++suffix)
+            }
+          }
+          const previous = Math.max(saved.sequence, ...own.map(row => row.heartbeat.sequence))
+          if (previous >= Number.MAX_SAFE_INTEGER) throw new Error('Heartbeat sequence exceeds the supported JSON integer range.')
+          const registration = this.registration(member)
+          saved = { ...saved, ...(this.config.accountId === undefined ? {} : { accountId: String(this.config.accountId) }), sequence: previous + 1, pending: {
+            id: randomUUID(), revision: snapshot.revision, registration,
+            heartbeat: { sequence: previous + 1, updatedAt: new Date(this.now()).toISOString(), status },
+            previousPaths: own.filter(row => row.registration.path !== registration.path).map(row => row.registration.path),
+          } }
+          // Persist the reserved sequence and exact payload before dispatch. Failures never roll it back.
+          signal?.throwIfAborted()
+          await this.storage.set(this.key, saved)
+        })
+      }
+      const prepared = saved.pending!
+      signal?.throwIfAborted()
+      try {
+        await this.transactions.run('heartbeat:' + prepared.id, prepared, { expectedRevision: prepared.revision }, async () => {
+          signal?.throwIfAborted()
+          const changes: FileChange[] = prepared.previousPaths.map(path => ({ path, content: null }))
+          changes.push({ path: prepared.registration.path, content: JSON.stringify(prepared.heartbeat) + '\n' })
+          return changes
+        })
+      } catch (error) {
+        if (error instanceof FilesConflictError) {
+          // Only a proven publication CAS conflict releases this rejected payload.
+          const { pending: _pending, ...rest } = saved
+          await this.storage.set(this.key, rest)
+          if (reevaluateConflict) {
+            signal?.throwIfAborted()
+            const current = await withSnapshot(this.files, async snapshot => snapshot.revision)
+            signal?.throwIfAborted()
+            // Continue this registration only on actual changed authority. Same-H
+            // errors, UNKNOWN, permission and readback failures are not retries.
+            if (current !== error.expectedRevision) continue
           }
         }
-        const previous = Math.max(saved.sequence, ...own.map(row => row.heartbeat.sequence))
-        if (previous >= Number.MAX_SAFE_INTEGER) throw new Error('Heartbeat sequence exceeds the supported JSON integer range.')
-        const registration = this.registration(member)
-        saved = { ...saved, ...(this.config.accountId === undefined ? {} : { accountId: String(this.config.accountId) }), sequence: previous + 1, pending: {
-          id: randomUUID(), revision: snapshot.revision, registration,
-          heartbeat: { sequence: previous + 1, updatedAt: new Date(this.now()).toISOString(), status },
-          previousPaths: own.filter(row => row.registration.path !== registration.path).map(row => row.registration.path),
-        } }
-        // Persist the reserved sequence and exact payload before dispatch. Failures never roll it back.
-        await this.storage.set(this.key, saved)
-      })
-    }
-    const prepared = saved.pending!
-    try {
-      await this.transactions.run('heartbeat:' + prepared.id, prepared, { expectedRevision: prepared.revision }, async () => {
-        const changes: FileChange[] = prepared.previousPaths.map(path => ({ path, content: null }))
-        changes.push({ path: prepared.registration.path, content: JSON.stringify(prepared.heartbeat) + '\n' })
-        return changes
-      })
-    } catch (error) {
-      if (error instanceof FilesConflictError) {
-        // Proven conflict means no write at H; a later call must reread and choose again.
-        const { pending: _pending, ...rest } = saved
-        await this.storage.set(this.key, rest)
+        throw error
       }
-      throw error
+      signal?.throwIfAborted()
+      await withSnapshot(this.files, async snapshot => {
+        const body = await this.files.read(snapshot, prepared.registration.path)
+        const confirmed = body === undefined ? undefined : heartbeat(body)
+        if (confirmed === undefined || JSON.stringify(confirmed) !== JSON.stringify(prepared.heartbeat)) {
+          throw new Error('Instance heartbeat read-back differs; preserve the pending publication for inspection.')
+        }
+        // Hand the already verified readback to this observer. Its next discovery
+        // still compares the authoritative entry version before using this value.
+        const entry = (await this.files.listDirectory(snapshot, 'instances/')).find(row => row.path === prepared.registration.path)
+        if (entry) this.heartbeatObservations.set(entry.path, { version: entry.version, heartbeat: confirmed })
+      })
+      signal?.throwIfAborted()
+      await this.storage.set(this.key, { ...(saved.accountId === undefined ? {} : { accountId: saved.accountId }), member: prepared.registration.member, sequence: saved.sequence, lastPublishedAt: this.now() } satisfies Saved)
+      signal?.throwIfAborted()
+      return prepared.registration
     }
-    await withSnapshot(this.files, async snapshot => {
-      const body = await this.files.read(snapshot, prepared.registration.path)
-      const confirmed = body === undefined ? undefined : heartbeat(body)
-      if (confirmed === undefined || JSON.stringify(confirmed) !== JSON.stringify(prepared.heartbeat)) {
-        throw new Error('Instance heartbeat read-back differs; preserve the pending publication for inspection.')
-      }
-      // Hand the already verified readback to this observer. Its next discovery
-      // still compares the authoritative entry version before using this value.
-      const entry = (await this.files.listDirectory(snapshot, 'instances/')).find(row => row.path === prepared.registration.path)
-      if (entry) this.heartbeatObservations.set(entry.path, { version: entry.version, heartbeat: confirmed })
-    })
-    await this.storage.set(this.key, { ...(saved.accountId === undefined ? {} : { accountId: saved.accountId }), member: prepared.registration.member, sequence: saved.sequence, lastPublishedAt: this.now() } satisfies Saved)
-    return prepared.registration
   }
   /** Losing observation continuity discards time-based claims, not remote records. */
   observationInterrupted(): void { this.interrupted = true }

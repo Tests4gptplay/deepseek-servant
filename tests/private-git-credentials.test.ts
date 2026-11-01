@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { CoopCredentials } from '../src/experimental/private-git/credentials.js'
+import childProcess from 'node:child_process'
+import { syncBuiltinESMExports } from 'node:module'
+import { CoopCredentials, ghToken } from '../src/experimental/private-git/credentials.js'
 import { CoopSettingsSchema } from '../src/experimental/private-git/contracts.js'
 import { GitHubClient, inspectPrivateRepo, GITHUB_CLI_SETUP_REQUIRED, GITHUB_CLI_ACCESS_REQUIRED } from '../src/experimental/private-git/github.js'
 
@@ -36,4 +38,27 @@ test('GitHub authorization failures include CLI configuration guidance and retai
       return message.includes('GitHub ' + status) && message.includes(GITHUB_CLI_ACCESS_REQUIRED) === (status !== 500) && !message.includes('cli-fixture')
     })
   }
+})
+
+
+test('an independent CLI AbortError is not attributed to a later caller abort', async t => {
+  const owner = new AbortController()
+  const ownReason = new DOMException('Later credential owner cancellation', 'AbortError')
+  const independentCause = new Error('Independent CLI abort cause')
+  const independent = Object.assign(new Error('Independent CLI aborted first'), { name: 'AbortError', cause: independentCause })
+  const mocked = t.mock.method(childProcess, 'execFile', (...args: unknown[]) => {
+    const callback = args.at(-1) as (error: Error, stdout: string) => void
+    owner.abort(ownReason)
+    queueMicrotask(() => callback(independent, 'synthetic-output-never-a-real-token'))
+    return {} as ReturnType<typeof childProcess.execFile>
+  })
+  syncBuiltinESMExports()
+  t.after(() => { mocked.mock.restore(); syncBuiltinESMExports() })
+  const credentials = new CoopCredentials(signal => ghToken(signal))
+  await assert.rejects(credentials.resolve(owner.signal), error => {
+    assert.equal(error, independent)
+    assert.equal((error as Error).cause, independentCause)
+    assert.notEqual(error, ownReason)
+    return true
+  })
 })

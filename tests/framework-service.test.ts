@@ -31,7 +31,7 @@ async function fixture(t: test.TestContext) {
     const conversation = new FrameworkConversation(files, transactions, { mode, collaborationId: internal.saved.get(mode).settings.collaborationId })
     internal.accesses.set(mode, Promise.resolve({ connection, conversation }))
     const registration = { member: mode === 'local' ? 'User-1' : 'Owner-2', workerSeats: internal.saved.get(mode).settings.workerSeats }
-    return { connection: { files, registration, updateWorkerSeats: async (seats: number) => { registration.workerSeats = seats; return registration }, members: async () => [{ member: 'Offline-1', availability: 'offline', instanceUUID: 'old-instance', workerSeats: 2 }], repository: mode === 'git' ? { identity: { login: 'Owner', id: 42 } } : undefined, close: async () => { lifecycle.closes++ } },
+    return { connection: { files, registration, cancelPending: () => {}, updateWorkerSeats: async (seats: number) => { registration.workerSeats = seats; return registration }, members: async () => [{ member: 'Offline-1', availability: 'offline', instanceUUID: 'old-instance', workerSeats: 2 }], repository: mode === 'git' ? { identity: { login: 'Owner', id: 42 } } : undefined, close: async () => { lifecycle.closes++ } },
       runtime: { workerSeats: registration.workerSeats, updateWorkerSeats(seats: number) { this.workerSeats = seats }, invalidateSkills: () => { lifecycle.invalidations++ }, controls: new ExecutionControls(storage, mode), applyUserControls: async () => {}, resumeTask: async () => {}, requestExecutionStop: async () => {}, conversation: new FrameworkConversation(files, transactions, { mode, collaborationId: internal.saved.get(mode).settings.collaborationId }), executionViews: () => [], dispose: async () => { lifecycle.disposes++ } }, resources: [{ member: 'Offline-1', availability: 'offline', instanceUUID: 'old-instance', workerSeats: 2 }] }
   }
   for (const mode of ['local', 'git'] as const) { internal.saved.set(mode, { revision: mode + '-settings', settings: { ...settings } }); internal.running.set(mode, running(mode)) }
@@ -627,4 +627,380 @@ test('service closes active request owners before waiting for a hot settings ope
   const operation=service.configure({mode:'git',commandId:'hot-while-close',expectedRevision:'git-settings',settings:{...settings,workerSeats:2}}).then(()=>false,()=>true)
   await entered.promise;await service.dispose()
   assert.equal(await operation,true);assert.equal(stopped,1)
+})
+
+test('explicit background withdrawal cancels an in-flight registration before waiting for its settings operation', async t => {
+  const { service, storage } = await fixture(t), internal = service as any
+  internal.running.delete('git')
+  const entered = Promise.withResolvers<void>()
+  let cancellations = 0
+  internal.open = async (_mode: unknown, signal: AbortSignal) => {
+    entered.resolve()
+    await new Promise<void>((_resolve, reject) => signal.addEventListener('abort', () => { cancellations++; reject(signal.reason) }, { once: true }))
+  }
+  const frontend = internal.accesses.get('git')
+  const configuring = service.configure({ mode: 'git', commandId: 'withdraw-registering', expectedRevision: 'git-settings', settings }).then(() => false, () => true)
+  await entered.promise
+  // A separately acquired pure storage handle while background registration is pending.
+  internal.accesses.set('git', frontend)
+  const withdrawing = service.participation({ mode: 'git', enabled: false })
+  try {
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.equal(cancellations, 1, 'withdrawal must reach the owned opener before waiting behind it')
+    assert.equal(await configuring, true)
+    await withdrawing
+    assert.equal(await storage.get('framework-participation/git'), false)
+    assert.equal(internal.running.has('git'), false)
+    assert.equal(internal.running.has('local'), true, 'the other mode retains its execution owner')
+    assert.equal((await service.history({ mode: 'git', collaborationId: 'team', limit: 10 })).messages.length, 0, 'withdrawal does not cancel pure frontend storage access')
+  } finally {
+    internal.backgroundOpening.get('git')?.abort()
+    await configuring
+    await withdrawing
+  }
+})
+
+test('changing settings cancels the old frontend acquisition before awaiting its closure', async t => {
+  const { service } = await fixture(t), internal = service as any
+  internal.running.delete('git')
+  const controller = new AbortController(), prior = internal.accesses.get('git')
+  const pending = new Promise<never>((_resolve, reject) => controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true }))
+  internal.accessOpening.set('git', controller)
+  internal.accesses.set('git', pending)
+  const configuring = service.configure({ mode: 'git', commandId: 'replace-pending-access', expectedRevision: 'git-settings', settings: { ...settings, repositoryDirectory: 'new-root' } })
+  try {
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.equal(controller.signal.aborted, true, 'old storage acquisition must be cancelled before its close is awaited')
+    await configuring
+    assert.equal(internal.running.has('local'), true)
+  } finally {
+    controller.abort()
+    await configuring
+    await prior
+  }
+})
+
+test('queued save is withdrawn before it can open, while a later explicit save remains valid', async t => {
+  const { service, storage, lifecycle } = await fixture(t), internal = service as any
+  internal.running.delete('git')
+  const gate = Promise.withResolvers<void>()
+  internal.configuration = gate.promise
+  const old = service.configure({ mode: 'git', commandId: 'queued-before-withdrawal', expectedRevision: 'git-settings', settings }).then(() => false, () => true)
+  const withdrawal = service.participation({ mode: 'git', enabled: false })
+  gate.resolve()
+  assert.equal(await old, true)
+  await withdrawal
+  assert.equal(lifecycle.opens, 0)
+  assert.equal(await storage.get('framework-participation/git'), false)
+  assert.equal(await storage.get('framework-settings/git'), undefined, 'withdrawn queued save did not publish its settings')
+  await service.configure({ mode: 'git', commandId: 'new-after-withdrawal', expectedRevision: 'git-settings', settings })
+  assert.equal(lifecycle.opens, 1)
+  assert.equal(await storage.get('framework-participation/git'), true)
+})
+
+test('withdrawal interrupts a hot background update without cancelling frontend or the other mode', async t => {
+  const { service, storage } = await fixture(t), internal = service as any, active = internal.running.get('git')
+  const entered = Promise.withResolvers<void>(), blocked = Promise.withResolvers<never>()
+  let cancellations = 0, frontendCancellations = 0
+  ;(await internal.accesses.get('git')).connection.cancelPending = () => { frontendCancellations++ }
+  active.connection.updateWorkerSeats = async () => { entered.resolve(); return blocked.promise }
+  active.connection.cancelPending = (reason: unknown) => { cancellations++; blocked.reject(reason) }
+  const configuring = service.configure({ mode: 'git', commandId: 'hot-withdrawal', expectedRevision: 'git-settings', settings: { ...settings, workerSeats: 3 } }).then(() => false, () => true)
+  await entered.promise
+  await service.participation({ mode: 'git', enabled: false })
+  assert.equal(await configuring, true)
+  assert.equal(cancellations, 1)
+  assert.equal(frontendCancellations, 0)
+  assert.equal(internal.running.has('local'), true)
+  assert.equal(await storage.get('framework-participation/git'), false)
+})
+
+test('invalid, stale and identical replayed settings do not cancel a valid admitted save', async t => {
+  const { service } = await fixture(t), internal = service as any
+  internal.running.delete('git')
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>(), open = internal.open
+  let signal: AbortSignal | undefined
+  internal.open = async (mode: string, current: AbortSignal) => { signal = current; entered.resolve(); await release.promise; return open(mode) }
+  const command = { mode: 'git' as const, commandId: 'stable-admission', expectedRevision: 'git-settings', settings }
+  const first = service.configure(command)
+  await entered.promise
+  const same = service.configure(command)
+  const invalid = service.configure({ ...command, commandId: 'invalid-admission', settings: { ...settings, workerSeats: -1 } }).then(() => false, () => true)
+  const stale = service.configure({ ...command, commandId: 'stale-admission', expectedRevision: 'not-current' }).then(() => false, () => true)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(signal?.aborted, false)
+  release.resolve()
+  await first; await same
+  assert.equal(await invalid, true); assert.equal(await stale, true)
+})
+
+test('saved participation intent survives a failed initial connection without claiming readback confirmation', async t => {
+  const { service, storage } = await fixture(t), internal = service as any
+  internal.running.delete('git')
+  internal.open = async () => { throw new Error('Registration outcome unknown') }
+  await assert.rejects(service.configure({ mode: 'git', commandId: 'initial-unknown', expectedRevision: 'git-settings', settings }), /outcome unknown/)
+  assert.equal(await storage.get('framework-participation/git'), true)
+  assert.equal(internal.running.has('git'), false)
+  const receipt = await storage.get<any>('framework-settings-commands/' + createHash('sha256').update('initial-unknown').digest('hex'))
+  assert.equal(receipt.confirmed, undefined)
+  await storage.set('framework-settings/local', { revision: 'local-saved', settings })
+  await storage.set('framework-participation/local', false)
+  const restarted = new FrameworkService({} as any, storage, settings), attempted: string[] = []
+  ;(restarted as any).open = async (mode: string) => { attempted.push(mode); throw new Error('Retained unknown publication still needs reconciliation') }
+  await restarted.start()
+  assert.deepEqual(attempted, ['git'], 'actual startup selects the persisted requested participation, not a fake connected flag')
+  await restarted.dispose()
+})
+
+test('withdrawal owns a real Local connection whose native runtime startup has not returned', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dss-withdraw-start-')), values = new Map<string, unknown>()
+  const storage: StoragePort = { get: async key => structuredClone(values.get(key)) as never,
+    set: async (key, value) => { values.set(key, structuredClone(value)) },
+    list: async prefix => [...values].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value: structuredClone(value) })) as never }
+  const chosen = { ...settings, localDirectory: root }
+  const service = new FrameworkService({ workspaceRegistry: { create: async (directory: string) => ({ id: 'withdraw-test-workspace', path: directory }) } } as any, storage, chosen)
+  const internal = service as any
+  internal.saved.set('local', { revision: 'loaded', settings: chosen })
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+  let runtime: FrameworkRoleRuntime | undefined
+  t.mock.method(FrameworkRoleRuntime.prototype, 'start', async function (this: FrameworkRoleRuntime) { runtime = this; entered.resolve(); await release.promise })
+  const opening = internal.connect('local').then(() => false, () => true)
+  try {
+    await entered.promise
+    const withdrawing = service.participation({ mode: 'local', enabled: false })
+    release.resolve()
+    assert.equal(await opening, true, 'withdrawn startup cannot publish a late running resource')
+    await withdrawing
+    assert.equal(internal.running.size, 0)
+    assert.equal(await storage.get('framework-participation/local'), false)
+    await assert.rejects(runtime!.files.snapshot(), /closed/)
+  } finally { release.resolve(); await opening; await service.dispose(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('queued participation enable is withdrawn without poisoning a later explicit enable', async t => {
+  const { service, lifecycle, storage } = await fixture(t), internal = service as any
+  internal.running.delete('git')
+  const gate = Promise.withResolvers<void>(); internal.configuration = gate.promise
+  const enable = service.participation({ mode: 'git', enabled: true }).then(() => false, () => true)
+  const disable = service.participation({ mode: 'git', enabled: false })
+  gate.resolve()
+  assert.equal(await enable, true); await disable
+  assert.equal(lifecycle.opens, 0)
+  assert.equal(await storage.get('framework-participation/git'), false)
+  await service.participation({ mode: 'git', enabled: true })
+  assert.equal(lifecycle.opens, 1)
+})
+
+for (const phase of ['queued', 'opening'] as const) test(`a validated new configuration supersedes only the earlier ${phase} owner`, async t => {
+  const { service, lifecycle } = await fixture(t), internal = service as any
+  internal.running.delete('git')
+  const entered = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>(), open = internal.open
+  let calls = 0
+  if (phase === 'queued') internal.configuration = gate.promise
+  else internal.open = async (mode: string, signal: AbortSignal) => {
+    if (++calls === 1) { entered.resolve(); await new Promise<void>((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true })) }
+    return open(mode)
+  }
+  const old = service.configure({ mode: 'git', commandId: 'superseded-' + phase, expectedRevision: 'git-settings', settings }).then(() => false, () => true)
+  if (phase === 'opening') await entered.promise
+  const latest = service.configure({ mode: 'git', commandId: 'superseding-' + phase, expectedRevision: internal.saved.get('git').revision, settings: { ...settings, repositoryDirectory: 'next-root' } })
+  gate.resolve()
+  assert.equal(await old, true)
+  await latest
+  assert.equal(internal.saved.get('git').settings.repositoryDirectory, 'next-root')
+  assert.equal(lifecycle.opens, 1)
+  assert.equal(internal.running.has('local'), true)
+})
+
+test('a new configuration cannot adopt a startup opening captured for the previous storage scope', async t => {
+  const { service } = await fixture(t), internal = service as any
+  internal.running.delete('git')
+  const entered = Promise.withResolvers<void>(), open = internal.open
+  const scopes: string[] = []; let oldSignal: AbortSignal | undefined
+  internal.open = async (mode: string, signal: AbortSignal) => {
+    scopes.push(internal.saved.get(mode).settings.repositoryDirectory)
+    if (scopes.length === 1) {
+      oldSignal = signal; entered.resolve()
+      await new Promise<void>((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))
+    }
+    return open(mode)
+  }
+  const startup = internal.connect('git').then(() => false, () => true)
+  await entered.promise
+  const changing = service.configure({ mode: 'git', commandId: 'replace-startup-scope', expectedRevision: 'git-settings', settings: { ...settings, repositoryDirectory: 'scope-B' } }).then(() => true, () => false)
+  try {
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.equal(oldSignal?.aborted, true, 'old unowned-by-config startup must be cancelled rather than adopted as scope B')
+    assert.equal(await startup, true)
+    assert.equal(await changing, true)
+    assert.deepEqual(scopes, ['', 'scope-B'])
+  } finally { internal.backgroundOpening.get('git')?.abort(); await startup; await changing }
+})
+
+for (const outcome of ['owned-abort', 'unknown', 'unowned-abort'] as const) test(`configuration diagnostics distinguish ${outcome} from a successful withdrawal`, async t => {
+  const { service } = await fixture(t), internal = service as any, active = internal.running.get('git')
+  const entered = Promise.withResolvers<void>(), blocked = Promise.withResolvers<never>()
+  active.connection.updateWorkerSeats = async () => { entered.resolve(); return blocked.promise }
+  active.connection.cancelPending = (reason: unknown) => blocked.reject(outcome === 'unknown' ? new FilesOutcomeUnknownError('retained-op') : reason)
+  const configuring = service.configure({ mode: 'git', commandId: 'diagnostic-' + outcome, expectedRevision: 'git-settings', settings: { ...settings, workerSeats: 3 } }).then(() => false, () => true)
+  await entered.promise
+  if (outcome === 'unowned-abort') blocked.reject(new DOMException('Not cancelled by this caller', 'AbortError'))
+  else await service.participation({ mode: 'git', enabled: false })
+  assert.equal(await configuring, true, 'no cancellation or unknown outcome is reported as successful configuration')
+  assert.equal(internal.configurationErrors.has('git'), outcome !== 'owned-abort')
+  assert.equal(internal.errors.has('git'), outcome !== 'owned-abort')
+})
+
+test('replacing Local startup closes its late old connection and preserves old files before confirming the new scope', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dss-replace-start-')), storage = new Map<string, unknown>()
+  const port: StoragePort = { get: async key => structuredClone(storage.get(key)) as never, set: async (key, value) => { storage.set(key, structuredClone(value)) },
+    list: async prefix => [...storage].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value: structuredClone(value) })) as never }
+  const chosen = { ...settings, localDirectory: join(root, 'A') }, next = { ...chosen, localDirectory: join(root, 'B') }
+  const service = new FrameworkService({ workspaceRegistry: { create: async (path: string) => ({ id: 'workspace', path }) } } as any, port, chosen), internal = service as any
+  internal.saved.set('local', { revision: 'loaded', settings: chosen })
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>(); let old: FrameworkRoleRuntime | undefined, starts = 0
+  t.mock.method(FrameworkRoleRuntime.prototype, 'start', async function (this: FrameworkRoleRuntime) {
+    if (++starts === 1) {
+      old = this
+      await withSnapshot(this.files, snapshot => this.files.commit(snapshot, [{ path: 'retained.txt', content: 'Old scope original' }], 'QA original'))
+      entered.resolve(); await release.promise
+    }
+  })
+  const startup = internal.connect('local').then(() => false, () => true)
+  try {
+    await entered.promise
+    const changing = service.configure({ mode: 'local', commandId: 'replace-native-startup', expectedRevision: 'loaded', settings: next })
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.equal(starts, 1, 'new scope waits for the cancelled old startup to settle')
+    release.resolve()
+    assert.equal(await startup, true)
+    await changing
+    assert.equal(starts, 2)
+    assert.equal(internal.running.get('local').connection.files.directory, next.localDirectory)
+    await assert.rejects(old!.files.snapshot(), /closed/)
+    const retained = await LocalFiles.open(chosen.localDirectory)
+    try { await withSnapshot(retained, async snapshot => assert.equal(await retained.read(snapshot, 'retained.txt'), 'Old scope original')) }
+    finally { await retained.close() }
+  } finally { release.resolve(); await startup; await service.dispose(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('unowned AbortError already rejected before withdrawal remains diagnostic', async t => {
+  const { service } = await fixture(t), internal = service as any, active = internal.running.get('git')
+  const entered = Promise.withResolvers<void>(), blocked = Promise.withResolvers<never>()
+  active.connection.updateWorkerSeats = async () => { entered.resolve(); return blocked.promise }
+  active.connection.cancelPending = () => {} // cannot have caused the already rejected operation
+  const configuring = service.configure({ mode: 'git', commandId: 'unowned-before-owned', expectedRevision: 'git-settings', settings: { ...settings, workerSeats: 3 } }).then(() => false, () => true)
+  await entered.promise
+  const unrelated = new DOMException('Independent upstream AbortError before withdrawal', 'AbortError')
+  blocked.reject(unrelated)
+  const withdrawing = service.participation({ mode: 'git', enabled: false })
+  assert.equal(await configuring, true)
+  await withdrawing
+  console.log('UNOWNED_ABORT_DIAGNOSTIC', JSON.stringify({ configurationError: internal.configurationErrors.get('git') ?? null, error: internal.errors.get('git') ?? null }))
+  assert.equal(internal.configurationErrors.get('git'), unrelated.message)
+})
+
+test('superseded startup UNKNOWN remains visible after new scope successful opening', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dss-audit-startup-unknown-')), values = new Map<string, unknown>()
+  const port: StoragePort = { get: async key => structuredClone(values.get(key)) as never,
+    set: async (key, value) => { values.set(key, structuredClone(value)) },
+    list: async prefix => [...values].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value: structuredClone(value) })) as never }
+  const chosen = { ...settings, localDirectory: join(root, 'A') }, next = { ...chosen, localDirectory: join(root, 'B') }
+  values.set('framework-settings/local', { revision: 'loaded', settings: chosen })
+  values.set('framework-settings/git', { revision: 'git-loaded', settings: chosen })
+  values.set('framework-participation/local', true); values.set('framework-participation/git', false)
+  const service = new FrameworkService({ workspaceRegistry: { create: async (path: string) => ({ id: 'workspace', path }) } } as any, port, chosen), internal = service as any
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>(); let starts = 0
+  const seenErrors: string[] = []
+  service.subscribeChanged(() => { const value = internal.errors.get('local'); if (value) seenErrors.push(value) })
+  t.mock.method(FrameworkRoleRuntime.prototype, 'start', async function () {
+    if (++starts === 1) { entered.resolve(); await release.promise; throw new FilesOutcomeUnknownError('retained-old-scope-operation') }
+  })
+  const startup = service.start()
+  let changing: Promise<unknown> | undefined
+  try {
+    await entered.promise
+    changing = service.configure({ mode: 'local', commandId: 'unknown-startup-replaced', expectedRevision: 'loaded', settings: next })
+    await new Promise<void>(resolve => setImmediate(resolve))
+    release.resolve()
+    await startup; await changing
+    assert.equal(starts, 2)
+    assert.ok(seenErrors.some(x => x.includes('uncertain')), 'old UNKNOWN was actually reported')
+    console.log('STARTUP_UNKNOWN_DIAGNOSTIC', JSON.stringify({ seenErrors, finalError: internal.errors.get('local') ?? null, activeDirectory: internal.running.get('local').connection.files.directory }))
+    assert.match(internal.errors.get('local') ?? '', /uncertain/)
+  } finally { release.resolve(); await startup.catch(()=>{}); await changing?.catch(()=>{}); await service.dispose(); await rm(root, {recursive:true,force:true}) }
+})
+
+
+test('frontend read admitted during scope replacement cannot remain bound to old scope', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dss-audit-access-race-')), values = new Map<string, unknown>()
+  const port: StoragePort = { get: async key => structuredClone(values.get(key)) as never,
+    set: async (key, value) => { values.set(key, structuredClone(value)) },
+    list: async prefix => [...values].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value: structuredClone(value) })) as never }
+  const chosen = { ...settings, localDirectory: join(root, 'A') }, next = { ...chosen, localDirectory: join(root, 'B') }
+  const service = new FrameworkService({ workspaceRegistry: { create: async (path: string) => ({ id: 'workspace', path }) } } as any, port, chosen), internal = service as any
+  internal.saved.set('local', { revision: 'loaded', settings: chosen })
+  t.mock.method(FrameworkRoleRuntime.prototype, 'start', async function () {})
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+  let changing: Promise<any> | undefined
+  try {
+    await internal.connect('local')
+    const before = await service.view({mode:'local'})
+    await service.send({mode:'local', collaborationId:before.collaborationId, storageScope:before.storageScope!, id:'old-original-A', createdAt:'2026-11-01T03:00:00.000Z', text:'Original old scope A', recipient:'human', device:'audit'})
+    const oldAccess = await internal.accesses.get('local'), close = oldAccess.connection.close.bind(oldAccess.connection)
+    oldAccess.connection.close = async () => { entered.resolve(); await release.promise; await close() }
+    changing = service.configure({ mode: 'local', commandId: 'replace-during-view', expectedRevision: 'loaded', settings: next })
+    await entered.promise
+    const duringRead = service.view({mode:'local'})
+    await new Promise<void>(resolve => setImmediate(resolve))
+    release.resolve()
+    const during = await duringRead
+    const after = await changing
+    const finalAccess = await internal.accesses.get('local')
+    console.log('FRONTEND_SCOPE_REPLACEMENT', JSON.stringify({ requested: after.settings.localDirectory, background: internal.running.get('local').connection.files.directory,
+      during: during.settings.localDirectory, frontend: finalAccess.connection.files.directory, returnedScope: after.storageScope }))
+    const message = { mode: 'local' as const, collaborationId: after.collaborationId, storageScope: after.storageScope, id: 'new-input-after-configure', createdAt: '2026-11-01T04:00:00.000Z', text: 'Expected new scope B', recipient: 'human' as const, device: 'audit' }
+    assert.equal(after.storageScope, internal.running.get('local').connection.scope)
+    assert.equal(during.storageScope, after.storageScope)
+    assert.equal(during.settings.localDirectory, next.localDirectory)
+    await assert.rejects(service.send({ ...message, id: 'old-A-scope', storageScope: oldAccess.connection.scope }), /Storage destination changed/)
+    await service.send(message)
+    const priorFiles = await LocalFiles.open(chosen.localDirectory)
+    let writtenA: string[]
+    try { const priorConversation = new FrameworkConversation(priorFiles, new FrameworkTransactions(priorFiles, port, 'old-A'), {mode:'local',collaborationId:chosen.collaborationId}); writtenA = (await priorConversation.page(20)).messages.map(row => row.text) } finally { await priorFiles.close() }
+    const writtenB = (await internal.running.get('local').runtime.conversation.page(20)).messages.map((row: any) => row.text)
+    console.log('SEND_AFTER_REPLACEMENT', JSON.stringify({ returnedScopeMatchesNewAccess: after.storageScope === finalAccess.connection.scope, writtenA, writtenB, oldAIdentityRejected: true }))
+    assert.equal(finalAccess.connection.files.directory, next.localDirectory)
+    assert.deepEqual(writtenA, ['Original old scope A'])
+    assert.deepEqual(writtenB, ['Expected new scope B'])
+  } finally { release.resolve(); await changing?.catch(()=>{}); await service.dispose(); await rm(root, {recursive:true,force:true}) }
+})
+
+test('successful hot settings do not clear an unrelated running-role diagnostic', async t => {
+  const { service } = await fixture(t), internal = service as any
+  internal.report('git', new Error('Independent Worker failure still needs diagnosis'))
+  await service.configure({ mode: 'git', commandId: 'hot-not-role-repair', expectedRevision: 'git-settings', settings: { ...settings, workerSeats: 3 } })
+  assert.match(internal.errors.get('git'), /Independent Worker failure/)
+})
+
+test('service shutdown preserves a real unknown publication instead of replacing it with a closed-settings diagnostic', async t => {
+  const { service } = await fixture(t), internal = service as any
+  const unknown = new FilesOutcomeUnknownError('unresolved-shutdown-write')
+  internal.running.get('git').runtime.dispose = async () => { throw unknown }
+  await assert.rejects(service.dispose(), (error: unknown) => error instanceof AggregateError && error.errors.includes(unknown))
+  assert.match(internal.errors.get('git'), /unresolved-shutdown-write/)
+  assert.match(internal.errors.get('git'), /Owner\/repo/)
+})
+
+test('only successful replay of the associated settings command clears its retained unknown operation', async t => {
+  const { service } = await fixture(t), internal = service as any, active = internal.running.get('git')
+  const actual = active.connection.updateWorkerSeats.bind(active.connection), unknown = new FilesOutcomeUnknownError('same-pending-op')
+  let fail = true
+  active.connection.updateWorkerSeats = async (seats: number) => { if (fail) { internal.report('git', unknown); throw unknown } return actual(seats) }
+  const command = { mode: 'git' as const, commandId: 'resolve-pending-settings', expectedRevision: 'git-settings', settings: { ...settings, workerSeats: 3 } }
+  await assert.rejects(service.configure(command), error => error === unknown)
+  assert.match(internal.errors.get('git'), /same-pending-op/)
+  fail = false
+  await service.configure(command)
+  assert.equal(internal.errors.has('git'), false)
 })

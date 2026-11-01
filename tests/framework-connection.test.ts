@@ -1,3 +1,4 @@
+import { FrameworkRoleRuntime } from '../src/framework/role-runtime.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
@@ -644,4 +645,63 @@ test('cancelled opening propagates ownership into token acquisition before any r
   assert.equal(remote.requests.length,0)
   await assert.rejects(openFrameworkConnection(gitSettings,{...dependencies(remote),signal:controller.signal}),{name:'AbortError'})
   assert.equal(remote.requests.length,0)
+})
+
+test('connection: three simultaneous first saves re-evaluate proven Git HEAD conflicts within their original acquisitions', async () => {
+  const remote = new Remote(), stores = [memory(), memory(), memory()]
+  remote.mutationMode = 'race'
+  const connections = await Promise.all(stores.map(storage => openFrameworkConnection(gitSettings, dependencies(remote, storage))))
+  try {
+    assert.deepEqual(connections.map(connection => connection.registration.member).sort(), ['alice', 'alice1', 'alice2'])
+    assert.equal(new Set(connections.map(connection => connection.registration.instanceUUID)).size, 3)
+    assert.ok(remote.count('/graphql') > 3, 'a real expectedHeadOid conflict preceded the three confirmed publications')
+    const roster = await connections[0].members()
+    assert.equal(roster.length, 3)
+    assert.equal(new Set(roster.map(row => row.instanceUUID)).size, 3)
+    for (const connection of connections) {
+      const row = roster.find(row => row.instanceUUID === connection.registration.instanceUUID)
+      assert.equal(row?.member, connection.registration.member)
+      assert.equal(row?.heartbeat?.status, 'running')
+    }
+    assert.equal(remote.commits.get(remote.head)!.files.get('README.md'), 'Owner notes: keep me.\n')
+    assert.equal(remote.commits.get(remote.head)!.files.get('Workspace/state/new-notice'), '')
+  } finally { for (const connection of connections) await connection.close() }
+})
+
+for (const phase of ['head', 'peer-heartbeat'] as const) test(`actual runtime shutdown accepts its own in-flight ${phase} read cancellation and still publishes stopped`, async () => {
+  const remote = new Remote(), storage = memory(), started = Promise.withResolvers<void>()
+  let hold = false, aborted: unknown, reason: unknown
+  const connection = await openFrameworkConnection(gitSettings, { ...dependencies(remote, storage), fetch: async (url, init) => {
+    const matches = phase === 'head' ? url.includes('/commits/heads/') : url.includes('/git/blobs/')
+    if (hold && matches) {
+      started.resolve()
+      return new Promise<Response>((_resolve, reject) => init!.signal!.addEventListener('abort', () => { aborted = init!.signal!.reason; reject(aborted) }, { once: true }))
+    }
+    return remote.fetch(url, init)
+  } })
+  const peer = await openFrameworkConnection(gitSettings, dependencies(remote))
+  const errors: unknown[] = []
+  const runtime = new FrameworkRoleRuntime({} as any, connection.files, storage,
+    { scope: connection.scope, member: connection.registration.member, primary: false, workspace: '/synthetic', workerSeats: 2, mode: 'git', collaborationId: 'test' },
+    { members: () => [connection.registration.member], resources: () => [], heartbeat: async () => {},
+      observeResources: async snapshot => { await connection.members(snapshot) }, error: error => { errors.push(error) },
+      cancelPending: value => { reason = value; hold = false; connection.cancelPending(value) } })
+  // The real loop/discovery/read/disposal chain runs. This case has no native
+  // role execution and skips unrelated maintenance actions, not transport or storage.
+  ;(runtime as any).observe = async () => {}
+  try {
+    hold = true
+    const polling = (runtime as any).loop.poll().then(() => undefined, (error: unknown) => error)
+    await started.promise
+    await runtime.dispose()
+    const pollError = await polling
+    assert.equal(aborted, reason)
+    if (phase === 'head') assert.equal(pollError, reason)
+    else assert.equal(pollError, undefined, 'discovery boundary already handled its cancelled peer read')
+    assert.deepEqual(errors, [])
+    await connection.close()
+    const roster = await peer.members()
+    assert.equal(roster.find(row => row.instanceUUID === connection.registration.instanceUUID)?.availability, 'stopped')
+    assert.notEqual(roster.find(row => row.instanceUUID === peer.registration.instanceUUID)?.availability, 'stopped')
+  } finally { hold = false; connection.cancelPending(); await runtime.dispose(); await connection.close(); await peer.close() }
 })

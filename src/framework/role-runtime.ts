@@ -59,7 +59,7 @@ export interface RuntimeEnvironment {
   members(): readonly string[]
   resources(): readonly ObservedInstance[]
   heartbeat(): Promise<void>
-  cancelPending?(): void
+  cancelPending?(reason?: unknown): void
   observeResources?(snapshot: FilesSnapshot): Promise<void>
   observationInterrupted?(): void
   error(error: unknown): void
@@ -92,6 +92,7 @@ export class FrameworkRoleRuntime {
   private recoveryWatchWrites?: Map<string, Promise<unknown>>
   private errorTail: Promise<void> = Promise.resolve()
   private disposing?: Promise<void>
+  private shutdownReason?: DOMException
   private rateLimitDiagnostics?: WeakMap<object, 'pending' | 'recorded'>
   constructor(private readonly ctx: Context, readonly files: FilesStore, private readonly records: StoragePort,
     readonly config: RuntimeConfiguration, private readonly environment: RuntimeEnvironment) {
@@ -1067,7 +1068,11 @@ export class FrameworkRoleRuntime {
       })
     }
   }
+  private cancelledByShutdown(error: unknown): boolean {
+    return this.shutdownReason !== undefined && (error === this.shutdownReason || (error instanceof Error && error.name === 'AbortError' && error.cause === this.shutdownReason))
+  }
   private error(error: unknown, context?: Record<string, unknown>): void {
+    if (this.cancelledByShutdown(error)) return
     this.environment.error(error)
     if (this.closed) return
     const rateLimit = error instanceof GitHubError ? error.rateLimit : undefined
@@ -1105,9 +1110,14 @@ export class FrameworkRoleRuntime {
     this.closed = true
     const failures: unknown[] = []
     try {
+      const cancellation = this.shutdownReason = new DOMException('Framework runtime is closing its owned requests.', 'AbortError')
       const loopStopped = this.loop.stop()
-      this.environment.cancelPending?.()
-      await loopStopped
+      try { this.environment.cancelPending?.(cancellation) } catch (error) { failures.push(error) }
+      try { await loopStopped } catch (error) {
+        // Only this shutdown's exact cancellation can complete a cancelled read.
+        // Unknown commit wrappers and independent errors remain failures.
+        if (!this.cancelledByShutdown(error)) failures.push(error)
+      }
       // A snapshot is insufficient if an already-owned operation installs another
       // stop while settling. Drain ownership before the remaining final checks.
       while ([...(this.stopOperations?.values() ?? [])].some(stop => !stop.settled)) {

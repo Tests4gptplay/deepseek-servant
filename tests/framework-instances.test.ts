@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import type { StoragePort } from '../src/contracts/ports.js'
 import { LocalFiles } from '../src/framework/local-files.js'
 import { FrameworkTransactions } from '../src/framework/command-transactions.js'
-import { FilesConflictError, withSnapshot } from '../src/framework/transactions.js'
+import { FilesConflictError, FilesOutcomeUnknownError, withSnapshot } from '../src/framework/transactions.js'
 import { InstanceRegistration, loadOrCreateInstanceUuid, type InstanceConfig } from '../src/framework/instances.js'
 const UUID = '00000000-0000-4000-8000-000000000001'
 const UUID2 = '00000000-0000-4000-8000-000000000002'
@@ -158,15 +158,22 @@ test('publication failure preserves exact pending payload and reserved sequence 
   const body = await withSnapshot(f.files, s => f.files.read(s, result.path))
   assert.deepEqual(JSON.parse(body!), payload.heartbeat)
 })
-test('registration race returns CAS conflict then rereads allocation on the next explicit attempt', async t => {
-  const f = await fixture(t), aStore = memory(), bStore = memory()
-  const a = f.create({}, aStore), b = f.create({ instanceUUID: UUID2 }, bStore)
-  const results = await Promise.allSettled([a.register(), b.register()])
-  assert.equal(results.filter(r => r.status === 'fulfilled').length, 1)
-  const failed = results.findIndex(r => r.status === 'rejected')
-  assert.ok((results[failed] as PromiseRejectedResult).reason instanceof FilesConflictError)
-  const retry = await (failed === 0 ? a : b).register()
-  assert.equal(retry.member, 'alice1')
+for (const count of [2, 3]) test(count + ' concurrent registrations finish their original operation with distinct aliases', async t => {
+  const f = await fixture(t)
+  const ids = [UUID, UUID2, '00000000-0000-4000-8000-000000000003'].slice(0, count)
+  const stores = ids.map(() => memory())
+  const instances = ids.map((instanceUUID, index) => f.create({ instanceUUID }, stores[index]))
+  const registered = await Promise.all(instances.map(instance => instance.register()))
+  assert.deepEqual(registered.map(row => row.member).sort(), ['alice', 'alice1', 'alice2'].slice(0, count))
+  assert.equal(new Set(registered.map(row => row.path)).size, count)
+  assert.deepEqual(new Set(registered.map(row => row.instanceUUID)), new Set(ids))
+  const rows = await instances[0]!.observe()
+  assert.equal(rows.length, count)
+  for (const store of stores) {
+    const state = (await store.list<any>('framework-instance/'))[0]!.value
+    assert.equal(state.pending, undefined)
+    assert.ok(state.sequence >= 1)
+  }
 })
 test('UUID persists and per-repository aliases are retained separately', async t => {
   const f = await fixture(t), local = memory()
@@ -452,4 +459,188 @@ test('another writer version and registration rename invalidate the verified rea
   assert.equal(reads,2)
   await withSnapshot(f.files,snapshot=>f.files.commit(snapshot,[{path:renamed,content:null}],'remove registration'))
   assert.deepEqual(await writer.observe(),[])
+})
+
+test('registration reevaluates each proven new HEAD inside the same owned operation without a retry-count gate', async t => {
+  const f = await fixture(t), run = f.transactions.run.bind(f.transactions)
+  const attempts: Array<{ id: string; request: any; expected?: string }> = []
+  f.transactions.run = (async (id, request, options, build) => {
+    attempts.push({ id, request: structuredClone(request), expected: options.expectedRevision })
+    if (attempts.length <= 3) {
+      const index = attempts.length, member = index === 1 ? 'alice' : 'alice' + (index - 1)
+      const uuid = '00000000-0000-4000-8000-00000000000' + (index + 1)
+      await withSnapshot(f.files, snapshot => f.files.commit(snapshot, [{
+        path: `instances/${member}_Workers2_${uuid}.json`,
+        content: JSON.stringify({ sequence: 1, updatedAt: '1970-01-01T00:00:00.000Z', status: 'running' }),
+      }], 'Actual competing registration'))
+      throw new FilesConflictError(options.expectedRevision!)
+    }
+    return run(id, request, options, build)
+  }) as typeof run
+  const instance = new InstanceRegistration(f.files, f.transactions, f.storage, f.config, () => 0)
+  const registered = await instance.register()
+  assert.equal(registered.member, 'alice3')
+  assert.equal(attempts.length, 4)
+  assert.equal(new Set(attempts.map(attempt => attempt.expected)).size, 4, 'each reevaluation observes a real different authoritative revision')
+  assert.equal(new Set(attempts.map(attempt => attempt.id)).size, 4, 'only proven failed CAS may be replaced')
+  assert.deepEqual(attempts.map(attempt => attempt.request.heartbeat.sequence), [1, 2, 3, 4], 'reserved sequences are never rolled back')
+  assert.equal((await instance.observe()).length, 4)
+})
+
+test('same-HEAD conflict is returned unchanged with no duplicate dispatch or guessed retry', async t => {
+  const f = await fixture(t), revision = await withSnapshot(f.files, async snapshot => snapshot.revision)
+  const conflict = new FilesConflictError(revision)
+  let dispatches = 0
+  f.transactions.run = async () => { dispatches++; throw conflict }
+  const instance = new InstanceRegistration(f.files, f.transactions, f.storage, f.config, () => 0)
+  await assert.rejects(instance.register(), error => error === conflict)
+  assert.equal(dispatches, 1)
+  assert.equal((await f.storage.list<any>('framework-instance/'))[0]!.value.pending, undefined, 'proven conflict retains reserved sequence but releases rejected publication')
+})
+
+for (const failure of ['unknown', 'permission', 'readback'] as const) test('registration does not retry ' + failure + ' as naming contention', async t => {
+  const f = await fixture(t), run = f.transactions.run.bind(f.transactions), read = f.files.read.bind(f.files)
+  const error = failure === 'unknown' ? new FilesOutcomeUnknownError('original-operation')
+    : failure === 'permission' ? Object.assign(new Error('GitHub 403: denied'), { status: 403 })
+    : new FilesConflictError('readback-is-not-a-proven-publication-conflict')
+  let dispatches = 0, original: any
+  f.transactions.run = (async (...args) => {
+    dispatches++; original = structuredClone(args[1])
+    if (failure !== 'readback') throw error
+    return run(...args)
+  }) as typeof run
+  if (failure === 'readback') f.files.read = async (snapshot, path) => {
+    const body = await read(snapshot, path)
+    if (path.startsWith('instances/') && body !== undefined) throw error
+    return body
+  }
+  const instance = new InstanceRegistration(f.files, f.transactions, f.storage, f.config, () => 0)
+  await assert.rejects(instance.register(), actual => actual === error)
+  assert.equal(dispatches, 1)
+  assert.deepEqual((await f.storage.list<any>('framework-instance/'))[0]!.value.pending, original)
+  if (failure === 'unknown') {
+    f.transactions.run = (async (...args) => {
+      assert.deepEqual(args[1], original, 'later explicit resolution retains the same original pending payload')
+      assert.equal(args[0], 'heartbeat:' + original.id)
+      return run(...args)
+    }) as typeof run
+    assert.equal((await instance.register()).member, original.registration.member)
+  }
+})
+
+for (const boundary of ['before', 'metadata', 'persisted', 'conflict', 'fresh-head'] as const) test('registration cancellation at ' + boundary + ' does not allocate or dispatch a replacement', async t => {
+  const f = await fixture(t), owner = new AbortController(), run = f.transactions.run.bind(f.transactions)
+  const set = f.storage.set.bind(f.storage), list = f.files.listDirectory.bind(f.files), snapshot = f.files.snapshot.bind(f.files)
+  let dispatches = 0, persisted = 0, conflicted = false
+  if (boundary === 'before') owner.abort()
+  if (boundary === 'metadata') f.files.listDirectory = async (...args) => { const rows = await list(...args); owner.abort(); return rows }
+  f.storage.set = async (key, value) => {
+    await set(key, value)
+    if (key.startsWith('framework-instance/') && (value as any).pending) {
+      persisted++
+      if (boundary === 'persisted') owner.abort()
+    }
+  }
+  f.transactions.run = (async (...args) => {
+    dispatches++
+    if (boundary === 'conflict' || boundary === 'fresh-head') {
+      await withSnapshot(f.files, current => f.files.commit(current, [{ path: 'unrelated.txt', content: 'a true new HEAD' }], 'Other writer'))
+      conflicted = true
+      if (boundary === 'conflict') owner.abort()
+      throw new FilesConflictError(args[2].expectedRevision!)
+    }
+    return run(...args)
+  }) as typeof run
+  if (boundary === 'fresh-head') f.files.snapshot = async () => {
+    const current = await snapshot()
+    if (conflicted) owner.abort()
+    return current
+  }
+  const instance = new InstanceRegistration(f.files, f.transactions, f.storage, f.config, () => 0)
+  await assert.rejects(instance.register(owner.signal), { name: 'AbortError' })
+  assert.equal(dispatches, boundary === 'conflict' || boundary === 'fresh-head' ? 1 : 0)
+  assert.equal(persisted, ['persisted', 'conflict', 'fresh-head'].includes(boundary) ? 1 : 0)
+  const state = (await f.storage.list<any>('framework-instance/'))[0]?.value
+  if (boundary === 'persisted') assert.ok(state.pending, 'a reserved payload is preserved even when cancellation precedes dispatch')
+  assert.deepEqual(await withSnapshot(f.files, current => f.files.listDirectory(current, 'instances/')), [])
+})
+
+test('new-HEAD contention preserves an existing registered member UUID and account instead of renaming it', async t => {
+  const f = await fixture(t), first = await f.create({ accountId: 101 }).register(), run = f.transactions.run.bind(f.transactions)
+  let dispatches = 0
+  f.transactions.run = (async (...args) => {
+    if (++dispatches === 1) {
+      await withSnapshot(f.files, snapshot => f.files.commit(snapshot, [{ path: 'another.txt', content: 'competing HEAD' }], 'Another writer'))
+      throw new FilesConflictError(args[2].expectedRevision!)
+    }
+    return run(...args)
+  }) as typeof run
+  const instance = new InstanceRegistration(f.files, f.transactions, f.storage, { ...f.config, accountId: 101 }, () => 30_000)
+  const next = await instance.register()
+  assert.equal(next.member, first.member); assert.equal(next.instanceUUID, first.instanceUUID)
+  assert.equal((await f.storage.list<any>('framework-instance/'))[0]!.value.accountId, '101')
+  assert.equal((await instance.observe()).length, 1)
+})
+
+test('cancellation while the command is preparing prevents its builder from dispatching a write', async t => {
+  const f = await fixture(t), owner = new AbortController(), set = f.storage.set.bind(f.storage), commit = f.files.commit.bind(f.files)
+  let commits = 0
+  f.storage.set = async (key, value) => { await set(key, value); if (key.startsWith('framework-commands/')) owner.abort() }
+  f.files.commit = async (...args) => { commits++; return commit(...args) }
+  const instance = new InstanceRegistration(f.files, f.transactions, f.storage, f.config, () => 0)
+  await assert.rejects(instance.register(owner.signal), { name: 'AbortError' })
+  assert.equal(commits, 0)
+  assert.ok((await f.storage.list<any>('framework-instance/'))[0]!.value.pending)
+})
+
+test('cancellation after a real Local commit retains its pending identity and later confirms without another commit', async t => {
+  const f = await fixture(t), owner = new AbortController(), commit = f.files.commit.bind(f.files)
+  let commits = 0
+  f.files.commit = async (...args) => { const result = await commit(...args); commits++; owner.abort(); return result }
+  const instance = new InstanceRegistration(f.files, f.transactions, f.storage, f.config, () => 0)
+  await assert.rejects(instance.register(owner.signal), { name: 'AbortError' })
+  assert.equal(commits, 1, 'cancellation is not a rollback of an already committed SQLite transaction')
+  const prepared = (await f.storage.list<any>('framework-instance/'))[0]!.value.pending
+  assert.ok(prepared)
+  const confirmed = await instance.register()
+  assert.equal(confirmed.path, prepared.registration.path)
+  assert.equal(commits, 1)
+  assert.deepEqual(JSON.parse((await withSnapshot(f.files, current => f.files.read(current, confirmed.path)))!), prepared.heartbeat)
+})
+
+test('proven conflicting old stopped publication does not trigger an extra running heartbeat after fresh registration', async t => {
+  const f = await fixture(t), run = f.transactions.run.bind(f.transactions)
+  const instance = new InstanceRegistration(f.files, f.transactions, f.storage, f.config, () => 0)
+  await instance.register()
+  f.transactions.run = async () => { throw new FilesOutcomeUnknownError('pending-stop') }
+  await assert.rejects(instance.disconnect(), { name: 'FilesOutcomeUnknownError' })
+  const before = (await f.storage.list<any>('framework-instance/'))[0]!.value.pending
+  assert.equal(before.heartbeat.status, 'stopped'); assert.equal(before.heartbeat.sequence, 2)
+  let attempts = 0
+  f.transactions.run = (async (...args) => {
+    if (++attempts === 1) {
+      assert.deepEqual(args[1], before, 'resolve the old uncertain stop before discarding anything')
+      await withSnapshot(f.files, current => f.files.commit(current, [{ path: 'other.txt', content: 'new authority' }], 'Competing write'))
+      throw new FilesConflictError(args[2].expectedRevision!)
+    }
+    return run(...args)
+  }) as typeof run
+  const registered = await instance.register()
+  assert.equal(attempts, 2, 'one proven rejected old publication, then one fresh running publication')
+  const body = JSON.parse((await withSnapshot(f.files, current => f.files.read(current, registered.path)))!)
+  assert.equal(body.sequence, 3); assert.equal(body.status, 'running')
+})
+
+test('confirmed old stopped pending is still followed by exactly one running publication on reconnect', async t => {
+  const f = await fixture(t), run = f.transactions.run.bind(f.transactions)
+  const instance = new InstanceRegistration(f.files, f.transactions, f.storage, f.config, () => 0)
+  await instance.register()
+  f.transactions.run = (async (...args) => { await run(...args); throw new FilesOutcomeUnknownError('accepted-stop-response-lost') }) as typeof run
+  await assert.rejects(instance.disconnect(), { name: 'FilesOutcomeUnknownError' })
+  let attempts = 0
+  f.transactions.run = (async (...args) => { attempts++; return run(...args) }) as typeof run
+  const registered = await instance.register()
+  assert.equal(attempts, 2, 'confirm the original stopped operation, then publish running once')
+  const body = JSON.parse((await withSnapshot(f.files, current => f.files.read(current, registered.path)))!)
+  assert.equal(body.sequence, 3); assert.equal(body.status, 'running')
 })

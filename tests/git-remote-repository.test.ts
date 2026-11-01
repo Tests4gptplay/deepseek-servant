@@ -351,6 +351,55 @@ test('remote: snapshot cancellation does not publish partial listing and fresh l
   assert.ok(next.files.has('dss-coop/state/seed'))
 })
 
+for (const kind of ['default', 'owner-abort', 'owner-error'] as const) test(`remote: cancelled snapshot and in-flight HTTP retain the same ${kind} reason across later epochs`, async () => {
+  const remote = new Remote(), original = remote.fetch.bind(remote), entered = Promise.withResolvers<void>()
+  let observed: AbortSignal | undefined
+  remote.fetch = async (url, init) => {
+    if (url.includes('/git/blobs/')) {
+      observed = init?.signal ?? undefined
+      assert.ok(observed)
+      entered.resolve()
+      return new Promise<Response>((_resolve, reject) => observed!.addEventListener('abort', () => reject(observed!.reason), { once: true }))
+    }
+    return original(url, init)
+  }
+  const { repo } = fixture(remote), base = await repo.snapshot()
+  await repo.list(base, 'dss-coop/')
+  const operation = repo.prepareCommit(base, changes, 'Retained prepared operation')
+  const pending = repo.read(base, 'dss-coop/state/seed').then(() => assert.fail('cancelled read succeeded'), error => error)
+  await entered.promise
+  const reason = kind === 'default' ? undefined : kind === 'owner-abort'
+    ? new DOMException('This owner withdrew its snapshot', 'AbortError') : new Error('This owner closed its connection')
+  repo.cancel(reason)
+  const expected = observed!.reason
+  if (kind === 'default') assert.equal(expected.name, 'AbortError')
+  else assert.equal(expected, reason)
+  assert.equal(await pending, expected, 'the in-flight native signal rejection is preserved')
+  const count = remote.requests.length
+  const stale = [
+    () => repo.read(base, 'dss-coop/state/seed'),
+    () => repo.readBytes(base, 'dss-coop/state/seed'),
+    () => repo.list(base, 'dss-coop/'), // Includes the already-loaded fast path.
+    () => repo.listDirectory(base, 'dss-coop/'),
+    () => repo.directories(base, 'dss-coop/'),
+    () => repo.changes(base, ''),
+    () => repo.changes(base, base.head), // An unchanged HEAD must not bypass ownership.
+    () => repo.commitPrepared(base, changes, 'Retained prepared operation', operation),
+  ]
+  for (const access of stale) await assert.rejects(access(), error => error === expected)
+  assert.throws(() => repo.prepareCommit(base, changes, 'New operation'), error => error === expected)
+  assert.equal(remote.requests.length, count, 'invalid snapshots cannot start HTTP in the fresh client epoch')
+  remote.fetch = original
+  const next = await repo.snapshot()
+  assert.equal(await repo.read(next, 'dss-coop/state/seed'), '', 'explicit new epoch remains usable')
+  const nextReason = new DOMException('The next owner withdrew', 'AbortError')
+  repo.cancel(nextReason)
+  await assert.rejects(repo.list(next, 'dss-coop/'), error => error === nextReason)
+  await assert.rejects(repo.list(base, 'dss-coop/'), error => error === expected, 'a later epoch cannot overwrite the original reason')
+  const independent = fixture()
+  assert.equal(await independent.repo.read(await independent.repo.snapshot(), 'dss-coop/state/seed'), '', 'other repository owners remain usable')
+})
+
 test('remote: same prepared transaction dispatched concurrently commits once under expectedHeadOid', async () => {
   const { repo, remote } = fixture(), base = await repo.snapshot(), operation = repo.prepareCommit(base, changes, 'Concurrent publish')
   const [a, b] = await Promise.all([
@@ -1040,16 +1089,19 @@ test('remote: cancellation after accepted mutation stays unknown and resolves th
   }
   const { repo } = fixture(remote), base = await repo.snapshot(), operation = repo.prepareCommit(base, changes, 'Cancelled response')
   const retained = JSON.parse(JSON.stringify(operation))
+  const reason = new DOMException('This repository owner cancelled its request', 'AbortError')
   const pending = repo.commitPrepared(base, changes, 'Cancelled response', operation)
   const rejection = assert.rejects(pending, error => {
     assert.ok(error instanceof GitCommitOutcomeUnknownError)
     assert.deepEqual(error.operation, retained)
+    assert.equal(error.cause, reason, 'UNKNOWN retains the initiating cause but is not an AbortError itself')
+    assert.notEqual(error.name, 'AbortError')
     return true
   })
   await accepted.promise
   const committed = remote.head
   assert.notEqual(committed, base.head)
-  repo.cancel(); await rejection
+  repo.cancel(reason); await rejection
   assert.deepEqual(await repo.resolveCommit(retained), { status: 'confirmed', commit: committed, head: committed })
   const retry = await repo.commitPrepared(await repo.at(base.head), changes, 'Cancelled response', retained)
   assert.deepEqual(retry, { commit: committed, replay: true })

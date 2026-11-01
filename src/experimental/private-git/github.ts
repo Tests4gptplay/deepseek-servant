@@ -40,7 +40,7 @@ export class GitHubClient {
     // may finish disconnect bookkeeping without inheriting the closed opener.
     this.signal = options?.signal ? AbortSignal.any([this.requests.signal, options.signal]) : this.requests.signal
   }
-  cancel(): void { this.requests.abort(); this.requests = new AbortController(); this.signal = this.requests.signal }
+  cancel(reason?: unknown): void { this.requests.abort(reason); this.requests = new AbortController(); this.signal = this.requests.signal }
   async session<T>(operation: (session: GitHubSession) => Promise<T>): Promise<T> {
     const signal = this.signal
     signal.throwIfAborted()
@@ -70,7 +70,10 @@ export class GitHubClient {
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         })
       } catch (error) {
-        signal.throwIfAborted()
+        // A later owner abort must not relabel an already independent transport
+        // failure. Native fetch preserves its actual signal reason (or cause).
+        if (signal.aborted && (error === signal.reason
+          || error instanceof Error && error.name === 'AbortError' && error.cause === signal.reason)) throw error
         throw new GitHubError(0, (error instanceof Error ? error.message : 'GitHub network request failed.').split(token.value).join('[redacted]'))
       }
       signal.throwIfAborted()
@@ -79,7 +82,12 @@ export class GitHubClient {
         throw new GitHubError(304, 'GitHub returned 304 without a previously observed HEAD.')
       }
       if (!response.ok) {
-        const data = await response.json().catch(() => ({})) as { message?: string }
+        const data = await response.json().catch(error => {
+          // Only invalid JSON falls back to the HTTP status. Body transport
+          // failures retain their actual cause, even if the owner aborts later.
+          if (error instanceof SyntaxError) return {}
+          throw error
+        }) as { message?: string }
         signal.throwIfAborted()
         const message = String(data.message ?? response.statusText).split(token.value).join('[redacted]')
         const now = Date.now(), retry = response.headers.get('retry-after'), reset = response.headers.get('x-ratelimit-reset')

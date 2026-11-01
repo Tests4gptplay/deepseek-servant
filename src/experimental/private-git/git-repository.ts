@@ -35,7 +35,7 @@ export class GitCommitOutcomeUnknownError extends Error {
     this.expectedHead = operation.expectedHead
   }
 }
-interface RemoteScope { connection: RepoConnection; directory: string; path: string; generation: number; metadata: ScopeMetadata }
+interface RemoteScope { connection: RepoConnection; directory: string; path: string; signal: AbortSignal; metadata: ScopeMetadata }
 interface TreeEntry { path: string; type: 'blob' | 'tree' | 'commit'; sha: string; size?: number }
 interface RemoteCommit { sha: string; tree: { sha: string }; parents: Array<{ sha: string }>; message: string }
 interface ScopeMetadata {
@@ -73,13 +73,21 @@ const encodePath = (path: string) => path.split('/').map(encodeURIComponent).joi
  * a checked transaction. Conflicts return to the caller for business re-evaluation.
  */
 export class GitHubRepository implements GitRepository {
-  private generation = 0
+  private scopes = new AbortController()
   private checked?: { key: string; authorizationScope: object; connection: RepoConnection }
   private metadata?: ScopeMetadata
   private states = new WeakMap<GitSnapshot, SnapshotState>()
   constructor(private readonly client: GitHubClient, private readonly binding: () => RepoBinding,
     _tokens?: TokenSource, _legacyCacheRoot?: string) {}
-  cancel(): void { this.generation++; this.checked = undefined; this.metadata = undefined; this.client.cancel() }
+  cancel(reason?: unknown): void {
+    // Snapshots and in-flight HTTP share one cancellation cause, including the
+    // default native AbortError. Old snapshots retain only their epoch signal.
+    this.scopes.abort(reason)
+    this.client.cancel(this.scopes.signal.reason)
+    this.scopes = new AbortController()
+    this.checked = undefined
+    this.metadata = undefined
+  }
   async releaseCache(): Promise<void> { this.cancel(); this.states = new WeakMap() }
   private async session<T>(operation: (session: GitHubSession) => Promise<T>): Promise<T> {
     try { return await this.client.session(operation) }
@@ -92,14 +100,14 @@ export class GitHubRepository implements GitRepository {
     return this.session(async session => (await this.scope(session, true, true)).connection)
   }
   private async scope(session: GitHubSession, recheck = false, connect = false): Promise<RemoteScope> {
-    const generation = this.generation, binding = this.binding()
+    const signal = this.scopes.signal, binding = this.binding()
     const key = JSON.stringify([binding.ownerRepo, binding.repositoryId, binding.participantId, binding.branch, binding.repositoryDirectory])
     let connection = !recheck && this.checked?.key === key && this.checked.authorizationScope === session.authorizationScope ? this.checked.connection : undefined
     // Connection/account changes and writes recheck identity. Ordinary polling uses
     // GitHub authorization on each HEAD request, not a second /user handshake timer.
     if (!connection) {
       connection = await inspectPrivateRepo(session, connect ? { ...binding, participantId: undefined } : binding)
-      this.check({ generation } as RemoteScope)
+      signal.throwIfAborted()
       this.checked = { key, authorizationScope: session.authorizationScope, connection }
     }
     const directory = binding.repositoryDirectory ?? 'dss-coop'
@@ -108,10 +116,10 @@ export class GitHubRepository implements GitRepository {
     if (this.metadata?.key !== metadataKey || this.metadata.authorizationScope !== session.authorizationScope) {
       this.metadata = { key: metadataKey, authorizationScope: session.authorizationScope }
     }
-    return { connection, directory, path: repositoryPath(connection.repository.fullName), generation, metadata: this.metadata }
+    return { connection, directory, path: repositoryPath(connection.repository.fullName), signal, metadata: this.metadata }
   }
   private check(scope: RemoteScope): void {
-    if (scope.generation !== this.generation) throw new DOMException('Repository operation canceled.', 'AbortError')
+    scope.signal.throwIfAborted()
   }
   private physical(scope: RemoteScope, path: string): string {
     if (path === 'dss-coop') return scope.directory
@@ -288,8 +296,8 @@ export class GitHubRepository implements GitRepository {
    * Only tree metadata is read, never the business file bodies.
    */
   async changes(snapshot: GitSnapshot, from: string, _ownInstance?: string): Promise<GitFileChange[]> {
-    if (snapshot.head === from) return []
     const state = this.state(snapshot)
+    if (snapshot.head === from) return []
     const before = from ? await this.session(session => this.makeSnapshot(session, state.scope, from)) : undefined
     await this.list(snapshot, 'dss-coop/')
     if (before) await this.list(before, 'dss-coop/')

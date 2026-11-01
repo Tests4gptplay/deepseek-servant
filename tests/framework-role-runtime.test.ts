@@ -1,3 +1,4 @@
+import { FilesOutcomeUnknownError } from '../src/framework/transactions.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { ExecutionControls } from '../src/framework/execution-control.js'
@@ -1740,7 +1741,7 @@ test('runtime shutdown drains admitted Host and Helper diagnostics before servic
   runtime.error(new Error('accepted Helper fault'), { role: 'Helper' })
   await entered.promise
   const service = Object.create(FrameworkService.prototype) as any
-  Object.assign(service, { closed: false, configuration: Promise.resolve(), opening: new Map(), stopping: new WeakMap(), accessOpening: new Map(), backgroundOpening: new Map(), accesses: new Map(), listeners: new Set(), disposalErrors: [],
+  Object.assign(service, { closed: false, configuration: Promise.resolve(), configurationOwners: new Set(), accessTransitions: new Map(), opening: new Map(), stopping: new WeakMap(), accessOpening: new Map(), backgroundOpening: new Map(), accesses: new Map(), listeners: new Set(), disposalErrors: [],
     running: new Map([['local', { runtime, connection: { close: async () => { events.push('connection-closed') } } }]]) })
   const shutdown = disposeResources([() => service.dispose(), () => serial(async () => { closed = true; events.push('storage-closed') })])
   try {
@@ -1772,6 +1773,7 @@ test('a native disposal failure does not abandon previously admitted diagnostic 
 test('runtime disposal preserves both shutdown and diagnostic drain failures', async () => {
   const { runtime } = queue(), stopFailure = new Error('native stop failed'), diagnosticFailure = new Error('diagnostic persistence failed')
   runtime.roleRecords = new Map(); runtime.loop = { stop: async () => { throw stopFailure } }
+  runtime.observations = { dispose: async () => {} }
   runtime.errorTail = Promise.resolve().then(() => { throw diagnosticFailure })
   await assert.rejects(runtime.dispose(), (error: unknown) => {
     assert.ok(error instanceof AggregateError)
@@ -2046,4 +2048,20 @@ test('runtime closes admission and cancels its owned transport before waiting fo
   const disposing=runtime.dispose()
   try {await new Promise(r=>setImmediate(r));assert.equal(cancelled,1)}
   finally {release();await disposing}
+})
+
+for (const outcome of ['owned-read', 'independent-abort', 'unknown-write'] as const) test(`shutdown drains native owners after ${outcome} and preserves only actual failures`, async t => {
+  const { runtime } = await runtimeFixture(t), pending = Promise.withResolvers<void>()
+  let nativeStopped = 0, observationsClosed = 0
+  const unrelated = new DOMException('Independent cancelled request', 'AbortError')
+  const unknown = new FilesOutcomeUnknownError('pending-write')
+  runtime.loop = { stop: () => pending.promise }
+  runtime.roleRecords.set('owned', { identity: { workId: 'owned', executionId: 'e', role: 'Worker' } })
+  runtime.stopOwnedRecord = async () => { nativeStopped++; return { status: 'stopped' } }
+  runtime.observations.dispose = async () => { observationsClosed++ }
+  runtime.environment.cancelPending = (reason: unknown) => pending.reject(outcome === 'owned-read' ? reason : outcome === 'unknown-write' ? unknown : unrelated)
+  if (outcome === 'owned-read') await runtime.dispose()
+  else await assert.rejects(runtime.dispose(), (error: unknown) => error === (outcome === 'unknown-write' ? unknown : unrelated))
+  assert.equal(nativeStopped, 1)
+  assert.equal(observationsClosed, 1)
 })

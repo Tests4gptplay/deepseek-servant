@@ -6,8 +6,10 @@ export async function ghToken(signal?: AbortSignal): Promise<string | undefined>
   return new Promise((resolve, reject) => {
     // AbortSignal terminates only this execFile child, not other CLI instances.
     execFile('gh', ['auth', 'token', '--hostname', 'github.com'], { signal, windowsHide: true, maxBuffer: 1024 * 1024 }, (error, stdout) => {
-      if (signal?.aborted) { reject(signal.reason); return }
+      // Native AbortError carries its real cause. A later owner abort must not
+      // replace an independent CLI failure with this owner's reason.
       if (error?.name === 'AbortError') { reject(error); return }
+      if (signal?.aborted) { reject(signal.reason); return }
       resolve(error ? undefined : stdout.trim() || undefined)
     })
   })

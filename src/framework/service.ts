@@ -18,7 +18,7 @@ import { FrameworkConversation } from './conversation.js';
 import { FrameworkRoleRuntime } from './role-runtime.js';
 import { createRecorderCapacity } from './capacity.js';
 import { paths, readJson, readMemberStatus, type TaskMetadata, type MemberStatus } from './task-files.js';
-import { withSnapshot } from './transactions.js';
+import { withSnapshot, FilesOutcomeUnknownError } from './transactions.js';
 import { InstanceRegistration, type ObservedInstance } from './instances.js';
 import type { FrameworkClientApi, FrameworkClientSettings, FrameworkClientView, FrameworkMode, FrameworkSendInput } from './client-contracts.js';
 const model = z.object({ provider: z.string(), model: z.string(), reasoningEffort: z.string().optional() });
@@ -30,6 +30,10 @@ interface Saved {
     settings: FrameworkClientSettings;
 }
 interface Access { knowledge?: FrameworkKnowledge; taskIndex?: FrameworkTaskIndex; connection: FrameworkStorage; conversation: FrameworkConversation; observer?: InstanceRegistration; controls?: ExecutionControls }
+function abortedBy(signal: AbortSignal | undefined, error: unknown): boolean {
+    return !!signal?.aborted && (error === signal.reason || (error instanceof Error && error.name === 'AbortError' && error.cause === signal.reason));
+}
+interface ConfigurationOwner { mode: FrameworkMode; commandId?: string; controller: AbortController }
 interface Running {
     connection: FrameworkConnection;
     runtime: FrameworkRoleRuntime;
@@ -37,16 +41,18 @@ interface Running {
 }
 /** Both modes use one business implementation; selecting a page does not own either runtime. */
 export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChanged'> {
+    private readonly accessTransitions = new Map<FrameworkMode, Promise<void>>();
     private readonly accesses = new Map<FrameworkMode, Promise<Access>>();
     private readonly stopping = new WeakMap<Running, Promise<void>>();
     private readonly running = new Map<FrameworkMode, Running>();
+    private readonly configurationOwners = new Set<ConfigurationOwner>();
     private readonly accessOpening = new Map<FrameworkMode, AbortController>();
     private readonly backgroundOpening = new Map<FrameworkMode, AbortController>();
     private readonly opening = new Map<FrameworkMode, Promise<Running>>();
     private readonly archiveViews = new Map<FrameworkMode, FrameworkClientView['archives']>();
     private readonly errors = new Map<FrameworkMode, string>();
     private readonly configurationErrors = new Map<FrameworkMode, string>();
-    private readonly reportedErrors = new Map<FrameworkMode, Set<string>>();
+    private readonly reportedErrors = new Map<FrameworkMode, Map<string, { operationId?: string; commandId?: string }>>();
     private readonly saved = new Map<FrameworkMode, Saved>();
     private readonly listeners = new Set<() => void>();
     private activeMode: FrameworkMode = 'local';
@@ -62,13 +68,31 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
     subscribeChanged = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
     private changed(): void { for (const listener of this.listeners)
         listener(); }
-    private report(mode: FrameworkMode, error: unknown): void {
-        const message = error instanceof Error ? error.message : String(error);
+    private diagnosticScope(mode: FrameworkMode, settings = this.saved.get(mode)?.settings): string {
+        if (!settings) return mode + ' (storage scope unavailable)';
+        return mode === 'local' ? settings.localDirectory : settings.ownerRepo + '/' + settings.repositoryDirectory;
+    }
+    private refreshErrors(mode: FrameworkMode): void {
+        const messages = this.reportedErrors.get(mode);
+        if (messages?.size) this.errors.set(mode, [...messages.keys()].join('\n'));
+        else { this.errors.delete(mode); this.reportedErrors.delete(mode); }
+    }
+    private clearResolvedErrors(mode: FrameworkMode, commandId?: string): void {
+        const messages = this.reportedErrors.get(mode);
+        for (const [message, record] of messages ?? []) {
+            if (commandId === undefined ? !record.operationId : record.commandId === commandId) messages!.delete(message);
+        }
+        this.refreshErrors(mode);
+    }
+    private report(mode: FrameworkMode, error: unknown, scope?: string, commandId?: string): string {
+        const raw = error instanceof Error ? error.message : String(error);
+        const operationId = error instanceof FilesOutcomeUnknownError ? error.operationId : undefined;
+        const message = operationId ? `Unresolved storage operation ${operationId} in ${scope ?? this.diagnosticScope(mode)}: ${raw}` : raw;
         let messages = this.reportedErrors.get(mode);
-        if (!messages) this.reportedErrors.set(mode, messages = new Set());
-        if (messages.has(message)) return;
-        messages.add(message);
-        this.errors.set(mode, [...messages].join('\n')); this.changed();
+        if (!messages) this.reportedErrors.set(mode, messages = new Map());
+        if (!messages.has(message)) { messages.set(message, { operationId, commandId }); this.refreshErrors(mode); this.changed(); }
+        else if (commandId !== undefined) messages.get(message)!.commandId = commandId;
+        return message;
     }
     start(): Promise<void> {
         if (this.closed) return Promise.reject(new Error('Framework service is disposed.'));
@@ -109,11 +133,16 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         for (const mode of ['local', 'git'] as const) {
             this.assertOpen();
             const enabled = await this.storage.get<boolean>('framework-participation/' + mode) ?? mode === 'local';
-            if (enabled) try { await this.connect(mode); } catch (error) { if (this.closed) throw error; this.report(mode,error); }
+            if (enabled) {
+                const scope = this.diagnosticScope(mode), opening = this.connect(mode), signal = this.backgroundOpening.get(mode)?.signal;
+                try { await opening; } catch (error) { if (this.closed) throw error; if (!abortedBy(signal, error)) this.report(mode,error,scope); }
+            }
         }
     }
     private access(mode: FrameworkMode): Promise<Access> {
         if (this.closed) return Promise.reject(new Error('Framework service is disposed.'));
+        const transition = this.accessTransitions.get(mode);
+        if (transition) return transition.then(() => this.access(mode));
         const prior = this.accesses.get(mode); if (prior) return prior;
         const settings = this.config(mode).settings;
         const controller = new AbortController();
@@ -121,9 +150,11 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         const pending = openFrameworkStorage(mode === 'local' ? { mode, directory: settings.localDirectory, login: settings.userName, workerSeats: settings.workerSeats }
             : { mode, ownerRepo: settings.ownerRepo, repositoryDirectory: settings.repositoryDirectory, workerSeats: settings.workerSeats }, { storage: this.storage, signal: controller.signal })
           .then(async connection => {
-            if (this.closed) {
+            if (this.closed || controller.signal.aborted || this.accessOpening.get(mode) !== controller) {
                 try { await connection.close(); } catch (error) { this.cleanupFailure(mode, error); throw error; }
                 this.assertOpen();
+                controller.signal.throwIfAborted();
+                throw new Error('Storage access was replaced before acquisition completed.');
             }
             return { connection, conversation: new FrameworkConversation(connection.files, connection.transactions, { mode, collaborationId: settings.collaborationId }) };
           });
@@ -134,7 +165,8 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
     }
     private config(mode: FrameworkMode): Saved { this.assertOpen(); const saved = this.saved.get(mode); if (!saved)
         throw new Error('Framework settings are not loaded.'); return saved; }
-    private connect(mode: FrameworkMode): Promise<Running> {
+    private connect(mode: FrameworkMode, signal?: AbortSignal): Promise<Running> {
+        if (signal?.aborted) return Promise.reject(signal.reason);
         if (this.closed) return Promise.reject(new Error('Framework service is disposed.'));
         const active = this.running.get(mode);
         if (active)
@@ -144,22 +176,26 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             return pending;
         const controller = new AbortController();
         this.backgroundOpening.set(mode, controller);
+        const abort = () => controller.abort(signal?.reason);
+        signal?.addEventListener('abort', abort, { once: true });
         const operation = this.open(mode, controller.signal);
         this.opening.set(mode, operation);
-        void operation.finally(() => { if (this.backgroundOpening.get(mode) === controller) this.backgroundOpening.delete(mode); if (this.opening.get(mode) === operation)
+        void operation.finally(() => { signal?.removeEventListener('abort', abort); if (this.backgroundOpening.get(mode) === controller) this.backgroundOpening.delete(mode); if (this.opening.get(mode) === operation)
             this.opening.delete(mode); }).catch(() => { });
         return operation;
     }
     private async open(mode: FrameworkMode, signal?: AbortSignal): Promise<Running> {
         const settings = this.config(mode).settings;
         const workspace = await new DshWorkspaceAdapter(this.ctx).resolve(undefined, settings.workspace || undefined);
-        this.assertOpen();
+        this.assertOpen(); signal?.throwIfAborted();
         const connection = await openFrameworkConnection(mode === 'local' ? { mode, directory: settings.localDirectory, login: settings.userName, workerSeats: settings.workerSeats }
             : { mode, ownerRepo: settings.ownerRepo, repositoryDirectory: settings.repositoryDirectory, workerSeats: settings.workerSeats }, { storage: this.storage, signal });
         let resources: ObservedInstance[];
         try {
             this.assertOpen();
+            signal?.throwIfAborted();
             resources = await connection.members();
+            signal?.throwIfAborted();
             if (mode === 'git') this.legacyCoop ??= await readLegacyCoopSettings(this.ctx);
             await migrateFrameworkStorage({ mode, scope: connection.scope, files: connection.files, transactions: connection.transactions, records: this.storage,
                 options: async (capture, id) => {
@@ -208,8 +244,8 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 workerSeats: settings.workerSeats, mode, collaborationId: settings.collaborationId, presetId: settings.presetId,
                 foreground: settings.foreground, background: settings.background,
             }, { members: () => resource.resources.map(row => row.member), resources: () => resource.resources, capacity: createRecorderCapacity(connection.files),
-                changed: () => this.changed(), restored: () => { this.errors.delete(mode); this.reportedErrors.delete(mode); this.changed(); },
-                cancelPending: () => connection.cancelPending(), heartbeat: async () => {
+                changed: () => this.changed(), restored: () => { this.clearResolvedErrors(mode); this.changed(); },
+                cancelPending: reason => connection.cancelPending(reason), heartbeat: async () => {
                     await connection.tick();
                     resource.runtime.updateWorkerSeats(connection.registration.workerSeats);
                 }, observationInterrupted: () => connection.observationInterrupted(), observeResources: async snapshot => {
@@ -219,12 +255,13 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                     resource.resources = next;
                     if (changed)
                         this.changed();
-                }, error: error => this.report(mode, error) });
+                }, error: error => { this.report(mode, error, this.diagnosticScope(mode, settings)); } });
             resource.runtime = runtime;
+            signal?.throwIfAborted();
             await runtime.start();
-            this.assertOpen();
+            this.assertOpen(); signal?.throwIfAborted();
             this.running.set(mode, resource);
-            this.errors.delete(mode); this.reportedErrors.delete(mode);
+            this.clearResolvedErrors(mode);
             return resource;
         }
         catch (error) {
@@ -242,6 +279,9 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             connection: { participating: !!active, status: active ? 'connected' : 'disconnected', detail: this.errors.get(mode), member: active?.connection.registration.member, workerSeats: active?.connection.registration.workerSeats }, messages: [], tasks: [], legacyTasks: [], archives: this.archiveViews.get(mode) ?? [], resources: [] };
         let access: Access;
         try { access = await this.access(mode); base.connection.status = 'connected'; } catch(error) { if (this.closed) throw error; base.connection.detail = error instanceof Error ? error.message : String(error); return base; }
+        // Access may have waited for an actual settings/scope handoff. Never
+        // pair an earlier header with the newly acquired destination.
+        if (this.config(mode).revision !== saved.revision) return this.view(input);
         base.storageScope = access.connection.scope;
         const page = await access.conversation.page(20);
         base.messages = page.messages;
@@ -387,10 +427,29 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         return receipt;
     }
     configure(input: Parameters<FrameworkClientApi['configure']>[0]): Promise<FrameworkClientView> {
+        let mode: FrameworkMode, settings: FrameworkClientSettings;
+        try { this.assertOpen(); mode = z.enum(['local', 'git']).parse(input.mode); settings = settingsSchema.parse(input.settings); }
+        catch (error) { return Promise.reject(error); }
+        const owner: ConfigurationOwner = { mode, commandId: input.commandId, controller: new AbortController() };
+        const predecessors = [...this.configurationOwners].filter(value => value.mode === mode && value.commandId !== input.commandId);
+        this.configurationOwners.add(owner);
+        const signal = owner.controller.signal;
+        const key = 'framework-settings-commands/' + createHash('sha256').update(input.commandId).digest('hex');
+        // Validate a superseding request before cancelling an older owner. The
+        // serial body remains authoritative for settings persistence/readback.
+        const admitted = (async () => {
+            const receipt = await this.storage.get<{ signature: string; confirmed?: boolean }>(key);
+            signal.throwIfAborted();
+            if (receipt && receipt.signature !== JSON.stringify([mode, settings])) throw new Error('Configuration command identity changed.');
+            if (!receipt && input.expectedRevision && input.expectedRevision !== this.config(mode).revision) throw new Error('Settings changed; reload before applying this edit.');
+            if (!receipt?.confirmed) for (const prior of predecessors) prior.controller.abort();
+        })();
+        void admitted.catch(() => {});
         const operation = this.configuration.then(async () => {
-            this.assertOpen();
-            const mode = z.enum(['local', 'git']).parse(input.mode), settings = settingsSchema.parse(input.settings);
-            const key = 'framework-settings-commands/' + createHash('sha256').update(input.commandId).digest('hex');
+            await admitted;
+            let finishAccessTransition: (() => void) | undefined;
+            try {
+            this.assertOpen(); signal.throwIfAborted();
             const signature = JSON.stringify([mode, settings]), old = await this.storage.get<{
                 signature: string;
                 revision: string;
@@ -402,6 +461,15 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             const previous = this.config(mode);
             if (!old && input.expectedRevision && input.expectedRevision !== previous.revision)
                 throw new Error('Settings changed; reload before applying this edit.');
+            signal.throwIfAborted();
+            // Startup may own an opening outside the settings queue. A new
+            // configuration must not adopt a connection captured for its old scope.
+            const pendingStartup = this.opening.get(mode);
+            if (pendingStartup && !this.running.has(mode)) {
+                this.backgroundOpening.get(mode)?.abort();
+                await pendingStartup.catch(() => undefined);
+                signal.throwIfAborted();
+            }
             const running = this.running.get(mode);
             const executionSettings = (value: FrameworkClientSettings) => JSON.stringify([
                 mode === 'local' ? [value.localDirectory] : [value.ownerRepo, value.repositoryDirectory],
@@ -412,39 +480,59 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 this.running.delete(mode);
             }
             if (!hot) {
+                let releaseTransition!: () => void;
+                const transition = new Promise<void>(resolve => { releaseTransition = resolve; });
+                this.accessTransitions.set(mode, transition);
+                finishAccessTransition = () => {
+                    if (this.accessTransitions.get(mode) === transition) this.accessTransitions.delete(mode);
+                    releaseTransition();
+                };
                 const access = this.accesses.get(mode); this.accesses.delete(mode); this.archiveViews.delete(mode);
-                if (access) await (await access.catch(() => undefined))?.connection.close();
+                this.accessOpening.get(mode)?.abort();
+                if (access) {
+                    const previousAccess = await access.catch(() => undefined);
+                    if (previousAccess) { previousAccess.connection.cancelPending(); await previousAccess.connection.close(); }
+                }
             }
+            signal.throwIfAborted();
             const next = { revision: old?.revision ?? randomUUID(), settings };
             await this.storage.set(key, { signature, revision: next.revision });
             await this.storage.set('framework-settings/' + mode, next);
             this.saved.set(mode, next);
+            finishAccessTransition?.(); finishAccessTransition = undefined;
+            signal.throwIfAborted();
+            await this.storage.set('framework-participation/' + mode, true);
+            signal.throwIfAborted();
+            const cancelUpdate = () => running?.connection.cancelPending(signal.reason);
+            if (hot) signal.addEventListener('abort', cancelUpdate, { once: true });
             try {
                 if (hot && running) {
                     const registration = await running.connection.updateWorkerSeats(settings.workerSeats);
+                    signal.throwIfAborted();
                     running.runtime.updateWorkerSeats(registration.workerSeats);
                     running.resources = await running.connection.members();
-                } else await this.connect(mode);
-                this.assertOpen();
+                } else await this.connect(mode, signal);
+                this.assertOpen(); signal.throwIfAborted();
                 if (mode === 'git')
                     await this.storage.set('framework-git-enabled', true);
-                await this.storage.set('framework-participation/' + mode, true);
                 await this.storage.set(key, { signature, revision: next.revision, confirmed: true });
+                this.clearResolvedErrors(mode, input.commandId);
                 const priorError = this.configurationErrors.get(mode);
-                if (priorError) {
-                    const messages = this.reportedErrors.get(mode); messages?.delete(priorError);
-                    if (messages?.size) this.errors.set(mode, [...messages].join('\n')); else this.errors.delete(mode);
-                    this.configurationErrors.delete(mode);
-                }
+                const messages = this.reportedErrors.get(mode);
+                if (priorError && !messages?.get(priorError)?.operationId) { messages?.delete(priorError); this.configurationErrors.delete(mode); this.refreshErrors(mode); }
             }
             catch (error) {
-                this.configurationErrors.set(mode, error instanceof Error ? error.message : String(error));
-                this.report(mode, error);
+                if (!abortedBy(signal, error)) {
+                    this.configurationErrors.set(mode, this.report(mode, error, this.diagnosticScope(mode, settings), input.commandId));
+                }
                 throw error;
             }
+            finally { signal.removeEventListener('abort', cancelUpdate); }
             this.changed();
             return this.view({ mode });
+            } finally { finishAccessTransition?.(); }
         });
+        void operation.finally(() => this.configurationOwners.delete(owner)).catch(() => {});
         this.configuration = operation.catch(() => { });
         return operation;
     }
@@ -490,14 +578,26 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         return operation;
     }
     participation(input: { mode: FrameworkMode; enabled: boolean }): Promise<FrameworkClientView> {
+        let mode: FrameworkMode, enabled: boolean;
+        try { mode = z.enum(['local','git']).parse(input.mode); enabled = z.boolean().parse(input.enabled); }
+        catch (error) { return Promise.reject(error); }
+        // Withdrawal must reach an admitted registration before waiting behind
+        // its configuration operation. Frontend access has a separate owner.
+        if (!enabled) {
+            for (const owner of this.configurationOwners) if (owner.mode === mode) owner.controller.abort();
+            this.backgroundOpening.get(mode)?.abort();
+        }
+        const owner: ConfigurationOwner | undefined = enabled ? { mode, controller: new AbortController() } : undefined;
+        if (owner) this.configurationOwners.add(owner);
         const operation = this.configuration.then(async () => {
-            this.assertOpen();
-            const mode = z.enum(['local','git']).parse(input.mode), enabled = z.boolean().parse(input.enabled);
+            this.assertOpen(); owner?.controller.signal.throwIfAborted();
             await this.storage.set('framework-participation/' + mode, enabled);
-            if(enabled) await this.connect(mode);
+            owner?.controller.signal.throwIfAborted();
+            if(enabled) await this.connect(mode, owner!.controller.signal);
             else { const running = this.running.get(mode); if(running) { try { await this.stopRunning(running); } finally { this.running.delete(mode); } } }
             this.changed(); return this.view({mode});
         });
+        void operation.finally(() => { if (owner) this.configurationOwners.delete(owner); }).catch(() => {});
         this.configuration = operation.catch(() => {}); return operation;
     }
     async selectMode(input: {
@@ -541,6 +641,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
     dispose(): Promise<void> {
         if (this.disposal) return this.disposal;
         this.closed = true;
+        for (const owner of this.configurationOwners) owner.controller.abort();
         for (const controller of [...this.accessOpening.values(), ...this.backgroundOpening.values()]) controller.abort();
         // Pending acquisitions remain owned until they settle. Their publication
         // guards close late resources instead of allowing a post-dispose Host.
