@@ -1,7 +1,7 @@
 {
   "name": "deepseek-servant",
   "version": "0.4.1",
-  "description": "DeepSeek Harness 自主 AI 助理与多 Agent 协作插件：前台对话理解需求，后台规划并组织多个 Worker 持续执行和验收任务；支持暂停与接续、故障恢复、任务历史与成果记录、工作记忆和技能学习，提供标准模式及可选的实验性私有 Git 协作。",
+  "description": "DeepSeek Harness Local/Git 协作助理：原生六角色执行、持久会话、任务恢复与成果归档。",
   "private": true,
   "type": "module",
   "main": "lib/host.js",
@@ -30,6 +30,7 @@
     "RETENTION.md",
     "docs/INSTALLATION.md",
     "docs/USAGE.md",
+    "docs/TESTING.md",
     "THIRD_PARTY_NOTICES.md",
     "CHANGELOG.md",
     "docs/releases/0.4.1.md"
@@ -59,13 +60,13 @@
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node scripts/test.mjs",
-    "test:model-settings": "node scripts/test-private-git-model-settings.mjs",
-    "test:history-ui": "node scripts/test-history-ui.mjs",
-    "test:lifecycle-ui": "node scripts/test-lifecycle-ui.mjs",
-    "test:event-streams": "node --experimental-eventsource scripts/test-event-streams.mjs"
+    "test:event-streams": "node --experimental-eventsource scripts/test-event-streams.mjs",
+    "test:historical": "node scripts/test-historical.mjs",
+    "test:package": "npm run build && node scripts/verify-package.mjs"
   },
   "dependencies": {
-    "zod": "4.4.3"
+    "zod": "4.4.3",
+    "yaml": "2.9.1"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.0.5",
@@ -92,7 +93,8 @@
     "@deepseek-ai/dsh-working-directory": "*",
     "@deepseek-ai/dsh-workspace": "*",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "@deepseek-ai/dsh-scope": "*"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-client-store": "0.2.1-rc.2",

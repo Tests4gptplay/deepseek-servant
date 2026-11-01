@@ -10,6 +10,7 @@ import { JsonStorageBackend } from '@deepseek-ai/dsh-storage-json'
 import { z } from 'zod'
 import type { StoragePort } from '../../contracts/ports.js'
 import type { RecordStorageView } from '../../contracts/views.js'
+import { omitAbsentFields } from './json-record.js'
 import { RecordFilesBackend, ensureRecordTree, recordFolder, recordFileUsage } from './record-files.js'
 
 interface StoredEnvelope { key: string; value: unknown }
@@ -176,7 +177,7 @@ export class DshStorageAdapter implements StoragePort {
     })
   }
   set<T>(key: string, value: T): Promise<void> {
-    const record = storedEnvelope.parse({ key, value: structuredClone(value) })
+    const record = storedEnvelope.parse({ key, value: omitAbsentFields(structuredClone(value)) })
     return this.serial(async () => { await this.refreshRecords(); this.records.files?.assertReadable(key); await this.prepareRecords(); await this.records.domain.table('records').put(key, record) })
   }
   list<T>(prefix: string): Promise<Array<{ key: string; value: T }>> {

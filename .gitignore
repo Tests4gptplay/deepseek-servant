@@ -10,3 +10,4 @@ coverage/
 # Generated verification output stays local; regression sources are maintained separately.
 validation/
 tsconfig.validation.json
+.test-tmp/

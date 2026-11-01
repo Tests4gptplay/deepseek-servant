@@ -9,6 +9,7 @@ import type {} from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-tools'
 import type { DshAgentRequest, ExecutionPermission, OwnedDshAgent } from './host-types.js'
 import { deriveNativeInputs } from './sessions.ts'
+import { observeDshProgress } from './progress.js'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -108,6 +109,8 @@ export class DshAgentGateway {
     let disposed = false, closing = false
     let disposal: Promise<void> | undefined
     const admissions = new Set<Promise<void>>()
+    const messageAdmissions = new Map<string, Promise<void>>()
+    const progressSubscriptions = new Set<() => void>()
     // Only join admitted durability barriers, never a model turn. Once closing
     // begins no new send/cancel may race native teardown's persistence close.
     const admit = (operation: () => Promise<void>): Promise<void> => {
@@ -120,9 +123,30 @@ export class DshAgentGateway {
     const handle: OwnedDshAgent = {
       sessionId: request.sessionId,
       actualAgent: agent,
-      send: async (text, messageId, mode = 'followup', source = request.role === 'foreground' ? 'user' : 'deepseek-servant') => {
+      send: async (text, messageId, mode = 'followup', source = request.role === 'foreground' ? 'user' : 'deepseek-servant', recovery) => {
         if (closing || disposed) throw new Error(`Servant Agent is closing or disposed: ${request.sessionId}`)
-        return admit(async () => {
+        const predecessor = messageAdmissions.get(messageId)
+        const operation = admit(async () => {
+          await predecessor?.catch(() => undefined)
+          if (closing || disposed) throw new Error(`Servant Agent is closing or disposed: ${request.sessionId}`)
+          if (recovery) {
+            if (source !== 'deepseek-servant' || (mode !== 'followup' && mode !== 'steer')) throw new Error('Recovery delivery must be a waking plugin followup or steer input.')
+            const input = deriveNativeInputs(agent.session.snapshotEvents(), {
+              'next-turn': agent.inbox.nextTurn, 'next-step': agent.inbox.nextStep,
+            }, agent.status === 'running').get(messageId)
+            if (input && (input.text !== text || input.source !== source)) throw new Error('Recovery input differs from its persisted native identity.')
+            if (input?.state === 'claimed' && !input.active && !recovery.replayInactiveClaim) {
+              throw new Error('Inactive claimed recovery input requires confirmed prior execution stop.')
+            }
+            if (input?.state === 'queued' && agent.status === 'idle') {
+              // Only the existing recovery explanation is withdrawn. Business
+              // inputs stay in their original inbox positions and retain ids.
+              if (!agent.inbox.remove(MessageId(messageId))) throw new Error('Recovery inbox input changed before withdrawal.')
+              await this.ctx.sessions.flush(agent.session)
+              if (closing || disposed) throw new Error(`Servant Agent closed before recovery readmission: ${request.sessionId}`)
+            }
+          }
+
           if (handle.hasMessage(messageId)) {
             // A previous admission may have succeeded while its durability barrier failed.
             // The retry must prove persistence before acknowledging the same stable id.
@@ -137,6 +161,9 @@ export class DshAgentGateway {
           agent[mode](message)
           await this.ctx.sessions.flush(agent.session)
         })
+        messageAdmissions.set(messageId, operation)
+        void operation.finally(() => { if (messageAdmissions.get(messageId) === operation) messageAdmissions.delete(messageId) }).catch(() => undefined)
+        return operation
       },
       cancel: async () => {
         if (disposed) return
@@ -155,6 +182,7 @@ export class DshAgentGateway {
         if (disposed) return
         if (disposal) return disposal
         closing = true
+        for (const unsubscribe of progressSubscriptions) unsubscribe()
         const pending = Promise.resolve().then(async () => {
           // Their callers retain the original failures; a failed admission must
           // not prevent native cleanup from draining/releasing its own resources.
@@ -182,6 +210,13 @@ export class DshAgentGateway {
         if (events.some(event => isAppendSurfaceEvent(event) && deriveEventMessage(event)?.id === messageId)) return true
         const input = deriveNativeInputs(events, { 'next-turn': agent.inbox.nextTurn, 'next-step': agent.inbox.nextStep }, agent.status === 'running').get(messageId)
         return input?.state === 'claimed' && input.active === true
+      },
+      subscribeProgress: listener => {
+        if (closing || disposed) return () => {}
+        const stop = observeDshProgress(agent, event => { if (!closing && !disposed) listener(event) })
+        const unsubscribe = () => { stop(); progressSubscriptions.delete(unsubscribe) }
+        progressSubscriptions.add(unsubscribe)
+        return unsubscribe
       },
       subscribe: (listener, terminalOnly = false) => {
         const onEvent = agent.ctx.on('session/event', (_session, event) => { if (!terminalOnly || event.type === 'turn/end') listener() })

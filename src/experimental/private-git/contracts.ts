@@ -31,7 +31,7 @@ export interface RepoConnection { identity: GitHubIdentity; repository: PrivateR
 export interface CoopInvitation { id: number; login: string; status: 'pending'; htmlUrl?: string }
 export interface CoopCollaborator { id: number; login: string; permissions: Record<string, boolean>; status: 'accepted' }
 export interface GitSnapshot { head: string; tree: string; files: ReadonlyMap<string, string>; reads?: Map<string, string | undefined> }
-export interface GitChange { path: string; content: string | null }
+export type GitChange = { path: string } & ({ content: string | null; bytes?: never } | { bytes: Uint8Array; content?: never })
 export interface GitFileChange { path: string; status: 'A' | 'M' | 'D'; commit: string; parent?: string; before?: string; after?: string }
 export interface GitChangeNotice { from: string; to: string; changes: GitFileChange[] }
 export interface GitReceipt { commit: string; replay: boolean }

@@ -79,3 +79,81 @@ test('native disposal failure is shared and preserved, retry does not falsely re
   assert.equal(f.counts().disposals, 2)
   assert.equal(f.gateway.get('synthetic-worker'), undefined)
 })
+
+async function recoveryFixture() {
+  const message = (id: string, text: string) => ({ id, role: 'user', source: { kind: 'deepseek-servant' }, content: [{ type: 'text', text }] })
+  const business = message('B', 'business B'), recovery = message('R', 'inspect persisted inputs and continue')
+  const events: any[] = [{ type: 'agent/inbox/spliced', data: { target: 'next-turn', start: 0, removedCount: 0, inserted: [business, recovery] } }]
+  let sends = 0, removals = 0, flush: () => Promise<void> = async () => {}
+  const agent: any = { id: 'recovery-native', status: 'idle', ctx: { get: () => undefined },
+    inbox: { nextTurn: [business, recovery], nextStep: [], remove: (id: string) => {
+      const index = agent.inbox.nextTurn.findIndex((item: any) => item.id === id)
+      if (index < 0) return false
+      agent.inbox.nextTurn.splice(index, 1); removals++
+      events.push({ type: 'agent/inbox/spliced', data: { target: 'next-turn', start: index, removedCount: 1, inserted: [], outcome: 'canceled' } })
+      return true
+    } },
+    session: { snapshotEvents: () => events, deriveMessages: () => [] },
+    followup: (input: any) => {
+      if (agent.inbox.nextTurn.some((item: any) => item.id === input.id)) throw new Error('already pending')
+      events.push({ type: 'agent/inbox/spliced', data: { target: 'next-turn', start: agent.inbox.nextTurn.length, removedCount: 0, inserted: [input] } })
+      agent.inbox.nextTurn.push(input); agent.status = 'running'; sends++
+    },
+  }
+  const ctx: any = { get: () => undefined, agents: { get: () => undefined, create: async () => ({ agent, dispose: async () => {} }) }, sessions: { flush: async () => flush() } }
+  const handle = await new DshAgentGateway(ctx).create({ sessionId: agent.id, cwd: '/synthetic', role: 'helper' })
+  return { handle, agent, events, business, recovery, counts: () => ({ sends, removals }), setFlush: (fn: typeof flush) => { flush = fn } }
+}
+test('recovery readmission preserves business input and serializes duplicate recovery requests', async () => {
+  const f = await recoveryFixture()
+  await Promise.all([f.handle.send(f.recovery.content[0]!.text, 'R', 'followup', 'deepseek-servant', {}),
+    f.handle.send(f.recovery.content[0]!.text, 'R', 'followup', 'deepseek-servant', {})])
+  assert.deepEqual(f.counts(), { sends: 1, removals: 1 })
+  assert.equal(f.agent.inbox.nextTurn[0], f.business)
+  assert.deepEqual(f.agent.inbox.nextTurn.map((item: any) => item.id), ['B', 'R'])
+})
+test('withdrawal flush failure retains the same recovery identity for a later retry', async () => {
+  const f = await recoveryFixture()
+  f.setFlush(async () => { throw new Error('unknown withdrawal durability') })
+  await assert.rejects(f.handle.send(f.recovery.content[0]!.text, 'R', 'followup', 'deepseek-servant', {}), /unknown withdrawal/)
+  assert.deepEqual(f.counts(), { sends: 0, removals: 1 })
+  f.setFlush(async () => {})
+  await f.handle.send(f.recovery.content[0]!.text, 'R', 'followup', 'deepseek-servant', {})
+  assert.deepEqual(f.counts(), { sends: 1, removals: 1 })
+  assert.deepEqual(f.agent.inbox.nextTurn.map((item: any) => item.id), ['B', 'R'])
+})
+for (const active of [true, false]) test('claimed recovery input active=' + active + ' is never blindly duplicated', async () => {
+  const f = await recoveryFixture()
+  f.events.push({ type: 'turn/start', data: { turn: 1 } })
+  f.agent.inbox.nextTurn.splice(1, 1)
+  f.events.push({ type: 'agent/inbox/spliced', data: { target: 'next-turn', start: 1, removedCount: 1, inserted: [] } })
+  f.agent.status = active ? 'running' : 'idle'
+  const send = () => f.handle.send(f.recovery.content[0]!.text, 'R', 'followup', 'deepseek-servant', {})
+  if (active) await send()
+  else await assert.rejects(send(), /confirmed prior execution stop/)
+  assert.deepEqual(f.counts(), { sends: 0, removals: 0 })
+})
+
+
+test('recovery explanation may use waking steer without changing the business inbox', async () => {
+  const f = await recoveryFixture()
+  let steers = 0
+  f.agent.steer = (input: any) => {
+    steers++
+    f.agent.inbox.nextStep.push(input)
+    f.events.push({ type: 'agent/inbox/spliced', data: { target: 'next-step', start: 0, removedCount: 0, inserted: [input] } })
+    f.agent.status = 'running'
+  }
+  const send = () => f.handle.send(f.recovery.content[0]!.text, 'R', 'steer', 'deepseek-servant', {})
+  await Promise.all([send(), send()])
+  assert.equal(steers, 1)
+  assert.deepEqual(f.agent.inbox.nextTurn, [f.business])
+  assert.deepEqual(f.agent.inbox.nextStep.map((item: any) => item.id), ['R'])
+  assert.equal(f.counts().removals, 1)
+})
+test('recovery delivery rejects non-waking inject and human source', async () => {
+  const f = await recoveryFixture()
+  await assert.rejects(f.handle.send('recovery', 'new-R', 'inject', 'deepseek-servant', {}), /Recovery delivery/)
+  await assert.rejects(f.handle.send('recovery', 'new-R', 'steer', 'user', {}), /Recovery delivery/)
+  assert.deepEqual(f.counts(), { sends: 0, removals: 0 })
+})

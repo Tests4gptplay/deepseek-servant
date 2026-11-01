@@ -105,7 +105,6 @@ export class GitHubMembers {
   invite(login: string, expected?: MemberScope): Promise<{ status: 'pending' | 'accepted'; id?: number; login: string }> {
     if (!/^[A-Za-z0-9-]+$/.test(login)) throw new Error('Enter a GitHub username.')
     return this.withRepo(async (session, path, connection) => {
-      if (!connection.repository.permissions.admin) throw new GitHubError(403, 'GitHub repository administration permission is required to invite members.')
       const result = await session.request<{ id: number } | undefined>('PUT', path + '/collaborators/' + encodeURIComponent(login), { permission: 'push' })
       return { status: result ? 'pending' : 'accepted', id: result?.id, login }
     }, expected)

@@ -32,7 +32,7 @@ export interface RecordStorageView {
 }
 export interface ServantView {
   conversationMode?: 'LOCAL' | 'PRIVATE_GIT_EXPERIMENTAL'
-  runtimeSettings: import('../application/runtime-settings.js').RuntimeSettings
+  runtimeSettings: { schemaVersion: 1; revision: number; workerSeats: number }
   recordStorage: RecordStorageView
   assistant: AssistantView
   tasks: TaskView[]

@@ -30,7 +30,7 @@ export interface DshSessionInspection {
   /** False when the host's native lifecycle projections are unavailable. Never infer an empty inbox. */
   lifecycleKnown: boolean
   queuedInbox: { nextTurn: string[]; nextStep: string[] }
-  lastTurn?: { turn: number; closed: boolean; toolCallIds: string[]; reason?: string; error?: string }
+  lastTurn?: { turn: number; closed: boolean; toolCallIds: string[]; reason?: string; abortCause?: string; error?: string }
   unresolvedToolCallIds: string[]
   /** Durable history hints only. These records never imply surviving OS jobs after restart. */
   jobs: Array<{ id: string; owner: string; kind: string; state: 'registered' | 'completed' | 'killed' | 'failed'; producerReported?: boolean }>
@@ -108,6 +108,7 @@ export class DshSessionReader {
         if (event.type === 'turn/end') base.lastTurn = {
           turn: event.data.turn, closed: true, reason: event.data.reason.kind,
           toolCallIds: base.lastTurn?.turn === event.data.turn ? base.lastTurn.toolCallIds : [],
+          ...(event.data.reason.kind === 'aborted' ? { abortCause: event.data.reason.reason.kind } : {}),
           ...(event.data.reason.kind === 'error' ? { error: event.data.reason.error.message } : {}),
         }
         if (event.type === 'tool/call') {
