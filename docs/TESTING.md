@@ -15,6 +15,11 @@ system-prompt registry for all six roles. It checks Auto and explicit model rout
 before rendering a persona containing `{{model}}`, then verifies native admission
 reaches the deliberately unconfigured provider error. It makes no model API request;
 real Web request admission and provider responses are separate validation steps.
+The same suite uses the official test-only MockAdapter and JSONL backend to flush
+and reopen a real request header: resumed Auto keeps A after the default changes
+to B, a new Auto session uses B, and explicit C changes both prompt and request.
+It also checks reasoning-effort removal and explicit/default output-token limits.
+These responses are controlled fixtures, not paid-model results.
 
 ## Historical implementation
 
