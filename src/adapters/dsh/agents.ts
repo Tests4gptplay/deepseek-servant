@@ -1,13 +1,15 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentOptions } from '@deepseek-ai/dsh-agent'
+import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
+import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { MessageId, freezeMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { SessionId, deriveEventMessage, isAppendSurfaceEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-tools'
-import type { DshAgentRequest, ExecutionPermission, OwnedDshAgent } from './host-types.js'
+import type { DshAgentRequest, DshModelRoute, ExecutionPermission, OwnedDshAgent } from './host-types.js'
 import { deriveNativeInputs } from './sessions.ts'
 import { observeDshProgress } from './progress.js'
 
@@ -62,7 +64,9 @@ export class DshAgentGateway {
       throw new Error('The selected Servant preset requires the DSH agent preset registry.')
     }
     const presetId = presets === undefined ? undefined : (await presets.resolve(request.presetId)).id
-    const route = request.model
+    // Native prompt variables read Agent.options before the request waterfall.
+    // Resolve Auto through the Host's default selection before creating the scope.
+    const route: DshModelRoute | undefined = request.model ?? this.ctx.get('agentDefaultModel')?.currentSelection()
     const agentOptions: AgentOptions = {
       ...(route?.provider === undefined ? {} : { provider: route.provider }),
       ...(route?.model === undefined ? {} : { model: route.model }),
@@ -75,17 +79,16 @@ export class DshAgentGateway {
         if (event.agent === agent) lastError = { message: errorChain(event.error), turn: event.turn, step: event.step }
       })
       if (presets !== undefined && presetId !== undefined) await presets.mount(agentCtx, presetId)
-      // DSH rc.2 reuses the last request header after the first request.
-      // Keep this owned execution on its captured route, including after resume.
-      const provider = route?.provider, model = route?.model
-      if (provider && model) agentCtx.on('agent/request', async ({ agent: owner }, next) => {
-        const previous = await next()
-        if (owner !== agent) return previous
-        const config = { ...previous, provider, model }
-        if (route.reasoningEffort === undefined) delete config.reasoningEffort
-        else config.reasoningEffort = route.reasoningEffort as ReasoningEffortId
-        return config
-      })
+      // A resumed Auto execution retains its admitted route; a new execution
+      // captures the current Host default. Couple prompt and request selection.
+      const selected = request.resume && request.model === undefined
+        ? agent.session.requestHeader()?.config ?? route : route
+      const provider = selected?.provider, model = selected?.model
+      if (provider && model) agentCtx.effect(() => installModelSelection(agentCtx, {
+        current: { provider, model, ...(selected.reasoningEffort === undefined ? {} : {
+          reasoningEffort: selected.reasoningEffort as ReasoningEffortId,
+        }) }, assembled: undefined,
+      }))
       return await request.setup?.(agentCtx, agent)
     }
     const native: AgentHandle = request.resume

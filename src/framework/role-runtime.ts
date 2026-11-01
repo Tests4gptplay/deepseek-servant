@@ -29,6 +29,7 @@ import { scanMemberRecovery, createRecoveryWatch, dueRecoveryWatch,
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 interface RoleRecord { identity: WorkIdentity; sessionId: string; generation: number; lastWake?: RoleWake; delivery?: { request: RoleWake; messageId: string; text?: string; confirmed: boolean; sequence?: number }; released?: boolean; stopped?: boolean; stopIntent?: NativeStopEvidence; stopUnknown?: { reason: string; jobs: string[] } }
+interface TrackedStop { executionId: string; taskId?: string; promise: Promise<void>; settled: boolean; result?: StopResult; persistedStopped?: boolean; reportedFailure?: string }
 interface WakeRecovery {
   targetExecutionId: string
   explanationText?: string
@@ -76,6 +77,7 @@ export class FrameworkRoleRuntime {
   private readonly observationStore: DurableObservationStore
   private readonly prefix: string
   private readonly roleRecords = new Map<string, RoleRecord>()
+  private stopOperations?: Map<string, TrackedStop>
   private pumping?: Promise<void>
   private closed = false
   private readonly bootId = randomUUID()
@@ -143,6 +145,11 @@ export class FrameworkRoleRuntime {
       if (record.stopped) record = { ...record, stopUnknown: undefined }
       await this.records.set(this.prefix + 'roles/' + hash(workId), record)
       this.roleRecords.set(workId, record)
+      const stopping = this.stopOperations?.get(JSON.stringify([workId, record.identity.executionId]))
+      if (stopping && record.stopped) {
+        stopping.persistedStopped = true
+        if (stopping.settled) stopping.result = { status: 'stopped' }
+      }
     })
     this.roleWrites.set(workId, operation)
     void operation.finally(() => { if (this.roleWrites?.get(workId) === operation) this.roleWrites.delete(workId) }).catch(() => {})
@@ -747,7 +754,7 @@ export class FrameworkRoleRuntime {
     const marker = paths.state(task.owner, task.taskId) + '/Cleaner'
     if (await this.files.read(snapshot, marker) === undefined && await this.files.read(snapshot, cleanupRecordPath(task.taskId)) === undefined) return false
     // Stop confirmation protects files being removed, not independent result notifications.
-    await this.stopBusiness(task.taskId)
+    if (!this.businessStopped(task.taskId)) return false
     const retentionRaw = await this.files.read(snapshot, paths.archive(task.taskId) + '/retention.json')
     if (retentionRaw !== undefined && [...this.roleRecords.values()].some(record => record.identity.taskId === task.taskId
       && record.identity.role === 'Recorder' && this.active(record))
@@ -757,9 +764,7 @@ export class FrameworkRoleRuntime {
       return false
     }
     for (const record of this.roleRecords.values()) if (record.identity.taskId === task.taskId && record.identity.role === 'Recorder' && !record.stopped) {
-      const result = await this.stopOwnedRecord(record)
-      if (result.status === 'unconfirmed') { await this.saveRole({ ...record, stopUnknown: result }); throw new Error(result.reason) }
-      if (result.status === 'stopped') await this.saveRole({ ...record, stopped: true })
+      if (!this.trackedStop(record)) return false
     }
     try { return (await this.cleaner.clean(task, snapshot)).status === 'released' }
     catch (error) {
@@ -782,6 +787,7 @@ export class FrameworkRoleRuntime {
   }
   private async releaseTask(task: TaskMetadata): Promise<void> {
     clearCleanupReferenceCache(this.files, task.taskId)
+    for (const [workId, stop] of this.stopOperations ?? []) if (stop.taskId === task.taskId && stop.settled) this.stopOperations!.delete(workId)
     for (const record of [...this.roleRecords.values()]) if (record.identity.taskId === task.taskId) {
       await this.observations.unbind(record.identity.workId, record.identity.executionId)
       await this.saveRole({ ...record, stopped: true, released: true })
@@ -805,8 +811,58 @@ export class FrameworkRoleRuntime {
   private async processSealedBusiness(): Promise<void> {
     for (const row of await this.records.list<{ taskId: string; released?: boolean }>(this.prefix + 'sealed/')) {
       if (row.value.released) continue
-      try { await this.stopBusiness(row.value.taskId) } catch (error) { this.error(error) }
+      this.businessStopped(row.value.taskId)
     }
+  }
+  /** A pending producer owns its stop promise, not the discovery loop. Only
+   * confirmed, persisted completion for this exact execution permits cleanup. */
+  private trackedStop(record: RoleRecord): boolean {
+    if (record.stopped) return true
+    const operations = this.stopOperations ??= new Map()
+    const { workId, executionId, taskId } = record.identity
+    const stopKey = JSON.stringify([workId, executionId])
+    const existing = operations.get(stopKey)
+    if (existing?.executionId === executionId) {
+      if (!existing.settled) return false
+      if (existing.result?.status === 'stopped') return true
+    }
+    const stop: TrackedStop = { executionId, taskId, promise: Promise.resolve(), settled: false,
+      persistedStopped: existing?.persistedStopped, reportedFailure: existing?.reportedFailure }
+    const report = (error: unknown, signature: string) => {
+      if (stop.reportedFailure === signature) return
+      stop.reportedFailure = signature
+      this.error(error)
+    }
+    operations.set(stopKey, stop)
+    stop.promise = Promise.resolve().then(async () => {
+      try {
+        const result = await this.stopOwnedRecord(record)
+        const current = this.roleRecords.get(workId)
+        if (current?.identity.executionId === executionId) {
+          if (result.status === 'stopped') await this.saveRole({ ...current, stopped: true, stopUnknown: undefined })
+          else if (result.status === 'unconfirmed') await this.saveRole({ ...current, stopUnknown: result })
+        }
+        // Another owned stop can persist this execution's confirmation before
+        // its replacement is installed; a late superseded result cannot erase it.
+        stop.result = stop.persistedStopped ? { status: 'stopped' } : result
+        if (stop.result.status === 'unconfirmed') report(new Error(stop.result.reason),
+          JSON.stringify(['unconfirmed', stop.result.reason, [...stop.result.jobs].sort()]))
+      } catch (error) { report(error, JSON.stringify(['failure', error instanceof Error ? error.message : String(error)])) }
+      finally {
+        if (stop.persistedStopped) stop.result = { status: 'stopped' }
+        stop.settled = true
+      }
+    })
+    return false
+  }
+  private businessStopped(taskId: string): boolean {
+    let stopped = true
+    for (const record of this.roleRecords.values()) if (record.identity.taskId === taskId
+      && (record.identity.role === 'Planner' || record.identity.role === 'Worker')) {
+      if (!this.trackedStop(record)) stopped = false
+    }
+    if ([...(this.stopOperations?.values() ?? [])].some(stop => stop.taskId === taskId && (!stop.settled || stop.result?.status !== 'stopped'))) stopped = false
+    return stopped
   }
   private async stopOwnedRecord(record: RoleRecord): Promise<StopResult> {
     const result = await this.native.stop(record.identity.workId, record.identity.executionId)
@@ -830,14 +886,6 @@ export class FrameworkRoleRuntime {
     // missed stop acknowledgement. An empty registry alone is never this proof.
     if (intent || current.stopUnknown) await this.saveRole({ ...current, stopped: true, stopUnknown: undefined })
     return { status: 'stopped' }
-  }
-  async stopBusiness(taskId: string): Promise<void> {
-    for (const record of this.roleRecords.values()) if (record.identity.taskId === taskId && (record.identity.role === 'Planner' || record.identity.role === 'Worker')) {
-      if (record.stopped) continue
-      const result = await this.stopOwnedRecord(record)
-      if (result.status === 'unconfirmed') { await this.saveRole({ ...record, stopUnknown: result }); throw new Error(result.reason) }
-      if (result.status === 'stopped') await this.saveRole({ ...record, stopped: true })
-    }
   }
   private recoveryInputPath(taskId: string, member: string, role: RecoveryRole): string {
     return 'technical/recovery-inputs/' + paths.member(taskId, member).slice('task-runs/'.length) + '/' + role + '.json'
@@ -946,7 +994,13 @@ export class FrameworkRoleRuntime {
   async dispose(): Promise<void> {
     this.closed = true
     await this.loop.stop()
+    // A snapshot is insufficient if an already-owned operation installs another
+    // stop while settling. Drain ownership before the remaining final checks.
+    while ([...(this.stopOperations?.values() ?? [])].some(stop => !stop.settled)) {
+      await Promise.all([...this.stopOperations!.values()].filter(stop => !stop.settled).map(stop => stop.promise))
+    }
     for (const record of this.roleRecords.values()) {
+      if (record.stopped) continue
       const result = await this.stopOwnedRecord(record)
       if (result.status === 'unconfirmed') await this.saveRole({ ...record, stopUnknown: result })
     }

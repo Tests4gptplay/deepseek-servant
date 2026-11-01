@@ -54,7 +54,7 @@ export interface FrameworkClientView {
   historyWindow?: boolean
   tasks: FrameworkClientTask[]
   legacyTasks: FrameworkLegacyTask[]
-  archives: Array<{ path: string; title: string; taskId?: string }>
+  archives: Array<{ path: string; title: string; taskId?: string; files?: string[] }>
   resources: FrameworkClientResource[]
   executions?: FrameworkClientExecution[]
 }

@@ -132,7 +132,7 @@ export function FrameworkPage(props: FrameworkPageProps) {
         </section>}</div>}
       {(tab === 'tasks' || tab === 'archives') && view && <LegacyTasks tasks={view.legacyTasks} controller={controller} mode={view.activeMode} storageScope={view.storageScope} open={open} tr={tr} />}
       {tab === 'knowledge' && view && <KnowledgePanel key={scope} api={props.api} view={view} tr={tr} />}
-      {tab === 'archives' && <div className={css.knowledge}>{view?.archives.map(item => <section className={css.knowledgeCard} key={item.path}><h3>{item.title}</h3><code>{item.taskId}</code><button className={css.artifact} onClick={() => run(open(item.path))}>{item.path}</button></section>)}</div>}
+      {tab === 'archives' && <div className={css.knowledge}>{view?.archives.map(item => <section className={css.knowledgeCard} key={item.path}><h3>{item.title}</h3><code>{item.taskId}</code><button className={css.artifact} onClick={() => run(open(item.path))}>{item.path}</button>{item.files?.map(path => <button className={css.artifact} key={path} onClick={() => run(open(path))}>{path}</button>)}</section>)}</div>}
       {tab === 'resources' && <div className={css.knowledge}>{view?.resources.map(resource => <section className={css.knowledgeCard} key={resource.instanceUUID ?? resource.name}><div className={css.rowBetween}><h3>{resource.name}</h3><span className={css.badge}>{resource.status}</span></div>
         <p>{tr('Worker 席位', 'Worker seats')}：{resource.workerSeats ?? tr('未知', 'Unknown')}</p><code>{resource.instanceUUID}</code>{resource.detail && <p>{resource.detail}</p>}</section>)}
         <RoleExecutions executions={view?.executions ?? []} tr={tr} controller={controller} view={view} /></div>}

@@ -470,3 +470,44 @@ for (const mode of ['failure', 'cancel'] as const) test(`remote: in-flight tree 
   await repo.commit(next, [{ path: 'dss-coop/recovered', content: mode }], 'After failed lifecycle')
   assert.equal(await repo.read(await repo.snapshot(), 'dss-coop/recovered'), mode)
 })
+
+test('remote: empty technical commit retains a recoverable operation after an unknown response', async () => {
+  const remote = new Remote(), original = remote.fetch.bind(remote)
+  remote.fetch = async (url, init) => {
+    const response = await original(url, init)
+    if (url.endsWith('/graphql')) { remote.failReads = true; throw new Error('Response and read-back lost') }
+    return response
+  }
+  const { repo } = fixture(remote), base = await repo.snapshot()
+  const before = new Map(remote.commits.get(remote.head)!.files)
+  const operation = repo.prepareCommit(base, [], 'Technical checkpoint without file changes')
+  assert.deepEqual(operation.writes, [])
+  const persisted = JSON.parse(JSON.stringify(operation))
+  assert.deepEqual(await fixture(remote).repo.resolveCommit(persisted), { status: 'pending', head: base.head })
+  await assert.rejects(repo.commitPrepared(base, [], 'Technical checkpoint without file changes', operation), error => {
+    assert.ok(error instanceof GitCommitOutcomeUnknownError)
+    assert.deepEqual(error.operation, operation)
+    return true
+  })
+  remote.failReads = false
+  const restarted = fixture(remote).repo
+  assert.deepEqual(await restarted.resolveCommit(persisted), { status: 'confirmed', commit: remote.head, head: remote.head })
+  assert.deepEqual(remote.commits.get(remote.head)!.files, before)
+  assert.equal(remote.count('/graphql'), 1)
+})
+
+test('remote: stalled HTTP transport observes the injected request deadline without network access', async () => {
+  let observed: AbortSignal | undefined, requests = 0
+  const client = new GitHubClient(async () => ({ value: 'synthetic-not-a-secret', source: 'fixture' }), async (url, init) => {
+    requests++
+    assert.equal(url, 'https://api.github.com/user')
+    observed = init?.signal ?? undefined
+    return new Promise<Response>((_resolve, reject) => {
+      const keepAlive = setTimeout(() => reject(new Error('Test transport failed to observe deadline')), 1_000)
+      observed!.addEventListener('abort', () => { clearTimeout(keepAlive); reject(observed!.reason) }, { once: true })
+    })
+  }, 10)
+  await assert.rejects(client.session(session => session.request('GET', '/user')), /timeout/i)
+  assert.equal(observed?.aborted, true)
+  assert.equal(requests, 1, 'deadline does not retry the request or infer its server outcome')
+})

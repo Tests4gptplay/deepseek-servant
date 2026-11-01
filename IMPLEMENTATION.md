@@ -67,8 +67,8 @@ npm run test:package
 
 构建生成 `lib/host.js` 与 `lib/client.js`。Client 使用宿主 ModuleLoader factory，不能用普通浏览器 ESM 入口代替宿主接线。候选打包后还需核对包文件、构建结果与被测试源码一致；打包不等于发布或安装验收。
 
-已开展的验证包括真实 SQLite、多文件事务、已安装官方原生技能 registry、受控 HTTP Git API 及客户端控制器/组件回归。具体命令、当前结果和覆盖边界见 [测试说明](docs/TESTING.md)，不在此固定容易过期的测试总数。
+已开展的验证包括真实 SQLite、多文件事务、已安装官方原生技能 registry、受控 HTTP Git API、客户端控制器/组件及真实原生 JSON 存储回归。原封候选还在固定官方 Host 服务上以官方受控模型运行过六角色工具、P/O 任务交付、Planner 与同一 Worker 的三轮交互（两次拒收后验收）、前台结果回复、Recorder/Cleaner、持久化重启和二进制成果读回；受控流程不代表真实模型任务质量，也不自动覆盖所有中断、跨 Host 协作或浏览器交互。具体命令、当前结果和覆盖边界见 [测试说明](docs/TESTING.md)，不在此固定容易过期的测试总数。
 
-**尚未完成当前候选的真实 Host 模型执行、Desktop / Web 实机交互及公网专用 Git 账号最终验收。** 原生接口源码核证、seam 和受控 HTTP 均不能冒充这些验证。历史 Windows rc.5 等结果见[旧公开证据](https://github.com/Tests4gptplay/deepseek-servant/blob/d28a4d8538abc966608761bcfd60d568dec11cc9/docs/testing/EVIDENCE.md)，仅适用于对应旧版本。
+**尚未完成当前候选的真实模型任务、完整 Desktop / Web 实机交互及公网专用 Git 账号最终验收。** 原生服务加受控模型、接口 seam 和受控 HTTP 均不能冒充这些验证。历史 Windows rc.5 等结果见[旧公开证据](https://github.com/Tests4gptplay/deepseek-servant/blob/d28a4d8538abc966608761bcfd60d568dec11cc9/docs/testing/EVIDENCE.md)，仅适用于对应旧版本。
 
 许可证、素材署名及第三方声明见 [README](README.md#来源与开源许可)、[NOTICE](NOTICE) 和 [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES.md)。

@@ -267,8 +267,14 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 } catch (error) { this.report(mode, error); }
             }
             } catch (error) { this.report(mode, error); }
-            if (input.includeArchives)
-                base.archives = (await access.connection.files.list(snapshot, 'archives/')).filter(entry => entry.path.endsWith('/records.md')).map(entry => ({ path: entry.path, title: entry.path.split('/')[1]!, taskId: entry.path.split('/')[1] }));
+            if (input.includeArchives) {
+                const entries = await access.connection.files.list(snapshot, 'archives/');
+                base.archives = entries.filter(entry => /^archives\/[^/]+\/records\.md$/.test(entry.path)).map(entry => {
+                    const taskId = entry.path.split('/')[1]!, prefix = `archives/${taskId}/`;
+                    return { path: entry.path, title: taskId, taskId,
+                        files: entries.filter(file => file.path.startsWith(prefix) && file.path !== entry.path && file.path !== `${prefix}retention.json`).map(file => file.path).sort() };
+                });
+            }
         }); } catch (error) { this.report(mode, error); }
         base.connection.detail = this.errors.get(mode);
         if (input.includeArchives)

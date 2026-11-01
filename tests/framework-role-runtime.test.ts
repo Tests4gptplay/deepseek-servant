@@ -780,6 +780,8 @@ test('runtime Cleaner requeues Recorder for changed original material, does not 
     { path: archivePath, content: 'Recorder now preserves late exact original result' },
     { path: retentionPath, content: encodeJson({ outputs: [archivePath], retainedPaths: [], inputs: reviewedInputs, verifiedReferences: await captureCleanupReferences(files, snapshot, [archivePath], [{ path: archivePath, content: 'Recorder now preserves late exact original result' }]), recorderCommand: 'review-save' }) },
   ], 'Recorder saves and confirms revised material'))
+  assert.equal(await clean(), false, 'Recorder stop is owned without blocking the poll')
+  await Promise.all([...runtime.stopOperations.values()].map((stop: any) => stop.promise))
   assert.equal(await clean(), true)
   assert.equal(stopped, 1)
   await withSnapshot(files, async snapshot => {
@@ -1178,12 +1180,12 @@ test('released Task stops participating in sealed stop work across restart while
   await runtime.sealBusiness('T1'); await runtime.sealBusiness('T2')
   await runtime.releaseTask({ taskId: 'T1', owner: 'A', members: ['A'] })
   const checked: string[] = [], errors: unknown[] = []
-  runtime.stopBusiness = async (taskId: string) => { checked.push(taskId); throw new Error('producer unconfirmed') }
+  runtime.businessStopped = (taskId: string) => { checked.push(taskId); runtime.error(new Error('producer unconfirmed')); return false }
   runtime.error = (error: unknown) => errors.push(error)
   await runtime.processSealedBusiness()
   // A new runtime object reads the same durable records after a Host restart.
   const restarted = queue().runtime
-  restarted.records = runtime.records; restarted.stopBusiness = runtime.stopBusiness; restarted.error = runtime.error
+  restarted.records = runtime.records; restarted.businessStopped = runtime.businessStopped; restarted.error = runtime.error
   await restarted.sealBusiness('T1')
   await restarted.processSealedBusiness()
   assert.deepEqual(checked, ['T2', 'T2'])
@@ -1568,4 +1570,143 @@ test('one unresolved Helper stop does not starve another execution observation r
   assert.equal([...rows.values()].find(row => row.pending?.id === first.id).complete, false)
   assert.equal([...rows.values()].find(row => row.pending?.id === second.id).complete, true)
   assert.ok([...rows.values()].some(row => row.request?.context?.observation.identity.executionId === 'other-worker-execution'))
+})
+
+test('sealed in-flight stop does not block completion notifications or another task in later polls', async () => {
+  const { runtime } = queue(), gate = Promise.withResolvers<void>(), calls: string[] = []
+  runtime.roleRecords = new Map([['worker-T1', { identity: { workId: 'worker-T1', executionId: 'e1', role: 'Worker', taskId: 'T1' }, sessionId: 's1', generation: 1 }]])
+  runtime.environment = { heartbeat: async () => undefined }; runtime.observations = { tick: async () => undefined }
+  runtime.applyUserControls = runtime.processObservations = runtime.observeRecoveryMarkers = runtime.processHostRestores = runtime.processRestores = async () => undefined
+  runtime.errorTail = Promise.resolve(); runtime.error = (error: unknown) => { throw error }
+  runtime.stopOwnedRecord = async () => { calls.push('stop'); await gate.promise; return { status: 'stopped' } }
+  runtime.pump = async () => { calls.push('Foreground/Recorder/T2') }
+  await runtime.sealBusiness('T1')
+  let settled = false
+  const first = runtime.observe().then(() => { settled = true })
+  try {
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(settled, true, 'a pending stop must not hold the discovery/notification poll')
+    await runtime.observe()
+    assert.deepEqual(calls, ['stop', 'Foreground/Recorder/T2', 'Foreground/Recorder/T2'])
+  } finally { gate.resolve(); await first }
+})
+
+test('tracked stop does not reuse old generation proof or discard an older pending promise', async () => {
+  const { runtime } = queue(), gates = [Promise.withResolvers<void>(), Promise.withResolvers<void>()], called: string[] = []
+  const first = { identity: {workId:'w', executionId:'e1', role:'Worker', taskId:'T'}, sessionId:'s1', generation:1 }
+  const second = { ...first, identity:{...first.identity,executionId:'e2'},sessionId:'s2',generation:2 }
+  runtime.roleRecords = new Map([['w',first]]); runtime.error = (error: unknown) => { throw error }
+  runtime.stopOwnedRecord = async (record: any) => { called.push(record.identity.executionId); await gates[record.generation-1].promise; return {status:'stopped'} }
+  assert.equal(runtime.trackedStop(first),false)
+  runtime.roleRecords.set('w',second)
+  assert.equal(runtime.trackedStop(second),false)
+  assert.equal(runtime.stopOperations.size,2)
+  gates[0].resolve(); await [...runtime.stopOperations.values()][0].promise
+  assert.equal(runtime.roleRecords.get('w').stopped,undefined,'old completion cannot mark a newer execution stopped')
+  assert.equal(runtime.trackedStop(second),false)
+  gates[1].resolve(); await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise))
+  assert.equal(runtime.trackedStop(runtime.roleRecords.get('w')),true)
+  assert.deepEqual(called,['e1','e2'])
+})
+
+test('unconfirmed tracked stop preserves evidence and rechecks the same actual execution', async () => {
+  const { runtime } = queue(), errors: unknown[] = []
+  const record = {identity:{workId:'w',executionId:'e',role:'Worker',taskId:'T'},sessionId:'s',generation:1}
+  runtime.roleRecords = new Map([['w',record]]); runtime.error=(error:unknown)=>errors.push(error)
+  let calls=0; runtime.stopOwnedRecord=async()=>++calls===1?{status:'unconfirmed',reason:'producer has not reported',jobs:['j']}:{status:'stopped'}
+  assert.equal(runtime.businessStopped('T'),false)
+  await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise))
+  assert.equal(runtime.roleRecords.get('w').stopped,undefined)
+  assert.deepEqual(runtime.roleRecords.get('w').stopUnknown.jobs,['j'])
+  assert.equal(runtime.businessStopped('T'),false)
+  await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise))
+  assert.equal(runtime.businessStopped('T'),true);assert.equal(calls,2);assert.equal(errors.length,1)
+})
+
+test('pending producer prevents only its Task cleanup, not another Task cleanup', async t => {
+  const {runtime,files}=await runtimeFixture(t), gate=Promise.withResolvers<void>(), cleaned:string[]=[]
+  const one={version:1,taskId:'11111111-1111-4111-8111-111111111111',owner:'A',route:'P',status:'complete',sourcePath:'tasks/one_P.md'}
+  const two={...one,taskId:'22222222-2222-4222-8222-222222222222',sourcePath:'tasks/two_P.md'}
+  await withSnapshot(files,snapshot=>files.commit(snapshot,[one,two].map(task=>({path:paths.state('A',task.taskId)+'/Cleaner',content:''})),'clean requests'))
+  const record={identity:{workId:'w',executionId:'e',role:'Worker',taskId:one.taskId},sessionId:'s',generation:1}
+  runtime.roleRecords.set('w',record);runtime.stopOwnedRecord=async()=>{await gate.promise;return{status:'stopped'}}
+  runtime.cleaner={clean:async(task:any)=>{cleaned.push(task.taskId);return{status:'released'}}}
+  const clean=(task:any)=>withSnapshot(files,snapshot=>runtime.clean(task,snapshot))
+  try{assert.equal(await clean(one),false);assert.equal(await clean(two),true);assert.deepEqual(cleaned,[two.taskId])}
+  finally{gate.resolve();await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise))}
+  assert.equal(await clean(one),true);assert.deepEqual(cleaned,[two.taskId,one.taskId])
+})
+
+test('dispose joins stops installed by already-owned stopping work before disposing observation storage', async () => {
+  const {runtime}=queue(), first=Promise.withResolvers<void>(),second=Promise.withResolvers<void>(),events:string[]=[]
+  const a={identity:{workId:'a',executionId:'e1',role:'Worker',taskId:'T'},sessionId:'a',generation:1}
+  const b={identity:{workId:'b',executionId:'e2',role:'Worker',taskId:'T'},sessionId:'b',generation:1}
+  runtime.roleRecords=new Map([['a',a],['b',b]]);runtime.loop={stop:async()=>events.push('loop-stopped')};runtime.observations={dispose:async()=>events.push('observations-disposed')};runtime.error=(error:unknown)=>{throw error}
+  runtime.stopOwnedRecord=async(record:any)=>{if(record.identity.workId==='a'){await first.promise;runtime.trackedStop(b)}else await second.promise;return{status:'stopped'}}
+  runtime.trackedStop(a);const disposed=runtime.dispose();await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(events,['loop-stopped'])
+  first.resolve();await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(events,['loop-stopped'])
+  second.resolve();await disposed;assert.deepEqual(events,['loop-stopped','observations-disposed'])
+})
+
+test('native stop success without durable role save is not cached as cleanup proof', async () => {
+  const {runtime}=queue(),errors:unknown[]=[]
+  const record={identity:{workId:'w',executionId:'e',role:'Worker',taskId:'T'},sessionId:'s',generation:1}
+  runtime.roleRecords=new Map([['w',record]]);runtime.error=(error:unknown)=>errors.push(error)
+  runtime.stopOwnedRecord=async()=>({status:'stopped'})
+  runtime.saveRole=async()=>{throw new Error('durable role write failed')}
+  assert.equal(runtime.businessStopped('T'),false)
+  await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise))
+  assert.equal([...runtime.stopOperations.values()][0].result,undefined)
+  assert.equal(runtime.roleRecords.get('w').stopped,undefined)
+  assert.equal(errors.length,1)
+  assert.equal(runtime.businessStopped('T'),false)
+  await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise))
+})
+
+test('replacement record cannot erase a tracked older producer that remains unconfirmed', async () => {
+  const {runtime}=queue()
+  const record={identity:{workId:'w',executionId:'e1',role:'Worker',taskId:'T'},sessionId:'s1',generation:1}
+  runtime.roleRecords=new Map([['w',record]]);runtime.error=()=>undefined
+  runtime.stopOwnedRecord=async()=>({status:'unconfirmed',reason:'old producer not confirmed',jobs:['j1']})
+  assert.equal(runtime.businessStopped('T'),false)
+  await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise))
+  // Even an incorrectly substituted newer record is not proof about the old job.
+  runtime.roleRecords.set('w',{...record,identity:{...record.identity,executionId:'e2'},sessionId:'s2',generation:2,stopped:true})
+  assert.equal(runtime.businessStopped('T'),false)
+  assert.equal([...runtime.stopOperations.values()][0].result.status,'unconfirmed')
+})
+
+test('unchanged unconfirmed execution stop reports one diagnostic until its actual evidence changes', async () => {
+  const {runtime}=queue(),errors:unknown[]=[]
+  const record={identity:{workId:'w',executionId:'e',role:'Worker',taskId:'T'},sessionId:'s',generation:1}
+  runtime.roleRecords=new Map([['w',record]]);runtime.error=(error:unknown)=>errors.push(error)
+  let jobs=['j'];runtime.stopOwnedRecord=async()=>({status:'unconfirmed',reason:'still waiting for producer',jobs})
+  for(let i=0;i<3;i++){runtime.businessStopped('T');await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise))}
+  assert.equal(errors.length,1,'unchanged evidence is one existing diagnostic responsibility')
+  jobs=['j','new-observed-producer'];runtime.businessStopped('T');await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise))
+  assert.equal(errors.length,2,'new producer evidence is an actual change, not a retry count')
+})
+
+test('late superseded stop uses exact already-persisted old execution confirmation after replacement', async () => {
+  const {runtime}=queue(),gate=Promise.withResolvers<void>()
+  const old={identity:{workId:'w',executionId:'e1',role:'Worker',taskId:'T'},sessionId:'s',generation:1}
+  runtime.roleRecords=new Map([['w',old]]);runtime.error=()=>undefined
+  runtime.stopOwnedRecord=async()=>{await gate.promise;return{status:'superseded'}}
+  runtime.businessStopped('T')
+  await runtime.saveRole({...old,stopped:true})
+  await runtime.saveRole({...old,identity:{...old.identity,executionId:'e2'},generation:2,stopped:true})
+  gate.resolve();await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise))
+  assert.equal(runtime.businessStopped('T'),true,'the durable e1 confirmation must survive a late superseded result')
+})
+
+test('durable exact stop confirmation arriving after superseded settlement unblocks cleanup', async () => {
+  const {runtime}=queue()
+  const old={identity:{workId:'w',executionId:'e1',role:'Worker',taskId:'T'},sessionId:'s',generation:1}
+  runtime.roleRecords=new Map([['w',old]]);runtime.error=()=>undefined
+  runtime.stopOwnedRecord=async()=>({status:'superseded'})
+  runtime.businessStopped('T');await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise))
+  assert.equal([...runtime.stopOperations.values()][0].result.status,'superseded')
+  await runtime.saveRole({...old,stopped:true})
+  await runtime.saveRole({...old,identity:{...old.identity,executionId:'e2'},generation:2,stopped:true})
+  assert.equal(runtime.businessStopped('T'),true)
 })

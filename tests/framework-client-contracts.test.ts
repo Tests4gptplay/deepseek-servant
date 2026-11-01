@@ -209,6 +209,26 @@ test('actual React page routes offline send, original-message retry, resources a
     assert.doesNotMatch(document.body.textContent!, /Saved setting/)
 
 
+    const attachmentReads: unknown[] = []
+    const attachmentApi = api({
+      view: async () => ({ ...view('local'), archives: [{ path: 'archives/T/records.md', title: 'T', taskId: 'T', files: ['archives/T/result.bin', 'archives/T/result.txt'] }] }),
+      readFile: async input => { attachmentReads.push(input); return input.path.endsWith('.bin')
+        ? { path: input.path, revision: 'H', binary: { bytes: 4, sha256: 'actual-descriptor-seam', downloadUrl: '/download?path=archives%2FT%2Fresult.bin' } }
+        : { path: input.path, revision: 'H', text: 'Retained output text', downloadUrl: '/download?path=archives%2FT%2Fresult.txt' } },
+    })
+    await React.act(async () => { root.render(React.createElement(FrameworkPage, { key: 'attachments', api: attachmentApi, language: 'en' })); await tick() })
+    await click('Archives'); await click('archives/T/result.bin')
+    assert.match(document.body.textContent!, /4 bytes/)
+    assert.equal([...document.querySelectorAll('a')].find(a => a.textContent === 'Download attachment')?.getAttribute('href'), '/download?path=archives%2FT%2Fresult.bin')
+    await click('Close'); await click('archives/T/result.txt')
+    assert.match(document.body.textContent!, /Retained output text/)
+    assert.equal([...document.querySelectorAll('a')].find(a => a.textContent === 'Download original file')?.getAttribute('href'), '/download?path=archives%2FT%2Fresult.txt')
+    assert.deepEqual(attachmentReads, [
+      { mode: 'local', storageScope: 'local-storage', path: 'archives/T/result.bin' },
+      { mode: 'local', storageScope: 'local-storage', path: 'archives/T/result.txt' },
+    ])
+    await click('Close')
+
     const oldRead = deferred<Awaited<ReturnType<FrameworkClientApi['readFile']>>>(), newRead = deferred<Awaited<ReturnType<FrameworkClientApi['readFile']>>>(), closedRead = deferred<Awaited<ReturnType<FrameworkClientApi['readFile']>>>()
     let reads = 0
     const documentView = (mode: 'local' | 'git') => ({ ...view(mode), archives: [{ path: 'doc.md', title: 'Scope document' }] })

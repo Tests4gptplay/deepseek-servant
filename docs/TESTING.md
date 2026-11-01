@@ -10,6 +10,18 @@ adapters, conversation/event adapters, credentials, remote Git contracts and
 command transaction regressions remain in the current run.
 There are no old role-prompt build definitions in this runner.
 
+`native-model-selection` mounts the official Agent loop, default-model service and
+system-prompt registry for all six roles. It checks Auto and explicit model routes
+before rendering a persona containing `{{model}}`, then verifies native admission
+reaches the deliberately unconfigured provider error. It makes no model API request;
+real Web request admission and provider responses are separate validation steps.
+
+The same suite uses the official test-only MockAdapter and JSONL backend to flush
+and reopen a real request header: resumed Auto keeps A after the Host default
+changes to B, new Auto uses B, explicit resume uses C, and cleared reasoning/token
+options use provider defaults. The adapter fixture retains its upstream MIT
+notice and is not included in the installation package.
+
 ## Historical implementation
 
 Run `node scripts/test-historical.mjs`. It requires local Git commit
@@ -50,6 +62,8 @@ Current replacements exercise the following actual interfaces:
   destination, account/scope changes, durable acknowledgement/replay, and RPC behavior.
 - `framework-role-runtime`, `native-executions`, `framework-host-loop`:
   role dispatch, native admission/stop evidence, task-domain controls and cleanup.
+- `native-storage-json`: actual Cordis Storage/JSON/Domain services, persisted
+  adapter close/reopen, optional object fields and rejected non-JSON values.
 - `framework-legacy-migration` and `framework-migration-lifecycle`: original historical
   producer data read through fixed-SHA fixtures, without obsolete production fallback.
 

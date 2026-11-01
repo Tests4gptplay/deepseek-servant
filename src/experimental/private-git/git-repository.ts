@@ -299,7 +299,7 @@ export class GitHubRepository implements GitRepository {
   }
   private validateOperation(operation: GitCommitOperation): void {
     if (operation.version !== 1 || !/^[0-9a-f-]+$/i.test(operation.id) || !/^[0-9a-f]{40,64}$/.test(operation.expectedHead)
-      || !/^[0-9a-f]{64}$/.test(operation.requestHash) || !operation.writes.length
+      || !/^[0-9a-f]{64}$/.test(operation.requestHash)
       || operation.writes.some(write => !validCoopPath(write.path) || write.sha256 !== null && !/^[0-9a-f]{64}$/.test(write.sha256))) {
       throw new Error('Invalid persisted Git operation metadata.')
     }

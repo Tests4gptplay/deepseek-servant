@@ -2,6 +2,7 @@
 export const historicalBaseline = '0acd3ba39a2ae23d66759279b3c54c4637cd0ad5'
 
 export const currentSuites = [
+  'native-model-selection.test.ts',
   'framework-json-record.test.ts',
   'command-transactions.test.ts',
   'conversation.test.ts',

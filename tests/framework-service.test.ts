@@ -62,6 +62,29 @@ test('text and binary read/download return original durable bytes without a synt
   assert.match(result.binary!.downloadUrl, /mode=local/)
   assert.deepEqual(await service.download('local', 'archives/T/image.bin'), binary)
 })
+test('archive discovery exposes retained outputs by exact Task without scanning or reading bodies on ordinary views', async t => {
+  const { service, local } = await fixture(t), binary = Uint8Array.from([255, 0, 254, 17])
+  await withSnapshot(local, snapshot => local.commit(snapshot, [
+    { path: 'archives/T/records.md', content: 'Recorder summary' },
+    { path: 'archives/T/results/note.txt', content: 'Retained result 😀' },
+    { path: 'archives/T/image.bin', bytes: binary },
+    { path: 'archives/T/retention.json', content: '{}' },
+    { path: 'archives/T2/records.md', content: 'Other Task' },
+    { path: 'archives/T2/other.bin', bytes: binary },
+    { path: 'task-runs/T/Worker_1_Reply.md', content: 'temporary' },
+  ], 'archive outputs'))
+  await withSnapshot(local, snapshot => local.commit(snapshot, [{ path: 'task-runs/T/Worker_1_Reply.md', content: null }], 'cleanup runtime material'))
+  const scans: string[] = [], list = local.list.bind(local)
+  local.list = async (snapshot, prefix) => { scans.push(prefix); return list(snapshot, prefix) }
+  const archives = (await service.view({ mode: 'local', includeArchives: true })).archives
+  assert.deepEqual(archives.find(row => row.taskId === 'T')?.files, ['archives/T/image.bin', 'archives/T/results/note.txt'])
+  assert.deepEqual(archives.find(row => row.taskId === 'T2')?.files, ['archives/T2/other.bin'])
+  assert.deepEqual((await service.view({ mode: 'local' })).archives, archives)
+  assert.deepEqual(scans, ['archives/'])
+  assert.equal((await service.readFile({ mode: 'local', path: archives[0].files![1] })).text, 'Retained result 😀')
+  assert.deepEqual([...await service.download('local', 'archives/T/results/note.txt')], [...new TextEncoder().encode('Retained result 😀')])
+  assert.deepEqual(await service.download('local', 'archives/T/image.bin'), binary)
+})
 test('human discussion is durable with no Foreground signal and no other-mode text', async t => {
   const { service, local } = await fixture(t)
   await service.send({ ...input('local', 'human'), recipient: 'human' })
