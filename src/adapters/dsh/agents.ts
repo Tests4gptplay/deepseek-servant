@@ -81,12 +81,16 @@ export class DshAgentGateway {
       if (presets !== undefined && presetId !== undefined) await presets.mount(agentCtx, presetId)
       // A resumed Auto execution retains its admitted route; a new execution
       // captures the current Host default. Couple prompt and request selection.
-      const selected = request.resume && request.model === undefined
-        ? agent.session.requestHeader()?.config ?? route : route
+      const loggedHeader = request.resume && request.model === undefined
+        ? agent.session.requestHeader() : undefined
+      const selected = loggedHeader?.config ?? route
+      // Adapter defaults are resolved again; only restore an actual effort choice.
+      const reasoningEffort = loggedHeader?.adapterDefaults?.reasoningEffort === true
+        ? undefined : selected?.reasoningEffort
       const provider = selected?.provider, model = selected?.model
       if (provider && model) agentCtx.effect(() => installModelSelection(agentCtx, {
-        current: { provider, model, ...(selected.reasoningEffort === undefined ? {} : {
-          reasoningEffort: selected.reasoningEffort as ReasoningEffortId,
+        current: { provider, model, ...(reasoningEffort === undefined ? {} : {
+          reasoningEffort: reasoningEffort as ReasoningEffortId,
         }) }, assembled: undefined,
       }))
       return await request.setup?.(agentCtx, agent)

@@ -124,3 +124,58 @@ test('persisted Auto resume keeps admitted A while new Auto uses B and explicit 
   check(adapter.requests[4], 'C', undefined, 2048)
   await cleared.dispose()
 })
+
+test('persisted Auto resume re-resolves adapter-defaulted effort instead of freezing it as a choice', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dss-adapter-effort-resume-'))
+  t.after(async () => { await rm(root, { recursive: true, force: true }) })
+  const boot = async (effort: 'low' | 'high') => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjections)
+    await ctx.plugin(SystemPrompt, { personaPrefix: 'You are powered by {{model}}.' })
+    await ctx.plugin(Tools)
+    await ctx.plugin(Agents)
+    await ctx.plugin(JsonlPersistence, { root, compression: 'none' })
+    await ctx.plugin(AgentDefaultModel, { provider: 'controlled', model: 'A' })
+    await ctx.plugin(AgentLoop, { agents: [] })
+    const adapter = new MockAdapter([textResponse('Controlled response.')], {
+      efforts: [{ id: ReasoningEffortId('low'), name: 'Low' }, { id: ReasoningEffortId('high'), name: 'High' }],
+      defaultEffort: ReasoningEffortId(effort),
+    })
+    ctx.llm.registerAdapter(['controlled'], adapter)
+    return { ctx, adapter, gateway: new DshAgentGateway(ctx) }
+  }
+  const request = { sessionId: 'persisted-adapter-effort', cwd: root, role: 'foreground' as const }
+  const first = await boot('low')
+  try {
+    const owned = await first.gateway.create(request)
+    await owned.send('Use provider defaults.', 'default-low')
+    await owned.whenIdle()
+    assert.equal(owned.observe().error, undefined)
+    assert.equal(first.adapter.requests[0]?.reasoningEffort, 'low')
+    await first.ctx.sessions.flush(owned.actualAgent.session)
+    await owned.dispose()
+    const disk = await first.ctx.sessionPersistence.open(SessionId(request.sessionId), 'read')
+    try {
+      const headers = (await disk.read(0)).events.filter(event => event.type === 'request/header')
+      assert.ok(headers.some(event => event.type === 'request/header'
+        && event.data.header.config.reasoningEffort === 'low'
+        && event.data.header.adapterDefaults?.reasoningEffort === true), 'JSONL records low as an adapter default')
+    } finally { await disk.close() }
+  } finally { await first.ctx.fiber.dispose() }
+  // A fresh native runtime loads the actual JSONL, with changed provider defaults.
+  const second = await boot('high')
+  try {
+    const owned = await second.gateway.create({ ...request, resume: true })
+    const logged = owned.actualAgent.session.requestHeader()
+    assert.equal(logged?.config.reasoningEffort, 'low')
+    assert.equal(logged?.adapterDefaults?.reasoningEffort, true)
+    await owned.send('Continue using provider defaults.', 'default-high')
+    await owned.whenIdle()
+    assert.equal(owned.observe().error, undefined)
+    assert.equal(second.adapter.requests[0]?.reasoningEffort, 'high')
+    assert.equal(owned.actualAgent.session.requestHeader()?.adapterDefaults?.reasoningEffort, true)
+    await owned.dispose()
+  } finally { await second.ctx.fiber.dispose() }
+})
