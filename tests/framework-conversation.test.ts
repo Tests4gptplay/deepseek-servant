@@ -183,3 +183,36 @@ test('legacy plan composes index without sending notifications and preserves his
   assert.deepEqual(await service.recentExchanges(), [])
   assert.deepEqual((await service.pendingForeground()).messages, [])
 })
+
+
+test('six complete exchanges retain every associated assistant original in timeline order', async t => {
+  const { service } = await fixture(t)
+  for (let n = 0; n < 7; n++) {
+    await service.send('user-' + n, message('u' + n, { text: '  question ' + n + '\n原文😀' }))
+    for (let part = 0; part < 2; part++) await service.send('answer-' + n + '-' + part,
+      message('a' + n + '-' + part, { role: 'assistant', text: 'part ' + part + '\n  exact ' + n,
+        replyTo: 'u' + n, recipient: 'human' }))
+  }
+  const exchanges = await service.recentExchanges()
+  assert.deepEqual(exchanges.map(exchange => exchange.human.id), ['u1', 'u2', 'u3', 'u4', 'u5', 'u6'])
+  for (let i = 0; i < exchanges.length; i++) {
+    const n = i + 1, exchange = exchanges[i]!
+    assert.equal(exchange.human.text, '  question ' + n + '\n原文😀')
+    assert.deepEqual(exchange.assistants.map(reply => reply.id), ['a' + n + '-0', 'a' + n + '-1'])
+    assert.deepEqual(exchange.assistants.map(reply => reply.text), ['part 0\n  exact ' + n, 'part 1\n  exact ' + n])
+    assert.equal(exchange.assistant.id, 'a' + n + '-1', 'Existing latest-answer projection remains compatible')
+  }
+})
+
+test('complete-round selection uses indexed provenance instead of rereading unrelated historical headers', async t => {
+  const { service, files } = await fixture(t)
+  for (let n = 0; n < 12; n++) {
+    await service.send('u-' + n, message('u-' + n, {text:'question ' + n}))
+    await service.send('a-' + n, message('a-' + n, {role:'assistant',replyTo:'u-' + n,text:'answer ' + n,recipient:'human'}))
+  }
+  const read = files.read.bind(files), headers: string[] = []
+  files.read = async (snapshot, path) => { if (path.endsWith('/entry.json')) headers.push(path); return read(snapshot,path) }
+  const selected = await service.recentExchanges()
+  assert.deepEqual(selected.map(round=>round.human.id), ['u-6','u-7','u-8','u-9','u-10','u-11'])
+  for (let n = 0; n < 6; n++) assert.ok(!headers.some(path=>path.endsWith('-u-' + n + '/entry.json') || path.endsWith('-a-' + n + '/entry.json')))
+})

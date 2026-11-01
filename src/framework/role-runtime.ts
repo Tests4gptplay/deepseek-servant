@@ -1,3 +1,4 @@
+import { captureForegroundTurns } from './foreground-capture.js'
 import { GitHubError } from '../experimental/private-git/github.js'
 import { nativeRecoveryWakeId, resolveNativeRecoveryInput } from './native-recovery-input.js'
 import type { DshSessionInspection } from '../adapters/dsh/sessions.js'
@@ -29,7 +30,7 @@ import { scanMemberRecovery, createRecoveryWatch, dueRecoveryWatch,
   completeHealthyRecoveryCycle, type RecoveryWatch, type MemberRecoveryInput, type WorkIdentity, type RecoveryRole } from './recovery.js'
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
-interface RoleRecord { identity: WorkIdentity; sessionId: string; generation: number; lastWake?: RoleWake; delivery?: { request: RoleWake; messageId: string; text?: string; confirmed: boolean; sequence?: number }; released?: boolean; stopped?: boolean; stopIntent?: NativeStopEvidence; stopUnknown?: { reason: string; jobs: string[] } }
+interface RoleRecord { identity: WorkIdentity; sessionId: string; generation: number; completedRound?: boolean; lastWake?: RoleWake; delivery?: { request: RoleWake; messageId: string; text?: string; confirmed: boolean; sequence?: number }; released?: boolean; stopped?: boolean; stopIntent?: NativeStopEvidence; stopUnknown?: { reason: string; jobs: string[] } }
 interface TrackedStop { executionId: string; taskId?: string; promise: Promise<void>; settled: boolean; result?: StopResult; persistedStopped?: boolean; reportedFailure?: string; failure?: unknown; controlCommands?: Set<string> }
 interface WakeRecovery {
   targetExecutionId: string
@@ -143,7 +144,7 @@ export class FrameworkRoleRuntime {
       } else if (latest && latest.identity.executionId !== record.identity.executionId) {
         if (record.generation <= latest.generation) throw new Error('A superseded execution cannot overwrite its replacement.');
       } else if (latest) record = { ...record, ...(latest.stopIntent ? { stopIntent: latest.stopIntent } : {}),
-        stopped: record.stopped || latest.stopped, released: record.released || latest.released, stopUnknown: record.stopUnknown ?? latest.stopUnknown,
+        completedRound: record.completedRound || latest.completedRound, stopped: record.stopped || latest.stopped, released: record.released || latest.released, stopUnknown: record.stopUnknown ?? latest.stopUnknown,
         delivery: latest.delivery ?? record.delivery, lastWake: latest.lastWake ?? record.lastWake }
       if (deliveryUpdate && incomingDelivery) {
         if (deliveryUpdate === 'confirm') {
@@ -240,6 +241,15 @@ export class FrameworkRoleRuntime {
       if (['Planner', 'Worker', 'Organizer'].includes(request.role) && await this.controls.taskHeld(request.taskId)) return
       let record = this.roleRecords.get(key)
       if (record && this.active(record)) return
+      if (record?.identity.role === 'Foreground' && !row.value.recovery) {
+        await this.finishForegroundRound(record)
+        record = this.roleRecords.get(key)
+        if (record?.completedRound && !record.stopped) return
+        if (record?.completedRound && record.delivery?.request.id === request.id) {
+          await this.records.set(row.key, { ...row.value, delivered: true })
+          return
+        }
+      }
       const checkSources = request.reason === 'notification' && request.sources.length > 0
       const checkTask = request.taskId && ['Planner', 'Worker', 'Organizer'].includes(request.role)
       if (checkSources || checkTask) {
@@ -293,18 +303,27 @@ export class FrameworkRoleRuntime {
         record = { identity: { workId: key, executionId: randomUUID(), role: request.role,
           ...(request.taskId && !['Foreground','Organizer','Helper'].includes(request.role) ? { taskId: request.taskId } : {}),
           ...(request.taskId && (request.role === 'Planner' || request.role === 'Worker') ? { member: this.config.member } : {}),
-          ...(request.workerId ? { workerId: request.workerId } : {}) }, sessionId: record?.sessionId ?? 'dss-' + randomUUID(), generation: (record?.generation ?? 0) + 1 }
+          ...(request.workerId ? { workerId: request.workerId } : {}) }, sessionId: record?.completedRound ? 'dss-' + randomUUID() : record?.sessionId ?? 'dss-' + randomUUID(), generation: (record?.generation ?? 0) + 1 }
         await this.saveRole(record)
       }
       if (record.stopUnknown) throw new Error('Native producer stop is unconfirmed: ' + record.stopUnknown.reason)
       const binding = this.binding(record, request)
       const agent = await this.native.open(record.identity, { sessionId: record.sessionId, cwd: this.config.workspace,
         presetId: this.config.presetId, model: (request.role === 'Foreground' ? this.config.foreground : this.config.background ?? this.config.foreground) ?? this.config.model, resume: await this.gateway.exists(record.sessionId),
-        ...(request.role === 'Foreground' ? { recentExchanges: (await this.conversation.recentExchanges()).map(exchange => [exchange.human, exchange.assistant].map(message => ({ id: message.id, role: message.role, text: message.text, at: message.createdAt, source: message.participantId }))) } : {}),
+        ...(request.role === 'Foreground' ? { recentExchanges: (await this.conversation.recentExchanges()).map(exchange => [exchange.human, ...exchange.assistants].map(message => ({ id: message.id, role: message.role, text: message.text, at: message.createdAt, source: message.participantId }))) } : {}),
         setup: (scope, actual) => {
           if (row.value.recovery) scope.systemPrompt.section({ name: 'deepseek-servant:recovery-input', order: 102, interpolate: false,
             text: 'This owned execution is resuming after interruption. Before continuing, inspect the existing native inputs and saved Task material. Preserve original input identities; do not repeat already completed effects. Recovery facts: ' + JSON.stringify(request.context ?? {}) })
-          scope.on('agent/status', event => { if (event.agent === actual) this.environment.changed?.() })
+          scope.on('agent/status', event => {
+            if (event.agent !== actual) return
+            this.environment.changed?.()
+            if (request.role === 'Foreground' && actual.status === 'idle' && !this.closed) {
+              void this.serialWork(key, async () => {
+                const current = this.roleRecords.get(key)
+                if (!this.closed && current?.identity.executionId === record!.identity.executionId) await this.finishForegroundRound(current)
+              }).catch(error => this.error(error, { identity: record!.identity, stage: 'foreground-round-capture' }))
+            }
+          })
           scope.on('agent/error', event => {
             if (event.agent === actual) this.error(event.error, { identity: record!.identity, turn: event.turn, step: event.step })
           })
@@ -361,6 +380,54 @@ export class FrameworkRoleRuntime {
       } catch (error) { this.error(error, { wakeId: row.value.request.id, role: row.value.request.role }) }
       })
     }
+  }
+  /** Persist completed visible originals before retiring their native context.
+   * Interrupted turns remain owned by the existing recovery responsibility. */
+  private async finishForegroundRound(record: RoleRecord): Promise<void> {
+    if (record.identity.role !== 'Foreground' || this.active(record)) return
+    const current = this.roleRecords.get(record.identity.workId)
+    if (current?.identity.executionId !== record.identity.executionId) return
+    if (!record.completedRound) {
+      const sessions = new DshSessionReader(this.ctx)
+      const capture = await sessions.capture(record.sessionId)
+      if (!capture.finished) return
+      if (record.delivery) {
+        const input = (await sessions.inputs(record.sessionId)).get(record.delivery.messageId)
+        if (input?.state !== 'consumed') return
+      }
+      const turns = captureForegroundTurns(await sessions.events(record.sessionId))
+      for (const turn of turns) {
+        if (!turn.final) continue
+        const final = turn.final
+        // A successful explicit send is already an authoritative reply. Only an
+        // identical final rendering of that same turn is redundant, not a later
+        // answer elsewhere in the conversation with coincidentally equal text.
+        let alreadySaved = false
+        for (const send of turn.sends) {
+          if (send.text !== final.text) continue
+          const saved = await this.conversation.read(send.id)
+          if (saved?.role === 'assistant' && saved.text === final.text) alreadySaved = true
+        }
+        if (alreadySaved) continue
+        const sourceIds = turn.claimedMessageIds.length ? turn.claimedMessageIds : turn.readMessageIds
+        const replyTo = sourceIds.length === 1 ? sourceIds[0] : undefined
+        if (replyTo) {
+          const original = await this.conversation.read(replyTo)
+          if (original?.role !== 'user') throw new Error('Foreground claimed reply source is not a human message.')
+        }
+        const id = 'native-' + hash(JSON.stringify([record.sessionId, final.id]))
+        await this.conversation.send('native-capture/' + id, { id, role: 'assistant', participantId: this.config.member,
+          createdAt: final.at, text: final.text, source: 'model', recipient: 'human',
+          ...(final.model ? { model: final.model } : {}), ...(replyTo ? { replyTo } : {}) })
+      }
+      await this.saveRole({ ...record, completedRound: true })
+      record = this.roleRecords.get(record.identity.workId)!
+      this.environment.changed?.()
+    }
+    // Retirement owns the same asynchronous stop responsibility as other roles.
+    // An idle turn is not permission to block unrelated Task admission or to
+    // replace an execution whose native producer has not confirmed settlement.
+    this.trackedStop(record)
   }
   private binding(record: RoleRecord, request: RoleWake): FrameworkRoleBinding {
     const identity = record.identity, base: FrameworkRoleBinding = { ...identity, owner: this.config.member, collaborationId: this.config.collaborationId }
@@ -569,6 +636,11 @@ export class FrameworkRoleRuntime {
     const continuations: RoleWake[] = []
     const sessions = new DshSessionReader(this.ctx)
     for (const record of this.roleRecords.values()) {
+      if (record.completedRound) {
+        try { await this.serialWork(record.identity.workId, () => this.finishForegroundRound(record)) }
+        catch (error) { this.error(error, { identity: record.identity, stage: 'startup-foreground-retirement' }) }
+        continue
+      }
       if (restoring.has(record.identity.executionId) || !['Foreground', 'Organizer', 'Recorder', 'Helper'].includes(record.identity.role) || this.active(record) || (!record.lastWake && !record.delivery)) continue
       let inspection
       try { inspection = await sessions.inspect(record.sessionId) }
@@ -577,6 +649,11 @@ export class FrameworkRoleRuntime {
         continue
       }
       if (!inspection.exists || !inspection.lifecycleKnown) continue
+      if (record.identity.role === 'Foreground' && inspection.lastTurn?.reason === 'completed') {
+        try { await this.serialWork(record.identity.workId, () => this.finishForegroundRound(record)) }
+        catch (error) { this.error(error, { identity: record.identity, stage: 'startup-foreground-capture' }); continue }
+        if (this.roleRecords.get(record.identity.workId)?.completedRound) continue
+      }
       const hostDisposed = inspection.lastTurn?.reason === 'aborted' && inspection.lastTurn.abortCause === 'disposed'
       if (record.stopped && !hostDisposed) continue
       if (await this.controls.execution(record.identity.executionId)) continue
@@ -1130,6 +1207,12 @@ export class FrameworkRoleRuntime {
       }
       await this.observations.dispose()
     } catch (error) { failures.push(error) } finally {
+      // Native idle notifications can already own capture/retirement work even
+      // after the poll has drained. No such storage write may outlive disposal.
+      while (this.workOperations?.size) {
+        const settled = await Promise.allSettled([...this.workOperations.values()])
+        for (const result of settled) if (result.status === 'rejected' && !this.cancelledByShutdown(result.reason)) failures.push(result.reason)
+      }
       // Closing rejects new diagnostics, but already admitted facts still own
       // storage work. Persist them before the service closes its storage backend.
       try { await this.errorTail } catch (error) { failures.push(error) }

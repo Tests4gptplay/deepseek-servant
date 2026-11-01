@@ -108,7 +108,7 @@ export class DshAgentGateway {
       try {
         agent.inject(freezeMessage({ id: MessageId('servant-history:' + request.sessionId), role: 'user',
         source: { kind: 'deepseek-servant-history' }, content: [{ type: 'text', text:
-          'Recent completed conversation exchanges, verbatim and chronological. These are historical originals for context; the next actual user input supplies the current request. Use conversation_search/read for earlier originals.\n'
+          'Recent completed conversation exchanges, verbatim and chronological. These are historical originals for context; the next actual user input supplies the current request. Use dss_conversation_read with mode page and beforeId to page through earlier originals, or mode message and reference set to a known message id for one original.\n'
           + JSON.stringify(request.recentExchanges) }] }))
         await this.ctx.sessions.flush(agent.session)
       } catch (error) { await native.dispose(); throw error }

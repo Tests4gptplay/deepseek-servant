@@ -85,3 +85,68 @@ test('malformed historical definition can be explicitly disabled without rewriti
   const row = (await f.knowledge.list()).items.find(item => item.path === 'skills/old/record.json')!
   assert.equal(row.status, 'disabled'); assert.equal(row.indexed, false); assert.ok(row.error)
 })
+
+test('actual baseline facts and preferences remain discoverable and readable through the current service after migration', async t => {
+  const { BaselineKnowledgeService } = await import('./legacy-baseline.js')
+  const { MemoryStorage } = await import('./support.js')
+  const { captureLocalLegacy, prepareLegacyMigration, applyLegacyMigration } = await import('../src/framework/legacy-migration.js')
+  const { FrameworkService } = await import('../src/framework/service.js')
+  const storage = new MemoryStorage(), scope = { assistantId: 'original-assistant', workspaceId: 'original-workspace' }
+  const old = new BaselineKnowledgeService({ store: storage, evidence: {
+    resolveResult: async resultId => ({ ...scope, resultId, taskId: 'old-task', status: 'accepted', summary: 'fixture result', artifactRefs: [] }),
+    resolveUserSource: async () => scope,
+  } })
+  await old.putProjectFact({ id: 'fact', scope, text: 'Original exact fact 🚀', sourceResultId: 'accepted-original' })
+  await old.putPreference({ id: 'preference', scope, text: 'Original exact preference', applicability: 'Only this project', userSourceRef: 'user-message-original' })
+  const f = await fixture(t), tx = new FrameworkTransactions(f.files, new MemoryStorage(), 'migration-test')
+  const capture = await captureLocalLegacy(storage)
+  const plan = await withSnapshot(f.files, s => prepareLegacyMigration(capture, f.files, s, { id: 'knowledge-visible', owner: 'owner', members: {} }))
+  await applyLegacyMigration(f.files, tx, plan)
+  // Only access acquisition is injected; these are the actual public service methods.
+  const service = Object.create(FrameworkService.prototype) as InstanceType<typeof FrameworkService>
+  Object.assign(service, { access: async () => ({ knowledge: f.knowledge, connection: { scope: 'original-store' } }) })
+  const listing = await service.knowledgeList({ mode: 'local', storageScope: 'original-store' })
+  const facts = listing.items.filter(item => item.kind === 'project-fact' || item.kind === 'preference')
+  assert.equal(facts.length, 2)
+  for (const item of facts) {
+    const read = await service.knowledgeRead({ mode: 'local', storageScope: 'original-store', path: item.path })
+    assert.equal(read.edit, undefined)
+    assert.deepEqual(read.record!.scope, scope)
+    assert.equal(read.record!.text, item.kind === 'project-fact' ? 'Original exact fact 🚀' : 'Original exact preference')
+    assert.equal(read.record!.source, item.kind === 'project-fact' ? 'accepted-original' : 'user-message-original')
+    const { createElement } = await import('react')
+    const { renderToStaticMarkup } = await import('react-dom/server')
+    const { KnowledgeRecordView } = await import('../src/framework/knowledge-records.js')
+    const html = renderToStaticMarkup(createElement(KnowledgeRecordView, { record: read.record!, tr: (_cn, en) => en }))
+    assert.ok(html.includes(read.record!.text)); assert.ok(html.includes(read.record!.source))
+    assert.ok(html.includes(scope.assistantId)); assert.ok(html.includes(scope.workspaceId))
+    if (item.kind === 'preference') assert.ok(html.includes('Only this project'))
+    assert.equal(/<(textarea|input|button)/.test(html), false, 'read-only presentation does not expose new mutation controls')
+    await assert.rejects(f.knowledge.edit('no-edit', { path: item.path, expectedRevision: read.revision, body: 'forbidden', createdAt: '2026-11-01T00:00:00Z' }), /skill/)
+    await assert.rejects(f.knowledge.setStatus('no-status', { path: item.path, expectedRevision: read.revision, status: 'disabled' }), /skill/)
+  }
+  await assert.rejects(service.knowledgeList({ mode: 'local', storageScope: 'different-store' }), /destination changed/)
+})
+
+test('Git migration records expose participant and original source without turning them into skills; malformed records stay isolated', async t => {
+  const { prepareLegacyMigration, applyLegacyMigration, LEGACY_BASELINE } = await import('../src/framework/legacy-migration.js')
+  const { MemoryStorage } = await import('./support.js')
+  const f = await fixture(t), tx = new FrameworkTransactions(f.files, new MemoryStorage(), 'git-migration-format')
+  // A captured historical Git format fixture, not a public Git or native Host test.
+  const records = ['knowledge', 'preference'].map(kind => ({ key: `knowledge/participant-original/${kind}/entry/source.json`, bytes: Buffer.from(JSON.stringify({ taskId: 'original-task', resultId: 'original-result' })) }))
+  const capture = { mode: 'git' as const, revision: 'fixed-source-head', baseline: LEGACY_BASELINE, records,
+    texts: records.map(record => ({ ref: 'dss-coop/' + record.key.slice(0, -'/source.json'.length), text: 'Exact Git ' + record.key })), tasks: [], issues: [] }
+  const plan = await withSnapshot(f.files, s => prepareLegacyMigration(capture, f.files, s, { id: 'git-readable-records', owner: 'owner', members: {} }))
+  await applyLegacyMigration(f.files, tx, plan)
+  await withSnapshot(f.files, s => f.files.commit(s, [{ path: 'knowledge/legacy-git/participant-original/preference/broken.json', content: '{' }], 'broken fixture'))
+  const items = (await f.knowledge.list()).items.filter(item => item.path.startsWith('knowledge/legacy-git/'))
+  assert.equal(items.length, 3); assert.equal(items.filter(item => item.error).length, 1)
+  for (const item of items.filter(item => !item.error)) {
+    const read = await f.knowledge.read(item.path)
+    assert.deepEqual(read.record!.scope, { participantId: 'participant-original' })
+    assert.ok(read.record!.text.startsWith('Exact Git knowledge/participant-original/'))
+    assert.ok(read.record!.source.includes('original-task')); assert.ok(read.record!.source.includes('dss-coop/knowledge/'))
+    assert.equal(read.edit, undefined); assert.equal(item.indexed, false); assert.equal(item.status, 'read-only')
+  }
+  assert.equal((await f.knowledge.list()).items.find(item => item.kind === 'markdown')!.status, 'active')
+})

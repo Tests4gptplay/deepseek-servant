@@ -461,3 +461,42 @@ test('new-install and bilingual public product labels use the full name', async 
     assert.match(messages['retention.conversationWarning'], /DeepSeek Servant/)
   }
 })
+
+test('scroll older joins repeated requests and survives an unrelated live refresh without losing rows', async () => {
+  const msg = (id: string) => ({ id, participantId: 'qa', role: 'user' as const, createdAt: id, text: id })
+  const page = deferred<Awaited<ReturnType<FrameworkClientApi['history']>>>()
+  let calls = 0, fresh = { ...view('local'), messages: [msg('b'), msg('c')], pageBefore: 'b' }
+  const controller = new FrameworkClientController(api({ view: async () => fresh, history: () => { calls++; return page.promise } }))
+  await controller.refresh()
+  const first = controller.older(50), repeated = controller.older(50)
+  fresh = { ...fresh, messages: [msg('c'), msg('d')], pageBefore: 'c' }
+  await controller.refresh()
+  page.resolve({ revision: 'H', messages: [msg('a'), msg('b')] })
+  await Promise.all([first, repeated])
+  assert.equal(calls, 1)
+  assert.deepEqual(controller.snapshot().value?.messages.map(x => x.id), ['a', 'b', 'c', 'd'])
+})
+test('date history prepends multiple pages rather than replacing the readers window', async () => {
+  const msg = (id: string) => ({ id, participantId: 'qa', role: 'user' as const, createdAt: id, text: id })
+  const controller = new FrameworkClientController(api({ history: async input => ({ revision: 'H', messages: (input.beforeId ? ['a', 'b'] : ['c', 'd']).map(msg), moreBefore: input.beforeId ? undefined : 'c' }) }))
+  await controller.refresh(); await controller.navigateHistory({ date: '2026-11-01', limit: 50 }); await controller.older(50)
+  assert.deepEqual(controller.snapshot().value?.messages.map(x => x.id), ['a', 'b', 'c', 'd'])
+  assert.equal(controller.snapshot().value?.historyDate, '2026-11-01')
+})
+test('late older response cannot contaminate a newly selected date', async () => {
+  const page = deferred<Awaited<ReturnType<FrameworkClientApi['history']>>>()
+  const controller = new FrameworkClientController(api({ view: async () => ({ ...view('local'), pageBefore: 'b' }), history: input => input.beforeId ? page.promise : Promise.resolve({ revision: 'H', messages: [] }) }))
+  await controller.refresh(); const old = controller.older(50)
+  await controller.navigateHistory({ date: '2026-10-01', limit: 50 })
+  page.resolve({ revision: 'H', messages: [{ id: 'stale', participantId: 'qa', role: 'user', createdAt: '', text: 'stale' }] }); await old
+  assert.deepEqual(controller.snapshot().value?.messages, [])
+})
+test('a live invalidation does not discard the selected date while its history read is pending', async () => {
+  const page = deferred<Awaited<ReturnType<FrameworkClientApi['history']>>>()
+  const controller = new FrameworkClientController(api({ history: () => page.promise }))
+  await controller.refresh(); const date = controller.navigateHistory({ date: '2026-10-01', limit: 50 })
+  await controller.refresh()
+  page.resolve({ revision: 'H', messages: [{ id: 'dated', participantId: 'qa', createdAt: '', role: 'user', text: 'dated' }] }); await date
+  assert.equal(controller.snapshot().value?.historyDate, '2026-10-01')
+  assert.deepEqual(controller.snapshot().value?.messages.map(x => x.id), ['dated'])
+})

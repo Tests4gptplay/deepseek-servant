@@ -17,6 +17,8 @@ export const currentSuites = [
   'framework-completion-combinations.test.ts',
   'framework-connection.test.ts',
   'framework-conversation.test.ts',
+  'framework-foreground-capture.test.ts',
+  'framework-foreground-continuity.test.ts',
   'framework-dispose-resources.test.ts',
   'framework-execution-control.test.ts',
   'framework-git-send.test.ts',

@@ -2065,3 +2065,97 @@ for (const outcome of ['owned-read', 'independent-abort', 'unknown-write'] as co
   assert.equal(nativeStopped, 1)
   assert.equal(observationsClosed, 1)
 })
+
+/** Real LocalFiles and production capture/retirement with a recorded native-log
+ * seam. Actual AgentLoop/JSONL round boundaries have their own current suite. */
+async function completedForegroundFixture(t: test.TestContext) {
+  const fixture = await runtimeFixture(t), { runtime } = fixture
+  await runtime.conversation.send('human', { id: 'human', role: 'user', participantId: 'human',
+    createdAt: '2026-11-01T00:00:00.000Z', text: 'original question', recipient: 'ai' })
+  const pending = await runtime.conversation.pendingForeground()
+  await runtime.conversation.claimForeground('claimed', ['human'], { list: 'original', cache: 'preserved' }, { expectedRevision: pending.revision })
+  const event = (type: string, data: unknown, seq: number) => ({ type, data, seq, time: 1793491200000 + seq,
+    ...(['user/message', 'assistant/message', 'tool/result'].includes(type) ? { surfaceOp: 'append' } : {}) })
+  const events = [event('turn/start', { turn: 1 }, 0),
+    event('user/message', { id: 'original-native-input', role: 'user', source: { kind: 'deepseek-servant' }, content: [{type:'text', text:'original responsibility'}] }, 1),
+    event('tool/call', {turn:1, step:0, callId:'claim', name:'dss_conversation_claim', arguments:JSON.stringify({messageIds:['human']})}, 2),
+    event('tool/result', {turn:1, step:0, message:{id:'claim-result',role:'tool',source:{kind:'tool',callId:'claim'},toolCallId:'claim',content:[{type:'text',text:'{}'}]}}, 3),
+    event('assistant/message', {turn:1,step:1,stream:[],message:{id:'actual-native-final',role:'assistant',source:{kind:'model',provider:'actual',model:'actual-model'},content:[{type:'text',text:'  actual answer\n原文'}]}}, 4),
+    event('turn/end', {turn:1,reason:{kind:'completed'}}, 5)]
+  const sessionId = 'completed-session'
+  const persistence = { stat: async()=>({sizeBytes:123}), open:async()=>({header:{id:sessionId,createdAt:0,version:4}, inheritedEventCount:0,
+    read:async()=>({events}),close:async()=>{}}) }
+  runtime.ctx = {agents:{get:()=>undefined},sessions:{get:()=>undefined},jobs:{list:()=>[]},get:(name:string)=>name==='sessionPersistence'?persistence:name==='sessionProjections'?{
+    restore:()=>({checkpoint:{inbox:{val:{'next-turn':[],'next-step':[]}},turnBoundary:{val:{lastTurn:1,openTurnStartSeq:null}}}})}:undefined}
+  const request = {id:'completed-wake',role:'Foreground',reason:'notification',sources:[]}
+  const record = {identity:{workId:runtime.roleKey('Foreground'),executionId:'completed-execution',role:'Foreground'},sessionId,generation:1,
+    lastWake:request,delivery:{request,messageId:'original-native-input',text:'original responsibility',confirmed:true}}
+  await runtime.saveRole(record)
+  return { ...fixture, record }
+}
+
+test('Foreground capture UNKNOWN preserves the original session until the same native message receipt resolves', async t => {
+  const {runtime,record}=await completedForegroundFixture(t)
+  const originalSend=runtime.conversation.send.bind(runtime.conversation), commands:string[]=[]
+  let first=true, stops=0
+  runtime.stopOwnedRecord=async()=>{stops++;return{status:'stopped'}}
+  runtime.conversation.send=async(command:string,message:any)=>{commands.push(command);const receipt=await originalSend(command,message);if(first){first=false;throw new FilesOutcomeUnknownError('capture-original-op',undefined,receipt)}return receipt}
+  await assert.rejects(runtime.finishForegroundRound(record),FilesOutcomeUnknownError)
+  assert.equal(stops,0);assert.equal(runtime.roleRecords.get(record.identity.workId).completedRound,undefined)
+  assert.equal((await runtime.conversation.page(20)).messages.filter((message:any)=>message.role==='assistant').length,1)
+  await runtime.finishForegroundRound(runtime.roleRecords.get(record.identity.workId))
+  await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise))
+  assert.equal(commands[0],commands[1]);assert.equal(stops,1)
+  const replies=(await runtime.conversation.page(20)).messages.filter((message:any)=>message.role==='assistant')
+  assert.equal(replies.length,1);assert.equal(replies[0].text,'  actual answer\n原文');assert.equal(replies[0].replyTo,'human')
+  assert.equal(runtime.roleRecords.get(record.identity.workId).completedRound,true)
+})
+
+test('Foreground completed capture survives a crash before retirement without replaying or duplicating the answer', async t => {
+  const {runtime,record,storage}=await completedForegroundFixture(t)
+  let stops=0
+  runtime.stopOwnedRecord=async()=>{stops++;return{status:'stopped'}}
+  const tracked=runtime.trackedStop.bind(runtime)
+  runtime.trackedStop=()=>false // Crash boundary: completedRound is durable, no stop starts.
+  await runtime.finishForegroundRound(record)
+  assert.equal(stops,0)
+  const saved=(await storage.list<any>(runtime.prefix+'roles/'))[0]!.value
+  assert.equal(saved.completedRound,true);assert.equal(saved.stopped,undefined)
+  runtime.roleRecords.set(saved.identity.workId,structuredClone(saved));runtime.trackedStop=tracked
+  runtime.conversation.send=async()=>{throw new Error('Completed capture must not be replayed')}
+  await runtime.finishForegroundRound(saved)
+  await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise))
+  assert.equal(stops,1);assert.equal(runtime.roleRecords.get(saved.identity.workId).stopped,true)
+})
+
+test('Foreground retirement owns a pending stop without blocking unrelated work or declaring it stopped', async t => {
+  const {runtime,record}=await completedForegroundFixture(t)
+  let release!:()=>void
+  runtime.stopOwnedRecord=async()=>{await new Promise<void>(resolve=>{release=resolve});return{status:'stopped'}}
+  await runtime.finishForegroundRound(record)
+  await Promise.resolve()
+  assert.equal(runtime.roleRecords.get(record.identity.workId).completedRound,true)
+  assert.notEqual(runtime.roleRecords.get(record.identity.workId).stopped,true)
+  let advanced=false
+  await runtime.serialWork('independent-task-worker',async()=>{advanced=true})
+  assert.equal(advanced,true)
+  release();await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise))
+  assert.equal(runtime.roleRecords.get(record.identity.workId).stopped,true)
+})
+
+for (const stopFailure of [false,true]) test('runtime disposal drains admitted Foreground capture before storage release even when native cleanup '+(stopFailure?'fails':'succeeds'), async()=>{
+  const {runtime}=queue(),gate=Promise.withResolvers<void>(),entered=Promise.withResolvers<void>(),events:string[]=[]
+  runtime.closed=false;runtime.errorTail=Promise.resolve();runtime.environment={}
+  runtime.loop={stop:async()=>{events.push('loop-stopped')}}
+  runtime.roleRecords=new Map(stopFailure?[['worker',{identity:{workId:'worker',executionId:'worker-e',role:'Worker'},sessionId:'worker-s',generation:1}]]:[])
+  const failure=new Error('Actual native cleanup failure')
+  runtime.stopOwnedRecord=async()=>{throw failure}
+  runtime.observations={dispose:async()=>{events.push('observations-disposed')}}
+  const capture=runtime.serialWork('foreground',async()=>{entered.resolve();await gate.promise;events.push('capture-persisted')})
+  await entered.promise
+  let settled=false
+  const disposing=runtime.dispose().then(()=>{settled=true},(error:unknown)=>{assert.equal(error,failure);settled=true})
+  await new Promise(resolve=>setImmediate(resolve));assert.equal(settled,false)
+  gate.resolve();await capture;await disposing
+  assert.equal(events.includes('capture-persisted'),true);assert.equal(settled,true)
+})

@@ -13,7 +13,7 @@ const stable = (value: unknown): string => Array.isArray(value) ? '[' + value.ma
     : JSON.stringify(value)
 export interface KnowledgeItem {
   path: string
-  kind: 'legacy' | 'markdown' | 'legacy-git'
+  kind: 'legacy' | 'markdown' | 'legacy-git' | 'project-fact' | 'preference'
   name: string
   description: string
   status: string
@@ -22,6 +22,38 @@ export interface KnowledgeItem {
   versions?: Array<{ version: number; status: string; contentHash: string }>
   candidates: Array<{ path: string; hash: string; createdAt: string }>
   error?: string
+  scope?: KnowledgeReadRecord['scope']
+  source?: string
+}
+export interface KnowledgeReadRecord {
+  kind: 'project-fact' | 'preference'
+  text: string
+  scope: { assistantId?: string; workspaceId?: string; participantId?: string }
+  source: string
+  applicability?: string
+}
+function isReadOnlyRecord(path: string): boolean {
+  filePath(path)
+  return /^knowledge\/(facts|preferences)\/.+\.json$/.test(path)
+    || /^knowledge\/legacy-git\/[^/]+\/(knowledge|preference)\/[^/]+\.json$/.test(path)
+}
+function readOnlyRecord(path: string, text: string): KnowledgeReadRecord {
+  if (!isReadOnlyRecord(path)) throw new Error('Select a migrated fact or preference record.')
+  const value = JSON.parse(text)
+  if (typeof value.text !== 'string') throw new Error('Knowledge record body is invalid.')
+  if (path.startsWith('knowledge/legacy-git/')) {
+    if (value.version !== 1 || !['knowledge', 'preference'].includes(value.kind)
+      || typeof value.participantId !== 'string' || typeof value.source?.path !== 'string') throw new Error('Migrated Git knowledge provenance is invalid.')
+    return { kind: value.kind === 'preference' ? 'preference' : 'project-fact', text: value.text,
+      scope: { participantId: value.participantId }, source: JSON.stringify(value.source) }
+  }
+  if (value.schemaVersion !== 1 || !['project-fact', 'preference'].includes(value.kind)
+    || typeof value.scope?.assistantId !== 'string' || typeof value.scope.workspaceId !== 'string'
+    || typeof (value.kind === 'project-fact' ? value.sourceResultId : value.userSourceRef) !== 'string'
+    || (value.kind === 'preference' && typeof value.applicability !== 'string')) throw new Error('Migrated knowledge provenance is invalid.')
+  return { kind: value.kind, text: value.text, scope: value.scope,
+    source: value.kind === 'project-fact' ? value.sourceResultId : value.userSourceRef,
+    ...(value.kind === 'preference' ? { applicability: value.applicability } : {}) }
 }
 interface Candidate { sourcePath: string; path: string; hash: string; createdAt: string }
 interface CandidateIndex { version: 1; entries: Candidate[] }
@@ -91,10 +123,30 @@ export class FrameworkKnowledge {
         } catch (error) { item.error = error instanceof Error ? error.message : String(error) }
         items.push(item)
       }
+      const legacyIndex = JSON.parse(await this.files.read(snapshot, 'knowledge/legacy-index.json') ?? '{"version":1,"entries":[]}') as { entries: Array<{ path: string; kind: string }> }
+      const recordPaths = new Set(legacyIndex.entries.filter(entry => ['project-fact', 'preference'].includes(entry.kind)).map(entry => entry.path))
+      for (const entry of await this.files.list(snapshot, 'knowledge/legacy-git/')) if (isReadOnlyRecord(entry.path)) recordPaths.add(entry.path)
+      for (const path of recordPaths) {
+        const item: KnowledgeItem = { path, kind: 'project-fact', name: path, description: '', status: 'read-only', indexed: false, candidates: [] }
+        try {
+          if (!isReadOnlyRecord(path)) throw new Error('Invalid migrated knowledge record path.')
+          const text = await this.files.read(snapshot, path)
+          if (text === undefined) throw new Error('Migrated knowledge record is missing.')
+          const record = readOnlyRecord(path, text)
+          item.kind = record.kind; item.scope = record.scope; item.source = record.source
+          item.description = record.applicability ?? ''
+        } catch (error) { item.error = error instanceof Error ? error.message : String(error) }
+        items.push(item)
+      }
       return { revision: snapshot.revision, items }
     })
   }
-  read(path: string) {
+  read(path: string): Promise<{ revision: string; path: string; text?: string; record?: KnowledgeReadRecord;
+    edit?: { body: string; title?: string; description?: string; applicability?: string } }> {
+    if (isReadOnlyRecord(path)) return withSnapshot(this.files, async snapshot => {
+      const text = await this.files.read(snapshot, path)
+      return { revision: snapshot.revision, path, text, ...(text === undefined ? {} : { record: readOnlyRecord(path, text) }) }
+    })
     const selectedKind = kind(path)
     return withSnapshot(this.files, async snapshot => {
       const text = await this.files.read(snapshot, path)

@@ -28,10 +28,10 @@ export interface ConversationEntry extends Omit<ConversationMessage, 'text'> {
   textPath: string
   textHash: string
 }
-interface IndexedMessage { id: string; path: string; createdAt?: string; notification?: string; consumed?: boolean }
+interface IndexedMessage { id: string; path: string; createdAt?: string; role?: ConversationMessage['role']; replyTo?: string; notification?: string; consumed?: boolean }
 interface ConversationIndex { version: 1; messages: IndexedMessage[] }
 export interface ForegroundMemory { list: string; cache: string }
-export interface ConversationExchange { human: ConversationMessage; assistant: ConversationMessage }
+export interface ConversationExchange { human: ConversationMessage; assistant: ConversationMessage; assistants: ConversationMessage[] }
 export class ConversationRecordError extends Error {
   constructor(readonly path: string, readonly reason: 'missing' | 'integrity' | 'identity', message: string) { super(message); this.name = 'ConversationRecordError' }
 }
@@ -89,7 +89,8 @@ export class FrameworkConversation {
         if (await this.files.read(snapshot, base) !== undefined) notification += '-' + hash(this.scope.mode + '\0' + this.scope.collaborationId + '\0' + message.id)
         changes.push({ path: notification, content: '' })
       }
-      index.messages.push({ id: message.id, path, createdAt: message.createdAt, ...(notification ? { notification } : {}) })
+      index.messages.push({ id: message.id, path, createdAt: message.createdAt, role: message.role,
+        ...(message.replyTo ? { replyTo: message.replyTo } : {}), ...(notification ? { notification } : {}) })
       changes.push({ path: this.indexPath, content: json(index) })
       return changes
     })
@@ -175,18 +176,28 @@ export class FrameworkConversation {
    * unanswered inputs do not consume the six-exchange context budget. */
   recentExchanges(): Promise<ConversationExchange[]> {
     return withSnapshot(this.files, async snapshot => {
-      const index = await this.index(snapshot), result: ConversationExchange[] = [], seen = new Set<string>()
+      const index = await this.index(snapshot), result: ConversationExchange[] = []
+      const selected = new Map<string, ConversationExchange>()
       const byId = new Map(index.messages.map(entry => [entry.id, entry]))
       for (const indexed of [...index.messages].reverse()) {
-        const message = await this.headerAt(snapshot, indexed)
-        if (message.role !== 'assistant' || !message.replyTo || seen.has(message.replyTo)) continue
+        // New entries index their immutable provenance. Older indexes remain
+        // readable through the original header; unrelated bodies are never read.
+        const message = indexed.role ? indexed : await this.headerAt(snapshot, indexed)
+        if (message.role !== 'assistant' || !message.replyTo) continue
+        const existing = selected.get(message.replyTo)
+        if (existing) {
+          existing.assistants.unshift(await this.readAt(snapshot, indexed))
+          continue
+        }
+        if (result.length === 6) continue
         const humanIndex = byId.get(message.replyTo)
         if (!humanIndex) continue
         const humanHeader = await this.headerAt(snapshot, humanIndex)
         if (humanHeader.role !== 'user') continue
         const human = await this.readAt(snapshot, humanIndex)
-        result.unshift({ human, assistant: await this.readAt(snapshot, indexed) }); seen.add(human.id)
-        if (result.length === 6) break
+        const assistant = await this.readAt(snapshot, indexed)
+        const exchange = { human, assistant, assistants: [assistant] }
+        result.unshift(exchange); selected.set(human.id, exchange)
       }
       return result
     })
