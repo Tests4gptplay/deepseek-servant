@@ -267,8 +267,10 @@ test('actual service browses UTC saved date and newer pages through real convers
   }
   const query = { mode: 'local' as const, collaborationId: 'team', storageScope: 'local', date: '2026-10-31', limit: 1 }
   const first = await service.history(query)
-  assert.deepEqual(first.messages.map(message => message.id), ['early']); assert.equal(first.moreAfter, 'early')
-  const second = await service.history({ ...query, afterId: first.moreAfter })
+  assert.deepEqual(first.messages.map(message => message.id), ['later']); assert.equal(first.moreBefore, 'later'); assert.equal(first.moreAfter, undefined)
+  const earlier = await service.history({ ...query, beforeId: first.moreBefore })
+  assert.deepEqual(earlier.messages.map(message => message.id), ['early']); assert.equal(earlier.moreBefore, undefined); assert.equal(earlier.moreAfter, 'early')
+  const second = await service.history({ ...query, afterId: earlier.moreAfter })
   assert.deepEqual(second.messages.map(message => message.id), ['later']); assert.equal(second.moreAfter, undefined)
   const previous = await service.history({ ...query, beforeId: second.moreBefore })
   assert.deepEqual(previous.messages.map(message => message.id), ['early'])
@@ -1004,3 +1006,132 @@ test('only successful replay of the associated settings command clears its retai
   await service.configure(command)
   assert.equal(internal.errors.has('git'), false)
 })
+
+test('confirmed Local cleanup is accessible without enabling participation and never clears the other mode', async t => {
+  const { service, local, gitSeam, lifecycle } = await fixture(t), internal = service as any
+  internal.running.delete('local')
+  await service.send({ ...input('local', 'clear-me'), recipient: 'human' })
+  await service.send({ ...input('git', 'keep-git'), recipient: 'human' })
+  const access = await internal.access('local'), root = access.conversation.foregroundRoot
+  await access.connection.transactions.run('seed-memory', {}, { reevaluate: true }, async () => [
+    { path: root + '/Foreground_List.md', content: 'keep list' }, { path: root + '/Foreground_Cache.md', content: 'keep cache' },
+  ])
+  const before = { ...lifecycle }
+  await assert.rejects(service.cleanupRecords({ mode: 'local', storageScope: 'wrong', commandId: 'wrong-scope', action: 'conversation', confirmation: 'clear-foreground-conversation' }), /scope|destination/i)
+  const cleared = await service.cleanupRecords({ mode: 'local', storageScope: 'local', commandId: 'clear-chat', action: 'conversation', confirmation: 'clear-foreground-conversation' })
+  assert.equal(cleared.cleared, true)
+  assert.deepEqual((await service.history({ mode: 'local', collaborationId: 'team', storageScope: 'local', limit: 20 })).messages, [])
+  assert.equal((await service.history({ mode: 'git', collaborationId: 'team', storageScope: 'git', limit: 20 })).messages.length, 1)
+  assert.equal(await withSnapshot(local, snapshot => local.read(snapshot, root + '/Foreground_List.md')), 'keep list')
+  assert.deepEqual(lifecycle, before)
+  assert.equal(internal.running.has('local'), false)
+  await service.send({ ...input('local', 'after-clear'), recipient: 'human' })
+  await service.cleanupRecords({ mode: 'local', storageScope: 'local', commandId: 'clear-chat', action: 'conversation', confirmation: 'clear-foreground-conversation' })
+  assert.deepEqual((await service.history({ mode: 'local', collaborationId: 'team', limit: 20 })).messages.map(message => message.id), ['after-clear'])
+  await service.cleanupRecords({ mode: 'local', storageScope: 'local', commandId: 'clear-list', action: 'planning', confirmation: 'clear-work-planning-notes' })
+  assert.equal(await withSnapshot(local, snapshot => local.read(snapshot, root + '/Foreground_List.md')), '')
+  assert.equal((await service.history({ mode: 'local', collaborationId: 'team', limit: 20 })).messages.length, 1)
+})
+
+test('task history clear removes the user-visible record but keeps delivered attachment discovery and original bytes', async t => {
+  const { service, local } = await fixture(t), internal = service as any
+  internal.running.delete('local')
+  const taskId = '00000000-0000-4000-8000-000000000078', archive = `archives/${taskId}`, artifact = archive + '/result.bin'
+  const bytes = Uint8Array.from([0, 250, 4, 0, 255])
+  await withSnapshot(local, snapshot => local.commit(snapshot, [
+    { path: paths.task(taskId), content: JSON.stringify({ version: 1, taskId, route: 'P', owner: 'User', status: 'complete', sourcePath: 'tasks/kept_P.md', resultPaths: [artifact] }) },
+    { path: archive + '/records.md', content: 'Actual retained record to clear' },
+    { path: artifact, bytes },
+    { path: `technical/cleanup/${taskId}.json`, content: JSON.stringify({ version: 1, taskId, phase: 'released', retentionHash: 'verified-fixture', deletedPaths: [], preservedPaths: [artifact] }) },
+  ], 'synthetic released Task'))
+  const preview = await service.cleanupPreview({ mode: 'local', storageScope: 'local' })
+  assert.deepEqual(preview.tasks.map(item => item.taskId), [taskId])
+  await service.cleanupRecords({ mode: 'local', storageScope: 'local', commandId: 'clear-task-record', action: 'tasks', preview, confirmation: 'clear-ended-task-records' })
+  const view = await service.view({ mode: 'local', includeArchives: true })
+  assert.equal(view.tasks.some(task => task.taskId === taskId), false)
+  assert.equal(await withSnapshot(local, snapshot => local.read(snapshot, archive + '/records.md')), undefined)
+  assert.deepEqual(view.archives.find(item => item.taskId === taskId)?.files, [artifact])
+  assert.deepEqual(await service.download('local', artifact, 'local'), bytes)
+  assert.ok(await withSnapshot(local, snapshot => local.read(snapshot, paths.task(taskId))))
+})
+
+test('Local maintenance uses explicit statistics, the actual native path opener and original record export', async t => {
+  const { service, local } = await fixture(t), internal = service as any
+  const workspace = await mkdtemp(join(tmpdir(), 'dss-export-workspace-'))
+  t.after(() => rm(workspace, { recursive: true, force: true }))
+  const { DshWorkspaceAdapter } = await import('../src/adapters/dsh/workspace.js')
+  t.mock.method(DshWorkspaceAdapter.prototype, 'resolve', async () => ({ id: 'actual-fixture-workspace', directory: workspace } as any))
+  const opened: string[] = []
+  internal.ctx.get = (name: string) => {
+    assert.equal(name, 'sessionController')
+    return { canOpenWorkspacePath: () => true, openWorkspacePath: async ({ path }: { path: string }) => { opened.push(path) } }
+  }
+  internal.storage.storageView = () => ({ directory: '/actual-technical-records', nativeDirectory: '/actual-native-session-logs' })
+  const original = '# Exact retained records\n\nUnicode 原文 😀\n'
+  await withSnapshot(local, snapshot => local.commit(snapshot, [
+    { path: 'archives/export-task/records.md', content: original },
+    { path: 'assistants/collaborations/local/team/Foreground_Cache.md', content: 'cache-body' },
+  ], 'synthetic retained records'))
+  const usage = await service.maintenanceView({ mode: 'local', storageScope: 'local' })
+  assert.equal(usage.localDirectory, local.directory)
+  assert.equal(usage.nativeDirectory, '/actual-native-session-logs')
+  assert.equal(usage.usage.permanent.planningBytes, Buffer.byteLength('cache-body'))
+  await service.openMaintenancePath({ mode: 'local', storageScope: 'local', target: 'records' })
+  await service.openMaintenancePath({ mode: 'local', storageScope: 'local', target: 'native-logs' })
+  assert.deepEqual(opened, [local.directory, '/actual-native-session-logs'])
+  const exported = await service.exportRecords({ mode: 'local', storageScope: 'local', taskId: 'export-task' })
+  const { readFile } = await import('node:fs/promises')
+  assert.equal(await readFile(exported.path, 'utf8'), original)
+  assert.equal(await withSnapshot(local, snapshot => local.read(snapshot, 'archives/export-task/records.md')), original)
+  assert.deepEqual(await service.exportRecords({ mode: 'local', storageScope: 'local', taskId: 'export-task' }), exported)
+})
+
+test('Local cancel, settled execution, manual clear and cold ownership retain artifacts without reopening Task', async t => {
+  const { service, local, storage } = await fixture(t), internal=service as any;
+  const {FrameworkRoleRuntime}=await import('../src/framework/role-runtime.js');
+  const taskId='00000000-0000-4000-8000-000000000079', artifact=`archives/${taskId}/result.bin`;
+  const ctx={agents:{get:()=>undefined},jobs:{list:()=>[]},get:()=>undefined} as any;
+  const config={scope:'local',member:'User',primary:true,workspace:'/fixture',workerSeats:1,mode:'local' as const,collaborationId:'team'};
+  const runtime=new FrameworkRoleRuntime(ctx,local,storage,config,{members:()=>['User'],heartbeat:async()=>{},error:()=>{}}) as any;
+  internal.running.get('local').runtime=runtime; internal.running.get('local').connection.registration.member='User';
+  await withSnapshot(local,snapshot=>local.commit(snapshot,[
+    {path:paths.task(taskId),content:JSON.stringify({version:1,taskId,route:'P',owner:'User',members:['User'],status:'running',sourcePath:'tasks/cancel_P.md',resultPaths:[artifact]})},
+    {path:'tasks/cancel_P.md',content:taskId+'\nOriginal cancelled request'},
+    {path:paths.inbox(taskId,'User'),content:'unfinished material'},
+    {path:`archives/${taskId}/records.md`,content:'retained partial history'},
+    {path:artifact,bytes:Uint8Array.from([0,255,8])},
+  ],'synthetic active responsibility'));
+  const record={identity:{role:'Worker',workId:'cancel-worker',executionId:'cancel-execution',taskId},sessionId:'cancel-session',generation:1};
+  await runtime.saveRole(record);
+  let stops=0;
+  // Native stopping is an explicit boundary fixture; storage, controls,
+  // cancellation ownership, cleanup transaction and cold runtime are real.
+  runtime.stopOwnedRecord=async (actual:any)=>{assert.equal(actual.identity.executionId,'cancel-execution');stops++;return {status:'stopped'}};
+  await service.taskControl({mode:'local',storageScope:'local',commandId:'explicit-cancel',taskId,intent:'cancelled'});
+  assert.equal(stops,1);
+  const preview=await service.cleanupPreview({mode:'local',storageScope:'local'});
+  assert.ok(preview.tasks.some(task=>task.taskId===taskId));
+  const request={mode:'local' as const,storageScope:'local',commandId:'clear-cancelled',action:'tasks' as const,preview,confirmation:'clear-ended-task-records' as const};
+  const commit=local.commit.bind(local);
+  let entered!:()=>void, release!:()=>void;
+  const atCommit=new Promise<void>(resolve=>{entered=resolve}), released=new Promise<void>(resolve=>{release=resolve});
+  local.commit=async (snapshot,changes,message)=>{
+    if(changes.some(change=>change.path===`technical/cleanup/${taskId}.json` && 'content' in change && change.content?.includes('historyCleared'))) {entered();await released;}
+    return commit(snapshot,changes,message);
+  };
+  const clearing=service.cleanupRecords(request);
+  await atCommit;
+  const resuming=service.taskControl({mode:'local',storageScope:'local',commandId:'racing-resume',taskId,intent:'running'});
+  const resumeResult=assert.rejects(resuming,/explicitly cleared/);
+  assert.equal((await runtime.controls.task(taskId)).intent,'cancelled','queued resume cannot cross the confirmed deletion owner');
+  release(); await clearing; await resumeResult; local.commit=commit;
+  assert.equal(await runtime.controls.task(taskId),undefined);
+  assert.equal((await service.view({mode:'local',includeArchives:true})).tasks.some(task=>task.taskId===taskId),false);
+  assert.deepEqual(await service.download('local',artifact,'local'),Uint8Array.from([0,255,8]));
+  await assert.rejects(service.taskControl({mode:'local',storageScope:'local',commandId:'late-resume',taskId,intent:'running'}),/explicitly cleared/);
+  await service.cleanupRecords(request); assert.equal(stops,1);
+  const cold=new FrameworkRoleRuntime(ctx,local,storage,config,{members:()=>['User'],heartbeat:async()=>{},error:()=>{}}) as any;
+  assert.deepEqual(await withSnapshot(local,snapshot=>cold.scanMembers(snapshot)),[]);
+  await assert.rejects(cold.resumeTask(taskId,'cold-resume'),/explicitly cleared/);
+  await withSnapshot(local,async snapshot=>assert.equal(JSON.parse((await local.read(snapshot,paths.task(taskId)))!).status,'running'));
+});

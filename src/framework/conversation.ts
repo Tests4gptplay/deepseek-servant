@@ -141,18 +141,52 @@ export class FrameworkConversation {
       return entry ? this.readAt(snapshot, entry) : undefined
     })
   }
+  /** Explicit search over full originals; excerpts and page sizes do not truncate storage. */
+  search(query: string, cursor = 0, limit = 10) {
+    if (!query.trim() || !Number.isSafeInteger(cursor) || cursor < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 50)
+      return Promise.reject(new Error('Enter a search phrase and valid page size.'))
+    return withSnapshot(this.files, async snapshot => {
+      const entries = (await this.index(snapshot)).messages
+      const matches: Array<{ message: Omit<ConversationMessage, 'text'> & { ref: string }; excerpt: string }> = []
+      let next = cursor
+      for (; next < entries.length && matches.length < limit; next++) {
+        const { text, ...header } = await this.readAt(snapshot, entries[next]!)
+        const found = text.toLocaleLowerCase().indexOf(query.toLocaleLowerCase())
+        if (found >= 0) matches.push({ message: { ...header, ref: header.id }, excerpt: text.slice(Math.max(0, found - 100), found + query.length + 160) })
+      }
+      return { matches, revision: snapshot.revision, ...(next < entries.length ? { nextCursor: next } : {}) }
+    })
+  }
+  /** Character pagination is opt-in; ordinary message reads still return the full original. */
+  readText(ref: string, cursor = 0, limit = 32768) {
+    if (!Number.isSafeInteger(cursor) || cursor < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 262144)
+      return Promise.reject(new Error('Invalid text cursor or page size.'))
+    return withSnapshot(this.files, async snapshot => {
+      const entry = (await this.index(snapshot)).messages.find(value => value.id === ref)
+      if (!entry) throw new ConversationRecordError(this.indexPath, 'identity', 'Conversation reference is absent.')
+      const { text, ...header } = await this.readAt(snapshot, entry)
+      if (cursor > text.length) throw new Error('Invalid text cursor.')
+      const end = Math.min(text.length, cursor + limit)
+      return { ref, message: header, text: text.slice(cursor, end), cursor, characters: text.length,
+        revision: snapshot.revision, ...(end < text.length ? { nextCursor: end } : {}) }
+    })
+  }
   /** Caller chooses page size; no product message-length or history limit. */
   page(limit: number, beforeId?: string, query: { afterId?: string; date?: string } = {}): Promise<{ messages: ConversationMessage[]; moreBefore?: string; moreAfter?: string; revision: string }> {
     if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('Page size must be a positive integer.')
     if (beforeId && query.afterId) throw new Error('Choose one pagination direction.')
     if (query.date && !/^\d{4}-\d{2}-\d{2}$/.test(query.date)) throw new Error('Saved date must use YYYY-MM-DD.')
     return withSnapshot(this.files, async snapshot => {
-      let entries = (await this.index(snapshot)).messages
-      if (query.date) {
+      const allEntries = (await this.index(snapshot)).messages
+      let entries = allEntries
+      // Local calendar pages remain day-scoped. Git calendar selection is only
+      // the initial inclusive day-end cursor; explicit cursors can cross days.
+      if (query.date && (this.scope.mode === 'local' || (!beforeId && !query.afterId))) {
         const matching: IndexedMessage[] = []
         for (const entry of entries) {
           const at = entry.createdAt ?? (await this.headerAt(snapshot, entry)).createdAt
-          if (new Date(at).toISOString().slice(0, 10) === query.date) matching.push(entry)
+          const day = new Date(at).toISOString().slice(0, 10)
+          if (this.scope.mode === 'local' ? day === query.date : day <= query.date) matching.push(entry)
         }
         entries = matching
       }
@@ -162,14 +196,16 @@ export class FrameworkConversation {
         if (index < 0) throw new ConversationRecordError(this.indexPath, 'identity', 'Pagination reference is absent.')
         start = index + 1; end = Math.min(entries.length, start + limit)
       } else {
-        end = beforeId === undefined ? query.date ? Math.min(limit, entries.length) : entries.length : entries.findIndex(entry => entry.id === beforeId)
+        end = beforeId === undefined ? entries.length : entries.findIndex(entry => entry.id === beforeId)
         if (end < 0) throw new ConversationRecordError(this.indexPath, 'identity', 'Pagination reference is absent.')
         start = Math.max(0, end - limit)
       }
       const selected = entries.slice(start, end)
       return { messages: await Promise.all(selected.map(entry => this.readAt(snapshot, entry))),
         ...(start && selected.length ? { moreBefore: selected[0].id } : {}),
-        ...(end < entries.length && selected.length ? { moreAfter: selected[selected.length - 1].id } : {}), revision: snapshot.revision }
+        ...(selected.length && (this.scope.mode === 'git'
+          ? allEntries.findIndex(entry => entry.id === selected[selected.length - 1].id) < allEntries.length - 1
+          : end < entries.length) ? { moreAfter: selected[selected.length - 1].id } : {}), revision: snapshot.revision }
     })
   }
   /** Only explicit assistant replies complete an exchange; human discussion and

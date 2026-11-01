@@ -1,3 +1,10 @@
+import { FrameworkRecordMove, type RecordMoveReceipt, type RecordMovePhysicalStore } from './record-move.js'
+import { isDeepStrictEqual } from 'node:util'
+import { listLegacyRecordExports, readLegacyRecordExport, type LegacyRecordExportIdentity } from './legacy-record-export.js'
+import { frameworkStorageUsage, exportFrameworkRecords, exportFrameworkBytes } from './maintenance.js'
+import { LocalFiles } from './local-files.js'
+import { FrameworkManualCleanup, type ManualTaskCleanupRecord } from './manual-cleanup.js'
+import { cleanupRecordPath } from './cleaner.js'
 import { FrameworkKnowledge } from './knowledge.js'
 import { FrameworkTaskIndex } from './task-index.js'
 import { createHash, randomUUID } from 'node:crypto';
@@ -29,7 +36,7 @@ interface Saved {
     revision: string;
     settings: FrameworkClientSettings;
 }
-interface Access { knowledge?: FrameworkKnowledge; taskIndex?: FrameworkTaskIndex; connection: FrameworkStorage; conversation: FrameworkConversation; observer?: InstanceRegistration; controls?: ExecutionControls }
+interface Access { legacyExports?: Map<string, LegacyRecordExportIdentity[]>; knowledge?: FrameworkKnowledge; taskIndex?: FrameworkTaskIndex; connection: FrameworkStorage; conversation: FrameworkConversation; observer?: InstanceRegistration; controls?: ExecutionControls }
 function abortedBy(signal: AbortSignal | undefined, error: unknown): boolean {
     return !!signal?.aborted && (error === signal.reason || (error instanceof Error && error.name === 'AbortError' && error.cause === signal.reason));
 }
@@ -59,6 +66,11 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
     private legacyCoop?: Awaited<ReturnType<typeof readLegacyCoopSettings>>;
     private configuration: Promise<unknown> = Promise.resolve();
     private closed = false;
+    private recordMoving?: Error;
+    private recordMoveController?: AbortController;
+    private recordMover?: FrameworkRecordMove;
+    private pendingRecordMove?: RecordMoveReceipt;
+    private readonly relocationOwners = new Map<FrameworkMode, FrameworkRoleRuntime>();
     private disposal?: Promise<void>;
     private starting?: Promise<void>;
     private readonly disposalErrors: unknown[] = [];
@@ -130,16 +142,37 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             await this.storage.set(key, saved);
             this.saved.set(mode, saved);
         }
+        const physical = this.storage as StoragePort & Partial<RecordMovePhysicalStore>;
+        if (physical.moveRecords && physical.storageView) {
+            const controller = this.recordMoveController = new AbortController();
+            try {
+                this.pendingRecordMove = await this.mover().pendingReceipt();
+                await this.mover().resumePending(controller.signal);
+                this.pendingRecordMove = undefined;
+            }
+            catch (error) {
+                if (this.closed) throw error;
+                this.recordMoving ??= error instanceof Error ? error : new Error(String(error));
+                this.report('local', error); return;
+            }
+            finally { if (this.recordMoveController === controller) this.recordMoveController = undefined; }
+        }
         for (const mode of ['local', 'git'] as const) {
             this.assertOpen();
             const enabled = await this.storage.get<boolean>('framework-participation/' + mode) ?? mode === 'local';
             if (enabled) {
                 const scope = this.diagnosticScope(mode), opening = this.connect(mode), signal = this.backgroundOpening.get(mode)?.signal;
                 try { await opening; } catch (error) { if (this.closed) throw error; if (!abortedBy(signal, error)) this.report(mode,error,scope); }
+            } else if (mode === 'local') {
+                try {
+                    const access = await this.access(mode);
+                    await this.withManualCleanup(access, cleanup => cleanup.resumePending((error, commandId) => { this.report(mode, error, access.connection.scope, commandId); }));
+                } catch (error) { if (this.closed) throw error; this.report(mode, error); }
             }
         }
     }
     private access(mode: FrameworkMode): Promise<Access> {
+        if (this.recordMoving) return Promise.reject(this.recordMoving);
         if (this.closed) return Promise.reject(new Error('Framework service is disposed.'));
         const transition = this.accessTransitions.get(mode);
         if (transition) return transition.then(() => this.access(mode));
@@ -166,6 +199,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
     private config(mode: FrameworkMode): Saved { this.assertOpen(); const saved = this.saved.get(mode); if (!saved)
         throw new Error('Framework settings are not loaded.'); return saved; }
     private connect(mode: FrameworkMode, signal?: AbortSignal): Promise<Running> {
+        if (this.recordMoving) return Promise.reject(this.recordMoving);
         if (signal?.aborted) return Promise.reject(signal.reason);
         if (this.closed) return Promise.reject(new Error('Framework service is disposed.'));
         const active = this.running.get(mode);
@@ -234,6 +268,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         }
         const resource = { connection, resources } as Running;
         let runtime: FrameworkRoleRuntime | undefined;
+        const cleanupFailures: Array<{ error: unknown; commandId: string }> = [];
         try {
             this.assertOpen();
             const profile = mode === 'local' ? await this.storage.get<Assistant>('assistant/default') : undefined;
@@ -258,10 +293,16 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 }, error: error => { this.report(mode, error, this.diagnosticScope(mode, settings)); } });
             resource.runtime = runtime;
             signal?.throwIfAborted();
+            if (mode === 'local') {
+                const cleanup = new FrameworkManualCleanup(connection.files, connection.transactions, runtime.conversation, runtime);
+                await cleanup.resumePending((error, commandId) => { cleanupFailures.push({ error, commandId }); });
+            }
+            signal?.throwIfAborted();
             await runtime.start();
             this.assertOpen(); signal?.throwIfAborted();
             this.running.set(mode, resource);
             this.clearResolvedErrors(mode);
+            for (const { error, commandId } of cleanupFailures) this.report(mode, error, connection.scope, commandId);
             return resource;
         }
         catch (error) {
@@ -277,12 +318,15 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         const mode = input.mode ?? this.activeMode, saved = this.config(mode), active = this.running.get(mode);
         const base: FrameworkClientView = { revision: saved.revision, activeMode: mode, collaborationId: saved.settings.collaborationId, settings: saved.settings,
             connection: { participating: !!active, status: active ? 'connected' : 'disconnected', detail: this.errors.get(mode), member: active?.connection.registration.member, workerSeats: active?.connection.registration.workerSeats }, messages: [], tasks: [], legacyTasks: [], archives: this.archiveViews.get(mode) ?? [], resources: [] };
+        if (mode === 'local' && this.pendingRecordMove?.scope) base.pendingRecordMove = { commandId: this.pendingRecordMove.commandId,
+            storageScope: this.pendingRecordMove.scope, expectedRevision: this.pendingRecordMove.settingsBefore.revision, directory: this.pendingRecordMove.targetRecords };
         let access: Access;
         try { access = await this.access(mode); base.connection.status = 'connected'; } catch(error) { if (this.closed) throw error; base.connection.detail = error instanceof Error ? error.message : String(error); return base; }
         // Access may have waited for an actual settings/scope handoff. Never
         // pair an earlier header with the newly acquired destination.
         if (this.config(mode).revision !== saved.revision) return this.view(input);
         base.storageScope = access.connection.scope;
+        if (input.includeArchives) base.archives = [];
         const page = await access.conversation.page(20);
         base.messages = page.messages;
         base.pageBefore = page.moreBefore;
@@ -294,6 +338,11 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             try {
             access.taskIndex ??= new FrameworkTaskIndex(access.connection.files, error => this.report(mode, error));
             for (const task of await access.taskIndex.list(snapshot)) {
+                const cleanup = (task.status === 'complete' || mode === 'local') ? await readJson<ManualTaskCleanupRecord>(access.connection.files, snapshot, cleanupRecordPath(task.taskId)) : undefined;
+                if (cleanup?.version === 1 && cleanup.taskId === task.taskId && cleanup.phase === 'released' && cleanup.historyCleared === true) {
+                    if (input.includeArchives && cleanup.preservedArtifacts.length) base.archives.push({ path: cleanup.preservedArtifacts[0]!, title: task.sourcePath, taskId: task.taskId, files: cleanup.preservedArtifacts });
+                    continue;
+                }
                 const members = await Promise.all((task.members ?? [task.owner]).map(async name => {
                     try { return { name, status: (await readMemberStatus(access.connection.files, snapshot, paths.memberStatus(task.taskId, name)))?.state ?? 'unknown' }; }
                     catch (error) { this.report(mode, error); return { name, status: 'unknown' }; }
@@ -307,28 +356,246 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             for (const migration of migrations?.migrations ?? []) {
                 try {
                 const manifest = await readJson<MigrationManifest>(access.connection.files, snapshot, migration.manifestPath);
+                if (input.includeArchives) {
+                    try {
+                        const found = await listLegacyRecordExports(access.connection.files, snapshot, migration.manifestPath, error => this.report(mode, error));
+                        (access.legacyExports ??= new Map()).set(migration.id, found);
+                    } catch (error) { access.legacyExports?.delete(migration.id); this.report(mode, error); }
+                }
+                const clearedIds = new Set((manifest as (MigrationManifest & { clearedTasks?: Array<{ oldId: string }> }) | undefined)?.clearedTasks?.map(item => item.oldId) ?? []);
+                const exports = (access.legacyExports?.get(migration.id) ?? []).filter(item => !clearedIds.has(item.oldTaskId));
                 for (const task of manifest?.tasks ?? []) {
+                    if (clearedIds.has(task.oldId)) continue;
                     const own = task.memberContinuations?.find(row => row.member === localMember);
                     const terminal = task.continuation === 'complete' || task.continuation === 'cancelled';
                     base.legacyTasks.push({ migrationId: migration.id, oldTaskId: task.oldId, taskId: task.taskId, continuation: terminal ? task.continuation : own?.continuation ?? task.continuation,
-                        recordPath: task.recordPath, issues: manifest?.issues, waits: terminal ? [] : own?.waits?.map(wait => ({ ...wait, memberIdentity: own.identity })) });
+                        recordPath: task.recordPath, recordsAvailable: exports.some(row => row.oldTaskId === task.oldId), issues: manifest?.issues, waits: terminal ? [] : own?.waits?.map(wait => ({ ...wait, memberIdentity: own.identity })) });
+                }
+                for (const row of exports) if (!manifest?.tasks.some(task => task.oldId === row.oldTaskId))
+                    base.legacyTasks.push({ migrationId: migration.id, ...row, recordsAvailable: true });
+                if (input.includeArchives) for (const cleared of (manifest as (MigrationManifest & { clearedTasks?: Array<{ oldId: string; taskId: string; preservedArtifacts?: string[] }> }) | undefined)?.clearedTasks ?? []) {
+                    const files = cleared.preservedArtifacts;
+                    if (Array.isArray(files) && files.length && files.every(path => typeof path === 'string'))
+                        base.archives.push({ path: files[0]!, title: cleared.oldId, taskId: cleared.taskId, files: [...files] });
                 }
                 } catch (error) { this.report(mode, error); }
             }
             } catch (error) { this.report(mode, error); }
             if (input.includeArchives) {
                 const entries = await access.connection.files.list(snapshot, 'archives/');
-                base.archives = entries.filter(entry => /^archives\/[^/]+\/records\.md$/.test(entry.path)).map(entry => {
+                base.archives.push(...entries.filter(entry => /^archives\/[^/]+\/records\.md$/.test(entry.path)).map(entry => {
                     const taskId = entry.path.split('/')[1]!, prefix = `archives/${taskId}/`;
                     return { path: entry.path, title: taskId, taskId,
                         files: entries.filter(file => file.path.startsWith(prefix) && file.path !== entry.path && file.path !== `${prefix}retention.json`).map(file => file.path).sort() };
-                });
+                }));
             }
         }); } catch (error) { this.report(mode, error); }
         base.connection.detail = this.errors.get(mode);
         if (input.includeArchives)
             this.archiveViews.set(mode, base.archives);
         return base;
+    }
+    private mover(): FrameworkRecordMove {
+        if (this.recordMover) return this.recordMover;
+        const physical = this.storage as StoragePort & Partial<RecordMovePhysicalStore>;
+        if (!physical.moveRecords || !physical.storageView) throw new Error('This Host does not expose its owned records relocation.');
+        return this.recordMover = new FrameworkRecordMove(this.storage, physical as StoragePort & RecordMovePhysicalStore, {
+            quiesce: (receipt, signal) => this.quiesceRecords(receipt, signal),
+            applySettings: async receipt => {
+                const current = await this.storage.get<Saved>('framework-settings/local');
+                if (!isDeepStrictEqual(current, receipt.settingsAfter)) {
+                    if (!isDeepStrictEqual(current, receipt.settingsBefore)) throw new Error('Local settings changed outside the retained record move.');
+                    await this.storage.set('framework-settings/local', receipt.settingsAfter);
+                }
+                this.saved.set('local', structuredClone(receipt.settingsAfter));
+            },
+            reopen: async (_receipt, signal) => {
+                this.recordMoving = undefined;
+                for (const mode of ['local', 'git'] as const) {
+                    signal.throwIfAborted(); this.assertOpen();
+                    if (await this.storage.get<boolean>('framework-participation/' + mode) ?? mode === 'local') await this.connect(mode, signal);
+                }
+            },
+        });
+    }
+    private async quiesceRecords(_receipt: Readonly<RecordMoveReceipt>, signal: AbortSignal): Promise<void> {
+        this.pendingRecordMove = structuredClone(_receipt);
+        // Materialize only the configured access owners before blocking new
+        // acquisitions. A mechanical runtime reads existing execution evidence;
+        // it never starts a loop, registers a member or opens an Agent.
+        const owners = new Map<FrameworkMode, Access>();
+        for (const mode of ['local', 'git'] as const) {
+            if (mode === 'git' && !this.running.has(mode) && !this.opening.has(mode) && !this.accesses.has(mode)) {
+                // A configured repository is not an acquired execution owner.
+                // Do not authenticate a never-used/offline Git scope merely to
+                // move Local records. Only durable unsettled roles require a
+                // cold ownership check before moving their technical store.
+                let unsettled = false;
+                const settings = this.config(mode).settings;
+                for (const entry of await this.storage.list<{ mode: string; ownerRepo?: string; repositoryDirectory?: string }>('framework-connection-settings/')) {
+                    if (entry.value.mode !== 'git') continue;
+                    const prefix = 'framework-runtime/' + entry.key.slice('framework-connection-settings/'.length) + '/roles/';
+                    const roles = await this.storage.list<{ released?: boolean; stopped?: boolean }>(prefix);
+                    if (!roles.some(row => !row.value.released && !row.value.stopped)) continue;
+                    if (entry.value.ownerRepo?.toLowerCase() !== settings.ownerRepo.toLowerCase() || (entry.value.repositoryDirectory ?? '') !== settings.repositoryDirectory)
+                        throw new Error('A previous Git storage scope has unresolved native execution ownership; retain its records before moving.');
+                    unsettled = true;
+                }
+                if (!unsettled) continue;
+            }
+            if (!this.recordMoving) owners.set(mode, await this.access(mode));
+        }
+        this.recordMoving = new Error('The confirmed record move owns these locations; resume that command before accessing records.');
+        for (const controller of [...this.accessOpening.values(), ...this.backgroundOpening.values()]) controller.abort(this.recordMoving);
+        await Promise.allSettled([...this.opening.values()]);
+        const failures: unknown[] = [];
+        for (const mode of ['local', 'git'] as const) {
+            const active = this.running.get(mode), access = owners.get(mode);
+            const settings = this.config(mode).settings;
+            let runtime = this.relocationOwners.get(mode) ?? active?.runtime;
+            try {
+                if (!runtime && access) runtime = new FrameworkRoleRuntime(this.ctx, access.connection.files, this.storage, {
+                    scope: access.connection.scope, member: access.connection.identity.login, primary: mode === 'local',
+                    workspace: settings.workspace, workerSeats: settings.workerSeats, mode, collaborationId: settings.collaborationId,
+                    presetId: settings.presetId, foreground: settings.foreground, background: settings.background,
+                }, { members: () => [], resources: () => [], heartbeat: async () => {}, error: error => this.report(mode, error), changed: () => this.changed(), cancelPending: reason => access.connection.cancelPending(reason) });
+                if (runtime) { this.relocationOwners.set(mode, runtime); await runtime.settleForStorageMove(); }
+            } catch (error) { failures.push(error); }
+            if (active) try { await active.connection.close(); } catch (error) { failures.push(error); }
+            if (access) try { access.connection.cancelPending(); await access.connection.close(); } catch (error) { failures.push(error); }
+        }
+        this.running.clear(); this.accesses.clear(); this.archiveViews.clear();
+        if (failures.length === 1) throw failures[0];
+        if (failures.length) throw new AggregateError(failures, 'Record relocation could not confirm all storage owners stopped.');
+        this.relocationOwners.clear();
+    }
+    moveRecords(input: { mode: 'local'; storageScope: string; expectedRevision: string; commandId: string; directory: string }): Promise<FrameworkClientView> {
+        const operation = this.configuration.then(async () => {
+            this.assertOpen();
+            if (input.mode !== 'local') throw new Error('Owned records relocation is a Local user action.');
+            const mover = this.mover(), prior = await mover.receipt(input.commandId);
+            const controller = this.recordMoveController = new AbortController();
+            try {
+                if (prior) {
+                    if (prior.scope !== input.storageScope || prior.settingsBefore.revision !== input.expectedRevision)
+                        throw new Error('Move retry must retain its original location, scope and settings revision.');
+                    await mover.run(input.commandId, { ...prior, targetRecords: input.directory }, controller.signal);
+                } else {
+                    const before = this.config('local');
+                    if (before.revision !== input.expectedRevision) throw new Error('Settings changed; reread before moving records.');
+                    const access = await this.access('local'); this.checkScope(access, input.storageScope);
+                    if (!(access.connection.files instanceof LocalFiles)) throw new Error('Record relocation requires Local files.');
+                    const physical = this.storage as StoragePort & RecordMovePhysicalStore;
+                    await mover.run(input.commandId, { sourceRecords: physical.storageView().directory, targetRecords: input.directory,
+                        sourceLocal: access.connection.files.directory, scope: access.connection.scope,
+                        settingsBefore: structuredClone(before), nextSettingsRevision: randomUUID() }, controller.signal);
+                }
+                this.pendingRecordMove = undefined;
+                this.clearResolvedErrors('local', input.commandId); this.changed();
+                return this.view({ mode: 'local', includeArchives: true });
+            } catch (error) {
+                try { this.pendingRecordMove = await mover.pendingReceipt() ?? this.pendingRecordMove; } catch { /* Keep the already-owned intent if locator reconciliation remains unknown. */ }
+                this.report('local', error, input.storageScope, input.commandId); throw error;
+            }
+            finally { if (this.recordMoveController === controller) this.recordMoveController = undefined; }
+        });
+        this.configuration = operation.catch(() => {}); return operation;
+    }
+    async maintenanceView(input: Parameters<FrameworkClientApi['maintenanceView']>[0]) {
+        const access = await this.access(input.mode); this.checkScope(access, input.storageScope);
+        if (input.mode !== 'local' || !(access.connection.files instanceof LocalFiles)) throw new Error('Local records management requires its Local storage.');
+        const store = this.storage as StoragePort & { storageView?(): { directory: string; nativeDirectory?: string } };
+        const directories = store.storageView?.();
+        return { localDirectory: access.connection.files.directory, recordsDirectory: directories?.directory,
+            nativeDirectory: directories?.nativeDirectory, usage: await frameworkStorageUsage(access.connection.files) };
+    }
+    async openMaintenancePath(input: Parameters<FrameworkClientApi['openMaintenancePath']>[0]) {
+        const access = await this.access(input.mode); this.checkScope(access, input.storageScope);
+        if (input.mode !== 'local' || !(access.connection.files instanceof LocalFiles)) throw new Error('Local records management requires its Local storage.');
+        const store = this.storage as StoragePort & { storageView?(): { directory: string; nativeDirectory?: string } };
+        const path = input.target === 'records' ? access.connection.files.directory : store.storageView?.().nativeDirectory;
+        if (!path) throw new Error('The Host has not supplied the native session log directory.');
+        const controller = this.ctx.get('sessionController');
+        if (!controller?.canOpenWorkspacePath()) throw new Error('This Host cannot open local directories. Path: ' + path);
+        await controller.openWorkspacePath({ path });
+        return { path };
+    }
+    private async legacyManifestPath(access: Access, snapshot: import('./transactions.js').FilesSnapshot, migrationId: string): Promise<string> {
+        const index = await readJson<{ migrations: Array<{ id: string; manifestPath: string }> }>(access.connection.files, snapshot, 'technical/legacy-migrations/index.json');
+        const matches = index?.migrations.filter(item => item.id === migrationId) ?? [];
+        if (matches.length !== 1) throw new Error('Select an existing legacy migration.');
+        return matches[0]!.manifestPath;
+    }
+    async legacyRecords(input: { mode: FrameworkMode; storageScope?: string; migrationId: string; oldTaskId: string }): Promise<{ text: string; revision: string }> {
+        const access = await this.access(input.mode); this.checkScope(access, input.storageScope);
+        return withSnapshot(access.connection.files, async snapshot => {
+            const manifestPath = await this.legacyManifestPath(access, snapshot, input.migrationId);
+            const record = await readLegacyRecordExport(access.connection.files, snapshot, { manifestPath, oldTaskId: input.oldTaskId });
+            return { text: Buffer.from(record.bytes).toString('utf8'), revision: snapshot.revision };
+        });
+    }
+    exportRecords(input: Parameters<FrameworkClientApi['exportRecords']>[0]) {
+        const operation = this.configuration.then(async () => {
+            const access = await this.access(input.mode); this.checkScope(access, input.storageScope);
+            if (input.mode !== 'local') throw new Error('Record export is a Local user action.');
+            const workspace = await new DshWorkspaceAdapter(this.ctx).resolve(undefined, this.config(input.mode).settings.workspace || undefined);
+            if (input.taskId && !input.migrationId && !input.oldTaskId)
+                return exportFrameworkRecords(access.connection.files, input.taskId, workspace.directory);
+            if (input.taskId || !input.migrationId || !input.oldTaskId) throw new Error('Select exactly one current or legacy record.');
+            const record = await withSnapshot(access.connection.files, async snapshot => {
+                const manifestPath = await this.legacyManifestPath(access, snapshot, input.migrationId!);
+                return readLegacyRecordExport(access.connection.files, snapshot, { manifestPath, oldTaskId: input.oldTaskId! });
+            });
+            return exportFrameworkBytes(record.bytes, record.taskId, workspace.directory);
+        });
+        this.configuration = operation.catch(() => {}); return operation;
+    }
+    /** Explicit maintenance uses the existing background owner when present. A
+     * disconnected Local scope gets only a mechanical lifecycle owner: no
+     * registration, heartbeat, loop or Agent is started. */
+    private async withManualCleanup<T>(access: Access, operation: (cleanup: FrameworkManualCleanup, runtime: FrameworkRoleRuntime) => Promise<T>, owned?: FrameworkRoleRuntime): Promise<T> {
+        if (access.conversation.scope.mode !== 'local') throw new Error('Manual record cleanup is a Local user action.');
+        const settings = this.config('local').settings;
+        const active = owned ?? this.running.get('local')?.runtime;
+        const runtime = active ?? new FrameworkRoleRuntime(this.ctx, access.connection.files, this.storage, {
+            scope: access.connection.scope, member: access.connection.identity.login, primary: true,
+            workspace: settings.workspace, workerSeats: settings.workerSeats, mode: 'local', collaborationId: settings.collaborationId,
+            presetId: settings.presetId, foreground: settings.foreground, background: settings.background,
+        }, { members: () => [], resources: () => [], heartbeat: async () => {}, error: error => this.report('local', error), changed: () => this.changed() });
+        if (runtime.config.scope !== access.connection.scope) throw new Error('Cleanup belongs to another Local storage scope.');
+        const cleanup = new FrameworkManualCleanup(access.connection.files, access.connection.transactions, access.conversation, runtime);
+        let result: T | undefined; const failures: unknown[] = [];
+        try { result = await operation(cleanup, runtime); } catch (error) { failures.push(error); }
+        finally { if (!active) try { await runtime.dispose(); } catch (error) { failures.push(error); } }
+        if (failures.length === 1) throw failures[0];
+        if (failures.length) throw new AggregateError(failures, 'Manual cleanup and lifecycle disposal failed.');
+        return result as T;
+    }
+    async cleanupPreview(input: Parameters<FrameworkClientApi['cleanupPreview']>[0]) {
+        await this.starting;
+        const operation = this.configuration.then(async () => {
+            const access = await this.access(input.mode); this.checkScope(access, input.storageScope);
+            return this.withManualCleanup(access, cleanup => cleanup.previewTasks());
+        });
+        this.configuration = operation.catch(() => {}); return operation;
+    }
+    async cleanupRecords(input: Parameters<FrameworkClientApi['cleanupRecords']>[0]) {
+        await this.starting;
+        const operation = this.configuration.then(async () => {
+            this.assertOpen();
+            const access = await this.access(input.mode); this.checkScope(access, input.storageScope);
+            const result = await this.withManualCleanup(access, async (cleanup, runtime) => {
+                if (input.action === 'tasks') {
+                    const result = await cleanup.clearTasks(input.commandId, input.preview, input.confirmation);
+                    for (const task of input.preview.tasks) await runtime.prepareTaskCleanup(task.taskId);
+                    return result;
+                }
+                if (input.action === 'conversation') return cleanup.clearConversation(input.commandId, input.confirmation);
+                return cleanup.clearPlanning(input.commandId, input.confirmation);
+            });
+            this.archiveViews.delete(input.mode); access.legacyExports = undefined; this.changed(); return result;
+        });
+        this.configuration = operation.catch(() => {}); return operation;
     }
     private knowledge(access: Access, mode: FrameworkMode): FrameworkKnowledge {
         return access.knowledge ??= new FrameworkKnowledge(access.connection.files, access.connection.transactions, () => {
@@ -370,7 +637,13 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             this.assertOpen();
             const access = await this.access(input.mode), active = this.running.get(input.mode);
             this.checkScope(access, input.storageScope);
-            const task = await withSnapshot(access.connection.files, snapshot => readJson<TaskMetadata>(access.connection.files, snapshot, paths.task(input.taskId)));
+            const task = await withSnapshot(access.connection.files, async snapshot => {
+                if (input.mode === 'local') {
+                    const cleanup = await readJson<ManualTaskCleanupRecord>(access.connection.files, snapshot, cleanupRecordPath(input.taskId));
+                    if (cleanup?.version === 1 && cleanup.taskId === input.taskId && cleanup.phase === 'released' && cleanup.historyCleared === true) throw new Error('This Task history was explicitly cleared. Create a new Task.');
+                }
+                return readJson<TaskMetadata>(access.connection.files, snapshot, paths.task(input.taskId));
+            });
             if (!task || task.status === 'complete') throw new Error('A completed or absent Task cannot be reopened or controlled.');
             const member = active?.connection.registration.member ?? (await this.observe(access, input.mode)).find(row => row.instanceUUID === access.connection.identity.instanceUUID)?.member;
             if (!member || !(task.members ?? [task.owner]).includes(member)) throw new Error('This Host has no registered execution domain in the selected Task.');
@@ -404,7 +677,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
     async history(input: Parameters<FrameworkClientApi['history']>[0]) { const active = await this.access(input.mode); this.checkScope(active, input.storageScope); if (input.collaborationId !== this.config(input.mode).settings.collaborationId)
         throw new Error('Conversation selection changed.'); return active.conversation.page(input.limit, input.beforeId, { afterId: input.afterId, date: input.date }); }
     send(input: FrameworkSendInput) {
-        const operation = this.configuration.then(() => { this.assertOpen(); return this.sendStored(input); });
+        const operation = this.configuration.then(async () => { await this.starting; this.assertOpen(); return this.sendStored(input); });
         this.configuration = operation.catch(() => {});
         return operation;
     }
@@ -428,7 +701,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
     }
     configure(input: Parameters<FrameworkClientApi['configure']>[0]): Promise<FrameworkClientView> {
         let mode: FrameworkMode, settings: FrameworkClientSettings;
-        try { this.assertOpen(); mode = z.enum(['local', 'git']).parse(input.mode); settings = settingsSchema.parse(input.settings); }
+        try { this.assertOpen(); if (this.recordMoving) throw this.recordMoving; mode = z.enum(['local', 'git']).parse(input.mode); settings = settingsSchema.parse(input.settings); }
         catch (error) { return Promise.reject(error); }
         const owner: ConfigurationOwner = { mode, commandId: input.commandId, controller: new AbortController() };
         const predecessors = [...this.configurationOwners].filter(value => value.mode === mode && value.commandId !== input.commandId);
@@ -450,6 +723,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             let finishAccessTransition: (() => void) | undefined;
             try {
             this.assertOpen(); signal.throwIfAborted();
+            if (this.recordMoving) throw this.recordMoving;
             const signature = JSON.stringify([mode, settings]), old = await this.storage.get<{
                 signature: string;
                 revision: string;
@@ -641,6 +915,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
     dispose(): Promise<void> {
         if (this.disposal) return this.disposal;
         this.closed = true;
+        this.recordMoveController?.abort();
         for (const owner of this.configurationOwners) owner.controller.abort();
         for (const controller of [...this.accessOpening.values(), ...this.backgroundOpening.values()]) controller.abort();
         // Pending acquisitions remain owned until they settle. Their publication
@@ -661,6 +936,8 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 if (!this.stopping.has(active)) try { await this.stopRunning(active); } catch (error) { this.cleanupFailure(mode, error); }
             }
             this.running.clear();
+            for (const runtime of this.relocationOwners.values()) try { await runtime.dispose(); } catch (error) { this.disposalErrors.push(error); }
+            this.relocationOwners.clear();
             for (const pending of accesses) {
                 const access = await pending.catch(() => undefined);
                 if (access) try { await access.connection.close(); } catch (error) { this.disposalErrors.push(error); }

@@ -216,3 +216,92 @@ test('complete-round selection uses indexed provenance instead of rereading unre
   assert.deepEqual(selected.map(round=>round.human.id), ['u-6','u-7','u-8','u-9','u-10','u-11'])
   for (let n = 0; n < 6; n++) assert.ok(!headers.some(path=>path.endsWith('-u-' + n + '/entry.json') || path.endsWith('-a-' + n + '/entry.json')))
 })
+
+test('full-text search finds originals beyond context/chunk boundaries and character pages reconstruct them without loss', async t => {
+  const { service, files, transactions } = await fixture(t)
+  const original = '前'.repeat(70_000) + 'Needle Exact 🚀' + '\n尾'.repeat(170_000)
+  await service.send('long-original', message('long-original', { text: original }))
+  await service.send('second-match', message('second-match', { text: 'Another NEEDLE original' }))
+  const other = new FrameworkConversation(files, transactions, { mode: 'git', collaborationId: 'other-scope' })
+  await other.send('other', message('foreign-message', { text: 'NEEDLE private scope' }))
+  const found = await service.search('needle', 0, 1)
+  assert.equal(found.matches.length, 1); assert.equal(found.matches[0]!.message.ref, 'long-original')
+  assert.ok(found.matches[0]!.excerpt.includes('Needle Exact 🚀')); assert.equal(found.matches[0]!.excerpt, original.slice(69_900, 70_000 + 6 + 160))
+  const next = await service.search('needle', found.nextCursor, 1)
+  assert.equal(next.matches[0]!.message.ref, 'second-match'); assert.equal(next.nextCursor, undefined)
+  let reconstructed = '', cursor = 0
+  for (;;) {
+    const page = await service.readText('long-original', cursor)
+    assert.equal(page.characters, original.length); assert.equal(page.cursor, cursor); assert.ok(page.text.length <= 32768)
+    reconstructed += page.text
+    if (page.nextCursor === undefined) break
+    cursor = page.nextCursor
+  }
+  assert.equal(reconstructed, original)
+  assert.equal((await service.readText('long-original', original.length)).text, '')
+  await assert.rejects(service.readText('foreign-message'), /absent/)
+  await assert.rejects(service.readText('long-original', original.length + 1), /cursor/)
+  await assert.rejects(service.readText('long-original', 0, 262145), /page/)
+  await assert.rejects(service.search('needle', 0, 51), /page/)
+  await assert.rejects(service.search(' ', 0, 10), /search/)
+})
+
+test('restored search excerpts and explicit character pages match the fixed baseline production implementation', async t => {
+  const { loadBaselineModule } = await import('./legacy-baseline.js')
+  const { MemoryStorage } = await import('./support.js')
+  type Original = { append(a: string, s: string, value: { id: string; role: 'user'; text: string }): Promise<{ ref: string }>;
+    search(a: string, query: string, cursor?: number, limit?: number): Promise<{ matches: Array<{ excerpt: string }> }>;
+    read(a: string, ref: string, cursor: number, limit: number): Promise<{ text: string; nextCursor?: number }> }
+  const module = await loadBaselineModule<{ ConversationStore: new (storage: MemoryStorage, zone: string) => Original }>('src/application/conversation-store.ts')
+  const old = new module.ConversationStore(new MemoryStorage(), 'UTC'), { service } = await fixture(t)
+  const original = '历史'.repeat(40_000) + 'ExactMatch' + '🚀结尾'.repeat(20_000)
+  const prior = await old.append('assistant', 'session', { id: 'same-original', role: 'user', text: original })
+  await service.send('same-original', message('same-original', { text: original }))
+  assert.deepEqual((await service.search('exactmatch')).matches.map(item => item.excerpt), (await old.search('assistant', 'exactmatch')).matches.map(item => item.excerpt))
+  for (const cursor of [0, 65_530, 80_008, original.length]) {
+    const before = await old.read('assistant', prior.ref, cursor, 32768), now = await service.readText('same-original', cursor, 32768)
+    assert.equal(now.text, before.text); assert.equal(now.nextCursor, before.nextCursor)
+  }
+})
+
+for (const mode of ['local', 'git'] as const) test(mode + ' ordinary history remains bidirectional across three days without date filtering', async t => {
+  const f = await fixture(t), service = new FrameworkConversation(f.files, f.transactions, { mode, collaborationId: 'date-navigation-' + mode })
+  for (const day of [1, 2, 3]) for (const part of [1, 2, 3]) await service.send(`date-${day}-${part}`, message(`${day}-${part}`, { createdAt: `2026-10-0${day}T0${part}:00:00.000Z` }))
+  const latest = await service.page(2)
+  assert.deepEqual(latest.messages.map(m => m.id), ['3-2', '3-3'])
+  const older = await service.page(2, latest.moreBefore)
+  assert.deepEqual(older.messages.map(m => m.id), ['2-3', '3-1'])
+  const newer = await service.page(2, undefined, { afterId: older.moreAfter })
+  assert.deepEqual(newer.messages.map(m => m.id), ['3-2', '3-3'])
+})
+
+test('Local calendar starts at the selected day tail and older/newer stay within that day', async t => {
+  const f = await fixture(t), service = new FrameworkConversation(f.files, f.transactions, { mode: 'local', collaborationId: 'local-calendar' })
+  for (const day of [1, 2, 3]) for (const part of [1, 2, 3]) await service.send(`date-${day}-${part}`, message(`${day}-${part}`, { createdAt: `2026-10-0${day}T0${part}:00:00.000Z` }))
+  const selected = await service.page(2, undefined, { date: '2026-10-02' })
+  assert.deepEqual(selected.messages.map(m => m.id), ['2-2', '2-3'])
+  assert.equal(selected.moreAfter, undefined)
+  const older = await service.page(2, selected.moreBefore, { date: '2026-10-02' })
+  assert.deepEqual(older.messages.map(m => m.id), ['2-1'])
+  assert.equal(older.moreBefore, undefined)
+  const newer = await service.page(2, undefined, { date: '2026-10-02', afterId: older.moreAfter })
+  assert.deepEqual(newer.messages.map(m => m.id), ['2-2', '2-3'])
+  assert.deepEqual((await service.page(2, undefined, { date: '2026-10-04' })).messages, [])
+})
+
+test('Git calendar is an inclusive selected-day starting cursor, not a permanent day filter', async t => {
+  const f = await fixture(t), service = new FrameworkConversation(f.files, f.transactions, { mode: 'git', collaborationId: 'git-calendar' })
+  for (const day of [1, 2, 3]) for (const part of [1, 2, 3]) await service.send(`date-${day}-${part}`, message(`${day}-${part}`, { createdAt: `2026-10-0${day}T0${part}:00:00.000Z` }))
+  const selected = await service.page(2, undefined, { date: '2026-10-02' })
+  assert.deepEqual(selected.messages.map(m => m.id), ['2-2', '2-3'])
+  const older = await service.page(2, selected.moreBefore, { date: '2026-10-02' })
+  assert.deepEqual(older.messages.map(m => m.id), ['1-3', '2-1'])
+  const oldest = await service.page(2, older.moreBefore, { date: '2026-10-02' })
+  assert.deepEqual(oldest.messages.map(m => m.id), ['1-1', '1-2']); assert.equal(oldest.moreBefore, undefined)
+  const newer = await service.page(2, undefined, { date: '2026-10-02', afterId: selected.moreAfter })
+  assert.deepEqual(newer.messages.map(m => m.id), ['3-1', '3-2'])
+  const latest = await service.page(2, undefined, { date: '2026-10-02', afterId: newer.moreAfter })
+  assert.deepEqual(latest.messages.map(m => m.id), ['3-3']); assert.equal(latest.moreAfter, undefined)
+  assert.deepEqual((await service.page(2, undefined, { date: '2026-10-04' })).messages.map(m => m.id), ['3-2', '3-3'])
+  assert.deepEqual((await service.page(2, undefined, { date: '2026-09-30' })).messages, [])
+})

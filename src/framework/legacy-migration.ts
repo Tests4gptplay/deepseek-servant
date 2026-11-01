@@ -5,8 +5,10 @@ import type { Assistant } from '../contracts/assistant.js'
 import type { Context } from '@deepseek-ai/cordis'
 import { CoopSettingsSchema } from '../experimental/private-git/contracts.js'
 import type { Task } from '../contracts/task.js'
-import type { RecordEntry, RecordPart } from '../contracts/records.js'
+import type { RecordEntry } from '../contracts/records.js'
 import { RecordJournal } from '../application/record-journal.js'
+import { decodeLegacySealedRecords, decodeLegacySealedTask, legacyLocalRecordsReference, LEGACY_BASELINE, legacyMigratedTaskId } from './legacy-record-export.js'
+export { LEGACY_BASELINE, legacyMigratedTaskId } from './legacy-record-export.js'
 import { TaskRecords, isSeparatedTask, type PreparedTask } from '../application/task-records.js'
 import type { RootTask, Join, ParticipantPlan } from '../experimental/private-git/protocol.js'
 import type { FrameworkTransactions } from './command-transactions.js'
@@ -16,7 +18,6 @@ import { initializeTask, paths, encodeJson, type TaskMetadata } from './task-fil
 import { workerPaths } from './role-tools.js'
 import { filePath, withSnapshot, type FilesStore, type FilesSnapshot, type FileChange } from './transactions.js'
 
-export const LEGACY_BASELINE = '0acd3ba39a2ae23d66759279b3c54c4637cd0ad5'
 type Continuation = 'running' | 'wait-result' | 'wait-user' | 'paused' | 'cancelled' | 'complete' | 'unresolved'
 export interface LegacyNativeExecution {
   executionId: string; sessionId: string; agentId?: string; role: string; generation: number; actionId: string
@@ -108,11 +109,6 @@ const hash = (data: string | Uint8Array) => createHash('sha256').update(data).di
 const utf8 = (text: string) => Buffer.from(text, 'utf8')
 const decode = (data: Uint8Array) => new TextDecoder('utf-8', { fatal: true }).decode(data)
 const identity = (value: string) => { filePath(value); if (value.includes('/')) throw new Error('Migration identity must occupy one path segment.'); return value }
-function taskId(scope: string, oldId: string): string {
-  if (/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(oldId)) return oldId
-  const digest = hash(scope + '\0' + oldId)
-  return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-8${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`
-}
 function localContinuation(task: Task): Continuation {
   if (task.control === 'cancelled' || task.phase === 'cancelled') return 'cancelled'
   if (task.phase === 'completed') return 'complete'
@@ -182,14 +178,9 @@ export async function captureLocalLegacy(source: Pick<StoragePort, 'list'>): Pro
   const archivedTask = async (id: string): Promise<Task | undefined> => {
     const index = await captured.get<{ deleting?: boolean; deliveryReadAt?: string }>('task-history/' + encodeURIComponent(id))
     if (index?.deleting) return undefined
-    const manifest = await captured.get<{ snapshot: RecordPart[] }>('records/' + encodeURIComponent(id) + '/manifest')
+    const manifest = await captured.get<unknown>('records/' + encodeURIComponent(id) + '/manifest')
     if (!manifest) return undefined
-    const pieces = await Promise.all(manifest.snapshot.map(async part => {
-      const value = await captured.get<{ text: string }>(part.key)
-      if (!value || hash(value.text) !== part.sha256 || value.text.length !== part.characters || Buffer.byteLength(value.text) !== part.bytes) throw new Error('Legacy archive part is missing or corrupt: ' + part.key)
-      return value.text
-    }))
-    const task = JSON.parse(pieces.join('')) as Task
+    const task = await decodeLegacySealedTask(manifest, id, key => captured.get(key)) as unknown as Task
     if (task.delivery && index?.deliveryReadAt) task.delivery.readAt = index.deliveryReadAt
     return task
   }
@@ -205,6 +196,14 @@ export async function captureLocalLegacy(source: Pick<StoragePort, 'list'>): Pro
   for (const value of map.values()) if ((value as RecordEntry)?.kind === 'servant-record-entry') {
     const entry = value as RecordEntry
     texts.push({ ref: entry.ref, text: await journal.fullText(entry.ref) })
+  }
+  // Preserve the already sealed document's original segment order. Ordinary
+  // RecordJournal entries are not the complete Task records document.
+  for (const [key, value] of map) if (/^records\/[^/]+\/manifest$/.test(key)) {
+    const id = decodeURIComponent(key.split('/')[1]!)
+    if (key !== 'records/' + encodeURIComponent(id) + '/manifest') throw new Error('Invalid legacy records identity: ' + key)
+    if ((map.get('task-history/' + encodeURIComponent(id)) as { deleting?: boolean } | undefined)?.deleting) continue
+    texts.push({ ref: legacyLocalRecordsReference(id), text: await decodeLegacySealedRecords(value, id, async part => map.get(part)) })
   }
   const tasks: LegacyTask[] = [], issues: string[] = []
   for (const [key, value] of map) if (key.startsWith('task:')) {
@@ -225,6 +224,23 @@ export async function captureLocalLegacy(source: Pick<StoragePort, 'list'>): Pro
         children: Object.values(task.children).map(child => ({ id: child.id, contract: child,
           reports: Object.values(task.reports).filter(report => report.childId === child.id),
           executions: Object.values(task.executions).filter(execution => execution.childId === child.id) })) }] })
+  }
+  // Baseline finishCleanup removes task:<id> but deliberately retains its
+  // sealed history. A current root always wins; historical discovery never
+  // recreates execution/wake ownership for an already ended Task.
+  for (const [key, value] of map) if (key.startsWith('task-history/')) {
+    const index = value as { schemaVersion?: number; taskId?: string; deleting?: boolean }
+    if (index.deleting) continue
+    const id = decodeURIComponent(key.slice('task-history/'.length))
+    if (index.schemaVersion !== 1 || index.taskId !== id || key !== 'task-history/' + encodeURIComponent(id)) throw new Error('Invalid legacy task history: ' + key)
+    if (map.has('task:' + id)) continue
+    const task = await archivedTask(id)
+    if (!task || task.id !== id || task.schemaVersion !== 1 || !task.goal || !task.reports) throw new Error('Legacy archived Task is missing or corrupt: ' + id)
+    const continuation = localContinuation(task)
+    if (continuation !== 'complete' && continuation !== 'cancelled') {
+      issues.push('Historical Task has no terminal continuation: ' + id); continue
+    }
+    tasks.push({ id, original: task, continuation, request: task.goal.request, participants: [] })
   }
   const after = (await source.list<unknown>('')).filter(row => isLocalLegacyKey(row.key)).map(row => ({ key: row.key, bytes: utf8(JSON.stringify(row.value)) })).sort((a, b) => a.key.localeCompare(b.key))
   if (revisionOf(after) !== revision) throw new Error('Legacy Local source changed during capture; no migration was prepared.')
@@ -622,7 +638,7 @@ export async function prepareLegacyMigration(source: LegacyCapture, files: Files
       }
     }
     if (['running', 'wait-result'].includes(task.continuation) && task.participants.length && task.participants.every(participant => participant.continuation === 'unresolved')) task.continuation = 'unresolved'
-    const id = taskId(options.id, task.id), recordPath = paths.archive(id) + '/legacy/task.json'
+    const id = legacyMigratedTaskId(options.id, task.id), recordPath = paths.archive(id) + '/legacy/task.json'
     add({ path: recordPath, content: encodeJson(task.original) })
     if (source.mode === 'local') for (const artifact of Object.values((task.original as Task).reports).flatMap(report => report.artifacts)) {
       const captured = options.artifacts?.find(item => item.sourcePath === artifact.path)

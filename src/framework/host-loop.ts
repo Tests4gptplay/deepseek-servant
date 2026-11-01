@@ -1,3 +1,4 @@
+import { LocalFiles } from './local-files.js'
 import { FrameworkTaskIndex } from './task-index.js'
 import { randomUUID, createHash } from 'node:crypto'
 import type { StoragePort } from '../contracts/ports.js'
@@ -5,7 +6,7 @@ import { signalWorkerId, parseDirectSignal } from './role-tools.js'
 import { cleanupRecordPath, type CleanupRecord } from './cleaner.js'
 import type { RecoveryRole } from './recovery.js'
 import type { FrameworkTransactions } from './command-transactions.js'
-import { discoverInbox, initializeTask, paths, readJson, type TaskMetadata } from './task-files.js'
+import { discoverInbox, initializeTask, taskIdentity, paths, readJson, type TaskMetadata } from './task-files.js'
 import { FilesConflictError, type FileEntry, type FilesSnapshot, type FilesStore } from './transactions.js'
 
 export interface RoleWake {
@@ -109,9 +110,25 @@ export class FrameworkHostLoop {
       const entries = await this.files.listDirectory(snapshot, 'tasks/')
       const tasks = await this.metadata.list(snapshot, entries)
       if (this.stopping) return
+      const locallyReleased = new Set(Object.entries(this.record.completed).filter(([, value]) => value.released).map(([id]) => id))
+      const manuallyCleared = new Set<string>(), unreadableCleanup = new Set<string>()
+      if (this.files instanceof LocalFiles) for (const task of tasks) {
+        if (this.record.completed[task.taskId]?.released) continue
+        try {
+          const cleanup = await readJson<CleanupRecord & { historyCleared?: boolean }>(this.files, snapshot, cleanupRecordPath(task.taskId))
+          if (cleanup?.version === 1 && cleanup.taskId === task.taskId && cleanup.phase === 'released' && cleanup.historyCleared === true) manuallyCleared.add(task.taskId)
+        } catch (error) { this.actions.error(error); unreadableCleanup.add(task.taskId) }
+      }
       if (this.identity.primary) {
         for (const entry of entries.filter(entry => /_(P|O)\.md$/.test(entry.path))) {
           if (this.seenSources.get(entry.path) === entry.version) continue
+          if (manuallyCleared.size || unreadableCleanup.size || locallyReleased.size) {
+            const sourceTask = taskIdentity(await this.files.read(snapshot, entry.path) ?? '')
+            if (sourceTask && (manuallyCleared.has(sourceTask) || unreadableCleanup.has(sourceTask) || locallyReleased.has(sourceTask))) {
+              this.seenSources.set(entry.path, entry.version)
+              continue
+            }
+          }
           const command = 'initialize:' + digest(entry.path + ':' + entry.version)
           let assignment = this.record.initial[command]
           if (!assignment) {
@@ -145,6 +162,14 @@ export class FrameworkHostLoop {
       for (const task of tasks) {
         if (this.stopping) return
         try {
+        if (this.record.completed[task.taskId]?.released || unreadableCleanup.has(task.taskId)) continue
+        if (manuallyCleared.has(task.taskId)) {
+          await this.actions.releaseTask(task.taskId)
+          const completion = this.record.completed[task.taskId] ??= {}
+          completion.released = true
+          await this.save()
+          continue
+        }
         if (task.status === 'complete') {
           const completion = this.record.completed[task.taskId] ??= {}
           if (completion.released) continue

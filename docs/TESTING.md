@@ -1,5 +1,18 @@
 # Test ownership and reproducibility
 
+The current development candidate is **0.5.0, not yet released**. Final results
+are attached to a fixed source commit, Host dependencies and package SHA-256.
+Intermediate suite totals are not a final acceptance claim.
+
+## Commands
+
+```sh
+npm run typecheck
+npm test
+npm run build
+npm run test:package
+```
+
 ## Current implementation
 
 Run `node scripts/test.mjs` (the default test entry). `scripts/test-suites.mjs`
@@ -84,6 +97,33 @@ or real-model session. A green current run does not establish real-host, public-
 user-machine or provider acceptance. Final acceptance must pin the same source
 commit, dependencies and installable package, inspect its contents (tests and
 historical trees excluded), and record which actual Host checks were performed.
+
+## Conversation, maintenance and preservation regressions
+
+Current suites also exercise complete long-text retention and character paging,
+Local selected-day versus Git cross-day history cursors, Foreground final-message
+capture and new-session continuity, legacy full-record reads/exports, read-only
+preference/project-fact discovery, explicit cleanup and record relocation.
+Manual cancelled-task cleanup checks exact producer settlement, keeps the user
+hold until the file transaction commits, preserves referenced binary artifacts,
+and prevents cold scheduling or old business mutations after retirement.
+Relocation tests include real filesystem/SQLite copies, canonical symlink paths,
+acknowledgement loss and replay with the original scope and command identity.
+Native stop and UI/RPC seams are identified in their fixtures; they are not claims
+of user-machine execution.
+
+Official-service composition with the upstream controlled MockAdapter has also
+exercised Planner/Worker three-round rework, explicit pause/resume, graceful
+shutdown/restart, Recorder/Cleaner and binary readback on identified candidates.
+Graceful shutdown is distinct from an operating-system kill; controlled model
+output is distinct from real-provider task quality. Later source changes require
+verification against the new candidate rather than inheriting an older package's
+result.
+
+**Public collaboration across different real accounts has not been executed.**
+Single-account checks, controlled HTTP and separate Host instances do not establish
+that joint-account result. Browser, installed Host, real-provider and user-device
+checks are reported separately with their actual versions and boundaries.
 
 ## Offline package checks
 

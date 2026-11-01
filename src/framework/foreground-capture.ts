@@ -62,14 +62,14 @@ export function captureForegroundTurns(events: readonly SessionEvent[]): Foregro
     if (!args) continue
     const evidence: ForegroundToolEvidence = { callId, resultMessageId: event.data.message.id, time: event.time }
     if (call.name === 'dss_conversation_read') {
-      if (args.mode !== 'message' && args.mode !== 'pending' && args.mode !== 'page') continue
+      if (args.mode !== 'message' && args.mode !== 'pending' && args.mode !== 'page' && args.mode !== 'text') continue
       // These tools render their actual result as one JSON text block.
       const content = event.data.message.content
       if (content.length !== 1 || content[0]?.type !== 'text') continue
       let value: Record<string, unknown> | undefined
       try { value = object(JSON.parse(content[0].text)) } catch { continue }
       if (!value) continue
-      const messages = args.mode === 'message' ? [value] : value.messages
+      const messages = args.mode === 'message' ? [value] : args.mode === 'text' && typeof value.text === 'string' ? [{ ...object(value.message), text: value.text }] : value.messages
       if (!Array.isArray(messages)) continue
       for (const candidate of messages) {
         const message = object(candidate)

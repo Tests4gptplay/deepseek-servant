@@ -1,3 +1,5 @@
+import { LocalFiles } from './local-files.js'
+import { foregroundMemoryGuide } from '../contracts/foreground-memory.js'
 import { captureCleanupInputs, captureCleanupReferences, cleanupRecordPath, type CleanupRecord, type RetentionManifest } from './cleaner.js'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -33,7 +35,7 @@ export interface FrameworkRoleServices {
   skillResourceAllowed?(binding: FrameworkRoleBinding, path: string): boolean
   conversation?: {
     foregroundRoot: string
-    read(input: { mode: 'page' | 'message' | 'recent' | 'pending' | 'memory'; limit?: number; beforeId?: string; reference?: string }, binding: FrameworkRoleBinding): Promise<unknown>
+    read(input: { mode: 'page' | 'message' | 'recent' | 'pending' | 'memory' | 'search' | 'text'; limit?: number; beforeId?: string; reference?: string; query?: string; cursor?: number }, binding: FrameworkRoleBinding): Promise<unknown>
     send(input: { id: string; text: string; intent: 'human' | 'ai'; replyTo?: string }, binding: FrameworkRoleBinding, commandId: string): Promise<unknown>
     claim(input: { messageIds: string[]; list: string; cache: string; expectedRevision: string }, binding: FrameworkRoleBinding, commandId: string): Promise<unknown>
   }
@@ -93,6 +95,11 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
   ctx.systemPrompt.section({ name: 'deepseek-servant:framework-role', order: 100, interpolate: false, text: frameworkRolePrompt(binding.role) })
   ctx.systemPrompt.section({ name: 'deepseek-servant:framework-binding', order: 101, interpolate: false,
     text: 'Current role and source locations: ' + JSON.stringify(binding) })
+  if (binding.role === 'Foreground' && services.conversation) ctx.systemPrompt.section({
+    name: 'deepseek-servant:foreground-memory-guide', order: 102, interpolate: false,
+    text: foregroundMemoryGuide(services.conversation.foregroundRoot + '/Foreground_List.md', services.conversation.foregroundRoot + '/Foreground_Cache.md',
+      'Use dss_conversation_read mode memory to read both documents before replacing them. Preserve their existing contents and sources in dss_conversation_claim, then read memory back before reporting an update. Never use empty replacement text merely because you have not read the old memory. Use dss_record at a reviewed snapshot for authorized document maintenance.'),
+  })
   const register = <T extends z.ZodType>(name: string, description: string, schema: T,
     execute: (input: z.infer<T>, exec: ToolRunContext) => Promise<unknown>) => {
     ctx.tools.register({ name, description, parameters: toolParameters(schema),
@@ -113,6 +120,11 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
   const task = async (value: View): Promise<TaskMetadata> => {
     const current = await readJson<TaskMetadata>(files, value.snapshot, paths.task(taskId(value)))
     if (!current) throw new Error('Task metadata does not exist; use the supplied direct-task paths for a short task.')
+    if (files instanceof LocalFiles) {
+      const cleanup = await readJson<CleanupRecord & { historyCleared?: boolean }>(files, value.snapshot, cleanupRecordPath(current.taskId))
+      if (cleanup?.version === 1 && cleanup.taskId === current.taskId && cleanup.phase === 'released' && cleanup.historyCleared === true)
+        throw new Error('This Task history was explicitly cleared; submit a new Task instead of reopening the old business flow.')
+    }
     return current
   }
   const reference = (id: string): ViewReference => {
@@ -262,7 +274,10 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
         ]
       }))
     if (services.conversation) {
-      register('dss_conversation_read', 'Read confirmed shared conversation history in this collaboration scope.', z.object({ mode: z.enum(['page', 'message', 'recent', 'pending', 'memory']), limit: z.number().int().positive().optional(), beforeId: z.string().optional(), reference: z.string().optional() }), input => services.conversation!.read(input, binding))
+      register('dss_conversation_read', 'Read confirmed shared conversation history in this collaboration scope.', z.object({ mode: z.enum(['page', 'message', 'recent', 'pending', 'memory', 'search', 'text']), limit: z.number().int().positive().optional(), beforeId: z.string().optional(), reference: z.string().optional(), query: z.string().optional(), cursor: z.number().int().nonnegative().optional() }).superRefine((input, ctx) => {
+        if (input.mode === 'search' && (!input.query?.trim() || (input.limit !== undefined && input.limit > 50))) ctx.addIssue({ code: 'custom', message: 'Search requires a phrase and at most 50 results per page.' })
+        if (input.mode === 'text' && (!input.reference || (input.limit !== undefined && input.limit > 262144))) ctx.addIssue({ code: 'custom', message: 'Text requires a reference and at most 262144 characters per page.' })
+      }), input => services.conversation!.read(input, binding))
       register('dss_conversation_send', 'Write a scoped conversation message with explicit human or AI intent, retaining supplied identity and reply references.',
         z.object({ id: z.string(), text: z.string(), intent: z.enum(['human', 'ai']), replyTo: z.string().optional() }),
         (input, exec) => services.conversation!.send(input, binding, command(exec)))

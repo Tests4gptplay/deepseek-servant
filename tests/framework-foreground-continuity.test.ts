@@ -33,7 +33,7 @@ async function until(check: () => boolean | Promise<boolean>, label: string) {
     await new Promise(resolve => setTimeout(resolve, 10))
   }
 }
-async function fixture(t: TestContext, rounds: number, silent = false, interrupted = false, explicitSend?: 'same' | 'different') {
+async function fixture(t: TestContext, rounds: number, silent = false, interrupted = false, explicitSend?: 'same' | 'different', resetBackground = false) {
   const root = await mkdtemp(join(tmpdir(), 'dss-current-foreground-'))
   const ctx = new Context(), files = await LocalFiles.open(join(root, 'files'))
   let runtime: FrameworkRoleRuntime | undefined
@@ -62,11 +62,18 @@ async function fixture(t: TestContext, rounds: number, silent = false, interrupt
     ...(explicitSend ? [() => toolCallResponse('conversation-' + (++call), 'dss_conversation_send', { id: 'explicit-answer-' + round, text: answer(round), intent: 'human', replyTo: 'user-' + round })] : []),
     () => textResponse(silent ? '' : answer(round) + (explicitSend === 'different' ? '\nAdditional actual native final.' : '')),
   ]).flat()
-  const adapter = new MockAdapter(interrupted ? [...script.slice(0, 2), 'hang'] : script)
+  const adapter = new MockAdapter(resetBackground ? [...script.slice(0, 2),
+    () => toolCallResponse('reset-snapshot', 'dss_snapshot', {}),
+    options => {
+      const snapshot = options.messages.filter(message => message.role === 'tool').flatMap(texts).flatMap(text => { try { return [JSON.parse(text)] } catch { return [] } }).findLast(value => value.snapshotId)
+      assert.ok(snapshot)
+      return toolCallResponse('reset-task', 'dss_submit_task', { snapshotId: snapshot.snapshotId, name: 'independent-background', route: 'P', text: 'Synthetic independent task remains active while conversation reset stops only Foreground.' })
+    }, 'hang', 'hang', 'hang'] : interrupted ? [...script.slice(0, 2), 'hang'] : script)
   ctx.llm.registerAdapter(['controlled'], adapter)
   const rows = new Map<string, unknown>(), errors: unknown[] = []
+  let heartbeats = 0
   const storage: StoragePort = { get: async key => structuredClone(rows.get(key)) as never, set: async (key, value) => { rows.set(key, structuredClone(value)) }, list: async prefix => [...rows].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value: structuredClone(value) })) as never }
-  runtime = new FrameworkRoleRuntime(ctx, files, storage, { scope: 'native-foreground', member: 'synthetic-A', primary: true, workspace: root, workerSeats: 0, mode: 'local', collaborationId: 'native-foreground' }, { members: () => ['synthetic-A'], resources: () => [], heartbeat: async () => {}, error: error => errors.push(error) })
+  runtime = new FrameworkRoleRuntime(ctx, files, storage, { scope: 'native-foreground', member: 'synthetic-A', primary: true, workspace: root, workerSeats: 0, mode: 'local', collaborationId: 'native-foreground' }, { members: () => ['synthetic-A'], resources: () => [], heartbeat: async () => { heartbeats++ }, error: error => errors.push(error) })
   await runtime.start()
   const exchange = async (round: number) => {
     await runtime!.conversation.send('user-' + round, { id: 'user-' + round, participantId: 'synthetic-A', role: 'user', text: question(round), createdAt: new Date(Date.UTC(2026, 10, 1, 0, round)).toISOString(), recipient: 'ai' })
@@ -80,7 +87,7 @@ async function fixture(t: TestContext, rounds: number, silent = false, interrupt
     await ctx.sessions.flush(owned.actualAgent.session)
     return owned
   }
-  return { runtime, adapter, exchange, ctx, storage, root, files, errors, extraDisposers }
+  return { runtime, adapter, exchange, ctx, storage, root, files, errors, extraDisposers, heartbeats: () => heartbeats }
 }
 
 test('current native Foreground finishes two interactions in separate sessions and records actual answers', async t => {
@@ -195,4 +202,70 @@ for (const mode of ['same', 'different'] as const) test(`real Foreground send pl
   const seedText = texts(seeds[0]).join('\n')
   const originals = JSON.parse(seedText.slice(seedText.indexOf('\n') + 1)) as Array<Array<{ text: string; role: string }>>
   assert.deepEqual(originals.map(group => group.map(message => [message.role, message.text])), [[['user', question(0)], ...expected.map(text => ['assistant', text])]])
+})
+
+for (const outcome of ['confirmed', 'unknown'] as const) test(`Local Foreground reset stops its exact owner before ${outcome} action and replay does not stop a later session or background Task`, async t => {
+  const { runtime, ctx, adapter, storage, heartbeats } = await fixture(t, 1, false, false, undefined, true)
+  await runtime.conversation.send('user-0', { id: 'user-0', participantId: 'synthetic-A', role: 'user', text: question(0), createdAt: '2026-11-01T00:00:00Z', recipient: 'ai' })
+  await runtime.wake({ id: 'reset-original', role: 'Foreground', reason: 'notification', sources: [] })
+  await until(() => adapter.requests.length >= 6, 'Actual Foreground and independently submitted Planner must both be in flight')
+  const old = runtime.native.get(foregroundWork)!
+  const bindings = adapter.requests.map(request => {
+    const text = request.messages.filter(message => message.role === 'system').flatMap(texts).join('\n')
+    const marker = 'Current role and source locations: '
+    return JSON.parse(text.slice(text.indexOf(marker) + marker.length).split('\n')[0]) as { role: string; workId: string; taskId?: string }
+  })
+  const planner = bindings.find(binding => binding.role === 'Planner')!
+  assert.ok(planner?.taskId, 'The background Task must be submitted through actual native tools')
+  const background = runtime.native.get(planner.workId)!
+  assert.equal(old.observe().state, 'running')
+  assert.equal(background.observe().state, 'running')
+  await runtime.wake({ id: 'reset-pending-old-recovery', role: 'Foreground', reason: 'startup-recovery', sources: [], context: { facts: 'Synthetic existing continuation queued behind the busy old Foreground.' } })
+  const beforeWakes = await storage.list<any>('framework-runtime/')
+  assert.ok(beforeWakes.some(row => row.key.includes('/wakes/') && row.value.request?.id === 'reset-pending-old-recovery' && !row.value.delivered))
+  let actions = 0
+  const reset = () => runtime.withForegroundReset('clear-chat-' + outcome, async () => {
+    actions++
+    const wakes = await storage.list<any>('framework-runtime/')
+    assert.ok(wakes.some(row => row.key.includes('/wakes/') && row.value.request?.id === 'reset-pending-old-recovery' && row.value.delivered), 'Old queued continuation is withdrawn before file action begins')
+    assert.equal(ctx.agents.get(old.actualAgent.id), undefined, 'File action cannot begin before the exact old native Foreground is retired')
+    const inspection = await new DshSessionReader(ctx).inspect(old.sessionId)
+    assert.equal(inspection.liveAgent, false)
+    assert.deepEqual(inspection.liveJobIds, [])
+    assert.equal(inspection.lastTurn?.reason, 'aborted')
+    assert.equal(inspection.lastTurn?.abortCause, 'disposed')
+    assert.equal((await runtime.conversation.page(100)).messages.some(message => message.role === 'assistant' && message.text === 'partial'), false, 'Interrupted stream fragments are not a completed assistant reply')
+    assert.equal(runtime.native.get(planner.workId), background)
+    assert.equal(background.observe().state, 'running', 'Reset cannot stop an unrelated real background Task')
+    if (outcome === 'unknown' && actions === 1) throw new Error('Synthetic action outcome unknown; no file deletion asserted')
+    return 'action-observed'
+  })
+  if (outcome === 'unknown') await assert.rejects(reset(), /action outcome unknown/)
+  else assert.equal(await reset(), 'action-observed')
+  await runtime.conversation.send('user-1', { id: 'user-1', participantId: 'synthetic-A', role: 'user', text: question(1), createdAt: '2026-11-01T00:01:00Z', recipient: 'ai' })
+  await runtime.wake({ id: 'reset-later', role: 'Foreground', reason: 'notification', sources: [] })
+  if (outcome === 'unknown') {
+    assert.ok((await runtime.conversation.page(100)).messages.some(message => message.id === 'user-1' && message.text === question(1)), 'New user input remains durably recorded while cleanup outcome is unresolved')
+    const initialHeartbeats = heartbeats()
+    await until(() => heartbeats() >= initialHeartbeats + 2, 'Real Host polling must continue while cleanup is unresolved')
+    assert.equal(adapter.requests.length, 6, 'No new Foreground may enter before the same cleanup action resolves')
+    assert.equal(runtime.native.get(foregroundWork), undefined)
+    assert.equal(runtime.native.get(planner.workId), background)
+    assert.equal(background.observe().state, 'running', 'Only Foreground admission is held, not background execution')
+    const pending = await storage.list<any>('framework-runtime/')
+    assert.ok(pending.some(row => row.key.includes('/wakes/') && row.value.request?.id === 'reset-later' && !row.value.delivered))
+    assert.equal(await reset(), 'action-observed', 'The original command resolves the pending action before admission resumes')
+  }
+  await until(() => adapter.requests.length >= 7, 'New post-reset conversation must admit a new native session')
+  const later = runtime.native.get(foregroundWork)!
+  assert.ok(later)
+  assert.notEqual(later.sessionId, old.sessionId)
+  assert.equal(later.observe().state, 'running')
+  assert.equal(await reset(), 'action-observed')
+  assert.equal(actions, outcome === 'unknown' ? 3 : 2, 'The callback retains responsibility for its own stable-command replay')
+  assert.equal(runtime.native.get(foregroundWork), later)
+  assert.equal(ctx.agents.get(later.actualAgent.id), later.actualAgent)
+  assert.equal(later.observe().state, 'running', 'Replayed old reset must not cancel a newly admitted conversation')
+  assert.equal(runtime.native.get(planner.workId), background)
+  assert.equal(background.observe().state, 'running')
 })

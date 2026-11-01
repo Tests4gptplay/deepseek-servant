@@ -427,3 +427,108 @@ test('stopping during shared discovery does not start task enumeration afterward
   const stopped=f.loop.stop();release.resolve();await Promise.all([polling,stopped])
   assert.equal(lists,0)
 }))
+
+test('fresh Host loop honors explicit cleared-history receipt before completion notifications and persists local release', () => fixture(async f => {
+  const cleared = 'a1111111-1111-4111-8111-111111111111', running = 'b2222222-2222-4222-8222-222222222222'
+  const receiptPath = 'technical/cleanup/' + cleared + '.json'
+  const artifact = paths.archive(cleared) + '/retained-result.bin'
+  const bytes = new Uint8Array([0, 255, 128, 10, 1])
+  await withSnapshot(f.files, snapshot => f.files.commit(snapshot, [
+    { path: paths.task(cleared), content: encodeJson({ version: 1, taskId: cleared, route: 'P', sourcePath: 'tasks/cleared_P.md', owner: 'A', status: 'complete', resultPaths: [artifact] }) },
+    { path: receiptPath, content: encodeJson({ version: 1, taskId: cleared, phase: 'released', historyCleared: true, retentionHash: 'verified-before-user-clear', deletedPaths: [paths.archive(cleared) + '/records.md'], preservedPaths: [artifact], preservedArtifacts: [artifact] }) },
+    { path: artifact, bytes },
+    { path: paths.task(running), content: encodeJson({ version: 1, taskId: running, route: 'P', sourcePath: 'tasks/active_P.md', owner: 'A', status: 'running' }) },
+    { path: paths.state('A', running) + '/' + workerWakeSignal('active-child'), content: '' },
+  ], 'synthetic completed receipt and independent active task'))
+  const values = new Map<string, unknown>()
+  const storage: StoragePort = { get: async key => structuredClone(values.get(key)) as never, set: async (key, value) => { values.set(key, structuredClone(value)) }, list: async prefix => [...values].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value: structuredClone(value) })) as never }
+  const wakes: RoleWake[] = [], released: string[] = [], errors: unknown[] = []
+  const actions: HostLoopActions = { startup: async () => {}, observe: async () => {}, executing: () => false,
+    wake: async wake => { wakes.push(wake) }, releaseTask: async id => { released.push(id) },
+    sealBusiness: async task => { assert.notEqual(task.taskId, cleared, 'Cleared history must not re-enter business sealing') },
+    clean: async task => { assert.notEqual(task.taskId, cleared, 'Explicitly cleared history must not run Cleaner again') }, error: error => errors.push(error) }
+  const reads: string[] = [], directories: string[] = [], read = f.files.read.bind(f.files), list = f.files.listDirectory.bind(f.files)
+  f.files.read = async (snapshot, path) => { reads.push(path); return read(snapshot, path) }
+  f.files.listDirectory = async (snapshot, path) => { directories.push(path); return list(snapshot, path) }
+  const makeLoop = () => new FrameworkHostLoop(f.files, new FrameworkTransactions(f.files, storage, 'fresh-local'), storage, { member: 'A', primary: true, scope: 'fresh-local' }, () => ['A'], actions)
+  const first = makeLoop()
+  try { await first.start(); await first.poll() } finally { await first.stop() }
+  assert.deepEqual(wakes.filter(wake => wake.taskId === cleared).map(wake => wake.role), [], 'No Foreground/Recorder may rebuild explicitly cleared Task history')
+  assert.deepEqual(errors, [])
+  assert.deepEqual(released, [cleared])
+  assert.ok(wakes.some(wake => wake.taskId === running && wake.role === 'Worker'))
+  assert.equal(reads.filter(path => path === receiptPath).length, 1)
+  const restarted = makeLoop()
+  try { await restarted.start(); await restarted.poll() } finally { await restarted.stop() }
+  assert.deepEqual(released, [cleared], 'Local release association survives Host reconstruction')
+  assert.equal(reads.filter(path => path === receiptPath).length, 1, 'Released old Task receipt is not polled again')
+  assert.ok(!directories.some(path => path.startsWith(paths.state('A', cleared))))
+  await withSnapshot(f.files, async snapshot => assert.deepEqual(await f.files.readBytes(snapshot, artifact), bytes))
+}))
+
+for (const change of [
+  { historyCleared: false }, { historyCleared: 'true' }, { version: 2 },
+  { taskId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee' }, { phase: 'files-cleaned' },
+]) test('non-authoritative cleared-history receipt does not suppress completion: ' + JSON.stringify(change), () => fixture(async f => {
+  const id = 'c3333333-3333-4333-8333-333333333333'
+  await put(f.files, paths.task(id), encodeJson({ version: 1, taskId: id, route: 'P', sourcePath: 'tasks/old_P.md', owner: 'A', status: 'complete' }))
+  await put(f.files, 'technical/cleanup/' + id + '.json', encodeJson({ version: 1, taskId: id, phase: 'released', historyCleared: true, retentionHash: 'existing', deletedPaths: [], preservedPaths: [], ...change }))
+  await f.loop.poll()
+  assert.deepEqual(f.wakes.map(wake => wake.role), ['Foreground', 'Recorder'])
+  assert.ok(!f.actions.includes('release'))
+}))
+
+test('cleared-history local release failure retains responsibility without recreating completion notifications', () => fixture(async f => {
+  const id = 'd4444444-4444-4444-8444-444444444444'
+  await put(f.files, paths.task(id), encodeJson({ version: 1, taskId: id, route: 'O', sourcePath: 'tasks/old_O.md', owner: 'A', status: 'complete' }))
+  await put(f.files, 'technical/cleanup/' + id + '.json', encodeJson({ version: 1, taskId: id, phase: 'released', historyCleared: true, retentionHash: 'checked', deletedPaths: [], preservedPaths: [] }))
+  let attempts = 0
+  f.hooks.releaseTask = async taskId => { assert.equal(taskId, id); if (++attempts === 1) throw new Error('Local release not yet persisted') }
+  await f.loop.poll()
+  assert.equal(attempts, 1)
+  assert.equal(f.errors.length, 1)
+  assert.deepEqual(f.wakes, [])
+  await f.loop.poll(); await f.loop.poll()
+  assert.equal(attempts, 2)
+  assert.deepEqual(f.wakes, [])
+  assert.ok(!f.actions.includes('seal') && !f.actions.includes('clean'))
+}))
+
+test('cold Local Host cannot initialize or schedule a running Task whose cancelled history was explicitly cleared', () => fixture(async f => {
+  const id = 'a5555555-5555-4555-8555-555555555555', other = 'b6666666-6666-4666-8666-666666666666', source = 'tasks/cancelled_O.md'
+  await withSnapshot(f.files, s => f.files.commit(s, [
+    { path: source, content: 'Task ID: ' + id + '\nOriginal cancelled work' },
+    { path: paths.task(id), content: encodeJson({ version: 1, taskId: id, route: 'O', sourcePath: source, owner: 'A', status: 'running' }) },
+    { path: 'technical/cleanup/' + id + '.json', content: encodeJson({ version: 1, taskId: id, phase: 'released', historyCleared: true, retentionHash: 'user-cleared', deletedPaths: [], preservedPaths: [] }) },
+    { path: paths.state('A', id) + '/Organizer_Foreground', content: '' },
+    { path: paths.state('A', id) + '/Planner_Inbox', content: '' },
+    { path: paths.state('A', id) + '/' + workerWakeSignal('old-child'), content: '' },
+    { path: paths.task(other), content: encodeJson({ version: 1, taskId: other, route: 'P', sourcePath: 'tasks/other_P.md', owner: 'A', status: 'running' }) },
+    { path: paths.state('A', other) + '/' + workerWakeSignal('other-child'), content: '' },
+  ], 'cancelled and manually cleared fixture'))
+  const reads: string[] = [], directories: string[] = [], read = f.files.read.bind(f.files), list = f.files.listDirectory.bind(f.files)
+  f.files.read = async (snapshot, path) => { reads.push(path); return read(snapshot, path) }
+  f.files.listDirectory = async (snapshot, path) => { directories.push(path); return list(snapshot, path) }
+  await f.loop.poll(); await f.loop.poll()
+  assert.equal(reads.filter(path => path === source).length, 1, 'source identity is checked once without re-entering initialization or polling old state')
+  assert.equal(f.wakes.some(wake => wake.taskId === id), false)
+  assert.equal(directories.some(path => path.startsWith(paths.state('A', id))), false)
+  assert.equal(reads.some(path => path.startsWith(paths.run(id) + '/')), false, 'no old Inbox or runtime body is observed')
+  assert.ok(f.wakes.some(wake => wake.taskId === other && wake.role === 'Worker'))
+  assert.equal((await withSnapshot(f.files, s => readJson<TaskMetadata>(f.files, s, paths.task(id))))!.status, 'running', 'cancelled is not fabricated as complete')
+  assert.equal(f.actions.filter(action => action === 'release').length, 1)
+}))
+
+test('a reused source filename with a new explicit Task ID initializes the new Task after manual history cleanup', () => fixture(async f => {
+  const old = 'a7777777-7777-4777-8777-777777777777', fresh = 'b8888888-8888-4888-8888-888888888888', source = 'tasks/reused_P.md'
+  await withSnapshot(f.files, s => f.files.commit(s, [
+    { path: source, content: 'Task ID: ' + fresh + '\nA genuinely new request' },
+    { path: paths.task(old), content: encodeJson({ version: 1, taskId: old, route: 'P', sourcePath: source, owner: 'A', status: 'running' }) },
+    { path: 'technical/cleanup/' + old + '.json', content: encodeJson({ version: 1, taskId: old, phase: 'released', historyCleared: true, retentionHash: 'manual', deletedPaths: [], preservedPaths: [] }) },
+  ], 'new Task identity reuses prior filename'))
+  await f.loop.poll(); await f.loop.poll(); await f.loop.poll()
+  const task = await withSnapshot(f.files, s => readJson<TaskMetadata>(f.files, s, paths.task(fresh)))
+  assert.equal(task!.taskId, fresh)
+  assert.ok(f.wakes.some(wake => wake.taskId === fresh && wake.role === 'Planner'))
+  assert.equal(f.wakes.some(wake => wake.taskId === old), false)
+}))

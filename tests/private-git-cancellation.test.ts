@@ -119,8 +119,9 @@ for (const explicitReason of [false, true]) test('real ghToken execFile cancels 
   await writeFile(executable, '#!' + process.execPath + '\n' + `
 const fs = require('node:fs');
 process.on('SIGTERM', () => { fs.writeFileSync(${JSON.stringify(stopped)}, 'cancelled'); process.exit(0); });
-fs.writeFileSync(${JSON.stringify(started)}, JSON.stringify(process.argv.slice(2)));
-process.stdout.write('synthetic-output-never-a-real-token');
+process.stdout.write('synthetic-output-never-a-real-token', () => {
+  fs.writeFileSync(${JSON.stringify(started)}, JSON.stringify(process.argv.slice(2)));
+});
 setTimeout(() => { fs.writeFileSync(${JSON.stringify(stopped)}, 'guard'); process.exit(0); }, 3000);
 `)
   await chmod(executable, 0o700)

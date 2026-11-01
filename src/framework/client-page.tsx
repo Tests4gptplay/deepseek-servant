@@ -1,3 +1,7 @@
+import { RecordMovePanel } from './record-move-panel.js'
+import { illustrationFor, showCornerIllustration } from '../client/illustrations.js'
+import { frameworkMessageAuthor } from './client-presentation.js'
+import { ManualCleanupPanel } from './manual-cleanup-panel.js'
 import { KnowledgeRecordView } from './knowledge-records.js'
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { Button, Input, Modal, SegmentedControl, StateDot, IconSettingsOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -26,12 +30,13 @@ export function FrameworkPage(props: FrameworkPageProps) {
   const [tab, setTab] = useState<'conversation' | 'tasks' | 'archives' | 'resources' | 'knowledge'>('conversation')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [error, setError] = useState('')
+  const [exported, setExported] = useState('')
   const [selectedTask, setSelectedTask] = useState<string>()
   const [draft, setDraft] = useState('')
   const draftText = useRef('')
   const [recipient, setRecipient] = useState<'ai' | 'human'>('ai')
   const [replyTo, setReplyTo] = useState<string>()
-  const [document, setDocument] = useState<Awaited<ReturnType<FrameworkClientApi['readFile']>>>()
+  const [document, setDocument] = useState<Omit<Awaited<ReturnType<FrameworkClientApi['readFile']>>, 'path'> & { path?: string; label?: string }>()
   const [documentLoading, setDocumentLoading] = useState(false)
   const documentRequest = useRef(0)
   const [historyBusy, setHistoryBusy] = useState(false)
@@ -47,7 +52,7 @@ export function FrameworkPage(props: FrameworkPageProps) {
     const saved = draftsByScope.current.get(scope) ?? (previousScope.current === '' ? draftsByScope.current.get('') : undefined)
     draftText.current = saved?.text ?? ''
     setDraft(saved?.text ?? ''); setReplyTo(saved?.replyTo); setRecipient(saved?.recipient ?? 'ai')
-    setDocument(undefined); documentRequest.current++; setDocumentLoading(false); setSelectedTask(undefined)
+    setExported(''); setDocument(undefined); documentRequest.current++; setDocumentLoading(false); setSelectedTask(undefined)
     previousScope.current = scope
   }, [scope])
   const remember = (text: string, reply = replyTo, target = recipient) => { draftText.current = text; setDraft(text); setReplyTo(reply); setRecipient(target); draftsByScope.current.set(scope, { text, replyTo: reply, recipient: target }) }
@@ -66,6 +71,26 @@ export function FrameworkPage(props: FrameworkPageProps) {
     try { const result = await props.api.readFile({ mode: view.activeMode, storageScope: view.storageScope, path }); if (request === documentRequest.current) setDocument(result) }
     catch (reason) { if (request === documentRequest.current) setError(reason instanceof Error ? reason.message : String(reason)) }
     finally { if (request === documentRequest.current) setDocumentLoading(false) }
+  }
+  const sameDocumentScope = () => {
+    const current = controller.snapshot().value
+    return current && frameworkScopeKey(current.activeMode, current.collaborationId, current.storageScope) === scope
+  }
+  const openLegacyRecords = async (task: FrameworkLegacyTask) => {
+    if (!view) return
+    const request = ++documentRequest.current; setDocument(undefined); setDocumentLoading(true)
+    try {
+      const result = await props.api.legacyRecords({ mode: view.activeMode, storageScope: view.storageScope, migrationId: task.migrationId, oldTaskId: task.oldTaskId })
+      if (request === documentRequest.current && sameDocumentScope()) setDocument({ ...result, label: tr('完整原记录', 'Complete original records') + ' · ' + task.oldTaskId })
+    } catch (reason) { if (request === documentRequest.current && sameDocumentScope()) setError(reason instanceof Error ? reason.message : String(reason)) }
+    finally { if (request === documentRequest.current && sameDocumentScope()) setDocumentLoading(false) }
+  }
+  const exportLegacyRecords = async (task: FrameworkLegacyTask) => {
+    if (!view || view.activeMode !== 'local') return
+    try {
+      const result = await props.api.exportRecords({ mode: 'local', storageScope: view.storageScope, migrationId: task.migrationId, oldTaskId: task.oldTaskId })
+      if (sameDocumentScope()) setExported(result.path)
+    } catch (reason) { if (sameDocumentScope()) setError(reason instanceof Error ? reason.message : String(reason)) }
   }
   const pending = snapshot.drafts.filter(item => frameworkScopeKey(item.input.mode, item.input.collaborationId, item.input.storageScope) === scope && (item.state !== 'confirmed' || !view?.messages.some(message => message.id === item.input.id)))
   const messages = useRef<HTMLDivElement>(null), followBottom = useRef(true), previousTop = useRef(0)
@@ -120,6 +145,8 @@ export function FrameworkPage(props: FrameworkPageProps) {
   }
   const task = view?.tasks.find(item => item.taskId === selectedTask)
   const empty = !view || (tab === 'conversation' ? !view.messages.length : tab === 'tasks' ? !view.tasks.length : false)
+  const imageFor = (page: 'conversation' | 'tasks') => illustrationFor(page, view?.settings ?? blankSettings) === 'welcome' ? __SERVANT_WELCOME_CHARACTER_DATA_URI__ : __SERVANT_TASK_EMPTY_CHARACTER_DATA_URI__
+  const corner = showCornerIllustration(!empty, view?.settings ?? blankSettings)
   return <section className={css.page} aria-label="DeepSeek Servant">
     <header className={css.heading}><div className={css.identity}>
       <img className={css.avatar} src={__SERVANT_ICON_DATA_URI__} alt="" />
@@ -139,7 +166,7 @@ export function FrameworkPage(props: FrameworkPageProps) {
       {view?.activeMode === 'git' && <span className={css.muted}>{tr('Git 协作模式', 'Git collaboration mode')}</span>}
     </div>{view && <span className={css.muted}>{view.collaborationId} · {view.connection.member}{view.connection.workerSeats !== undefined && <> · {tr('已生效席位', 'Applied seats')}: {view.connection.workerSeats}{view.connection.workerSeats !== view.settings.workerSeats && <> ({tr('已保存设置', 'Saved setting')}: {view.settings.workerSeats})</>}</>}</span>}</nav>
     {(error || snapshot.error || view?.connection.detail) && <div className={css.notice} role={error || snapshot.error ? 'alert' : 'status'}>{error || snapshot.error || view?.connection.detail}</div>}
-    <div className={`${css.content} ${!empty && view?.settings.showCornerCharacter !== false ? css.contentWithCorner : ''}`}>
+    <div className={`${css.content} ${corner ? css.contentWithCorner : ''}`}>
       {tab === 'conversation' && <div className={css.conversation}>
         <div className={css.historyNavigation}>{view?.pageBefore && <Button size="sm" disabled={historyBusy} onClick={loadOlder}>{tr('读取更早消息', 'Load earlier messages')}</Button>}
           <label>{tr('保存日期（UTC）', 'Saved date (UTC)')}<input type="date" aria-label={tr('保存日期（UTC）', 'Saved date (UTC)')} value={historyDate} onChange={event => setHistoryDate(event.target.value)} /></label>
@@ -149,9 +176,9 @@ export function FrameworkPage(props: FrameworkPageProps) {
         </div>
         <div ref={messages} className={css.messages} role="log" aria-live="polite" aria-busy={historyBusy}
           onScroll={onScroll} onWheel={event => { if (event.deltaY < 0 && event.currentTarget.scrollTop < event.currentTarget.clientHeight / 2) loadOlder() }}>
-          {empty && <div className={css.welcome}><img className={css.welcomeIcon} src={view?.settings.swapPageIllustrations ? __SERVANT_TASK_EMPTY_CHARACTER_DATA_URI__ : __SERVANT_WELCOME_CHARACTER_DATA_URI__} alt="" /><h2>{tr('从这里开始', 'Start here')}</h2></div>}
+          {empty && <div className={css.welcome}><img className={css.welcomeIcon} src={imageFor('conversation')} alt="" /><h2>{tr('从这里开始', 'Start here')}</h2></div>}
           {view?.messages.filter(message => message.role !== 'system' || message.source === 'deepseek-servant-status').map(message => <article key={message.id} data-message-id={message.id} className={`${css.message} ${message.role === 'user' ? css.userMessage : ''}`}>
-            <div className={css.messageAuthor}>{message.participantId} · {message.role} · {message.createdAt}{message.device ? ' · ' + message.device : ''}{message.model ? ' · ' + message.model : ''}{message.modelVersion ? ' · ' + message.modelVersion : ''}</div>
+            <div className={css.messageAuthor} title={message.participantId}>{frameworkMessageAuthor(view.activeMode, message, view.settings)} · {message.role} · {message.createdAt}{message.device ? ' · ' + message.device : ''}{message.model ? ' · ' + message.model : ''}{message.modelVersion ? ' · ' + message.modelVersion : ''}</div>
             {message.replyTo && <p className={css.muted}>{tr('回复', 'Reply to')} {message.replyTo}</p>}
             <div className={css.messageText}>{message.text}</div>
             <Button size="sm" onClick={() => remember(draft, message.id)}>{tr('回复此条', 'Reply')}</Button>
@@ -170,7 +197,7 @@ export function FrameworkPage(props: FrameworkPageProps) {
         </div><p className={css.footnote}>{tr('切换页面或模式不停止已承接的后台工作。', 'Changing pages or mode does not stop accepted background work.')}</p>
       </div>}
       {tab === 'tasks' && <div className={`${css.taskLayout} ${task ? css.hasSelection : ''}`}><div className={css.taskList}>
-        {empty && <div className={css.empty}><img className={css.welcomeIcon} src={view?.settings.swapPageIllustrations ? __SERVANT_WELCOME_CHARACTER_DATA_URI__ : __SERVANT_TASK_EMPTY_CHARACTER_DATA_URI__} alt="" /><h2>{tr('暂无任务', 'No tasks yet')}</h2></div>}
+        {empty && <div className={css.empty}><img className={css.welcomeIcon} src={imageFor('tasks')} alt="" /><h2>{tr('暂无任务', 'No tasks yet')}</h2></div>}
         {view?.tasks.map(item => <button key={item.taskId} className={`${css.taskRow} ${task?.taskId === item.taskId ? css.selected : ''}`} onClick={() => setSelectedTask(item.taskId)}>
           <span className={css.taskRowTitle}>{item.title}</span><span className={css.rowMeta}>{item.route} · {item.status} · {item.owner}</span><code>{item.taskId}</code>
         </button>)}</div>{task && <section className={css.taskDetail}><Button size="sm" onClick={() => setSelectedTask(undefined)}>{tr('返回', 'Back')}</Button><h2>{task.title}</h2>
@@ -180,18 +207,21 @@ export function FrameworkPage(props: FrameworkPageProps) {
           <RoleExecutions executions={task.executions} tr={tr} controller={controller} view={view} />
           <section className={css.section}><h3>{tr('成果与证据', 'Results and evidence')}</h3>{task.resultPaths.map(path => <button key={path} className={css.artifact} onClick={() => run(open(path))}><code>{path}</code></button>)}</section>
         </section>}</div>}
-      {(tab === 'tasks' || tab === 'archives') && view && <LegacyTasks tasks={view.legacyTasks} controller={controller} mode={view.activeMode} storageScope={view.storageScope} open={open} tr={tr} />}
+      {(tab === 'tasks' || tab === 'archives') && view && <LegacyTasks tasks={view.legacyTasks} controller={controller} mode={view.activeMode} storageScope={view.storageScope} open={open} openRecords={openLegacyRecords} exportRecords={exportLegacyRecords} tr={tr} />}
       {tab === 'knowledge' && view && <KnowledgePanel key={scope} api={props.api} view={view} tr={tr} />}
-      {tab === 'archives' && <div className={css.knowledge}>{view?.archives.map(item => <section className={css.knowledgeCard} key={item.path}><h3>{item.title}</h3><code>{item.taskId}</code><button className={css.artifact} onClick={() => run(open(item.path))}>{item.path}</button>{item.files?.map(path => <button className={css.artifact} key={path} onClick={() => run(open(path))}>{path}</button>)}</section>)}</div>}
+      {tab === 'archives' && <div className={css.knowledge}>{view?.archives.map(item => <section className={css.knowledgeCard} key={item.path}><h3>{item.title}</h3><code>{item.taskId}</code><button className={css.artifact} onClick={() => run(open(item.path))}>{item.path}</button>{item.files?.map(path => <button className={css.artifact} key={path} onClick={() => run(open(path))}>{path}</button>)}{view.activeMode === 'local' && item.taskId && item.path.endsWith('/records.md') && <Button onClick={() => run(props.api.exportRecords({ mode: 'local', storageScope: view.storageScope, taskId: item.taskId! }).then(result => { if (controller.snapshot().value?.storageScope === view.storageScope) setExported(result.path) }))}>{tr('导出完整记录', 'Export complete records')}</Button>}</section>)}</div>}
+      {exported && <p role="status">{tr('记录已导出到', 'Records exported to')}: {exported}</p>}
       {tab === 'resources' && <div className={css.knowledge}>{view?.resources.map(resource => <section className={css.knowledgeCard} key={resource.instanceUUID ?? resource.name}><div className={css.rowBetween}><h3>{resource.name}</h3><span className={css.badge}>{resource.status}</span></div>
         <p>{tr('Worker 席位', 'Worker seats')}：{resource.workerSeats ?? tr('未知', 'Unknown')}</p><code>{resource.instanceUUID}</code>{resource.detail && <p>{resource.detail}</p>}</section>)}
         <RoleExecutions executions={view?.executions ?? []} tr={tr} controller={controller} view={view} /></div>}
     </div>
-    {!empty && view?.settings.showCornerCharacter !== false && <div className={css.cornerArt} aria-hidden="true"><img className={css.cornerCharacter} src={__SERVANT_WELCOME_CHARACTER_DATA_URI__} alt="" /></div>}
+    {corner && <div className={css.cornerArt} aria-hidden="true"><img className={css.cornerCharacter} src={imageFor(tab === 'conversation' ? 'conversation' : 'tasks')} alt="" /></div>}
     <Modal open={settingsOpen} onClose={() => setSettingsOpen(false)} title={tr('设置', 'Settings')} closeLabel={tr('关闭', 'Close')} className={css.settingsModal} contentClassName={css.settingsModalContent}>
       {settingsOpen && <FrameworkSettingsForm key={view?.activeMode ?? 'local'} {...props} controller={controller} view={view} />}
+      {settingsOpen && view?.activeMode === 'local' && (view.pendingRecordMove?.storageScope ?? view.storageScope) && <RecordMovePanel key={'move:' + (view.pendingRecordMove?.storageScope ?? scope) + ':' + (view.pendingRecordMove?.commandId ?? '')} api={props.api} storageScope={(view.pendingRecordMove?.storageScope ?? view.storageScope)!} settingsRevision={view.revision} pendingRequest={view.pendingRecordMove} tr={tr} changed={async () => { await controller.latest(); await controller.refresh(true) }} />}
+      {settingsOpen && view?.activeMode === 'local' && view.storageScope && <ManualCleanupPanel key={scope} api={props.api} storageScope={view.storageScope} tr={tr} changed={async () => { await controller.latest(); await controller.refresh(true) }} />}
     </Modal>
-    <Modal open={documentLoading || !!document} onClose={() => { documentRequest.current++; setDocument(undefined); setDocumentLoading(false) }} title={document?.path ?? tr('读取资料', 'Reading document')} closeLabel={tr('关闭', 'Close')} className={css.settingsModal} contentClassName={css.settingsModalContent}>
+    <Modal open={documentLoading || !!document} onClose={() => { documentRequest.current++; setDocument(undefined); setDocumentLoading(false) }} title={document?.label ?? document?.path ?? tr('读取资料', 'Reading document')} closeLabel={tr('关闭', 'Close')} className={css.settingsModal} contentClassName={css.settingsModalContent}>
       {documentLoading && <StateDot state="ongoing" />}{document?.text !== undefined && <div className={css.messageText}>{document.text}</div>}
       {document?.downloadUrl && <a className={css.artifact} href={document.downloadUrl} download>{tr('下载原文件', 'Download original file')}</a>}
       {document?.binary && <div><p>{document.binary.bytes} bytes</p><code>SHA-256 {document.binary.sha256}</code><a className={css.artifact} href={document.binary.downloadUrl} download>{tr('下载附件', 'Download attachment')}</a></div>}
@@ -234,7 +264,7 @@ function FrameworkSettingsForm(props: FrameworkPageProps & { controller: Framewo
   </div></form>
 }
 
-function LegacyTasks({ tasks, controller, mode, storageScope, open, tr }: { tasks: FrameworkLegacyTask[]; controller: FrameworkClientController; mode: 'local' | 'git'; storageScope?: string; open: (path: string) => Promise<void>; tr: (cn: string, en: string) => string }) {
+function LegacyTasks({ tasks, controller, mode, storageScope, open, openRecords, exportRecords, tr }: { tasks: FrameworkLegacyTask[]; controller: FrameworkClientController; mode: 'local' | 'git'; storageScope?: string; open: (path: string) => Promise<void>; openRecords: (task: FrameworkLegacyTask) => Promise<void>; exportRecords: (task: FrameworkLegacyTask) => Promise<void>; tr: (cn: string, en: string) => string }) {
   const [answers, setAnswers] = useState<Record<string, string>>({}), [busy, setBusy] = useState<string>(), [error, setError] = useState('')
   const attempts = useRef(new Map<string, { fingerprint: string; commandId: string }>())
   const act = (task: FrameworkLegacyTask, action: 'resume' | 'answer', waitId?: string) => {
@@ -250,7 +280,9 @@ function LegacyTasks({ tasks, controller, mode, storageScope, open, tr }: { task
     {tasks.map(task => { const key = JSON.stringify([mode, storageScope, task.migrationId, task.oldTaskId]); return <section className={css.knowledgeCard} key={key}>
       <div className={css.rowBetween}><h4>{task.oldTaskId}</h4><span className={css.badge}>{task.continuation}</span></div><code>{task.taskId}</code>
       {task.issues?.map((issue, index) => <p key={index} className={css.errorDetail}>{issue}</p>)}
-      <button className={css.artifact} onClick={() => { void open(task.recordPath) }}>{tr('打开完整原记录', 'Open complete original record')}<code>{task.recordPath}</code></button>
+      {task.recordPath && <button className={css.artifact} onClick={() => { void open(task.recordPath!) }}>{tr('原任务资料', 'Original task data')}<code>{task.recordPath}</code></button>}
+      {task.recordsAvailable && <Button onClick={() => { void openRecords(task) }}>{tr('完整原记录', 'Complete original records')}</Button>}
+      {task.recordsAvailable && mode === 'local' && <Button onClick={() => { void exportRecords(task) }}>{tr('导出完整原记录', 'Export complete original records')}</Button>}
       {task.continuation === 'paused' && <Button disabled={busy === JSON.stringify([mode, storageScope, task.migrationId, task.oldTaskId, undefined])} onClick={() => act(task, 'resume')}>{tr('继续任务', 'Resume task')}</Button>}
       {task.continuation !== 'complete' && task.continuation !== 'cancelled' && (task.waits ?? []).map(wait => {
         const answerKey = JSON.stringify([mode, storageScope, task.migrationId, task.oldTaskId, wait.id])

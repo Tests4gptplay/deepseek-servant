@@ -1,3 +1,5 @@
+import type { StorageUsageStats } from '../contracts/retention.js'
+import type { ManualTaskCleanupPreview, ManualCleanupResult } from './manual-cleanup.js'
 import type { FrameworkKnowledge, KnowledgeEdit } from './knowledge.js'
 export type FrameworkMode = 'local' | 'git'
 export type FrameworkClientRole = 'Foreground' | 'Organizer' | 'Planner' | 'Worker' | 'Recorder' | 'Helper'
@@ -37,10 +39,11 @@ export interface FrameworkClientResource {
 export interface FrameworkLegacyTask {
   migrationId: string; oldTaskId: string; taskId: string
   continuation: 'running' | 'wait-result' | 'wait-user' | 'paused' | 'cancelled' | 'complete' | 'unresolved'
-  recordPath: string; issues?: string[]
+  recordPath?: string; recordsAvailable?: boolean; issues?: string[]
   waits?: Array<{ id: string; question: string; memberIdentity: string }>
 }
 export interface FrameworkClientView {
+  pendingRecordMove?: { commandId: string; storageScope: string; expectedRevision: string; directory: string }
   revision: string
   activeMode: FrameworkMode
   collaborationId: string
@@ -63,10 +66,20 @@ export interface FrameworkSendInput {
   recipient: 'ai' | 'human'; replyTo?: string; device: string; timezoneOffsetMinutes: number
 }
 export interface FrameworkClientApi {
+  maintenanceView(input: { mode: 'local'; storageScope?: string }): Promise<{ localDirectory: string; recordsDirectory?: string; nativeDirectory?: string; usage: StorageUsageStats }>
+  openMaintenancePath(input: { mode: 'local'; storageScope?: string; target: 'records' | 'native-logs' }): Promise<{ path: string }>
+  exportRecords(input: { mode: 'local'; storageScope?: string; taskId?: string; migrationId?: string; oldTaskId?: string }): Promise<{ path: string; sha256: string; bytes: number }>
+  cleanupPreview(input: { mode: 'local'; storageScope?: string }): Promise<ManualTaskCleanupPreview>
+  cleanupRecords(input: { mode: 'local'; storageScope?: string; commandId: string } & (
+    { action: 'tasks'; preview: ManualTaskCleanupPreview; confirmation: 'clear-ended-task-records' }
+    | { action: 'conversation'; confirmation: 'clear-foreground-conversation' }
+    | { action: 'planning'; confirmation: 'clear-work-planning-notes' })): Promise<ManualCleanupResult>
   view(input: { mode?: FrameworkMode; includeArchives?: boolean }): Promise<FrameworkClientView>
   history(input: { mode: FrameworkMode; collaborationId: string; storageScope?: string; beforeId?: string; afterId?: string; date?: string; limit: number }): Promise<{ messages: FrameworkClientMessage[]; moreBefore?: string; moreAfter?: string; revision: string }>
   send(input: FrameworkSendInput): Promise<{ revision: string; replay?: boolean }>
   configure(input: { mode: FrameworkMode; commandId: string; expectedRevision?: string; settings: FrameworkClientSettings }): Promise<FrameworkClientView>
+  moveRecords(input: { mode: 'local'; storageScope: string; expectedRevision: string; commandId: string; directory: string }): Promise<FrameworkClientView>
+  legacyRecords(input: { mode: FrameworkMode; storageScope?: string; migrationId: string; oldTaskId: string }): Promise<{ text: string; revision: string }>
   legacyControl(input: { mode: FrameworkMode; storageScope?: string; commandId: string; migrationId: string; oldTaskId: string; action: 'resume' | 'answer'; waitId?: string; answer?: string }): Promise<FrameworkClientView>
   invite(input: { mode: 'git'; storageScope?: string; username: string }): Promise<{ status: 'pending' | 'accepted' }>
   knowledgeList(input: { mode: FrameworkMode; storageScope?: string }): ReturnType<FrameworkKnowledge['list']>

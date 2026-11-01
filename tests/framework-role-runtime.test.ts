@@ -140,6 +140,7 @@ test('assistant message captures actual native model source once, never configur
   let actualModel='actual-model-202610'
   runtime.native={get:()=>({actualAgent:{session:{requestContext:()=>({provider:'native-provider',model:actualModel})}}})}
   const binding={role:'Foreground',workId:'front',executionId:'e',owner:'A'}
+  runtime.roleRecords.set('front', { identity: binding, sessionId: 'actual-source-session', generation: 1 })
   await runtime.services().conversation.send({id:'answer',text:'result',intent:'human'},binding,'native-call-1')
   actualModel='different-current-model'
   await runtime.services().conversation.send({id:'answer',text:'result',intent:'human'},binding,'native-call-1')
@@ -1723,7 +1724,7 @@ test('runtime shutdown drains admitted Host and Helper diagnostics before servic
   const { FrameworkService } = await import('../src/framework/service.js')
   const { disposeResources } = await import('../src/framework/dispose-resources.js')
   const { runtime, rows } = queue(), entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
-  const events: string[] = [], reported: unknown[] = [], owner = { chain: Promise.resolve() }
+  const events: string[] = [], reported: unknown[] = [], owner = Object.assign(Object.create(DshStorageAdapter.prototype), { chain: Promise.resolve() })
   let closed = false, block = true
   const serial = <T>(run: () => Promise<T>): Promise<T> => (DshStorageAdapter.prototype as any).serial.call(owner, run)
   const guard = () => assert.equal(closed, false, 'admitted diagnostic cannot access closed storage')
@@ -1741,7 +1742,7 @@ test('runtime shutdown drains admitted Host and Helper diagnostics before servic
   runtime.error(new Error('accepted Helper fault'), { role: 'Helper' })
   await entered.promise
   const service = Object.create(FrameworkService.prototype) as any
-  Object.assign(service, { closed: false, configuration: Promise.resolve(), configurationOwners: new Set(), accessTransitions: new Map(), opening: new Map(), stopping: new WeakMap(), accessOpening: new Map(), backgroundOpening: new Map(), accesses: new Map(), listeners: new Set(), disposalErrors: [],
+  Object.assign(service, { closed: false, configuration: Promise.resolve(), configurationOwners: new Set(), accessTransitions: new Map(), opening: new Map(), stopping: new WeakMap(), relocationOwners: new Map(), accessOpening: new Map(), backgroundOpening: new Map(), accesses: new Map(), listeners: new Set(), disposalErrors: [],
     running: new Map([['local', { runtime, connection: { close: async () => { events.push('connection-closed') } } }]]) })
   const shutdown = disposeResources([() => service.dispose(), () => serial(async () => { closed = true; events.push('storage-closed') })])
   try {
@@ -2159,3 +2160,97 @@ for (const stopFailure of [false,true]) test('runtime disposal drains admitted F
   gate.resolve();await capture;await disposing
   assert.equal(events.includes('capture-persisted'),true);assert.equal(settled,true)
 })
+
+test('storage move settlement never treats ordinary runtime disposal or an absent live registry as confirmed producer stop', async () => {
+  const { runtime, rows } = queue()
+  runtime.roleRecords = new Map()
+  const record = { identity: { role: 'Worker', workId: 'old-worker', executionId: 'old-execution', taskId: 'T' }, sessionId: 'old-session', generation: 1 }
+  rows.set('test/roles/old', record)
+  runtime.dispose = async () => {}
+  let confirmed = false, checks = 0
+  runtime.stopOwnedRecord = async (target: any) => { checks++; assert.equal(target.identity.executionId, 'old-execution'); return confirmed ? { status: 'stopped' } : { status: 'unconfirmed', reason: 'native producer evidence missing', jobs: ['actual-job'] } }
+  runtime.saveRole = async (target: any) => { runtime.roleRecords.set(target.identity.workId, target); rows.set('test/roles/old', target) }
+  await assert.rejects(runtime.settleForStorageMove(), /unconfirmed native producer/)
+  assert.equal(rows.get('test/roles/old').stopped, undefined)
+  confirmed = true
+  await runtime.settleForStorageMove()
+  assert.equal(rows.get('test/roles/old').stopped, true)
+  await runtime.settleForStorageMove()
+  assert.equal(checks, 2, 'already confirmed stop is not killed again during move replay')
+})
+
+test('manual cancelled cleanup evidence requires exact settled producers and preserves the cancellation until commit', async t => {
+  const { runtime, files, storage } = await runtimeFixture(t), taskId = 'manual-cancelled';
+  await withSnapshot(files, snapshot => files.commit(snapshot, [{ path: paths.task(taskId), content: encodeJson({version:1,taskId,route:'O',owner:'A',status:'running',members:['A'],sourcePath:'tasks/cancel_O.md'}) }], 'setup'));
+  const record = {identity:{role:'Worker',workId:'owned-worker',executionId:'worker-e',taskId},sessionId:'worker-s',generation:1,stopped:true};
+  runtime.roleRecords.set(record.identity.workId,record); await storage.set(runtime.prefix+'roles/worker',record);
+  await runtime.controls.setTask('pause',taskId,'paused');
+  assert.equal(await runtime.cancelledTaskCleanupEvidence(taskId),undefined);
+  await runtime.controls.setTask('cancel',taskId,'cancelled');
+  const proof = await runtime.cancelledTaskCleanupEvidence(taskId); assert.equal(proof.commandId,'cancel');
+  await runtime.prepareTaskCleanup(taskId); assert.equal((await runtime.controls.task(taskId)).intent,'cancelled');
+  assert.equal(runtime.roleRecords.get(record.identity.workId).released,undefined);
+  runtime.roleRecords.set(record.identity.workId,{...record,stopped:false,stopUnknown:{reason:'producer unresolved',jobs:['job']}});
+  assert.equal(await runtime.cancelledTaskCleanupEvidence(taskId),undefined);
+  runtime.roleRecords.set(record.identity.workId,record);
+  const organizer={identity:{role:'Organizer',workId:'organizer',executionId:'o-e'},sessionId:'o-s',generation:1,lastWake:{taskId:'other-task'}};
+  runtime.roleRecords.set('organizer',organizer);
+  assert.deepEqual(await runtime.cancelledTaskCleanupEvidence(taskId),proof,'unrelated Organizer does not block or enter this proof');
+  runtime.roleRecords.set('organizer',{...organizer,lastWake:{taskId}});
+  assert.equal(await runtime.cancelledTaskCleanupEvidence(taskId),undefined,'own unsettled Organizer blocks deletion');
+  runtime.roleRecords.delete('organizer');
+  await runtime.controls.setTask('resume',taskId,'running');
+  assert.equal(await runtime.cancelledTaskCleanupEvidence(taskId),undefined);
+});
+
+test('confirmed manual retirement releases cancelled ownership without reopening its still-running business metadata', async t => {
+  const {runtime,files,storage}=await runtimeFixture(t), taskId='manual-retired';
+  await withSnapshot(files,snapshot=>files.commit(snapshot,[
+    {path:paths.task(taskId),content:encodeJson({version:1,taskId,route:'P',owner:'A',status:'running',members:['A'],sourcePath:'tasks/old_P.md'})},
+    {path:'technical/cleanup/'+taskId+'.json',content:encodeJson({version:1,taskId,phase:'released',historyCleared:true,preservedArtifacts:[],retentionHash:'manual:fixed'})},
+    {path:paths.inbox(taskId,'A'),content:'old preserved input must not wake'},
+  ],'confirmed manual clear'));
+  const record={identity:{role:'Planner',workId:'old-planner',executionId:'old-e',taskId},sessionId:'old-s',generation:1,stopped:true};
+  runtime.roleRecords.set(record.identity.workId,record);
+  await storage.set(runtime.prefix+'roles/old',record);
+  await runtime.controls.setTask('cancel-old',taskId,'cancelled');
+  await runtime.prepareTaskCleanup(taskId);
+  assert.equal(await runtime.controls.task(taskId),undefined);
+  assert.equal(runtime.roleRecords.has(record.identity.workId),false);
+  await assert.rejects(runtime.resumeTask(taskId,'not-a-new-task'),/explicitly cleared/);
+  assert.deepEqual(await withSnapshot(files,snapshot=>runtime.scanMembers(snapshot)),[]);
+  const list=files.listDirectory.bind(files); let oldStateReads=0;
+  files.listDirectory=async(snapshot,path)=>{if(path===paths.state('A',taskId))oldStateReads++;return list(snapshot,path)};
+  await runtime.observeRecoveryMarkers(); assert.equal(oldStateReads,0,'released old task state is no longer polled');
+  await withSnapshot(files,async snapshot=>assert.equal(JSON.parse((await files.read(snapshot,paths.task(taskId)))!).status,'running'));
+  const cold=new FrameworkRoleRuntime(runtime.ctx,files,storage,runtime.config,runtime.environment) as any;
+  assert.equal(await cold.arrangeNativeContinuation(record,{}),undefined,'no cold native inspection/admission for this retired task');
+});
+
+test('overall restoration does not recreate a manually retired namespace when its Inbox is a preserved result', async t=>{
+  const {runtime,files,storage}=await runtimeFixture(t), retired='retired-with-result', live='other-running';
+  const {FrameworkManualCleanup}=await import('../src/framework/manual-cleanup.js');
+  await withSnapshot(files,snapshot=>files.commit(snapshot,[... [retired,live].flatMap(taskId=>[
+    {path:paths.task(taskId),content:encodeJson({version:1,taskId,route:'O',owner:'A',members:['A'],status:'running',sourcePath:`tasks/${taskId}_O.md`,resultPaths:taskId===retired?[paths.inbox(taskId,'A')]:[]})},
+    {path:paths.inbox(taskId,'A'),content:'actual retained material'},
+  ])],'two actual tasks'));
+  await runtime.controls.setTask('cancel-retired',retired,'cancelled');
+  const cleanup=new FrameworkManualCleanup(files,runtime.transactions,runtime.conversation,runtime);
+  const preview=await cleanup.previewTasks(); assert.deepEqual(preview.tasks.map(task=>task.taskId),[retired]);
+  await cleanup.clearTasks('manual-retired',preview,'clear-ended-task-records');
+  await runtime.prepareTaskCleanup(retired);
+  await storage.set(runtime.prefix+'host-restores/after-clean',{commandId:'after-clean',createdAt:'2026-11-01T00:00:00Z',input:{facts:'restore current work',hypotheses:'inspect',actionsTaken:'preserved',continuation:'continue'},targets:[],complete:false});
+  await runtime.processHostRestores();
+  const stale={identity:{role:'Worker',workId:'retired-worker',executionId:'retired-e',taskId:retired,member:'A'},sessionId:'retired-s',generation:1,stopped:true};
+  runtime.roleRecords.set(stale.identity.workId,stale);
+  await storage.set(runtime.prefix+'restores/stale',{commandId:'stale-member-restore',createdAt:'2026-11-01T00:00:00Z',input:{target:stale.identity,facts:'old request',hypotheses:'unknown',actionsTaken:'preserved',continuation:'inspect'},complete:false});
+  runtime.stopOwnedRecord=async()=>{throw new Error('retired producer must not be stopped/restarted again')};
+  await runtime.processRestores();
+  assert.equal((await storage.get<any>(runtime.prefix+'restores/stale')).complete,true);
+  await withSnapshot(files,async snapshot=>{
+    assert.equal(await files.read(snapshot,paths.inbox(retired,'A')),'actual retained material');
+    assert.deepEqual(await files.list(snapshot,paths.state('A',retired)),[]);
+    assert.equal(await files.read(snapshot,paths.state('A',live)+'/recovery'),'');
+    assert.equal(await files.read(snapshot,paths.state('A',live)+'/Planner_Helper'),'');
+  });
+});

@@ -23,16 +23,57 @@ const DATA_FOLDER = 'deepseek_servant'
 const LEGACY_FILE = 'deepseek_servant.json'
 type Records = Domain<typeof servantDomain>
 interface OpenRecords { domain: Records; files?: RecordFilesBackend; close(): Promise<void> }
+type Location = Domain<typeof locationDomain>
+type LocationValue = { directory: string; layout?: 'folders-v1' }
+
+class LocationCommitUncertainError extends Error {
+  constructor(readonly destination: string, cause: unknown) {
+    super('Record location could not be confirmed. Both record copies are retained: ' + destination, { cause })
+    this.name = 'LocationCommitUncertainError'
+  }
+}
+
+/** Domain.get is an in-memory map. A rejected JSON publish can have renamed the
+ * durable file before losing acknowledgement, so only a fresh native open is a
+ * readback of the locator rather than its stale in-memory value.
+ */
+async function selectLocation(ctx: Context, location: Location, value: LocationValue): Promise<
+  { location: Location; committed: true } | { location: Location; committed: false; error: unknown }> {
+  const previous = location.table('settings').get('active')
+  try { await location.table('settings').put('active', value); return { location, committed: true } }
+  catch (error) {
+    let fresh: Location
+    try { await location.close(); fresh = await ctx.storageDomain.open(locationDomain) }
+    catch (readback) { throw new LocationCommitUncertainError(value.directory, new AggregateError([error, readback], 'Location write and durable readback failed.')) }
+    const selected = fresh.table('settings').get('active')
+    if (isDeepStrictEqual(selected, value)) return { location: fresh, committed: true }
+    if (isDeepStrictEqual(selected, previous)) return { location: fresh, committed: false, error }
+    try { await fresh.close() }
+    catch (close) { throw new LocationCommitUncertainError(value.directory, new AggregateError([error, close], 'Unexpected location readback and handle-close failure.')) }
+    throw new LocationCommitUncertainError(value.directory, error)
+  }
+}
+
+interface PendingRelocation {
+  destination: string
+  sourceTree: string
+  targetTree: string
+  target: OpenRecords
+  verifyPublished?: (directory: string) => Promise<void>
+}
 
 /** One durable Task or skill record remains the atomic commit boundary. */
 export class DshStorageAdapter implements StoragePort {
   private chain: Promise<unknown> = Promise.resolve()
   private retainedSource?: string
+  private closed = false
+  private disposal?: Promise<void>
+  private pendingRelocation?: PendingRelocation
   private constructor(private readonly ctx: Context, private records: OpenRecords, private directory: string,
-    private readonly location: Domain<typeof locationDomain>) {}
+    private location: Location) {}
 
   static async open(ctx: Context): Promise<DshStorageAdapter> {
-    const location = await ctx.storageDomain.open(locationDomain)
+    let location = await ctx.storageDomain.open(locationDomain)
     let legacy: OpenRecords | undefined
     let records: OpenRecords | undefined
     let createdTree = false
@@ -82,7 +123,9 @@ export class DshStorageAdapter implements StoragePort {
       // The complete new tree is already durable before the native locator
       // switches. Missing local folders are recreated at their configured location.
       // We never redirect an unavailable drive to a different default location.
-      await location.table('settings').put('active', { directory, layout: 'folders-v1' })
+      const selection = await selectLocation(ctx, location, { directory, layout: 'folders-v1' })
+      location = selection.location
+      if (!selection.committed) throw selection.error
       const adapter = new DshStorageAdapter(ctx, records, directory, location)
       if (legacy) {
         try {
@@ -92,11 +135,16 @@ export class DshStorageAdapter implements StoragePort {
       }
       return adapter
     } catch (error) {
-      await records?.close()
-      await legacy?.close()
-      if (stage) await rm(stage, { recursive: true, force: true })
-      if (createdTree && directory) await rm(path.join(directory, DATA_FOLDER), { recursive: true, force: true })
-      await location.close()
+      const closed = await Promise.allSettled([records?.close(), legacy?.close(), location.close()])
+      const failures: unknown[] = [error, ...closed.flatMap(result => result.status === 'rejected' ? [result.reason] : [])]
+      // A failed close is not proof that its producer released the new copy.
+      if (failures.length === 1) {
+        try {
+          if (stage) await rm(stage, { recursive: true, force: true })
+          if (createdTree && directory && !(error instanceof LocationCommitUncertainError)) await rm(path.join(directory, DATA_FOLDER), { recursive: true, force: true })
+        } catch (cleanup) { failures.push(cleanup) }
+      }
+      if (failures.length > 1) throw new AggregateError(failures, 'Opening record storage failed; owned copies are retained where cleanup was not confirmed.')
       throw error
     }
   }
@@ -117,7 +165,8 @@ export class DshStorageAdapter implements StoragePort {
   }
 
   /** Move the owned tree, including its legacy backup, without moving other host files. */
-  moveRecords(directory: string, expectedDirectory: string, signal: AbortSignal): Promise<RecordStorageView> {
+  moveRecords(directory: string, expectedDirectory: string, signal: AbortSignal,
+    verifyPublished?: (targetRecordsDirectory: string) => Promise<void>): Promise<RecordStorageView> {
     return this.serial(async () => {
       signal.throwIfAborted()
       if (expectedDirectory !== this.directory) throw new Error('记录目录已变化，请刷新后重试。')
@@ -149,19 +198,25 @@ export class DshStorageAdapter implements StoragePort {
         await rename(stage, targetTree)
         published = true
         target = await openTree(this.ctx, targetTree)
+        // The caller may verify an owned framework SQLite store after all its
+        // producers have closed. It must not call this adapter's serial methods.
+        await verifyPublished?.(destination)
         signal.throwIfAborted()
-        await this.location.table('settings').put('active', { directory: destination, layout: 'folders-v1' })
+        const selection = await selectLocation(this.ctx, this.location, { directory: destination, layout: 'folders-v1' })
+        this.location = selection.location
+        if (!selection.committed) throw selection.error
       } catch (error) {
-        await target?.close()
-        await rm(published ? targetTree : stage, { recursive: true, force: true })
+        if (error instanceof LocationCommitUncertainError && target) {
+          this.pendingRelocation = { destination, sourceTree, targetTree, target, verifyPublished }
+          throw error
+        }
+        try { await target?.close() }
+        catch (close) { throw new AggregateError([error, close], 'Record relocation and target close failed; both record copies are retained.') }
+        try { await rm(published ? targetTree : stage, { recursive: true, force: true }) }
+        catch (cleanup) { throw new AggregateError([error, cleanup], 'Record relocation failed and the unselected target could not be removed.') }
         throw error
       }
-      const previous = this.records
-      this.records = target!
-      this.directory = destination
-      this.retainedSource = undefined
-      try { await previous.close(); await rm(sourceTree, { recursive: true }) }
-      catch { this.retainedSource = path.dirname(sourceTree) }
+      await this.finishRelocation({ destination, sourceTree, targetTree, target: target!, verifyPublished })
       return this.storageView()
     })
   }
@@ -192,7 +247,44 @@ export class DshStorageAdapter implements StoragePort {
     })
   }
   delete(key: string): Promise<void> { return this.serial(async () => { await this.refreshRecords(); this.records.files?.assertReadable(key); await this.prepareRecords(); await this.records.domain.table('records').delete(key) }) }
-  close(): Promise<void> { return this.serial(async () => { await this.records.close(); await this.location.close() }) }
+  close(): Promise<void> {
+    if (this.disposal) return this.disposal
+    this.closed = true
+    const result = this.chain.then(async () => {
+      const outcomes = await Promise.allSettled([this.records.close(), this.location.close(), this.pendingRelocation?.target.close()])
+      const failures = outcomes.flatMap(outcome => outcome.status === 'rejected' ? [outcome.reason] : [])
+      if (failures.length) throw new AggregateError(failures, 'Record storage close failed.')
+    })
+    this.chain = result.catch(() => {})
+    return this.disposal = result
+  }
+  private async finishRelocation(move: PendingRelocation): Promise<void> {
+    const previous = this.records
+    this.records = move.target
+    this.directory = move.destination
+    this.pendingRelocation = undefined
+    this.retainedSource = undefined
+    try { await previous.close(); await rm(move.sourceTree, { recursive: true }) }
+    catch { this.retainedSource = path.dirname(move.sourceTree) }
+  }
+  private async reconcileRelocation(): Promise<void> {
+    const move = this.pendingRelocation
+    if (!move) return
+    // No ordinary record write is admitted while its actual durable destination
+    // remains unknown. Every attempt reads the native locator from disk anew.
+    await this.location.close()
+    this.location = await this.ctx.storageDomain.open(locationDomain)
+    const selected = this.location.table('settings').get('active')
+    if (selected?.directory === move.destination && selected.layout === 'folders-v1') {
+      assertSameRecords(this.records.domain, move.target.domain)
+      await move.verifyPublished?.(move.destination)
+      await this.finishRelocation(move)
+    } else if (selected?.directory === this.directory && selected.layout === 'folders-v1') {
+      await move.target.close()
+      await rm(move.targetTree, { recursive: true })
+      this.pendingRelocation = undefined
+    } else throw new LocationCommitUncertainError(move.destination, new Error('The durable locator does not match either owned record location.'))
+  }
   private async refreshRecords(): Promise<void> {
     if (!await this.records.files?.retryFaults()) return
     const next = await openTree(this.ctx, path.join(this.directory, DATA_FOLDER))
@@ -214,7 +306,8 @@ export class DshStorageAdapter implements StoragePort {
     }
   }
   private serial<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.chain.then(operation)
+    if (this.closed) return Promise.reject(new Error('Record storage is closed.'))
+    const result = this.chain.then(async () => { await this.reconcileRelocation(); return operation() })
     this.chain = result.catch(() => {})
     return result
   }

@@ -1,64 +1,33 @@
 # DeepSeek Servant
 
-> **当前工作分支：Local / Git 统一框架候选，尚未 Release。** 包内版本号仍为 `0.4.1`，不能据此认定候选已发布或已通过用户实机验收。
+基于 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai/deepseek-harness) 的自主 AI 助理与多 Agent 协作插件。前台交流需求，后台协作推进任务、验收成果并整理长期知识。
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Tests4gptplay/deepseek-servant/v0.3.0/docs/images/deepseek-servant-maids-duo.webp" alt="DeepSeek Servant 短裙与长裙女仆角色设计">
 </p>
 
-基于 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai/deepseek-harness) 的社区协作助理插件。沿用原有界面与角色美术，当前候选将 Local 和 Git 接入同一套任务、记录、恢复和归档规则。
-
-## 当前候选能力
-
-- **六类原生角色**：Foreground 与用户交流，Organizer 分派和总验收，Planner 规划与成员验收，Worker 执行，Recorder 整理长期记录与技能，Helper 处理异常恢复。执行使用 DSH 原生 Agent、Session、工具和 Jobs，不另造模型执行器。
-- **两种存储模式**：Local 用本实例的 SQLite 文件库；Git 直接读写所选私有仓库的远端树和 blob，不在本地维护 Git 镜像或工作树。协作权限不等于访问其他参与者的电脑。
-- **前台访问与后台参与分开**：查看历史、发送消息和读取成果不自动登记后台成员或启动角色。后台参与可显式开始和退出；保存设置也会尝试登记并开始参与。关闭页面不等于停止后台。
-- **可核对的成果**：任务完成、前台回复、Recorder 归档各有实际状态，不以阅读回执互相阻塞。附件通过授权文件能力保存真实字节并校验，再提供下载。
-- **持久记录与知识**：AI Recorder 编写归档，固定 Cleaner 在核实保留资料后清理本任务临时文件。知识页支持读取、候选编辑及停用；候选不默认成为已验证技能。
-- **明确的不确定性**：冲突需要重读和重新判断；响应丢失保留原写入身份。停止执行缺少真实确认时不会显示为已成功停止。
-
-使用说明见 [USAGE](docs/USAGE.md)，Git 设置见 [PRIVATE_GIT](PRIVATE_GIT.md)，数据范围见 [RETENTION](RETENTION.md)。
-
 ## 安装与升级
 
-### 已发布的历史版本
+当前分支为 **0.5.0 候选**。收到候选 `.tgz` 后，在 DSH 的 **插件 → 添加插件 → 包名或地址** 填写运行 DSH 的电脑上该文件的完整路径，核对版本并启用。
 
-以下链接固定指向 **历史发布版 0.4.1，不包含本工作分支的统一框架改造**。安装步骤的历史说明见 [安装与升级](docs/INSTALLATION.md)，发行内容见 [0.4.1 发布说明](docs/releases/0.4.1.md)。
+公开发行包见 [Releases](https://github.com/Tests4gptplay/deepseek-servant/releases)。历史已发布版本为 **0.4.1**；当前候选的发布状态及内容见 [0.5.0 说明](docs/releases/0.5.0.md)。Desktop、Web 和升级步骤见[安装指南](docs/INSTALLATION.md)。
 
-Desktop：打开 **插件 → 添加插件**，在 **包名或地址** 填入：
+## 统一框架能力
 
-```text
-github:Tests4gptplay/deepseek-servant#v0.4.1
-```
+- **六类原生角色**：Foreground 交流需求，Organizer 分派与总验收，Planner 规划与成员验收，Worker 执行，Recorder 整理长期记录与技能，Helper 协助恢复。角色使用 DSH 原生 Agent、Session、工具和 Jobs。
+- **Local / Git**：Local 使用 SQLite 文件库；Git 通过 GitHub API 读写私有协作仓库。前台访问与本端后台参与分别管理。
+- **持续对话**：Foreground 每轮完成后使用新会话接续，带入最近六个完整对话往返原文；历史支持上滚和日期定位；AI 可检索原文并按字符分页读取长文。
+- **成果与知识**：查看任务结果、下载已保存附件，读取旧任务完整原记录、偏好及项目事实；技能支持候选编辑与停用，并保留来源和版本。
+- **记录管理**：Local 分别提供任务历史、前台对话和工作规划记录的明确清理操作；记录搬家核验原生执行停止、复制结果和原存储身份，保留任务与会话关联。
+- **长期归档**：Recorder 编写记录，Cleaner 核对原资料与保留成果后清理临时文件；结果引用与成果附件继续可用。
 
-备用发行包（可填同一输入框，或下载后使用运行 DSH 的电脑上的完整路径）：
+## 开始使用
 
-```text
-https://github.com/Tests4gptplay/deepseek-servant/releases/download/v0.4.1/deepseek-servant-0.4.1.tgz
-```
+从 DSH 侧栏打开 DeepSeek Servant，设置模型、预设与任务工作区，选择 Local 数据目录或 Git 仓库。保存并连接后，在对话中说明目标、交付物与验收要求。任务页查看进展和成果；参与开关控制本端后台。
 
-Web 在运行服务的环境中安装，和 Desktop 分别管理：
+模型提供者、工具及工作区权限由 DSH 管理。Git 仓库内容对获授权的协作者共享，请选用适合协作范围的仓库。
 
-```sh
-dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.4.1'
-```
-
-升级前保留 DSH 数据及用户文件；若宿主要求卸载后重装，只处理插件条目，不手工清除数据目录。是否重启依宿主提示。模型提供者、工具和工作区权限仍由 DSH 管理。
-
-### 当前候选
-
-当前分支需要构建并核对候选包，不能用上述历史标签代替。构建入口、实现映射与验证边界见 [IMPLEMENTATION](IMPLEMENTATION.md)。尚未完成当前候选的真实 Host 模型执行、Desktop / Web 实机交互及公网专用 Git 账号最终验收；受控 HTTP 和组件测试不代表这些环境已通过。
-
-## 实现与验证资料
-
-- [当前源码架构与构建](IMPLEMENTATION.md)
-- [当前测试说明](docs/TESTING.md)
-- [数据保留与清理](RETENTION.md)
-- [版本历史](CHANGELOG.md)
-- [旧版本公开验证资料](https://github.com/Tests4gptplay/deepseek-servant/blob/d28a4d8538abc966608761bcfd60d568dec11cc9/docs/testing/EVIDENCE.md)
-- [历史架构](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/DESIGN.md)、[历史设计稿](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/docs/DSS_MASTER_DESIGN_20261025.md)：仅用于追溯，不是当前候选的运行协议。
-
-旧 Windows `0.2.1-rc.5` 等验收结论仅属于相应历史版本，不外推为本次重构通过。
+[使用说明](docs/USAGE.md) · [Git 设置](PRIVATE_GIT.md) · [数据保留](RETENTION.md) · [实现与构建](IMPLEMENTATION.md) · [开发验证](docs/TESTING.md) · [版本历史](CHANGELOG.md)
 
 ## 来源与开源许可
 

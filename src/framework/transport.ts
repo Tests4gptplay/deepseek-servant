@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { ModeEvents } from '../mode-router/events.js';
 import { FilesConflictError, FilesOutcomeUnknownError } from './transactions.js';
 import type { FrameworkService } from './service.js';
-const methods = ['knowledgeList', 'knowledgeRead', 'knowledgeEdit', 'knowledgeStatus', 'view', 'history', 'send', 'configure', 'legacyControl', 'invite', 'gitMembers', 'gitMemberAction', 'taskControl', 'stopExecution', 'participation', 'selectMode', 'readFile'] as const;
+const methods = ['maintenanceView', 'openMaintenancePath', 'exportRecords', 'cleanupPreview', 'cleanupRecords', 'knowledgeList', 'knowledgeRead', 'knowledgeEdit', 'knowledgeStatus', 'view', 'history', 'send', 'configure', 'moveRecords', 'legacyRecords', 'legacyControl', 'invite', 'gitMembers', 'gitMemberAction', 'taskControl', 'stopExecution', 'participation', 'selectMode', 'readFile'] as const;
 /** Uses the Host's authenticated connection carrier, not an independent web server. */
 export function installFrameworkTransport(ctx: Context, service: FrameworkService): () => Promise<void> {
     const events = new ModeEvents(), off = service.subscribeChanged(events.changed);

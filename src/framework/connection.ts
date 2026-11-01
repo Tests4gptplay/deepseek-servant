@@ -1,3 +1,4 @@
+import { LocalLocationRegistry, canonicalLocalLocation } from './local-location.js'
 import { createHash } from 'node:crypto'
 import type { StoragePort } from '../contracts/ports.js'
 import { RepositoryDirectorySchema, type RepoBinding, type RepoConnection, type CoopInvitation, type CoopCollaborator } from '../experimental/private-git/contracts.js'
@@ -84,10 +85,16 @@ export async function openFrameworkStorage(input: FrameworkConnectionSettings,
     let initializeWrite: (() => Promise<void>) | undefined
     if (settings.mode === 'local') {
       if (!settings.directory.trim()) throw new Error('Choose the local DSS storage directory.')
+      const locations = new LocalLocationRegistry(storage)
+      const canonical = await canonicalLocalLocation(settings.directory, true)
+      // A moved-away location must not recreate a new empty database and attach
+      // the original runtime receipts. Only explicit verified moves bind aliases.
+      await locations.resolve(canonical)
+      dependencies.signal?.throwIfAborted()
       const local = await LocalFiles.open(settings.directory)
       release = () => local.close()
       files = local
-      scope = JSON.stringify(['local', local.directory])
+      scope = await locations.resolve(local.directory)
       repositoryId = scope
       // A display label need not be a path segment. Preserve it in settings, but
       // use the stable technical UUID identity when it is not a usable alias.

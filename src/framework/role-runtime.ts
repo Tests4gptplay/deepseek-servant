@@ -30,7 +30,7 @@ import { scanMemberRecovery, createRecoveryWatch, dueRecoveryWatch,
   completeHealthyRecoveryCycle, type RecoveryWatch, type MemberRecoveryInput, type WorkIdentity, type RecoveryRole } from './recovery.js'
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
-interface RoleRecord { identity: WorkIdentity; sessionId: string; generation: number; completedRound?: boolean; lastWake?: RoleWake; delivery?: { request: RoleWake; messageId: string; text?: string; confirmed: boolean; sequence?: number }; released?: boolean; stopped?: boolean; stopIntent?: NativeStopEvidence; stopUnknown?: { reason: string; jobs: string[] } }
+interface RoleRecord { identity: WorkIdentity; sessionId: string; generation: number; foregroundMessages?: Record<string, string>; completedRound?: boolean; lastWake?: RoleWake; delivery?: { request: RoleWake; messageId: string; text?: string; confirmed: boolean; sequence?: number }; released?: boolean; stopped?: boolean; stopIntent?: NativeStopEvidence; stopUnknown?: { reason: string; jobs: string[] } }
 interface TrackedStop { executionId: string; taskId?: string; promise: Promise<void>; settled: boolean; result?: StopResult; persistedStopped?: boolean; reportedFailure?: string; failure?: unknown; controlCommands?: Set<string> }
 interface WakeRecovery {
   targetExecutionId: string
@@ -89,6 +89,7 @@ export class FrameworkRoleRuntime {
   private taskMetadataIndex?: FrameworkTaskIndex
   private readonly skillProviders = new Map<string, ReturnType<typeof installFrameworkSkillProvider>>()
   private workOperations?: Map<string, Promise<unknown>>
+  private pendingForegroundResets?: Set<string>
   private roleWrites?: Map<string, Promise<void>>
   private recoveryWatchWrites?: Map<string, Promise<unknown>>
   private errorTail: Promise<void> = Promise.resolve()
@@ -116,6 +117,140 @@ export class FrameworkRoleRuntime {
       sealBusiness: task => this.sealBusiness(task.taskId), clean: (task, snapshot) => this.clean(task, snapshot), releaseTask: taskId => this.releaseLocalTask(taskId),
     })
   }
+  /** An explicitly confirmed Local history operation owns only Foreground.
+   * Its fixed prior execution cannot be replaced by a later session on retry. */
+  async withForegroundReset<T>(commandId: string, action: (capturedMessageIds?: readonly string[]) => Promise<T>): Promise<T> {
+    if (this.config.mode !== 'local' || !commandId) throw new Error('Foreground history reset requires an explicit Local command.')
+    const workId = this.roleKey('Foreground'), key = this.prefix + 'foreground-resets/' + hash(commandId)
+    type Reset = { commandId: string; phase: 'planned' | 'retired' | 'complete'; target?: RoleRecord;
+      wakeKeys: string[]; pendingTasks: RoleWake[]; capturedMessageIds?: string[] }
+    return this.serialWork(workId, async () => {
+      let reset = await this.records.get<Reset>(key)
+      if (!reset) {
+        const stored = await this.records.get<RoleRecord>(this.prefix + 'roles/' + hash(workId))
+        const target = this.roleRecords.get(workId) ?? (stored?.released ? undefined : stored)
+        const wakes = (await this.records.list<WakeRecord>(this.prefix + 'wakes/'))
+          .filter(row => this.requestKey(row.value.request) === workId)
+        const pendingTasks = new Map<string, RoleWake>()
+        for (const row of wakes) if (!row.value.delivered && row.value.request.taskId) pendingTasks.set(row.value.request.taskId, row.value.request)
+        const prior = target?.delivery?.request ?? target?.lastWake
+        if (prior?.taskId && !target?.completedRound) pendingTasks.set(prior.taskId, prior)
+        reset = { commandId, phase: 'planned', ...(target ? { target } : {}), wakeKeys: wakes.map(row => row.key), pendingTasks: [...pendingTasks.values()] }
+        await this.records.set(key, reset)
+      }
+      const pendingResets = this.pendingForegroundResets ??= new Set()
+      if (reset.phase !== 'complete') pendingResets.add(commandId)
+      else pendingResets.delete(commandId)
+      if (reset.phase === 'planned') {
+        if (reset.target) {
+          const stored = await this.records.get<RoleRecord>(this.prefix + 'roles/' + hash(workId))
+          const current = this.roleRecords.get(workId) ?? stored
+          if (current && current.identity.executionId !== reset.target.identity.executionId) throw new Error('The Foreground reset target changed before its retirement was confirmed.')
+          if (current && !current.released) {
+            this.roleRecords.set(workId, current)
+            if (!current.stopped) {
+              await this.finishForegroundRound(current)
+              const result = await this.stopOwnedRecord(this.roleRecords.get(workId) ?? current)
+              if (result.status !== 'stopped') throw new Error(result.status === 'unconfirmed' ? result.reason : 'Foreground ownership changed while clearing its history.')
+            }
+            const stopped = this.roleRecords.get(workId) ?? current
+            const capturedMessageIds: string[] = []
+            for (const [id, signature] of Object.entries(stopped.foregroundMessages ?? {})) {
+              const message = await this.conversation.read(id)
+              if (!message) continue
+              if (message.role !== 'assistant' || this.foregroundMessageSignature(message) !== signature) throw new Error('An old Foreground output identity no longer matches its saved message.')
+              capturedMessageIds.push(id)
+            }
+            reset = { ...reset, capturedMessageIds }
+            await this.records.set(key, reset)
+            await this.saveRole({ ...stopped, stopped: true, released: true })
+            this.roleRecords.delete(workId)
+          }
+        }
+        for (const wakeKey of reset.wakeKeys) {
+          const wake = await this.records.get<WakeRecord>(wakeKey)
+          if (wake) await this.records.set(wakeKey, { ...wake, delivered: true })
+        }
+        // A conversation reset does not discharge a completed Task's outstanding
+        // delivery. Reintroduce that existing responsibility, not old user text.
+        for (const prior of reset.pendingTasks) await this.wake({ id: 'history-reset-delivery:' + hash(commandId + '\0' + prior.taskId),
+          role: 'Foreground', taskId: prior.taskId, reason: 'business-complete', sources: [],
+          context: { facts: 'Conversation history was explicitly cleared. Inspect this completed Task and deliver its still-pending result in the new conversation.' } })
+        reset = { ...reset, phase: 'retired' }
+        await this.records.set(key, reset)
+      }
+      const result = await action(reset.capturedMessageIds ?? [])
+      if (reset.phase !== 'complete') await this.records.set(key, { ...reset, phase: 'complete' })
+      pendingResets.delete(commandId)
+      return result
+    })
+  }
+  private async manuallyCleared(taskId: string | undefined, snapshot?: FilesSnapshot): Promise<boolean> {
+    if (!taskId || this.config.mode !== 'local') return false
+    const read = async (view: FilesSnapshot) => {
+      const value = await readJson<{ version: number; taskId: string; phase: string; historyCleared?: boolean }>(this.files, view, cleanupRecordPath(taskId))
+      return value?.version === 1 && value.taskId === taskId && value.phase === 'released' && value.historyCleared === true
+    }
+    return snapshot ? read(snapshot) : withSnapshot(this.files, read)
+  }
+  /** Read-only evidence, not a request to stop anything. An intent alone, idle
+   * native registry or an unknown producer never establishes safe deletion. */
+  async cancelledTaskCleanupEvidence(taskId: string): Promise<{ commandId: string; signature: string } | undefined> {
+    if (this.config.mode !== 'local') return undefined
+    const intent = await this.controls.task(taskId)
+    if (intent?.intent !== 'cancelled') return undefined
+    const task = await withSnapshot(this.files, snapshot => readJson<TaskMetadata>(this.files, snapshot, paths.task(taskId)))
+    if (!task || task.status !== 'running') return undefined
+    const records = new Map((await this.records.list<RoleRecord>(this.prefix + 'roles/')).map(row => [row.value.identity.workId, row.value]))
+    for (const [key, value] of this.roleRecords) records.set(key, value)
+    const settled: unknown[] = []
+    for (const record of [...records.values()].sort((a, b) => a.identity.workId.localeCompare(b.identity.workId))) {
+      const related = record.identity.taskId === taskId || (record.identity.role === 'Organizer' && task.route === 'O' && await this.currentTask(record) === taskId)
+      if (!related) continue
+      if ((!record.stopped && !record.released) || this.active(record)) return undefined
+      settled.push([record.identity.workId, record.identity.executionId, record.sessionId, record.generation, !!record.stopped, !!record.released])
+    }
+    const current = await this.controls.task(taskId)
+    if (current?.commandId !== intent.commandId || current.intent !== 'cancelled') return undefined
+    return { commandId: intent.commandId, signature: hash(JSON.stringify([taskId, intent.commandId, settled])) }
+  }
+  /** Manual history deletion follows real task cleanup; it never substitutes a
+   * user intent bit for producer settlement or marks running work complete. */
+  async prepareTaskCleanup(taskId: string): Promise<void> {
+    if (this.config.mode !== 'local') throw new Error('Manual task history cleanup is Local only.')
+    const currentTask = await withSnapshot(this.files, async snapshot => {
+      const task = await readJson<TaskMetadata>(this.files, snapshot, paths.task(taskId))
+      if (!task) return false // The caller validates the retained legacy terminal manifest.
+      if (await this.manuallyCleared(taskId, snapshot)) return 'released'
+      if (task.status === 'running' && await this.cancelledTaskCleanupEvidence(taskId)) return 'cancelled'
+      const cleanup = await readJson<{ version: number; taskId: string; phase: string }>(this.files, snapshot, cleanupRecordPath(taskId))
+      if (task.status !== 'complete' || cleanup?.version !== 1 || cleanup.taskId !== taskId || cleanup.phase !== 'released') {
+        throw new Error('Task history cleanup requires its actual completed and released task.')
+      }
+      return true
+    })
+    if (currentTask === 'cancelled') return // Keep the user hold until the file transaction is confirmed.
+    if (!currentTask) {
+      const records = await this.records.list<RoleRecord>(this.prefix + 'roles/')
+      if (records.some(row => row.value.identity.taskId === taskId && !row.value.released)
+        || [...this.roleRecords.values()].some(record => record.identity.taskId === taskId && !record.released)) {
+        throw new Error('Retained legacy history still has an owned execution responsibility.')
+      }
+      return
+    }
+    for (const row of await this.records.list<RoleRecord>(this.prefix + 'roles/')) {
+      if (row.value.identity.taskId === taskId && !row.value.released && !this.roleRecords.has(row.value.identity.workId)) {
+        this.roleRecords.set(row.value.identity.workId, row.value)
+      }
+    }
+    // Singleton Organizer may have moved on to another Task. Only detach the
+    // stopped execution whose admitted responsibility still belongs to this one.
+    for (const record of this.roleRecords.values()) if (currentTask === 'released' && record.identity.role === 'Organizer' && await this.currentTask(record) === taskId) {
+      if (!record.stopped || this.active(record)) throw new Error('Organizer producer is not confirmed stopped for this Task.')
+      await this.observations.unbind(record.identity.workId, record.identity.executionId)
+    }
+    await this.releaseLocalTask(taskId)
+  }
   updateWorkerSeats(workerSeats: number): void {
     if (!Number.isSafeInteger(workerSeats) || workerSeats < 0) throw new Error('Worker seats must be a nonnegative integer.')
     this.config.workerSeats = workerSeats
@@ -123,6 +258,8 @@ export class FrameworkRoleRuntime {
   async start(): Promise<void> {
     if (this.closed) throw new Error('Framework runtime is disposed.')
     for (const row of await this.records.list<RoleRecord>(this.prefix + 'roles/')) if (!row.value.released) this.roleRecords.set(row.value.identity.workId, row.value)
+    this.pendingForegroundResets = new Set((await this.records.list<{ commandId: string; phase: string }>(this.prefix + 'foreground-resets/'))
+      .filter(row => row.value.phase !== 'complete').map(row => row.value.commandId))
     if (this.closed) throw new Error('Framework runtime is disposed.')
     await this.loop.start()
   }
@@ -144,6 +281,7 @@ export class FrameworkRoleRuntime {
       } else if (latest && latest.identity.executionId !== record.identity.executionId) {
         if (record.generation <= latest.generation) throw new Error('A superseded execution cannot overwrite its replacement.');
       } else if (latest) record = { ...record, ...(latest.stopIntent ? { stopIntent: latest.stopIntent } : {}),
+        foregroundMessages: { ...latest.foregroundMessages, ...record.foregroundMessages },
         completedRound: record.completedRound || latest.completedRound, stopped: record.stopped || latest.stopped, released: record.released || latest.released, stopUnknown: record.stopUnknown ?? latest.stopUnknown,
         delivery: latest.delivery ?? record.delivery, lastWake: latest.lastWake ?? record.lastWake }
       if (deliveryUpdate && incomingDelivery) {
@@ -238,6 +376,7 @@ export class FrameworkRoleRuntime {
       if (this.closed) return
       try {
       const request = row.value.request, key = this.requestKey(request)
+      if (request.role === 'Foreground' && this.pendingForegroundResets?.size) return
       if (['Planner', 'Worker', 'Organizer'].includes(request.role) && await this.controls.taskHeld(request.taskId)) return
       let record = this.roleRecords.get(key)
       if (record && this.active(record)) return
@@ -251,7 +390,7 @@ export class FrameworkRoleRuntime {
         }
       }
       const checkSources = request.reason === 'notification' && request.sources.length > 0
-      const checkTask = request.taskId && ['Planner', 'Worker', 'Organizer'].includes(request.role)
+      const checkTask = request.taskId && ['Planner', 'Worker', 'Organizer', 'Recorder'].includes(request.role)
       if (checkSources || checkTask) {
         const retired = await withSnapshot(this.files, async snapshot => {
           if (checkSources) {
@@ -264,6 +403,8 @@ export class FrameworkRoleRuntime {
             if (!present) return true
           }
           if (!checkTask) return false
+          if (await this.manuallyCleared(request.taskId, snapshot)) return true
+          if (request.role === 'Recorder') return false
           const task = await readJson<TaskMetadata>(this.files, snapshot, paths.task(request.taskId!))
           if (task?.status === 'complete') return true
           if (request.role === 'Organizer') return false
@@ -383,6 +524,17 @@ export class FrameworkRoleRuntime {
   }
   /** Persist completed visible originals before retiring their native context.
    * Interrupted turns remain owned by the existing recovery responsibility. */
+  private foregroundMessageSignature(message: object): string {
+    return hash(JSON.stringify(Object.fromEntries(Object.entries(message).filter(([, value]) => value !== undefined).sort(([a], [b]) => a.localeCompare(b)))))
+  }
+  private async ownForegroundMessage(record: RoleRecord, message: ConversationSend): Promise<void> {
+    if (record.identity.role !== 'Foreground') return
+    const current = this.roleRecords.get(record.identity.workId)
+    if (!current || current.identity.executionId !== record.identity.executionId || current.released) throw new Error('Foreground output execution was replaced before saving its message.')
+    const signature = this.foregroundMessageSignature(message), previous = current.foregroundMessages?.[message.id]
+    if (previous && previous !== signature) throw new Error('Foreground output identity was reused for different content.')
+    await this.saveRole({ ...current, foregroundMessages: { ...current.foregroundMessages, [message.id]: signature } })
+  }
   private async finishForegroundRound(record: RoleRecord): Promise<void> {
     if (record.identity.role !== 'Foreground' || this.active(record)) return
     const current = this.roleRecords.get(record.identity.workId)
@@ -416,9 +568,11 @@ export class FrameworkRoleRuntime {
           if (original?.role !== 'user') throw new Error('Foreground claimed reply source is not a human message.')
         }
         const id = 'native-' + hash(JSON.stringify([record.sessionId, final.id]))
-        await this.conversation.send('native-capture/' + id, { id, role: 'assistant', participantId: this.config.member,
+        const message: ConversationSend = { id, role: 'assistant', participantId: this.config.member,
           createdAt: final.at, text: final.text, source: 'model', recipient: 'human',
-          ...(final.model ? { model: final.model } : {}), ...(replyTo ? { replyTo } : {}) })
+          ...(final.model ? { model: final.model } : {}), ...(replyTo ? { replyTo } : {}) }
+        await this.ownForegroundMessage(record, message)
+        await this.conversation.send('native-capture/' + id, message)
       }
       await this.saveRole({ ...record, completedRound: true })
       record = this.roleRecords.get(record.identity.workId)!
@@ -495,6 +649,8 @@ export class FrameworkRoleRuntime {
       conversation: {
         foregroundRoot: this.conversation.foregroundRoot,
         read: async input => {
+          if (input.mode === 'search') return this.conversation.search(input.query ?? '', input.cursor, input.limit)
+          if (input.mode === 'text') return this.conversation.readText(input.reference ?? '', input.cursor, input.limit)
           if (input.mode === 'message') return this.conversation.read(input.reference ?? '')
           if (input.mode === 'recent') return this.conversation.recentExchanges()
           if (input.mode === 'pending') return this.conversation.pendingForeground()
@@ -513,6 +669,11 @@ export class FrameworkRoleRuntime {
           }
           const message: ConversationSend = { id: input.id, text: input.text, role: 'assistant', participantId: this.config.member,
             ...source, recipient: input.intent, ...(input.replyTo ? { replyTo: input.replyTo } : {}) }
+          if (binding.role === 'Foreground') {
+            const owner = this.roleRecords.get(binding.workId)
+            if (!owner || owner.identity.executionId !== binding.executionId) throw new Error('Foreground message belongs to a replaced execution.')
+            await this.ownForegroundMessage(owner, message)
+          }
           const receipt = await this.conversation.send(commandId, message)
           if (!receipt.replay) this.environment.changed?.()
           return receipt
@@ -574,7 +735,7 @@ export class FrameworkRoleRuntime {
     const result: MemberRecoveryInput[] = []
     for (const task of await this.taskMetadata(snapshot)) {
       try {
-      if (task.status !== 'running') continue
+      if (task.status !== 'running' || await this.manuallyCleared(task.taskId, snapshot)) continue
       const member = this.config.member, inbox = paths.inbox(task.taskId, member)
       const entries = await this.files.listDirectory(snapshot, inbox.slice(0, inbox.lastIndexOf('/')))
       const entry = entries.find(item => item.path === inbox)
@@ -604,6 +765,7 @@ export class FrameworkRoleRuntime {
   private async arrangeNativeContinuation(record: RoleRecord, context: Record<string, unknown>,
     inspection?: DshSessionInspection, explicitId?: string, fallback?: RoleWake, replacement?: RoleWake): Promise<RoleWake | undefined> {
     if (record.released || await this.controls.execution(record.identity.executionId)) return undefined
+    if (['Planner', 'Worker', 'Organizer', 'Recorder'].includes(record.identity.role) && await this.manuallyCleared(await this.currentTask(record))) return undefined
     if (!replacement) {
       const pending = (await this.records.list<WakeRecord>(this.prefix + 'wakes/')).find(row => !row.value.delivered
         && row.value.request.id !== record.delivery?.request.id
@@ -636,12 +798,14 @@ export class FrameworkRoleRuntime {
     const continuations: RoleWake[] = []
     const sessions = new DshSessionReader(this.ctx)
     for (const record of this.roleRecords.values()) {
+      if (record.identity.role === 'Foreground' && this.pendingForegroundResets?.size) continue
       if (record.completedRound) {
         try { await this.serialWork(record.identity.workId, () => this.finishForegroundRound(record)) }
         catch (error) { this.error(error, { identity: record.identity, stage: 'startup-foreground-retirement' }) }
         continue
       }
       if (restoring.has(record.identity.executionId) || !['Foreground', 'Organizer', 'Recorder', 'Helper'].includes(record.identity.role) || this.active(record) || (!record.lastWake && !record.delivery)) continue
+      if (['Organizer', 'Recorder'].includes(record.identity.role) && await this.manuallyCleared(await this.currentTask(record))) continue
       let inspection
       try { inspection = await sessions.inspect(record.sessionId) }
       catch (error) {
@@ -757,6 +921,7 @@ export class FrameworkRoleRuntime {
     await this.applyUserControls(true, { workId, executionId })
   }
   async resumeTask(taskId: string, commandId: string): Promise<void> {
+    if (await this.manuallyCleared(taskId)) throw new Error('This Task history was explicitly cleared. Create a new Task.')
     const members = await withSnapshot(this.files, snapshot => this.scanMembers(snapshot))
     for (const target of scanMemberRecovery(members.filter(member => member.taskId === taskId))) {
       const request: RoleWake = { id: 'user-resume:' + commandId + ':' + target.role + ':' + (target.workerId ?? ''), role: target.role, taskId, workerId: target.workerId,
@@ -808,7 +973,7 @@ export class FrameworkRoleRuntime {
     const inspect = async (snapshot: FilesSnapshot) => {
       for (const task of await this.taskMetadata(snapshot)) {
         if (this.closed) return
-        if (task.status !== 'running') continue
+        if (task.status !== 'running' || await this.manuallyCleared(task.taskId, snapshot)) continue
         const marker = paths.state(this.config.member, task.taskId) + '/recovery'
         const entries = await this.files.listDirectory(snapshot, paths.state(this.config.member, task.taskId))
         if (!entries.some(entry => entry.path === marker)) continue
@@ -1043,7 +1208,7 @@ export class FrameworkRoleRuntime {
       await this.transactions.run('host-restore:' + commandId, { input, createdAt }, { reevaluate: true }, async snapshot => {
         const writes = new Map<string, string>()
         for (const task of await this.taskMetadata(snapshot)) {
-          if (task.status !== 'running') continue
+          if (task.status !== 'running' || await this.manuallyCleared(task.taskId, snapshot)) continue
           let relevant = false
           for (const member of (task.members ?? [task.owner]).filter(member => this.config.primary || member === this.config.member)) {
             const status = await readMemberStatus(this.files, snapshot, paths.memberStatus(task.taskId, member))
@@ -1119,6 +1284,7 @@ export class FrameworkRoleRuntime {
       await this.serialWork(input.target.workId, async () => {
       let record = this.roleRecords.get(input.target.workId)
       if (!record || record.identity.executionId !== input.target.executionId) { await this.records.set(row.key, { ...row.value, complete: true }); return }
+      if (['Planner', 'Worker', 'Organizer', 'Recorder'].includes(record.identity.role) && await this.manuallyCleared(await this.currentTask(record))) { await this.records.set(row.key, { ...row.value, complete: true }); return }
       const date = row.value.createdAt.slice(0,10)
       await this.transactions.run('restore-debug:' + row.value.commandId, input, { reevaluate: true }, async snapshot => {
         const path = 'debug/' + date + '.md'
@@ -1131,6 +1297,7 @@ export class FrameworkRoleRuntime {
       if (record.identity.taskId && record.identity.member && (record.identity.role === 'Planner' || record.identity.role === 'Worker')) {
         const taskId = record.identity.taskId, member = record.identity.member
         await this.transactions.run('restore-marker:' + row.value.commandId, { taskId, member }, { reevaluate: true }, async checked => {
+          if (await this.manuallyCleared(taskId, checked)) return []
           const task = await readJson<TaskMetadata>(this.files, checked, paths.task(taskId))
           const status = await readMemberStatus(this.files, checked, paths.memberStatus(taskId, member))
           const inbox = await this.files.read(checked, paths.inbox(taskId, member))
@@ -1179,6 +1346,22 @@ export class FrameworkRoleRuntime {
       if (rateLimit) this.rateLimitDiagnostics!.delete(rateLimit)
       this.environment.error(failure)
     })
+  }
+  /** Moving the owned storage is stricter than closing its UI: no producer may
+   * still own a write into the directory being copied. Preserve unknown native
+   * settlement instead of treating an empty registry as stopped. */
+  async settleForStorageMove(): Promise<void> {
+    await this.dispose()
+    for (const row of await this.records.list<RoleRecord>(this.prefix + 'roles/')) {
+      if (row.value.released || row.value.stopped) continue
+      const current = this.roleRecords.get(row.value.identity.workId)
+      if (current && current.identity.executionId !== row.value.identity.executionId) throw new Error('Storage move encountered a replaced execution identity.')
+      this.roleRecords.set(row.value.identity.workId, row.value)
+      const result = await this.stopOwnedRecord(row.value)
+      if (result.status !== 'stopped') throw new Error(result.status === 'unconfirmed'
+        ? 'Storage has an unconfirmed native producer: ' + result.reason : 'Storage execution ownership changed before its move.')
+      await this.saveRole({ ...row.value, stopped: true })
+    }
   }
   dispose(): Promise<void> {
     return this.disposing ??= this.disposeOwned()

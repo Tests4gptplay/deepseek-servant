@@ -1,6 +1,6 @@
 # 当前实现与验证边界
 
-> 本文件描述工作分支候选，不是发布公告。包版本仍为 `0.4.1`；历史同版本安装链接不能代表当前源码已发布。
+> 本文件描述工作分支候选，不是发布公告。候选版本为 `0.5.0`，发布状态见 [版本说明](docs/releases/0.5.0.md)。
 
 ## 入口和模块
 
@@ -15,7 +15,8 @@
 | 六角色 | `role-runtime.ts`、`role-tools.ts`、`role-prompts.ts` | Foreground / Organizer / Planner / Worker / Recorder / Helper |
 | 原生执行 | `native-executions.ts`、`execution-observation.ts`、`execution-control.ts` | DSH Agent / Session / Jobs、实际进展和停止证据 |
 | 任务和恢复 | `task-files.ts`、`task-index.ts`、`recovery.ts`、`host-loop.ts` | 任务初始化、信号、持久状态与接续 |
-| 对话 | `conversation.ts` | 按模式/协作范围保存正文、来源、回复关系与提交顺序 |
+| 对话 | `conversation.ts`、`foreground-capture.ts` | 原文、来源、回复关系、长文分页及原生最终回复捕获 |
+| Local 维护 | `manual-cleanup.ts`、`maintenance.ts`、`record-move.ts`、`local-location.ts` | 显式清理、完整记录导出、核验搬家与逻辑范围接续 |
 | 成果 | `artifacts.ts`、`cleaner.ts` | 授权读取真实字节、验证归档、固定范围清理 |
 | 知识 | `skills.ts`、`knowledge.ts` | 摘要目录、原生技能 provider、候选及停用控制 |
 | 旧数据迁移 | `legacy-migration.ts`、`migration-lifecycle.ts` | 保留旧记录来源和身份，核对迁移与待接续事项 |
@@ -40,11 +41,21 @@ Foreground / Organizer / Recorder / Helper 已认领输入后的中断，依据�
 
 任务整体 complete 与前台通知、Recorder 整理并行推进，不引入阅读 ACK。客户端完成提示只根据实际任务变化显示，本地清标记不写业务状态。Recorder 的正文由 AI 生成；Cleaner 不机械生成记录或替角色总结。
 
+## 前台会话与记录管理
+
+Foreground 完成一轮后退休原执行，用新原生会话处理后续输入；最近六个完整往返原文作为接续材料，长文不以分页长度截断保存。普通原生可见最终回复捕获到 Conversation；与同轮已成功发送的相同正文核对去重。长文搜索和字符分页按需执行，List/Cache 自动注入用途、路径与操作指南，正文由角色显式读取。
+
+Local 日期定位取选中日末尾并在该日分页；Git 日期定位以选中日末尾为初始上界，后续游标可跨日。无日期时保持连续历史分页。
+
+Local 的任务历史、前台对话、工作规划记录分别由明确确认操作清理。任务历史清理保留成果引用；取消的任务须有持久取消意图及精确原生生产者停止证据，清理后保持原业务状态而非写成 complete。明确回收回执阻止旧 Task 再次调度或补充，后续业务使用新 Task 身份。
+
+记录搬家先持久原请求，再确认本插件拥有的执行停止、复制与验证，最后更新设置并重开。逻辑存储范围及原 UUID、命令、会话和消息身份保持；未知结果继续核对原操作。宿主原生日志单独管理。旧任务的完整原记录通过迁移引用读取，Local 可导出现存完整原文。
+
 ## 知识和附件
 
 技能目录按需读取摘要，选择技能时才加载正文；正式原生 pre-step 边界失效缓存，而非每秒扫描全部正文。新技能要求正式 `SKILL.md` 格式，普通 `.md` 不自动注册。旧 Local 技能保留原 scope、验证状态及 activeVersion；旧 Git 技能保持实际 participant 范围，不伪造 Local 版本语义。
 
-知识编辑保存候选，不默认激活。停用/退役控制保存在独立元数据中，重建目录不清除它们；正文和来源仍可追溯。缺少宿主 skills 能力会报告实际诊断，不增加任意最低版本门槛。
+知识页显式发现和读取迁移保留的项目事实、偏好正文及范围/来源；这些资料沿只读职责展示。技能编辑保存候选，不默认激活。停用/退役控制保存在独立元数据中，重建目录不清除它们；正文和来源仍可追溯。缺少宿主 skills 能力会报告实际诊断，不增加任意最低版本门槛。
 
 附件从宿主授权文件接口读取实际字节，和清单/回执一起事务保存，再按 SHA-256 与长度读回核验。下载端点返回原二进制。目录或外部链接不会自动变成已归档文件；本机附件引用也不冒充跨端永久链接。
 
@@ -69,6 +80,6 @@ npm run test:package
 
 已开展的验证包括真实 SQLite、多文件事务、已安装官方原生技能 registry、受控 HTTP Git API、客户端控制器/组件及真实原生 JSON 存储回归。原封候选还在固定官方 Host 服务上以官方受控模型运行过六角色工具、P/O 任务交付、Planner 与同一 Worker 的三轮交互（两次拒收后验收）、前台结果回复、Recorder/Cleaner、持久化重启和二进制成果读回；受控流程不代表真实模型任务质量，也不自动覆盖所有中断、跨 Host 协作或浏览器交互。具体命令、当前结果和覆盖边界见 [测试说明](docs/TESTING.md)，不在此固定容易过期的测试总数。
 
-**尚未完成当前候选的真实模型任务、完整 Desktop / Web 实机交互及公网专用 Git 账号最终验收。** 原生服务加受控模型、接口 seam 和受控 HTTP 均不能冒充这些验证。历史 Windows rc.5 等结果见[旧公开证据](https://github.com/Tests4gptplay/deepseek-servant/blob/d28a4d8538abc966608761bcfd60d568dec11cc9/docs/testing/EVIDENCE.md)，仅适用于对应旧版本。
+验证结果按测试层级、源码与包分别记录；跨不同真实账户的公网联合协作尚未执行。最终候选验收状态见 [测试说明](docs/TESTING.md)。历史 Windows rc.5 等结果见[旧公开证据](https://github.com/Tests4gptplay/deepseek-servant/blob/d28a4d8538abc966608761bcfd60d568dec11cc9/docs/testing/EVIDENCE.md)，仅适用于对应旧版本。
 
 许可证、素材署名及第三方声明见 [README](README.md#来源与开源许可)、[NOTICE](NOTICE) 和 [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES.md)。

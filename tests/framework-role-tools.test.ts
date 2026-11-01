@@ -503,7 +503,7 @@ test('globally complete Task still accepts late Worker facts before an actual cl
   await withSnapshot(f.files, async snapshot => assert.match((await f.files.read(snapshot, notes))!, /Late fact must remain available/))
 })
 
-test('Foreground selected cleaned Task does not block scoped List/Cache or durable conversation reply', async t => {
+for (const historyCleared of [false, true]) test('Foreground selected cleaned Task does not block scoped List/Cache or durable conversation reply; manual=' + historyCleared, async t => {
   let conversation!: FrameworkConversation
   const f = await fixture(t, 'Foreground', {}, 'P', (services, transactions) => {
     conversation = new FrameworkConversation(services.files, transactions, { mode: 'local', collaborationId: 'global-after-cleanup' })
@@ -514,7 +514,7 @@ test('Foreground selected cleaned Task does not block scoped List/Cache or durab
       claim: (input, _binding, commandId) => conversation.claimForeground(commandId, input.messageIds, input, { expectedRevision: input.expectedRevision }),
     }
   })
-  await withSnapshot(f.files, snapshot => f.files.commit(snapshot, [{ path: 'technical/cleanup/' + f.task.taskId + '.json', content: JSON.stringify({ version: 1, taskId: f.task.taskId, phase: 'released' }) }], 'selected old Task released'))
+  await withSnapshot(f.files, snapshot => f.files.commit(snapshot, [{ path: 'technical/cleanup/' + f.task.taskId + '.json', content: JSON.stringify({ version: 1, taskId: f.task.taskId, phase: 'released', historyCleared }) }], 'selected old Task released'))
   for (const name of ['Foreground_List.md', 'Foreground_Cache.md']) {
     const view = await f.snapshot()
     assert.equal(view.taskId, f.task.taskId, 'selected Task remains present in this global role snapshot')
@@ -597,4 +597,53 @@ for (const fault of ['changed-binary', 'missing-digest'] as const) test(`Recorde
     assert.equal(await f.files.read(snapshot, paths.state('A', f.task.taskId) + '/Cleaner'), undefined)
     assert.equal(await f.files.read(snapshot, archive), 'Actual AI-authored archive')
   })
+})
+
+test('Foreground registers full-text search/text pages and automatically injects only memory purpose/path guide', async t => {
+  let conversation!: FrameworkConversation, reads = 0
+  const f = await fixture(t, 'Foreground', {}, 'P', (services, transactions) => {
+    conversation = new FrameworkConversation(services.files, transactions, { mode: 'local', collaborationId: 'long-text-tools' })
+    services.conversation = {
+      foregroundRoot: conversation.foregroundRoot,
+      read: async input => {
+        reads++
+        if (input.mode === 'search') return conversation.search(input.query!, input.cursor, input.limit)
+        if (input.mode === 'text') return conversation.readText(input.reference!, input.cursor, input.limit)
+        return conversation.readForeground()
+      },
+      send: async () => { throw new Error('Not used by this read-only test') },
+      claim: async () => { throw new Error('Not used by this read-only test') },
+    }
+  })
+  const guide = f.prompts.join('\n')
+  assert.equal(reads, 0, 'registering purpose/path guide never preloads memory body')
+  for (const phrase of ['Foreground_List.md', 'Foreground_Cache.md', 'Keep completed items', '7 days', '30 days', 'user-specified waiting/review date', 'a reminder alone does not reset', 'No extra polling', 'no word or character quota', 'body is not preloaded']) assert.ok(guide.includes(phrase), phrase)
+  const original = 'a'.repeat(70_000) + 'search-original' + 'z'.repeat(80_000)
+  await conversation.send('text-source', { id: 'text-source', participantId: 'human', role: 'user', createdAt: '2026-11-01T00:00:00Z', text: original })
+  const found = await f.call('dss_conversation_read', { mode: 'search', query: 'search-original' })
+  assert.equal(found.matches[0].message.ref, 'text-source')
+  const page = await f.call('dss_conversation_read', { mode: 'text', reference: found.matches[0].message.ref, cursor: 69_990, limit: 40 })
+  assert.equal(page.text, original.slice(69_990, 70_030)); assert.equal(page.nextCursor, 70_030)
+  await assert.rejects(f.call('dss_conversation_read', { mode: 'search', query: 'search-original', limit: 51 }))
+  await assert.rejects(f.call('dss_conversation_read', { mode: 'text', reference: 'text-source', limit: 262145 }))
+})
+
+test('Foreground supplement cannot reopen an explicitly history-cleared running Local Task', async t => {
+  const f = await fixture(t, 'Foreground')
+  const receipt = 'technical/cleanup/' + f.task.taskId + '.json'
+  await withSnapshot(f.files, s => f.files.commit(s, [{ path: receipt, content: JSON.stringify({ version: 1, taskId: f.task.taskId, phase: 'released', historyCleared: true, retentionHash: 'manual', deletedPaths: [], preservedPaths: [] }) }], 'manual cancelled history cleared'))
+  const before = await withSnapshot(f.files, s => f.files.read(s, f.task.sourcePath)), snapshot = await f.snapshot()
+  await assert.rejects(f.call('dss_supplement_task', { snapshotId: snapshot.snapshotId, text: 'Must use a new task' }), /history.*cleared|new Task/)
+  assert.equal(await withSnapshot(f.files, s => f.files.read(s, f.task.sourcePath)), before)
+})
+
+for (const role of ['Organizer', 'Planner', 'Worker', 'Recorder'] as const) test(role + ' business mutation does not reopen manually cleared running Task', async t => {
+  const f = await fixture(t, role, role === 'Worker' ? { workerId: 'child' } : {}, role === 'Organizer' ? 'O' : 'P')
+  await withSnapshot(f.files, s => f.files.commit(s, [{ path: 'technical/cleanup/' + f.task.taskId + '.json', content: JSON.stringify({ version: 1, taskId: f.task.taskId, phase: 'released', historyCleared: true, retentionHash: 'manual', deletedPaths: [], preservedPaths: [] }) }], 'manual cancelled history cleared'))
+  const snapshot = await f.snapshot()
+  const request = role === 'Organizer' ? { name: 'dss_member_dispatch', input: { member: 'B', plan: 'Reopen', decision: 'Reopen' } }
+    : role === 'Planner' ? { name: 'dss_worker_assign', input: { childId: 'new-child', contract: 'Reopen', decision: 'Reopen' } }
+    : role === 'Worker' ? { name: 'dss_worker_deliver', input: { reply: 'Reopen', records: [] } }
+    : { name: 'dss_recorder_save', input: { outputs: [{ path: paths.archive(f.task.taskId) + '/records.md', text: 'Recreated history' }] } }
+  await assert.rejects(f.call(request.name, { ...request.input, snapshotId: snapshot.snapshotId }), /history.*cleared|new Task/)
 })

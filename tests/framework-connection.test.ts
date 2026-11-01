@@ -705,3 +705,71 @@ for (const phase of ['head', 'peer-heartbeat'] as const) test(`actual runtime sh
     assert.notEqual(roster.find(row => row.instanceUUID === peer.registration.instanceUUID)?.availability, 'stopped')
   } finally { hold = false; connection.cancelPending(); await runtime.dispose(); await connection.close(); await peer.close() }
 })
+
+test('verified Local relocation preserves original transaction and instance identity without aliasing ordinary directories', async t => {
+  const { LocalLocationRegistry, LocalLocationMovedError } = await import('../src/framework/local-location.js')
+  const { prepareLocalRecordCopy } = await import('../src/framework/maintenance.js')
+  const root = await directory(t), storage = memory(), source = join(root, 'source'), target = join(root, 'target')
+  const original = await openFrameworkConnection({ mode: 'local', directory: source, workerSeats: 2, login: 'Synthetic' }, { storage })
+  const scope = original.scope, identity = { ...original.registration }
+  await original.transactions.run('stable-write', { body: 'original' }, { reevaluate: true }, async () => [{ path: 'archives/preserved.txt', content: 'Exact original body' }])
+  await original.close()
+  const copy = await prepareLocalRecordCopy(source, target)
+  const registry = new LocalLocationRegistry(storage), request = { source: copy.source, target: copy.destination, scope, fingerprint: copy.fingerprint }
+  await registry.prepare('explicit-move', request)
+  await assert.rejects(openFrameworkStorage({ mode: 'local', directory: target, workerSeats: 2 }, { storage }), /pending explicit move/)
+  await copy.publish(); await registry.publish('explicit-move', request); await copy.dispose()
+  const moved = await openFrameworkConnection({ mode: 'local', directory: target, workerSeats: 2, login: 'Synthetic' }, { storage })
+  try {
+    assert.equal(moved.scope, scope)
+    assert.equal(moved.registration.instanceUUID, identity.instanceUUID)
+    assert.equal(moved.registration.member, identity.member)
+    let rebuilt = false
+    const replay = await moved.transactions.run('stable-write', { body: 'original' }, { reevaluate: true }, async () => { rebuilt = true; return [] })
+    assert.equal(replay.replay, true); assert.equal(rebuilt, false)
+    assert.equal(await withSnapshot(moved.files, snapshot => moved.files.read(snapshot, 'archives/preserved.txt')), 'Exact original body')
+    await registry.applied('explicit-move')
+    await assert.rejects(openFrameworkStorage({ mode: 'local', directory: source, workerSeats: 2 }, { storage }), LocalLocationMovedError)
+    await rm(source, { recursive: true })
+    await assert.rejects(openFrameworkStorage({ mode: 'local', directory: source, workerSeats: 2 }, { storage }), LocalLocationMovedError)
+    const { access } = await import('node:fs/promises')
+    await assert.rejects(access(source), { code: 'ENOENT' }, 'opening a retired location does not recreate an empty database')
+  } finally { await moved.close() }
+  const ordinary = await openFrameworkStorage({ mode: 'local', directory: join(root, 'unrelated'), workerSeats: 2 }, { storage })
+  try { assert.notEqual(ordinary.scope, scope) } finally { await ordinary.close() }
+})
+
+test('opening a moved-away missing Local child through a real symlink parent does not recreate its database', async t => {
+  const { LocalLocationRegistry, LocalLocationMovedError } = await import('../src/framework/local-location.js')
+  const { prepareLocalRecordCopy } = await import('../src/framework/maintenance.js')
+  const { symlink, access } = await import('node:fs/promises')
+  const root = await directory(t), storage = memory(), source = join(root, 'retired-child'), target = join(root, 'new-child')
+  const original = await openFrameworkStorage({ mode: 'local', directory: source, workerSeats: 0 }, { storage })
+  const scope = original.scope
+  await original.close()
+  const copy = await prepareLocalRecordCopy(source, target), registry = new LocalLocationRegistry(storage)
+  const move = { source: copy.source, target: copy.destination, scope, fingerprint: copy.fingerprint }
+  await registry.prepare('move-symlink-source', move); await copy.publish(); await registry.publish('move-symlink-source', move); await registry.applied('move-symlink-source'); await copy.dispose()
+  await rm(source, { recursive: true })
+  const alias = join(root, 'parent-alias'); await symlink(root, alias, 'dir')
+  await assert.rejects(openFrameworkStorage({ mode: 'local', directory: join(alias, 'retired-child'), workerSeats: 0 }, { storage }), LocalLocationMovedError)
+  await assert.rejects(access(source), { code: 'ENOENT' }, 'retired source must remain absent, not newly initialized before the moved-location rejection')
+})
+
+test('canonical preflight preserves ordinary relative Local paths while move canonicalization still requires an absolute path', async t => {
+  const { relative } = await import('node:path')
+  const { canonicalLocalLocation } = await import('../src/framework/local-location.js')
+  const root = await directory(t), location = join(root, 'new', 'local'), input = relative(process.cwd(), location), storage = memory()
+  const opened = await openFrameworkStorage({ mode: 'local', directory: input, workerSeats: 0 }, { storage })
+  try { assert.equal(opened.scope, JSON.stringify(['local', location])) } finally { await opened.close() }
+  await assert.rejects(canonicalLocalLocation(input), /absolute/)
+})
+
+test('canonical missing-parent dot segments resolve to the selected normalized target, never an ancestor', async t => {
+  const { canonicalLocalLocation } = await import('../src/framework/local-location.js')
+  const { access } = await import('node:fs/promises')
+  const root = await directory(t), selected = root + '/not-created/missing/..'
+  assert.equal(await canonicalLocalLocation(selected), join(root, 'not-created'))
+  assert.equal(await canonicalLocalLocation(root + '/not-created/./child/../target/.'), join(root, 'not-created', 'target'))
+  await assert.rejects(access(join(root, 'not-created')), { code: 'ENOENT' }, 'canonical lookup must not create the selected path or its parents')
+})

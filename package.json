@@ -1,6 +1,6 @@
 {
   "name": "deepseek-servant",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "DeepSeek Harness Local/Git 协作助理：原生六角色执行、持久会话、任务恢复与成果归档。",
   "private": true,
   "type": "module",
@@ -33,7 +33,7 @@
     "docs/TESTING.md",
     "THIRD_PARTY_NOTICES.md",
     "CHANGELOG.md",
-    "docs/releases/0.4.1.md"
+    "docs/releases/0.5.0.md"
   ],
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
@@ -69,7 +69,7 @@
     "zod": "4.4.3"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/cordis": "*",
     "@deepseek-ai/dsh-agent": "*",
     "@deepseek-ai/dsh-agent-default-model": "*",
     "@deepseek-ai/dsh-agent-preset-registry": "*",

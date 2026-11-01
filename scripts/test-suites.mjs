@@ -2,6 +2,13 @@
 export const historicalBaseline = '0acd3ba39a2ae23d66759279b3c54c4637cd0ad5'
 
 export const currentSuites = [
+  'framework-record-move-ui.test.ts',
+  'framework-legacy-record-service.test.ts',
+  'framework-legacy-records-ui.test.ts',
+  'framework-record-move-service.test.ts',
+  'native-storage-relocation.test.ts',
+  'framework-legacy-record-export.test.ts',
+  'framework-record-move.test.ts',
   'native-model-selection.test.ts',
   'framework-json-record.test.ts',
   'command-transactions.test.ts',
@@ -13,6 +20,8 @@ export const currentSuites = [
   'framework-capacity.test.ts',
   'framework-cleaner.test.ts',
   'framework-client-contracts.test.ts',
+  'framework-client-presentation.test.ts',
+  'framework-local-location.test.ts',
   'framework-client-notices.test.ts',
   'framework-completion-combinations.test.ts',
   'framework-connection.test.ts',
@@ -25,6 +34,9 @@ export const currentSuites = [
   'framework-host-loop.test.ts',
   'framework-instances.test.ts',
   'framework-knowledge.test.ts',
+  'framework-manual-cleanup.test.ts',
+  'framework-manual-cleanup-ui.test.ts',
+  'framework-maintenance.test.ts',
   'framework-legacy-migration.test.ts',
   'framework-migration-lifecycle.test.ts',
   'framework-recovery.test.ts',

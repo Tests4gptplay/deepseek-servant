@@ -117,3 +117,14 @@ test('a replacement tool result after completion is not evidence that a failed c
   assert.deepEqual(capture!.claimedMessageIds, [])
   assert.deepEqual(capture!.claims, [])
 })
+
+test('a successful original-text page identifies its actual human source without treating search snippets as a claim', () => {
+  const text = result(1, 'text', 2) as SessionEvent<'tool/result'>
+  text.data.message.content = [{ type: 'text', text: JSON.stringify({ ref: 'human-text', message: { id: 'human-text', role: 'user' }, text: 'Exact original page', cursor: 0, characters: 200, nextCursor: 19 }) }]
+  const search = result(1, 'search', 4) as SessionEvent<'tool/result'>
+  search.data.message.content = [{ type: 'text', text: JSON.stringify({ matches: [{ message: { ref: 'other', id: 'other', role: 'user' }, excerpt: 'matching snippet' }] }) }]
+  const [turn] = captureForegroundTurns([call(1, 'text', 'dss_conversation_read', { mode: 'text', reference: 'human-text' }, 1), text,
+    call(1, 'search', 'dss_conversation_read', { mode: 'search', query: 'matching' }, 3), search, end(1, 5)])
+  assert.deepEqual(turn.readMessageIds, ['human-text'])
+  assert.deepEqual(turn.claimedMessageIds, [])
+})
