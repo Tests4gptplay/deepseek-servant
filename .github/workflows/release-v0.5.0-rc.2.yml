@@ -1,0 +1,80 @@
+name: Verify and release DSS 0.5.0 RC2
+on:
+  push:
+    branches: ['release/0.5.0-rc.2']
+    tags: ['v0.5.0-rc.2']
+permissions:
+  contents: read
+concurrency:
+  group: dss-rc2-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  package:
+    if: github.repository == 'Tests4gptplay/deepseek-servant'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.19.0'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Match package tooling
+        run: npm install -g npm@11.9.0 --ignore-scripts
+      - name: Repack and verify the fixed candidate
+        run: |
+          set -euo pipefail
+          umask 022
+          node --input-type=module -e 'import fs from "node:fs"; const p = JSON.parse(fs.readFileSync("package.json", "utf8")); for (const f of ["package.json", ...p.files]) { if (f.startsWith("/") || f.split("/").includes("..")) throw Error("unsafe package path"); fs.chmodSync(f, 0o644); }'
+          mkdir dist
+          npm pack --offline --ignore-scripts --pack-destination dist
+          mv dist/deepseek-servant-0.5.0.tgz dist/deepseek-servant-0.5.0-rc.2.tgz
+          python3 scripts/release-v0.5.0-rc.2/verify-package.py dist/deepseek-servant-0.5.0-rc.2.tgz
+          (cd dist && sha256sum deepseek-servant-0.5.0-rc.2.tgz > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dss-v0.5.0-rc.2-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+  publish:
+    if: github.ref == 'refs/tags/v0.5.0-rc.2'
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: dss-v0.5.0-rc.2-${{ github.sha }}
+          path: dist
+      - name: Verify tag and package before publication
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse 'v0.5.0-rc.2^{commit}')" = "$GITHUB_SHA"
+          python3 scripts/release-v0.5.0-rc.2/verify-package.py dist/deepseek-servant-0.5.0-rc.2.tgz
+          (cd dist && sha256sum -c SHA256SUMS.txt)
+      - name: Publish the new immutable-tag prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: Tests4gptplay/deepseek-servant
+        run: |
+          set -euo pipefail
+          TAG='v0.5.0-rc.2'
+          if gh api "repos/$GH_REPO/releases/tags/$TAG" > "$RUNNER_TEMP/existing-release.json" 2> "$RUNNER_TEMP/release-query.err"; then
+            echo 'Release already exists; refusing to overwrite assets.'
+            exit 1
+          fi
+          grep -q 'HTTP 404' "$RUNNER_TEMP/release-query.err" || { cat "$RUNNER_TEMP/release-query.err"; exit 1; }
+          gh release create "$TAG" --verify-tag --prerelease --latest=false \
+            --title 'DeepSeek Servant 0.5.0 RC2' \
+            --notes-file scripts/release-v0.5.0-rc.2/NOTES.md \
+            dist/deepseek-servant-0.5.0-rc.2.tgz dist/SHA256SUMS.txt
