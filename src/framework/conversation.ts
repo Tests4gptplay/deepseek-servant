@@ -102,9 +102,9 @@ export class FrameworkConversation {
     if (entry.id !== indexed.id || (entry.collaborationId !== undefined && entry.collaborationId !== this.scope.collaborationId)) throw new ConversationRecordError(indexed.path, 'identity', 'Message reference belongs to a different conversation.')
     return entry
   }
-  private async readAt(snapshot: FilesSnapshot, indexed: IndexedMessage, checkedHeader?: ConversationEntry): Promise<ConversationMessage> {
+  private async readAt(snapshot: FilesSnapshot, indexed: IndexedMessage, checkedHeader?: ConversationEntry, checkedText?: string): Promise<ConversationMessage> {
     const entry = checkedHeader ?? await this.headerAt(snapshot, indexed)
-    const text = await readText(this.files, snapshot, entry.textPath)
+    const text = checkedText ?? await readText(this.files, snapshot, entry.textPath)
     if (entry.textHash !== undefined && hash(text) !== entry.textHash) throw new ConversationRecordError(entry.textPath, 'integrity', 'Message body hash differs from entry.')
     const { collaborationId: _scope, textPath: _path, textHash: _hash, ...body } = entry
     const writer = (entry as ConversationEntry & { writer?: { participantId?: string } }).writer
@@ -172,12 +172,14 @@ export class FrameworkConversation {
     })
   }
   /** Caller chooses page size; no product message-length or history limit. */
-  page(limit: number, beforeId?: string, query: { afterId?: string; date?: string } = {}, borrowed?: FilesSnapshot): Promise<{ messages: ConversationMessage[]; moreBefore?: string; moreAfter?: string; revision: string }> {
+  page(limit: number, beforeId?: string, query: { afterId?: string; date?: string } = {}, borrowed?: FilesSnapshot, signal?: AbortSignal): Promise<{ messages: ConversationMessage[]; moreBefore?: string; moreAfter?: string; revision: string }> {
     if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('Page size must be a positive integer.')
     if (beforeId && query.afterId) throw new Error('Choose one pagination direction.')
     if (query.date && !/^\d{4}-\d{2}-\d{2}$/.test(query.date)) throw new Error('Saved date must use YYYY-MM-DD.')
     const inspect = async (snapshot: FilesSnapshot) => {
+      signal?.throwIfAborted()
       const allEntries = (await this.index(snapshot)).messages
+      signal?.throwIfAborted()
       let entries = allEntries
       // Local calendar pages remain day-scoped. Git calendar selection is only
       // the initial inclusive day-end cursor; explicit cursors can cross days.
@@ -201,7 +203,23 @@ export class FrameworkConversation {
         start = Math.max(0, end - limit)
       }
       const selected = entries.slice(start, end)
-      return { messages: await Promise.all(selected.map(entry => this.readAt(snapshot, entry))),
+      let messages: ConversationMessage[]
+      if (this.files.prefetch && selected.length) {
+        signal?.throwIfAborted()
+        await this.files.prefetch(snapshot, { files: selected.map(entry => entry.path) })
+        signal?.throwIfAborted()
+        const headers = await Promise.all(selected.map(entry => this.headerAt(snapshot, entry)))
+        signal?.throwIfAborted()
+        await this.files.prefetch(snapshot, { files: headers.map(entry => logicalReference(entry.textPath) + '/manifest.json') })
+        signal?.throwIfAborted()
+        const manifests = await Promise.all(headers.map(entry => readManifest(this.files, snapshot, entry.textPath)))
+        signal?.throwIfAborted()
+        await this.files.prefetch(snapshot, { files: manifests.flatMap(manifest => manifest.chunks) })
+        signal?.throwIfAborted()
+        messages = await Promise.all(selected.map(async (entry, i) => this.readAt(snapshot, entry, headers[i],
+          await readText(this.files, snapshot, headers[i]!.textPath, manifests[i]))))
+      } else messages = await Promise.all(selected.map(entry => this.readAt(snapshot, entry)))
+      return { messages,
         ...(start && selected.length ? { moreBefore: selected[0].id } : {}),
         ...(selected.length && (this.scope.mode === 'git'
           ? allEntries.findIndex(entry => entry.id === selected[selected.length - 1].id) < allEntries.length - 1
@@ -295,18 +313,27 @@ function textChanges(path: string, text: string, git: boolean): FileChange[] {
   }
   return [...chunks, { path: path + '/manifest.json', content: json({ version: 1, sha256: hash(text), characters: text.length, chunks: chunks.map(chunk => git ? 'dss-coop/' + chunk.path : chunk.path) }) }]
 }
-async function readText(files: FilesStore, snapshot: FilesSnapshot, path: string): Promise<string> {
+interface TextManifest { version: number; sha256: string; characters: number; chunks: string[] }
+async function readManifest(files: FilesStore, snapshot: FilesSnapshot, path: string): Promise<TextManifest> {
   path = logicalReference(path)
   filePath(path)
   const raw = await files.read(snapshot, path + '/manifest.json')
   if (raw === undefined) throw new ConversationRecordError(path, 'missing', 'Text manifest is missing.')
-  const manifest = JSON.parse(raw) as { version: number; sha256: string; characters: number; chunks: string[] }
+  const manifest = JSON.parse(raw) as TextManifest
   if (manifest.version !== 1 || !Array.isArray(manifest.chunks)) throw new ConversationRecordError(path, 'integrity', 'Unsupported text manifest.')
-  const parts: string[] = []
-  for (const reference of manifest.chunks) {
+  const chunks = manifest.chunks.map(reference => {
     const chunk = logicalReference(reference)
     filePath(chunk)
     if (!chunk.startsWith(path + '/parts/')) throw new ConversationRecordError(chunk, 'integrity', 'Text chunk is outside its referenced record.')
+    return chunk
+  })
+  return { ...manifest, chunks }
+}
+async function readText(files: FilesStore, snapshot: FilesSnapshot, path: string, checked?: TextManifest): Promise<string> {
+  path = logicalReference(path)
+  const manifest = checked ?? await readManifest(files, snapshot, path)
+  const parts: string[] = []
+  for (const chunk of manifest.chunks) {
     const part = await files.read(snapshot, chunk)
     if (part === undefined) throw new ConversationRecordError(chunk, 'missing', 'Text chunk is missing.')
     parts.push(part)

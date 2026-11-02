@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import type { StoragePort } from '../src/contracts/ports.js'
 import { openFrameworkConnection, openFrameworkStorage } from '../src/framework/connection.js'
 import { withSnapshot } from '../src/framework/transactions.js'
+import { readPlanResponse } from './git-read-plan-fixture.js'
 
 // Controlled HTTP backend exercises the real GitHubRepository/GitFiles/registration
 // composition. No real GitHub account, CLI credential lookup or network mutation.
@@ -61,6 +62,7 @@ class Remote {
     const body = init?.body ? JSON.parse(String(init.body)) : undefined
     this.requests.push({ method, path: path + parsed.search, body })
     if (this.forbidden) return Response.json({ message: 'Access revoked' }, { status: 403 })
+    if (path === '/graphql' && body?.query?.startsWith('query DSSReadPlan')) { if (this.failReads) throw new Error('Synthetic read outage'); return readPlanResponse(this, body) }
     if (path === '/user') return Response.json(this.identity)
     if (path === '/repos/example/private') return Response.json({ id: this.repositoryId, full_name: 'example/private', private: true, default_branch: this.branch, permissions: { pull: true, push: true, admin: false } })
     if (method === 'GET' && ['/repos/example/private/invitations', '/repos/example/private/collaborators'].includes(path)) {
@@ -139,6 +141,7 @@ class Remote {
     }
     throw new Error('Unexpected HTTP route ' + method + ' ' + path)
   }
+  mutations() { return this.requests.filter(row => row.body?.query?.startsWith('mutation')).length }
   count(part: string) { return this.requests.filter(request => request.path.includes(part)).length }
 }
 function memory(): StoragePort {
@@ -219,7 +222,7 @@ test('connection: Git uses authoritative identity, real remote CAS/readback and 
   assert.equal(connection.registration.member, 'alice')
   assert.equal(connection.registration.primary, false, 'repository owner is example, not authenticated alice')
   assert.equal(connection.repository!.identity.id, 1)
-  assert.equal(remote.count('/graphql'), 1)
+  assert.equal(remote.mutations(), 1)
   assert.ok(remote.count('/git/blobs/') > 0, 'registration was actually read back')
   assert.equal((await connection.members()).length, 1)
   const saved = await deps.storage.list<any>('framework-git-operations/')
@@ -236,7 +239,7 @@ test('connection: empty Git repository bootstraps once then registers atomically
   const remote = new Remote(null), deps = dependencies(remote)
   const connection = await openFrameworkConnection({ ...gitSettings, repositoryDirectory: 'Maid space/中国' }, deps)
   assert.equal(remote.requests.filter(request => request.method === 'PUT').length, 1)
-  assert.equal(remote.count('/graphql'), 1)
+  assert.equal(remote.mutations(), 1)
   const files = remote.commits.get(remote.head)!.files
   assert.ok(files.has('Maid space/中国/README.md'))
   assert.ok(files.has('Maid space/中国/' + connection.registration.path))
@@ -246,7 +249,7 @@ test('connection: empty Git repository bootstraps once then registers atomically
 test('connection: denied access never returns successful connection and never dispatches writes', async () => {
   const remote = new Remote(); remote.forbidden = true
   await assert.rejects(openFrameworkConnection(gitSettings, dependencies(remote)), /403/)
-  assert.equal(remote.count('/graphql'), 0)
+  assert.equal(remote.mutations(), 0)
   assert.equal(remote.requests.filter(request => request.method === 'PUT').length, 0)
 })
 
@@ -261,10 +264,10 @@ test('connection: unknown remote registration survives reopening without new pay
   await assert.rejects(openFrameworkConnection(gitSettings, deps), /uncertain/)
   const pending = (await deps.storage.list<any>('framework-instance/'))[0]!.value.pending
   assert.equal(pending.heartbeat.sequence, 1)
-  assert.equal(remote.count('/graphql'), 1)
+  assert.equal(remote.mutations(), 1)
   remote.failReads = false; remote.mutationMode = 'normal'; deps.fetch = fetch
   const connection = await openFrameworkConnection(gitSettings, deps)
-  assert.equal(remote.count('/graphql'), 1, 'confirmed original commit rather than minting a new operation')
+  assert.equal(remote.mutations(), 1, 'confirmed original commit rather than minting a new operation')
   const body = await withSnapshot(connection.files, s => connection.files.read(s, connection.registration.path))
   assert.deepEqual(JSON.parse(body!), pending.heartbeat)
   await connection.close()
@@ -292,9 +295,9 @@ test('connection: switching working roots never reuses or clears another roots u
   const other = await openFrameworkConnection({ ...gitSettings, repositoryDirectory: 'Other' }, deps)
   assert.deepEqual(await deps.storage.get(original.key), original.value, 'old working root keeps its exact pending recovery metadata')
   await other.close()
-  const count = remote.count('/graphql')
+  const count = remote.mutations()
   const resumed = await openFrameworkConnection(gitSettings, deps)
-  assert.equal(remote.count('/graphql'), count, 'old root confirms its original operation despite later commits in the other root')
+  assert.equal(remote.mutations(), count, 'old root confirms its original operation despite later commits in the other root')
   assert.deepEqual((await resumed.members())[0]!.heartbeat, original.value.pending.heartbeat)
   await resumed.close()
 })
@@ -382,7 +385,7 @@ test('storage: empty Git frontend reads do not bootstrap; explicit message write
     { path: 'conversation/history.json', content: '["hello"]' },
   ])
   await access.close()
-  assert.equal(remote.count('/graphql'), 1)
+  assert.equal(remote.mutations(), 1)
   const files = remote.commits.get(remote.head)!.files
   assert.equal(files.get('Workspace/conversation/history.json'), '["hello"]')
   assert.ok([...files.keys()].every(path => !path.startsWith('Workspace/instances/')))
@@ -416,7 +419,7 @@ test('storage invitation uses the authenticated collaborator PUT and reports pen
       { method: 'PUT', path: '/repos/example/private/collaborators/existing-user', body: { permission: 'push' } },
     ])
     assert.equal(remote.head, head)
-    assert.equal(remote.count('/graphql'), 0)
+    assert.equal(remote.mutations(), 0)
     assert.ok([...remote.commits.get(remote.head)!.files.keys()].every(path => !path.startsWith('Workspace/instances/')))
     assert.deepEqual(await deps.storage.list('framework-instance/'), [])
   } finally { await access.close() }
@@ -427,7 +430,7 @@ test('invitation authorization comes from the actual API response, not cached ad
     remote.inviteStatus = 403
     await assert.rejects(access.invite!('invited-user'), (error: any) => error.status === 403 && /authorized repository managers/.test(error.message))
     assert.equal(remote.requests.filter(request => request.method === 'PUT' && request.path.includes('/collaborators/')).length, 1)
-    assert.equal(remote.count('/graphql'), 0)
+    assert.equal(remote.mutations(), 0)
   } finally { await access.close() }
 })
 test('invitation rejects changed authenticated account or repository identity before collaborator mutation', async () => {
@@ -471,7 +474,7 @@ test('explicit cancel/remove use authenticated DELETE and preserve actual permis
     ])
     remote.memberDeleteStatus = 403
     await assert.rejects(access.gitMemberAction!({ action: 'remove', username: 'denied-user' }), (error: any) => error.status === 403 && /Member action denied/.test(error.message))
-    assert.equal(remote.count('/graphql'), 0)
+    assert.equal(remote.mutations(), 0)
   } finally { await access.close() }
 })
 test('member deletion and list refresh reject changed account/repository scope before touching authorization lists', async () => {
@@ -573,20 +576,20 @@ test('connection: unknown hot seat change does not report success and retries th
   }
   const connection = await openFrameworkConnection({ ...gitSettings, workerSeats: 4 }, deps)
   try {
-    const before = connection.registration, initialWrites = remote.count('/graphql')
+    const before = connection.registration, initialWrites = remote.mutations()
     loseReadback = true; remote.mutationMode = 'lost-after-commit'
     await assert.rejects(connection.updateWorkerSeats(1), /uncertain/)
     assert.deepEqual(connection.registration, before, 'unknown remote result is not a confirmed registration')
     const pending = (await deps.storage.list<any>('framework-instance/'))[0]!.value.pending
     assert.equal(pending.heartbeat.sequence, 2)
-    assert.equal(remote.count('/graphql'), initialWrites + 1)
+    assert.equal(remote.mutations(), initialWrites + 1)
     const operations = await deps.storage.list<any>('framework-git-operations/')
     loseReadback = false; remote.failReads = false; remote.mutationMode = 'normal'
     const resolved = await connection.updateWorkerSeats(1)
     assert.equal(resolved.workerSeats, 1)
     assert.equal(resolved.member, before.member)
     assert.equal(resolved.instanceUUID, before.instanceUUID)
-    assert.equal(remote.count('/graphql'), initialWrites + 1, 'readback confirms the original write without resubmitting a fresh operation')
+    assert.equal(remote.mutations(), initialWrites + 1, 'readback confirms the original write without resubmitting a fresh operation')
     assert.deepEqual((await deps.storage.list<any>('framework-git-operations/')).map(row => row.key), operations.map(row => row.key))
     await withSnapshot(connection.files, async snapshot => {
       assert.equal(await connection.files.read(snapshot, before.path), undefined)
@@ -655,7 +658,7 @@ test('connection: three simultaneous first saves re-evaluate proven Git HEAD con
   try {
     assert.deepEqual(connections.map(connection => connection.registration.member).sort(), ['alice', 'alice1', 'alice2'])
     assert.equal(new Set(connections.map(connection => connection.registration.instanceUUID)).size, 3)
-    assert.ok(remote.count('/graphql') > 3, 'a real expectedHeadOid conflict preceded the three confirmed publications')
+    assert.ok(remote.mutations() > 3, 'a real expectedHeadOid conflict preceded the three confirmed publications')
     const roster = await connections[0].members()
     assert.equal(roster.length, 3)
     assert.equal(new Set(roster.map(row => row.instanceUUID)).size, 3)
@@ -673,7 +676,7 @@ for (const phase of ['head', 'peer-heartbeat'] as const) test(`actual runtime sh
   const remote = new Remote(), storage = memory(), started = Promise.withResolvers<void>()
   let hold = false, aborted: unknown, reason: unknown
   const connection = await openFrameworkConnection(gitSettings, { ...dependencies(remote, storage), fetch: async (url, init) => {
-    const matches = phase === 'head' ? url.includes('/commits/heads/') : url.includes('/git/blobs/')
+    const matches = phase === 'head' ? url.includes('/commits/heads/') : url.includes('/git/blobs/') || url.endsWith('/graphql') && String(init?.body).includes('query DSSReadPlan')
     if (hold && matches) {
       started.resolve()
       return new Promise<Response>((_resolve, reject) => init!.signal!.addEventListener('abort', () => { aborted = init!.signal!.reason; reject(aborted) }, { once: true }))

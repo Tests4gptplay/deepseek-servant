@@ -6,6 +6,7 @@ import { MemoryStorage } from './support.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { parse } from 'graphql'
+import { readPlanResponse } from './git-read-plan-fixture.js'
 import { createHash } from 'node:crypto'
 import { GitHubRepository, GitCommitOutcomeUnknownError } from '../src/experimental/private-git/git-repository.js'
 import { GitHubClient, GitConflictError, GitHubError } from '../src/experimental/private-git/github.js'
@@ -61,6 +62,10 @@ class Remote {
     const headers = new Headers(init?.headers)
     this.requests.push({ method, path: path + parsed.search, body, headers })
     if (this.forbidden) return Response.json({ message: 'Access revoked' }, { status: 403 })
+    if (path === '/graphql' && body?.query?.startsWith('query DSSReadPlan')) {
+      if (this.failReads) throw new Error('Synthetic read outage')
+      return readPlanResponse(this, body)
+    }
     if (path === '/user') return Response.json(this.identity)
     if (path === '/repos/example/private') return Response.json({ id: 77, full_name: 'example/private', private: true, default_branch: this.branch, permissions: { pull: true, push: true } })
     if (this.failReads && method === 'GET') throw new Error('Synthetic read outage')
@@ -130,6 +135,124 @@ function fixture(remote = new Remote(), extra: Partial<RepoBinding> = {}) {
   const client = new GitHubClient(token, (url, init) => remote.fetch(url, init))
   return { remote, binding, repo: new GitHubRepository(client, () => binding) }
 }
+
+test('batch read: one Commit query resolves latest ref, selected text and direct directory without ancestor REST walks', async () => {
+  const { repo, remote } = fixture(new Remote({ 'Workspace/a.txt': 'original 😀', 'Workspace/dir/b.txt': 'B', 'Other/private.txt': 'out of scope' }))
+  const snapshot = await repo.snapshot(false, { files: ['dss-coop/a.txt', 'dss-coop/absent.txt'], directories: ['dss-coop/dir'] })
+  assert.equal(await repo.read(snapshot, 'dss-coop/a.txt'), 'original 😀')
+  assert.equal(await repo.read(snapshot, 'dss-coop/absent.txt'), undefined)
+  assert.deepEqual((await repo.listDirectory(snapshot, 'dss-coop/dir')).map(entry => entry.path), ['dss-coop/dir/b.txt'])
+  assert.equal(remote.count('/commits/heads/'), 0); assert.equal(remote.count('/git/trees/'), 0)
+  assert.equal(remote.count('/git/blobs/'), 0); assert.equal(remote.count('/graphql'), 1)
+  assert.ok(!JSON.stringify(remote.requests).includes('Other/private'))
+})
+
+test('batch read: later batches stay on first commit while main advances; next view resolves new main', async () => {
+  const { repo, remote } = fixture(new Remote({ 'Workspace/a.txt': 'old A', 'Workspace/b.txt': 'old B' }))
+  const first = await repo.snapshot(false, { files: ['dss-coop/a.txt'] })
+  remote.change({ 'Workspace/a.txt': 'new A', 'Workspace/b.txt': 'new B' })
+  await repo.prefetch(first, { files: ['dss-coop/b.txt'] })
+  assert.equal(await repo.read(first, 'dss-coop/b.txt'), 'old B')
+  const next = await repo.snapshot(false, { files: ['dss-coop/a.txt'] })
+  assert.equal(await repo.read(next, 'dss-coop/a.txt'), 'new A')
+  const queries = remote.requests.filter(row => row.path === '/graphql')
+  assert.deepEqual(queries.map(row => row.body.variables.ref), ['refs/heads/main', first.head, 'refs/heads/main'])
+})
+
+test('batch read: binary and truncated text use existing exact bytes; no extra text conversion', async () => {
+  const remote = new Remote({ 'Workspace/a.txt': 'full original' })
+  const binary = new Uint8Array([0, 255, 128, 13, 10])
+  remote.append(new Map([['Workspace/b.bin', binary]]), 'binary')
+  const { repo } = fixture(remote)
+  const snapshot = await repo.snapshot(false, { files: ['dss-coop/b.bin'] })
+  assert.deepEqual(await repo.readBytes(snapshot, 'dss-coop/b.bin'), Buffer.from(binary))
+  assert.equal(remote.count('/git/blobs/'), 1)
+})
+
+for (const kind of ['forbidden', 'partial', 'wrong-not-found', 'bad-directory', 'cancel'] as const) test('batch read rejects ' + kind + ' without REST fallback or cached empty directory', async () => {
+  const remote = new Remote({ 'Workspace/a.txt': 'A', 'Workspace/dir/a.txt': 'A' })
+  let alter = true, repo!: GitHubRepository
+  const reason = new Error('cancel this batch')
+  const client = new GitHubClient(async () => ({ value: 'synthetic-batch-authority', source: 'fixture' }), async (url, init) => {
+    const response = await remote.fetch(url, init)
+    if (url.endsWith('/graphql') && alter) {
+      if (kind === 'forbidden') return Response.json({ message: 'Access revoked' }, { status: 403 })
+      if (kind === 'cancel') { repo.cancel(reason); return response }
+      const body = await response.json()
+      if (kind === 'partial') body.errors = [{ type: 'INTERNAL', message: 'Unavailable', path: ['repository', 'ref', 'target', 'p0'] }]
+      if (kind === 'wrong-not-found') body.errors = [{ type: 'NOT_FOUND', message: 'No repository', path: ['repository'] }]
+      if (kind === 'bad-directory') delete body.data.repository.ref.target.p0.object.entries
+      return Response.json(body)
+    }
+    return response
+  })
+  repo = new GitHubRepository(client, () => ({ ownerRepo: 'example/private', repositoryDirectory: 'Workspace', participantId: 1 }))
+  await assert.rejects(repo.snapshot(false, { directories: ['dss-coop/dir'] }), error => kind === 'cancel' ? error === reason : error instanceof GitHubError)
+  assert.equal(remote.count('/git/trees/'), 0); assert.equal(remote.count('/git/blobs/'), 0)
+  alter = false
+  const next = await repo.snapshot(false, { directories: ['dss-coop/dir'] })
+  assert.equal((await repo.listDirectory(next, 'dss-coop/dir')).length, 1)
+})
+
+test('batch read rejects changed credential scope before reusing a prefetched body', async () => {
+  const remote = new Remote({ 'Workspace/a.txt': 'A' }); let credential = 'synthetic-A'
+  const repo = new GitHubRepository(new GitHubClient(async () => ({ value: credential, source: 'fixture' }), (url, init) => remote.fetch(url, init)),
+    () => ({ ownerRepo: 'example/private', repositoryDirectory: 'Workspace', participantId: 1 }))
+  const snapshot = await repo.snapshot(false, { files: ['dss-coop/a.txt'] })
+  credential = 'synthetic-B'
+  await assert.rejects(repo.read(snapshot, 'dss-coop/a.txt'), error => error instanceof GitHubError && error.status === 409)
+})
+
+test('batch read: large demand splits transport while retaining one immutable commit', async () => {
+  const { repo, remote } = fixture(new Remote(Object.fromEntries(Array.from({ length: 130 }, (_, i) => ['Workspace/f' + i, 'body ' + i]))))
+  const snapshot = await repo.snapshot(false, { files: Array.from({ length: 130 }, (_, i) => 'dss-coop/f' + i) })
+  assert.equal(remote.count('/graphql'), 3)
+  assert.equal(remote.requests.filter(row => row.path === '/graphql' && row.body.variables.ref === 'refs/heads/main').length, 1)
+  assert.equal(await repo.read(snapshot, 'dss-coop/f129'), 'body 129')
+  assert.equal(remote.count('/git/blobs/'), 0)
+})
+
+test('batch read: empty repository retains the established branch check, not a fake empty directory on wrong branch', async () => {
+  const { repo } = fixture(new Remote(null))
+  assert.equal((await repo.snapshot(false, { files: ['dss-coop/absent'] })).head, '')
+  const f = fixture(new Remote(), { branch: 'missing' })
+  await assert.rejects(f.repo.snapshot(false, { files: ['dss-coop/absent'] }))
+})
+
+test('batch read: truncated UTF-8 uses original byte endpoint and exact existing integrity check', async () => {
+  const remote = new Remote({ 'Workspace/a.txt': 'complete original 😀' })
+  const repo = new GitHubRepository(new GitHubClient(async () => ({ value: 'synthetic-truncated', source: 'fixture' }), async (url, init) => {
+    const response = await remote.fetch(url, init)
+    if (!url.endsWith('/graphql')) return response
+    const value = await response.json(); value.data.repository.ref.target.p0.object.isTruncated = true; value.data.repository.ref.target.p0.object.text = 'complete'
+    return Response.json(value)
+  }), () => ({ ownerRepo: 'example/private', repositoryDirectory: 'Workspace', participantId: 1 }))
+  const snapshot = await repo.snapshot(false, { files: ['dss-coop/a.txt'] })
+  assert.equal(await repo.read(snapshot, 'dss-coop/a.txt'), 'complete original 😀')
+  assert.equal(remote.count('/git/blobs/'), 1)
+})
+
+test('batch read: HTTP200 RATE_LIMITED retains the actual reset and does not dispatch another request', async () => {
+  let calls = 0; const reset = new Date(Date.now() + 120000).toISOString()
+  const client = new GitHubClient(async () => ({ value: 'synthetic-limited', source: 'fixture' }), async () => {
+    calls++; return Response.json({ data: { rateLimit: { remaining: 0, resetAt: reset } }, errors: [{ type: 'RATE_LIMITED', message: 'Rate exceeded' }] })
+  })
+  for (let i = 0; i < 2; i++) await assert.rejects(client.session(session => session.request('POST', '/graphql', {})), error => error instanceof GitHubError && error.status === 429 && error.retryAt === Date.parse(reset))
+  assert.equal(calls, 1)
+})
+
+test('batch page stops before opening another batch after its UI read is cancelled', async () => {
+  const { repo } = fixture(), operations = new Map<string, any>(), records = new MemoryStorage()
+  const files = new GitFiles(repo, { save: async value => { operations.set(value.operation.id, value) }, get: async id => operations.get(id), list: async () => [...operations.values()] })
+  const conversation = new FrameworkConversation(files, new FrameworkTransactions(files, records, 'cancel-page-batches'), { mode: 'git', collaborationId: 'test' })
+  await conversation.send('first', { id: 'first', participantId: 'A', role: 'user', createdAt: '2026-11-02T00:00:00Z', text: 'Complete original' })
+  const abort = new AbortController(), reason = new Error('stop this view'), prefetch = files.prefetch.bind(files); let batches = 0
+  files.prefetch = async (...args) => { batches++; await prefetch(...args); abort.abort(reason) }
+  await assert.rejects(conversation.page(20, undefined, {}, undefined, abort.signal), error => error === reason)
+  assert.equal(batches, 1)
+  files.prefetch = prefetch
+  assert.equal((await conversation.page(20)).messages[0].text, 'Complete original')
+})
 const changes: GitChange[] = [{ path: 'dss-coop/tasks/普通任务_P.md', content: 'Worker details 🚀\n' }, { path: 'dss-coop/state/seed', content: null }]
 
 test('remote: binary FileAddition preserves exact bytes and hashes without text conversion', async () => {
@@ -1471,10 +1594,11 @@ test('owned reads: real Git conversation page and recent keep full bytes while e
     id: role + i, role, participantId: 'A', createdAt: '2026-11-01T00:00:00.000Z', text: 'Full unchanged 😀 original ' + role + i,
     ...(role === 'user' ? { recipient: 'ai' as const } : { replyTo: 'user' + i }),
   })
-  let before = f.count(), blobs = f.remote.count('/git/blobs/')
+  let before = f.count(), blobs = f.remote.count('/git/blobs/'), queries = f.remote.count('/graphql')
   const page = await conversation.page(20)
   assert.equal(f.count() - before, 1)
-  assert.equal(f.remote.count('/git/blobs/') - blobs, 19)
+  assert.equal(f.remote.count('/graphql') - queries, 3)
+  assert.equal(f.remote.count('/git/blobs/') - blobs, 1)
   assert.equal(page.messages.length, 6)
   before = f.count(); blobs = f.remote.count('/git/blobs/')
   const recent = await conversation.recentExchanges()

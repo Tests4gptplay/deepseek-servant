@@ -6,11 +6,13 @@ import { GitHubRepository, GitCommitOutcomeUnknownError, type GitCommitOperation
 export type FileChange = { path: string; content: string | null; bytes?: never } | { path: string; bytes: Uint8Array; content?: never }
 export interface FileEntry { path: string; version: string; bytes?: number; empty?: boolean }
 export interface FilesSnapshot { readonly revision: string; release(): Promise<void> }
+export interface FileReadPlan { files?: readonly string[]; directories?: readonly string[] }
 export interface FileReceipt { revision: string; replay: boolean; operationId?: string; /** Live metadata-only verification; never persist this snapshot. */ verifiedWrites?: GitSnapshot }
 export interface FilesStore {
   /** One owned callback; no credential/session survives its completion. */
   withReadOperation?<T>(operation: () => Promise<T>): Promise<T>
-  snapshot(): Promise<FilesSnapshot>
+  snapshot(plan?: FileReadPlan): Promise<FilesSnapshot>
+  prefetch?(snapshot: FilesSnapshot, plan: FileReadPlan): Promise<void>
   read(snapshot: FilesSnapshot, path: string): Promise<string | undefined>
   readBytes(snapshot: FilesSnapshot, path: string): Promise<Uint8Array | undefined>
   list(snapshot: FilesSnapshot, prefix: string): Promise<FileEntry[]>
@@ -51,9 +53,9 @@ export function validateChanges(changes: readonly FileChange[]): void {
 export function withReadOperation<T>(store: FilesStore, operation: () => Promise<T>): Promise<T> {
   return store.withReadOperation ? store.withReadOperation(operation) : operation()
 }
-export async function withSnapshot<T>(store: FilesStore, operation: (snapshot: FilesSnapshot) => Promise<T>): Promise<T> {
+export async function withSnapshot<T>(store: FilesStore, operation: (snapshot: FilesSnapshot) => Promise<T>, plan?: FileReadPlan): Promise<T> {
   const owned = async () => {
-    const snapshot = await store.snapshot()
+    const snapshot = await store.snapshot(plan)
     try { return await operation(snapshot) } finally { await snapshot.release() }
   }
   return withReadOperation(store, owned)
@@ -79,7 +81,12 @@ export class GitFiles implements FilesStore {
     this.snapshots.set(snapshot, native)
     return snapshot
   }
-  async snapshot(): Promise<FilesSnapshot> { return this.wrap(await this.repository.snapshot()) }
+  private plan(plan: FileReadPlan) {
+    return { files: plan.files?.map(path => 'dss-coop/' + filePath(path)),
+      directories: plan.directories?.map(path => 'dss-coop/' + directoryPrefix(path).replace(/\/$/, '')) }
+  }
+  async snapshot(plan?: FileReadPlan): Promise<FilesSnapshot> { return this.wrap(await this.repository.snapshot(false, plan && this.plan(plan))) }
+  prefetch(snapshot: FilesSnapshot, plan: FileReadPlan): Promise<void> { return this.repository.prefetch(this.native(snapshot), this.plan(plan)) }
   async at(revision: string): Promise<FilesSnapshot> { return this.wrap(await this.repository.at(revision)) }
   private native(snapshot: FilesSnapshot): GitSnapshot {
     const native = this.snapshots.get(snapshot)

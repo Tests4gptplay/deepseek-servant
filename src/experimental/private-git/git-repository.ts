@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash, randomUUID } from 'node:crypto'
 import type { GitChange, GitFileChange, GitReceipt, GitRepository, GitSnapshot, RepoBinding, RepoConnection } from './contracts.js'
 import { GitConflictError, GitHubClient, GitHubError, inspectPrivateRepo, repositoryPath, type GitHubSession, type TokenSource } from './github.js'
+import { GitRefNotResolvedError, readPlan, type GitReadPlan, type PathDemand, type PlannedEntry } from './read-plan.js'
 
 export function validCoopPath(path: string): boolean {
   return path.startsWith('dss-coop/') && !/[\\\0\r\n]/.test(path)
@@ -56,7 +57,9 @@ interface TreeNode {
   previous?: TreeNode
 }
 interface ReadOperation { session?: GitHubSession; scope: RemoteScope; signal: AbortSignal; binding: string; active: boolean; reusable: boolean; pending: Set<Promise<unknown>> }
-interface SnapshotState { scope: RemoteScope; head: string; root: TreeNode; nodes: Map<string, TreeNode>; loaded: Set<string>; verifiedWrites?: ReadonlyArray<Readonly<{ path: string; sha256: string | null }>> }
+interface SnapshotState { scope: RemoteScope; head: string; root: TreeNode; nodes: Map<string, TreeNode>; loaded: Set<string>;
+  planned: Map<string, (TreeEntry & { node?: TreeNode }) | null>; bodies: Map<string, Uint8Array>;
+  verifiedWrites?: ReadonlyArray<Readonly<{ path: string; sha256: string | null }>> }
 const sha256 = (value: string | Uint8Array) => createHash('sha256').update(value).digest('hex')
 function changeBytes(change: GitChange): Buffer | null {
   if (change.bytes !== undefined) {
@@ -215,8 +218,8 @@ export class GitHubRepository implements GitRepository {
       return ''
     }
   }
-  private async makeSnapshot(session: GitHubSession, scope: RemoteScope, head: string): Promise<GitSnapshot> {
-    let tree = scope.metadata.latestTree?.head === head ? scope.metadata.latestTree.tree : undefined
+  private async makeSnapshot(session: GitHubSession, scope: RemoteScope, head: string, knownTree?: string): Promise<GitSnapshot> {
+    let tree = knownTree ?? (scope.metadata.latestTree?.head === head ? scope.metadata.latestTree.tree : undefined)
     if (tree === undefined) tree = head ? (await session.request<RemoteCommit>('GET', scope.path + '/git/commits/' + head)).tree.sha : ''
     this.check(scope)
     if (head === scope.metadata.head) scope.metadata.latestTree = { head, tree }
@@ -233,16 +236,105 @@ export class GitHubRepository implements GitRepository {
     }
     index(root)
     const snapshot: GitSnapshot = { head, tree, files: new Map(), reads: new Map() }
-    this.states.set(snapshot, { scope, head, root, nodes, loaded: new Set() })
+    this.states.set(snapshot, { scope, head, root, nodes, loaded: new Set(), planned: new Map(), bodies: new Map() })
     return snapshot
   }
-  snapshot(_afterWrite = false): Promise<GitSnapshot> {
+  snapshot(_afterWrite = false, plan?: GitReadPlan): Promise<GitSnapshot> {
     // Each invocation reads the remote branch; no pre-write request is reused by
     // read-back. Only immutable tree responses may be shared across snapshots.
     return this.readSession(async session => {
       const scope = await this.scope(session)
+      if (plan) {
+        const demands = this.demands(scope, plan)
+        const first = demands.slice(0, 64)
+        let result: Awaited<ReturnType<typeof readPlan>>
+        try { result = await readPlan(session, scope.connection.repository.fullName, scope.connection.repository.branch, undefined, first) }
+        catch (error) {
+          // A genuinely unresolved ref still follows the established empty-repo
+          // check. Permission, partial and transport failures never switch APIs.
+          if (!(error instanceof GitRefNotResolvedError)) throw error
+          const snapshot = await this.makeSnapshot(session, scope, await this.head(session, scope))
+          if (snapshot.head) await this.prefetchDemands(session, snapshot, demands)
+          return snapshot
+        }
+        this.check(scope)
+        const snapshot = await this.makeSnapshot(session, scope, result.head, result.tree)
+        this.acceptPlan(snapshot, first, result.entries)
+        scope.metadata.head = result.head; scope.metadata.latestTree = { head: result.head, tree: result.tree }
+        await this.prefetchDemands(session, snapshot, demands.slice(first.length))
+        return snapshot
+      }
       return this.makeSnapshot(session, scope, await this.head(session, scope))
     })
+  }
+  private demands(scope: RemoteScope, plan: GitReadPlan): PathDemand[] {
+    const requested = new Map<string, boolean>()
+    for (const path of plan.directories ?? []) requested.set(this.physical(scope, path), false)
+    for (const path of plan.files ?? []) {
+      const physical = this.physical(scope, path)
+      if (requested.get(physical) === false) throw new Error('A read plan cannot request the same path as both file and directory.')
+      requested.set(physical, true)
+    }
+    return [...requested].map(([path, body]) => ({ path, body }))
+  }
+  async prefetch(snapshot: GitSnapshot, plan: GitReadPlan): Promise<void> {
+    const state = this.state(snapshot)
+    const demands = this.demands(state.scope, plan).filter(demand => {
+      const entry = state.planned.get(demand.path)
+      return !state.planned.has(demand.path) || !!entry && (demand.body ? entry.type === 'blob' && !state.bodies.has(entry.sha) : entry.type === 'tree' && !entry.node?.entries)
+    })
+    if (!demands.length || !snapshot.head) return
+    await this.readSession(session => this.prefetchDemands(session, snapshot, demands))
+  }
+  private async prefetchDemands(session: GitHubSession, snapshot: GitSnapshot, demands: readonly PathDemand[]): Promise<void> {
+    const state = this.state(snapshot)
+    if (session.authorizationScope !== state.scope.metadata.authorizationScope) throw new GitHubError(409, 'The GitHub authorization changed. Read a new snapshot before continuing.')
+    // Bound a transport batch, not history or message length. Later batches use
+    // the same immutable commit; no extra main/ref resolution is performed.
+    for (let start = 0; start < demands.length; start += 64) {
+      const batch = demands.slice(start, start + 64)
+      const result = await readPlan(session, state.scope.connection.repository.fullName, state.scope.connection.repository.branch, snapshot.head, batch)
+      this.check(state.scope)
+      this.acceptPlan(snapshot, batch, result.entries)
+    }
+  }
+  private acceptPlan(snapshot: GitSnapshot, demands: readonly PathDemand[], values: readonly (PlannedEntry | null)[]): void {
+    const state = this.state(snapshot), updates: Array<() => void> = []
+    const gitOid = (value: unknown): value is string => typeof value === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value)
+    for (let i = 0; i < demands.length; i++) {
+      const demand = demands[i]!, value = values[i]!
+      if (value === null) { updates.push(() => state.planned.set(demand.path, null)); continue }
+      const entry: TreeEntry & { node?: TreeNode } = { path: demand.path.split('/').at(-1)!, type: value.type, sha: value.oid }
+      const object = value.object
+      if (demand.body && value.type === 'blob') {
+        if (!object || object.oid !== value.oid || !Number.isSafeInteger(object.byteSize) || object.byteSize! < 0
+          || typeof object.isTruncated !== 'boolean' || ![true, false, null].includes(object.isBinary as boolean | null)
+          || object.text !== null && typeof object.text !== 'string')
+          throw new GitHubError(502, 'GitHub returned incomplete blob metadata.')
+        entry.size = object.byteSize
+        if (object.isBinary === false && !object.isTruncated && typeof object.text === 'string') {
+          const bytes = Buffer.from(object.text, 'utf8')
+          if (bytes.length !== object.byteSize) throw new GitHubError(502, 'GitHub returned incomplete blob text.')
+          updates.push(() => state.bodies.set(value.oid, bytes))
+        }
+        // Binary, truncated or unavailable text uses the existing byte reader;
+        // GraphQL errors never trigger that fallback.
+      } else if (!demand.body && value.type === 'tree') {
+        if (!object || object.oid !== value.oid || !Array.isArray(object.entries)) throw new GitHubError(502, 'GitHub returned an incomplete directory.')
+        const entries: TreeEntry[] = object.entries.map(child => {
+          if (!child.name || child.name.includes('/') || ['.', '..'].includes(child.name) || !gitOid(child.oid) || !['blob', 'tree', 'commit'].includes(child.type))
+            throw new GitHubError(502, 'GitHub returned an invalid directory entry.')
+          return { path: child.name, type: child.type, sha: child.oid, ...(child.object?.byteSize === undefined ? {} : { size: child.object.byteSize }) }
+        })
+        const node: TreeNode = { sha: value.oid, entries, children: new Map() }
+        for (const child of entries) if (child.type === 'tree') node.children.set(child.path, state.nodes.get(child.sha) ?? { sha: child.sha, children: new Map() })
+        entry.node = node
+        updates.push(() => { state.nodes.set(node.sha, node); for (const child of node.children.values()) state.nodes.set(child.sha, child) })
+      }
+      updates.push(() => state.planned.set(demand.path, entry))
+    }
+    this.check(state.scope)
+    for (const update of updates) update()
   }
   async at(revision: string): Promise<GitSnapshot> {
     if (!/^[0-9a-f]{40,64}$/.test(revision)) throw new Error('Use a Git commit id.')
@@ -291,6 +383,7 @@ export class GitHubRepository implements GitRepository {
     const state = this.state(snapshot)
     if (session.authorizationScope !== state.scope.metadata.authorizationScope) throw new GitHubError(409, 'The GitHub authorization changed. Read a new snapshot before continuing.')
     if (!snapshot.tree) return
+    if (state.planned.has(physical)) return state.planned.get(physical) ?? undefined
     if (!physical) return { path: '', type: 'tree', sha: snapshot.tree, node: state.root }
     let node = state.root
     const parts = physical.split('/')
@@ -356,15 +449,18 @@ export class GitHubRepository implements GitRepository {
       snapshot.reads?.set(path, sha)
       if (!sha) return
       ;(snapshot.files as Map<string, string>).set(path, sha)
-      const blob = await session.request<{ content: string; encoding: string }>('GET', state.scope.path + '/git/blobs/' + sha)
-      this.check(state.scope)
-      if (blob.encoding !== 'base64') throw new Error('Unsupported GitHub blob encoding: ' + blob.encoding)
-      const bytes = Buffer.from(blob.content.replace(/\s/g, ''), 'base64')
+      let bytes = state.bodies.get(sha)
+      if (!bytes) {
+        const blob = await session.request<{ content: string; encoding: string }>('GET', state.scope.path + '/git/blobs/' + sha)
+        this.check(state.scope)
+        if (blob.encoding !== 'base64') throw new Error('Unsupported GitHub blob encoding: ' + blob.encoding)
+        bytes = Buffer.from(blob.content.replace(/\s/g, ''), 'base64')
+      }
       // Verify the immutable Git blob rather than cache or trust partial bodies.
       const algorithm = sha.length === 64 ? 'sha256' : 'sha1'
       const actual = createHash(algorithm).update('blob ' + bytes.length + '\0').update(bytes).digest('hex')
       if (actual !== sha) throw new Error('Git blob integrity mismatch: ' + path)
-      return bytes
+      return Buffer.from(bytes)
     })
   }
   /** Net file difference between two immutable snapshots, including own writes.

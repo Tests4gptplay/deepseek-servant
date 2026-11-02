@@ -146,7 +146,9 @@ export class InstanceRegistration {
   private async rows(snapshot: FilesSnapshot): Promise<Array<{ registration: Omit<RegisteredInstance, 'primary'>; heartbeat?: Heartbeat; error?: string }>> {
     const rows = []
     const current = new Map<string, HeartbeatObservation>()
-    for (const entry of await this.files.listDirectory(snapshot, 'instances/')) {
+    const entries = await this.files.listDirectory(snapshot, 'instances/')
+    await this.files.prefetch?.(snapshot, { files: entries.filter(entry => parseInstancePath(entry.path) && this.heartbeatObservations.get(entry.path)?.version !== entry.version).map(entry => entry.path) })
+    for (const entry of entries) {
       const registration = parseInstancePath(entry.path)
       if (!registration) continue
       let observed = this.heartbeatObservations.get(entry.path)

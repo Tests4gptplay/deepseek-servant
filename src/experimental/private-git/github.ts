@@ -125,6 +125,15 @@ export class GitHubClient {
       // not an accumulating per-URL history.
       if (authorization.secondaryFailure?.request === requestKey) authorization.secondaryFailure = undefined
       const result = response.status === 204 ? undefined : sha ? (await response.text()).trim() : await response.json()
+      if (path === '/graphql' && result?.errors?.some((error: { type?: string }) => error.type === 'RATE_LIMITED')) {
+        const now = Date.now(), reset = response.headers.get('x-ratelimit-reset')
+        const deadline = result.data?.rateLimit?.resetAt ? Date.parse(result.data.rateLimit.resetAt) : reset ? Number(reset) * 1000 : NaN
+        const retryAt = Number.isFinite(deadline) && deadline > now ? deadline : undefined
+        const message = result.errors.map((error: { message?: string }) => String(error.message ?? 'GraphQL rate limit')).join('; ').split(token.value).join('[redacted]')
+        const error = new GitHubError(429, message, retryAt === undefined ? undefined : (retryAt - now) / 1000, retryAt, {})
+        if (retryAt !== undefined) authorization.limits.set('graphql', error)
+        throw error
+      }
       if (sha && (typeof result !== 'string' || !/^[0-9a-f]{40}$/.test(result))) throw new GitHubError(502, 'GitHub returned an invalid commit SHA.')
       signal.throwIfAborted()
       return result as R

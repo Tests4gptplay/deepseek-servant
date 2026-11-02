@@ -355,10 +355,18 @@ export class FrameworkClientController {
     if (retained.state === 'confirmed') return Promise.resolve()
     const update = (state: FrameworkDraft['state'], error?: string) => this.publish({ drafts: this.current.drafts.map(draft => draft.input.id === input.id ? { ...draft, state, error } : draft) })
     update('sending')
-    const operation = this.api.send(retained.input).then(() => {
+    const operation = this.api.send(retained.input).then(async () => {
       update('confirmed')
-      const view = this.current.value
-      if (view && frameworkScopeKey(view.activeMode, view.collaborationId, view.storageScope) === frameworkScopeKey(input.mode, input.collaborationId, input.storageScope)) return this.refresh().catch(() => {})
+      const scope = frameworkScopeKey(input.mode, input.collaborationId, input.storageScope)
+      const currentScope = () => { const view = this.current.value; return !!view && frameworkScopeKey(view.activeMode, view.collaborationId, view.storageScope) === scope }
+      const delivered = () => this.current.value?.messages.some(message => message.id === input.id && message.role === 'user' && message.text === input.text)
+      if (!currentScope() || delivered()) return
+      // The changed event often already owns the post-commit read. Join that
+      // read without creating another dirty invalidation for the same send.
+      // Independent changed events keep their existing dirty responsibility.
+      const reading = this.viewRead
+      if (reading && reading.mode === input.mode && reading.collaborationId === input.collaborationId) await reading.promise.catch(() => {})
+      if (currentScope() && !delivered()) return this.refresh().catch(() => {})
     }, error => { update('unknown', error instanceof Error ? error.message : String(error)); throw error })
     this.sends.set(input.id, operation)
     void operation.finally(() => { this.sends.delete(input.id) }).catch(() => {})

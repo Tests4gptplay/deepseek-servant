@@ -41,6 +41,7 @@ export class FrameworkTaskIndex {
     const present = new Set(direct.map(entry => entry.path))
     for (const path of this.cache.keys()) if (!present.has(path)) this.cache.delete(path)
     const result: TaskMetadata[] = [], visible: Array<[string, string]> = []
+    await this.files.prefetch?.(snapshot, { files: direct.filter(entry => this.cache.get(entry.path)?.version !== entry.version).map(entry => entry.path) })
     for (const entry of direct) {
       let cached = this.cache.get(entry.path)
       if (cached?.version !== entry.version) {

@@ -99,6 +99,13 @@ export class ExecutionControls {
   task(taskId: string): Promise<TaskControl | undefined> {
     return this.serial(async () => (await this.load()).tasks[hash(taskId)])
   }
+  /** One view's local control document; never retained across refreshes. */
+  taskStates(taskIds: readonly string[]): Promise<ReadonlyMap<string, TaskControl | undefined>> {
+    return this.serial(async () => {
+      const state = await this.load()
+      return new Map(taskIds.map(id => [id, state.tasks[hash(id)]]))
+    })
+  }
   execution(executionId: string): Promise<ExecutionStopControl | undefined> {
     return this.serial(async () => (await this.load()).executions[hash(executionId)])
   }

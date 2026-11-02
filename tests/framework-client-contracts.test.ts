@@ -8,6 +8,34 @@ function api(extra: Partial<FrameworkClientApi> = {}): FrameworkClientApi {
 const draft: FrameworkSendInput = { mode: 'git', collaborationId: 'git-team', storageScope: 'git-storage', id: 'message-1', createdAt: '2026-10-31T00:00:00.000Z', text: '  exact original\n😀', recipient: 'ai', device: 'browser', timezoneOffsetMinutes: 540 }
 const deferred = <T>() => { let resolve!: (value: T) => void, reject!: (error: unknown) => void; const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej }); return { promise, resolve, reject } }
 
+const savedDraftView = (): FrameworkClientView => ({ ...view('git'), messages: [{ id: draft.id, participantId: 'A', createdAt: draft.createdAt, role: 'user', text: draft.text }] })
+test('confirmed send does not refresh a view which already contains the exact saved original', async () => {
+  let reads = 0
+  const controller = new FrameworkClientController(api({ view: async () => { reads++; return savedDraftView() } }))
+  await controller.selectMode('git'); reads = 0
+  await controller.send(draft)
+  assert.equal(reads, 0); assert.equal(controller.snapshot().drafts[0].state, 'confirmed')
+})
+for (const scenario of ['includes-input', 'older-snapshot', 'independent-dirty'] as const) test('send receipt joins changed-owned read: ' + scenario, async () => {
+  const response = deferred<FrameworkClientView>(), entered = deferred<void>(), ack = deferred<{ revision: string }>()
+  let armed = false, reads = 0
+  const controller = new FrameworkClientController(api({ send: () => ack.promise, view: async input => {
+    if (!armed || input.headerOnly) return view('git')
+    reads++; if (reads === 1) { entered.resolve(); return response.promise }
+    return { ...savedDraftView(), resources: [{ name: 'new peer', status: 'online' }] }
+  } }))
+  await controller.selectMode('git'); armed = true
+  const sending = controller.send(draft), changedRead = controller.refresh()
+  await entered.promise; ack.resolve({ revision: 'newCommit' })
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(reads, 1)
+  const independent = scenario === 'independent-dirty' ? controller.refresh() : Promise.resolve()
+  response.resolve(scenario === 'older-snapshot' ? view('git') : savedDraftView())
+  await Promise.all([sending, changedRead, independent])
+  assert.equal(reads, scenario === 'includes-input' ? 1 : 2)
+  assert.equal(controller.snapshot().value?.messages[0].text, draft.text)
+  if (scenario === 'independent-dirty') assert.equal(controller.snapshot().value?.resources[0].name, 'new peer')
+})
+
 test('late Local refresh cannot replace a subsequently selected Git conversation', async () => {
   const local = deferred<FrameworkClientView>(), controller = new FrameworkClientController(api({ view: input => input.mode === 'git' ? Promise.resolve(view('git')) : local.promise }))
   const first = controller.refresh()

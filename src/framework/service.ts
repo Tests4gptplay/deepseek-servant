@@ -476,7 +476,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         // snapshot; independent refreshes still acquire their own remote HEAD.
         await withSnapshot(access.connection.files, async (snapshot) => {
             signal?.throwIfAborted();
-            const page = await access.conversation.page(20, undefined, {}, snapshot);
+            const page = await access.conversation.page(20, undefined, {}, snapshot, signal);
             signal?.throwIfAborted();
             base.messages = page.messages;
             base.pageBefore = page.moreBefore;
@@ -492,6 +492,11 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             access.taskIndex ??= new FrameworkTaskIndex(access.connection.files, error => this.report(mode, error));
             const tasks = await access.taskIndex.list(snapshot);
             signal?.throwIfAborted();
+            const controls = tasks.length ? await this.controls(access, active).taskStates(tasks.map(task => task.taskId)) : undefined;
+            signal?.throwIfAborted();
+            await access.connection.files.prefetch?.(snapshot, { files: tasks.filter(task => task.status !== 'complete')
+                .flatMap(task => (task.members ?? [task.owner]).map(name => paths.memberStatus(task.taskId, name))) });
+            signal?.throwIfAborted();
             for (const task of tasks) {
                 signal?.throwIfAborted();
                 const cleanup = (task.status === 'complete' || mode === 'local') ? await readJson<ManualTaskCleanupRecord>(access.connection.files, snapshot, cleanupRecordPath(task.taskId)) : undefined;
@@ -506,12 +511,14 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 }));
                 signal?.throwIfAborted();
                 base.tasks.push({ taskId: task.taskId, title: task.sourcePath.split('/').at(-1)!, route: task.route, owner: task.owner, status: task.status,
-                    members, control: (await this.controls(access, active).task(task.taskId))?.intent, executions: active?.runtime.executionViews(task.taskId) ?? [], resultPaths: task.resultPaths ?? [] });
+                    members, control: controls?.get(task.taskId)?.intent, executions: active?.runtime.executionViews(task.taskId) ?? [], resultPaths: task.resultPaths ?? [] });
             }
             } catch (error) { report(error); }
             signal?.throwIfAborted();
             try {
             const migrations = await readJson<{ migrations: Array<{ id: string; manifestPath: string }> }>(access.connection.files, snapshot, 'technical/legacy-migrations/index.json');
+            signal?.throwIfAborted();
+            await access.connection.files.prefetch?.(snapshot, { files: (migrations?.migrations ?? []).map(migration => migration.manifestPath) });
             signal?.throwIfAborted();
             for (const migration of migrations?.migrations ?? []) {
                 signal?.throwIfAborted();
@@ -563,7 +570,8 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 }));
             }
             } catch (error) { report(error); }
-        });
+        }, { files: [access.conversation.indexPath, 'technical/legacy-migrations/index.json'],
+            directories: ['tasks', ...(!active ? ['instances'] : [])] });
         signal?.throwIfAborted();
         if (active && this.running.get(mode) === active && active.connection.scope === access.connection.scope) {
             try {
@@ -873,7 +881,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         signal?.throwIfAborted();
         this.checkScope(active, input.storageScope);
         if (input.collaborationId !== this.config(input.mode).settings.collaborationId) throw new Error('Conversation selection changed.');
-        const page = await active.conversation.page(input.limit, input.beforeId, { afterId: input.afterId, date: input.date });
+        const page = await active.conversation.page(input.limit, input.beforeId, { afterId: input.afterId, date: input.date }, undefined, signal);
         signal?.throwIfAborted();
         return page;
     }

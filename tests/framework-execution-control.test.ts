@@ -9,6 +9,23 @@ function fixture() {
     list: async () => [] }
   return { storage, fail: (value: boolean) => { fail = value } }
 }
+test('view task controls read and clone one document, while the next view sees later durable controls', async () => {
+  const { storage } = fixture(), c = new ExecutionControls(storage, 'A')
+  const ids = Array.from({ length: 12 }, (_, i) => 'T' + i)
+  for (const id of ids) await c.setTask('pause-' + id, id, 'paused')
+  let reads = 0; const get = storage.get.bind(storage)
+  storage.get = async key => { reads++; return get(key) }
+  const first = await c.taskStates(ids)
+  assert.equal(reads, 1); assert.equal(first.size, 12)
+  await c.setTask('resume-T0', 'T0', 'running')
+  assert.equal(first.get('T0')?.intent, 'paused', 'prior view remains its own value')
+  reads = 0
+  const next = await c.taskStates(ids)
+  assert.equal(reads, 1); assert.equal(next.get('T0')?.intent, 'running')
+  next.get('T0')!.intent = 'cancelled'
+  assert.equal((await c.task('T0'))?.intent, 'running', 'caller cannot mutate durable storage through a returned value')
+  assert.equal((await new ExecutionControls(storage, 'B').taskStates(ids)).get('T0'), undefined)
+})
 test('task pause/cancel/resume persist explicit intent without inventing business state or remote signals', async () => {
   const { storage } = fixture(), c = new ExecutionControls(storage, 'A', () => '2026-10-31T00:00:00Z')
   assert.equal(await c.taskHeld('T'), false)
