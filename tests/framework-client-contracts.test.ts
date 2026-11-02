@@ -98,6 +98,30 @@ for (const destination of ['git-storage', 'different-storage']) test('cold unbou
   assert.equal(controller.snapshot().value?.messages.length, destination === 'git-storage' ? 1 : 0)
 })
 
+for (const navigation of ['none', 'same-mode', 'other-mode', 'changed-settings'] as const) test('receipt before cold panels binds only its original unbound header: ' + navigation, async () => {
+  const panels = deferred<FrameworkClientView>(), entered = deferred<void>(), receipt = deferred<{ revision: string; storageScope: string }>()
+  let reads = 0
+  const header = () => ({ ...view('git'), storageScope: undefined })
+  const controller = new FrameworkClientController(api({
+    selectMode: async input => input.mode === 'git' ? header() : view('local'),
+    configure: async () => ({ ...header(), revision: 'new-settings' }),
+    view: async input => { if (input.mode === 'local') return view('local'); entered.resolve(); return panels.promise },
+    send: () => receipt.promise,
+    sentMessage: async input => { reads++; assert.equal(input.storageScope, 'git-storage'); return { message: savedDraftView().messages[0], order: [draft.id], revision: 'H' } },
+  }))
+  await controller.selectMode('git'); await entered.promise
+  const original = { ...draft, storageScope: undefined }, sending = controller.send(original)
+  if (navigation === 'same-mode') await controller.selectMode('git')
+  else if (navigation === 'other-mode') await controller.selectMode('local')
+  else if (navigation === 'changed-settings') await controller.configure({ mode: 'git', commandId: 'settings', settings: header().settings })
+  receipt.resolve({ revision: 'H', storageScope: 'git-storage' }); await sending
+  assert.equal(reads, navigation === 'none' ? 1 : 0)
+  assert.equal(controller.snapshot().value?.messages.length, navigation === 'none' ? 1 : 0, 'panels still held; only authoritative readback may display a message')
+  assert.deepEqual(controller.snapshot().drafts[0].input, original)
+  panels.resolve(view('git')); await new Promise(resolve => setImmediate(resolve))
+  if (navigation === 'none') assert.equal(controller.snapshot().value?.messages[0]?.id, draft.id, 'earlier panel snapshot cannot erase readback')
+})
+
 for (const action of ['stopExecution', 'taskControl', 'legacyControl', 'participation'] as const) test('every full action response preserves a later authoritative message: ' + action, async () => {
   const response = deferred<FrameworkClientView>(), entered = deferred<void>()
   const controller = new FrameworkClientController(api({ [action]: () => { entered.resolve(); return response.promise },

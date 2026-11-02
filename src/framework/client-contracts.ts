@@ -379,6 +379,9 @@ export class FrameworkClientController {
     if (active) return active
     const retained = this.current.drafts.find(draft => draft.input.id === input.id)!
     if (retained.state === 'confirmed') return Promise.resolve()
+    const beforeSend = this.current.value, sendNavigation = this.navigationGeneration
+    const unboundOwner = input.storageScope === undefined && beforeSend?.storageScope === undefined && !this.navigation
+      && beforeSend?.activeMode === input.mode && beforeSend.collaborationId === input.collaborationId
     const update = (state: FrameworkDraft['state'], error?: string) => this.publish({ drafts: this.current.drafts.map(draft => draft.input.id === input.id ? { ...draft, state, error } : draft) })
     update('sending')
     const operation = this.api.send(retained.input).then(async receipt => {
@@ -386,6 +389,15 @@ export class FrameworkClientController {
       // A cold settings header may not know the storage identity yet. Bind the
       // read to the actual successful destination, never an undefined wildcard.
       const storageScope = input.storageScope ?? receipt.storageScope
+      const current = this.current.value
+      if (unboundOwner && storageScope !== undefined && current && current.storageScope === undefined
+        && sendNavigation === this.navigationGeneration && !this.navigation && current.revision === beforeSend!.revision
+        && current.activeMode === input.mode && current.collaborationId === input.collaborationId) {
+        // The same still-unbound header can learn its destination from the
+        // successful write before unrelated panels finish loading. No draft
+        // content is promoted: the message still comes from remote readback.
+        this.publish({ value: { ...current, storageScope } })
+      }
       const scope = frameworkScopeKey(input.mode, input.collaborationId, storageScope)
       const currentScope = () => { const view = this.current.value; return !!view && frameworkScopeKey(view.activeMode, view.collaborationId, view.storageScope) === scope }
       const delivered = () => this.current.value?.messages.some(message => message.id === input.id && message.role === 'user' && message.text === input.text)
