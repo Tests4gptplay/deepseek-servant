@@ -54,6 +54,8 @@ interface Running {
 export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChanged'> {
     private readonly accessTransitions = new Map<FrameworkMode, Promise<void>>();
     private readonly accesses = new Map<FrameworkMode, Promise<Access>>();
+    private readonly writePreparations = new Set<Promise<void>>();
+    private gitPreparation?: { revision: string; promise: Promise<void> };
     private readonly stopping = new WeakMap<Running, Promise<void>>();
     private readonly running = new Map<FrameworkMode, Running>();
     private readonly configurationOwners = new Set<ConfigurationOwner>();
@@ -209,6 +211,28 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             this.modeStarting.set(owner.mode, operation);
         }
         this.starting = Promise.all([...this.modeStarting.values()]).then(() => undefined);
+        if (this.activeMode === 'git' || await this.storage.get<boolean>('framework-git-enabled')) this.prepareGit();
+    }
+    /** Read-only preparation starts independently of Host ready and participation. */
+    private prepareGit(): void {
+        const saved = this.saved.get('git');
+        if (this.closed || !saved?.settings.ownerRepo.trim() || this.gitPreparation?.revision === saved.revision) return;
+        const access = this.access('git'), acquisition = this.accessOpening.get('git');
+        const current = () => !this.closed && this.saved.get('git') === saved && this.accesses.get('git') === access;
+        const operation = access.then(async value => {
+            if (current()) await value.connection.prepareWrite({ initialize: false });
+        }).catch(error => {
+            // A failed acquisition removes itself from accesses. Its real error
+            // still belongs here; cancellation or a replacement does not.
+            if (!this.closed && this.saved.get('git') === saved && !acquisition?.signal.aborted
+                && (!this.accesses.has('git') || this.accesses.get('git') === access))
+                this.report('git', error, this.diagnosticScope('git', saved.settings));
+        }).finally(() => {
+            this.writePreparations.delete(operation);
+            if (this.gitPreparation?.promise === operation) this.gitPreparation = undefined;
+        });
+        this.gitPreparation = { revision: saved.revision, promise: operation };
+        this.writePreparations.add(operation);
     }
     private async resumeStartupMove(): Promise<void> {
         this.assertOpen();
@@ -1066,6 +1090,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                     await this.storage.set('framework-git-enabled', true);
                 await this.storage.set(key, { signature, revision: next.revision, confirmed: true });
                 this.clearResolvedErrors(mode, input.commandId);
+                if (mode === 'git') this.prepareGit();
                 const priorError = this.configurationErrors.get(mode);
                 const messages = this.reportedErrors.get(mode);
                 if (priorError && !messages?.get(priorError)?.operationId) { messages?.delete(priorError); this.configurationErrors.delete(mode); this.refreshErrors(mode); }
@@ -1155,6 +1180,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         const mode = z.enum(['local', 'git']).parse(input.mode);
         this.activeMode = mode;
         await this.storage.set('framework-active-mode', mode);
+        if (mode === 'git') this.prepareGit();
         this.changed();
         return this.view({ mode, headerOnly: input.headerOnly });
     }
@@ -1222,6 +1248,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             await Promise.allSettled([...this.opening.values()]);
             await Promise.all(stopping);
             await Promise.all(cancellingAccess);
+            await Promise.allSettled([...this.writePreparations]);
             for (const [mode, active] of this.running) {
                 if (!this.stopping.has(active)) try { await this.stopRunning(active); } catch (error) { this.cleanupFailure(mode, error); }
             }

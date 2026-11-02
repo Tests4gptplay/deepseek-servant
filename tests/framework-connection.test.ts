@@ -777,3 +777,47 @@ test('canonical missing-parent dot segments resolve to the selected normalized t
   assert.equal(await canonicalLocalLocation(root + '/not-created/./child/../target/.'), join(root, 'not-created', 'target'))
   await assert.rejects(access(join(root, 'not-created')), { code: 'ENOENT' }, 'canonical lookup must not create the selected path or its parents')
 })
+
+for (const populated of [false, true]) test('storage: read-only prewarm is shared with an early send and only that send may initialize: ' + populated, async () => {
+  const remote = new Remote(populated ? { 'README.md': 'retain' } : null), deps = dependencies(remote)
+  const access = await openFrameworkStorage(gitSettings, deps)
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>(), fetch = deps.fetch
+  const original = remote.fetch.bind(remote); let held = false
+  remote.fetch = async (url, init) => {
+    if (!held && new URL(url).pathname.includes('/commits/heads/')) { held = true; entered.resolve(); await release.promise }
+    return original(url, init)
+  }
+  const warming = access.prepareWrite({ initialize: false }); await entered.promise
+  let sent = false
+  const sending = access.prepareWrite().then(() => { sent = true })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(sent, false); assert.equal(remote.requests.filter(r => r.method !== 'GET').length, 0)
+  release.resolve(); await Promise.all([warming, sending])
+  assert.equal(remote.requests.filter(r => r.method === 'PUT').length, populated ? 0 : 1)
+  if (populated) assert.equal(remote.count('/commits/heads/'), 1, 'early send joins the same probe')
+  const before = remote.requests.length
+  await access.prepareWrite(); await access.prepareWrite({ initialize: false })
+  assert.equal(remote.requests.length, before, 'prepared connection does not repeat setup on first send')
+  assert.equal((await deps.storage.list('framework-instance/')).length, 0)
+  await access.close()
+})
+
+test('storage: prewarm alone does not initialize an empty repository or join background', async () => {
+  const remote = new Remote(null), deps = dependencies(remote), access = await openFrameworkStorage(gitSettings, deps)
+  await access.prepareWrite({ initialize: false })
+  assert.equal(remote.head, ''); assert.ok(remote.requests.every(r => r.method === 'GET'))
+  assert.equal((await deps.storage.list('framework-instance/')).length, 0)
+  await access.close()
+})
+
+test('storage: a failed prewarm is visible and a later explicit send retains real permission checks', async () => {
+  const remote = new Remote(), deps = dependencies(remote), access = await openFrameworkStorage(gitSettings, deps)
+  remote.forbidden = true
+  await assert.rejects(access.prepareWrite({ initialize: false }), /Access revoked/)
+  const before = remote.requests.length
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(remote.requests.length, before, 'failed preparation has no retry loop')
+  await assert.rejects(access.prepareWrite(), /Access revoked/)
+  assert.equal(remote.mutations(), 0)
+  await access.close()
+})

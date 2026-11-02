@@ -28,9 +28,10 @@ export interface FrameworkStorage {
   readonly repository?: RepoConnection
   /** Authenticated Git identity, or explicitly local technical identity. Not registration. */
   readonly identity: { login: string; owner: string; instanceUUID: string; repositoryId: string | number }
-  /** Explicit write setup only. Reads of an empty Git repository never create a branch.
+  /** Read-only preparation may verify an existing branch. Only an explicit write
+   * (the default) may initialize an empty Git repository.
    * Obtain a fresh snapshot after this call; an empty pre-setup revision is stale. */
-  prepareWrite(): Promise<void>
+  prepareWrite(options?: { initialize?: boolean }): Promise<void>
   gitMembers?(): Promise<{ invitations: CoopInvitation[]; collaborators: CoopCollaborator[] }>
   gitMemberAction?(action: { action: 'cancelInvitation'; invitationId: number } | { action: 'remove'; username: string }): Promise<void>
   invite?(username: string): Promise<{ status: 'pending' | 'accepted'; id?: number; login: string }>
@@ -83,6 +84,7 @@ export async function openFrameworkStorage(input: FrameworkConnectionSettings,
     let files: FilesStore, scope: string, login: string, owner: string, repositoryId: string | number
     let repository: RepoConnection | undefined
     let initializeWrite: (() => Promise<void>) | undefined
+    let inspectWrite: (() => Promise<boolean>) | undefined
     if (settings.mode === 'local') {
       if (!settings.directory.trim()) throw new Error('Choose the local DSS storage directory.')
       const locations = new LocalLocationRegistry(storage)
@@ -126,6 +128,7 @@ export async function openFrameworkStorage(input: FrameworkConnectionSettings,
       owner = repository.repository.fullName.split('/')[0]!
       // Deferred until an explicit write. A read-only empty snapshot remains empty.
       initializeWrite = async () => { await remote.ensureBranch() }
+      inspectWrite = async () => !!(await remote.snapshot()).head
       files = new GitFiles(remote, operations(storage, scope))
     }
     dependencies.signal?.throwIfAborted()
@@ -133,17 +136,31 @@ export async function openFrameworkStorage(input: FrameworkConnectionSettings,
     await storage.set('framework-connection-settings/' + digest(scope), settings)
     dependencies.signal?.throwIfAborted()
     const transactions = new FrameworkTransactions(files, storage, scope)
-    let closed = false, closing: Promise<void> | undefined, preparing: Promise<void> | undefined
+    let closed = false, closing: Promise<void> | undefined, prepared = false
+    let preparing: { promise: Promise<boolean> } | undefined
     const assertOpen = () => { if (closed) throw new Error('Framework storage is closed.') }
+    const prepare = (initialize: boolean) => {
+      if (preparing) return preparing
+      const flight = { promise: Promise.resolve().then(async () => {
+        const available = initialize ? (await initializeWrite?.(), true) : await inspectWrite?.() ?? true
+        assertOpen(); prepared = available; return available
+      }) }
+      preparing = flight
+      void flight.promise.finally(() => { if (preparing === flight) preparing = undefined }).catch(() => {})
+      return flight
+    }
     return {
       files, transactions, scope, repository, invite, gitMembers, gitMemberAction, cancelPending, identity: { login, owner, instanceUUID, repositoryId },
-      prepareWrite: async () => {
+      prepareWrite: async (options) => {
         assertOpen()
-        if (!preparing) {
-          preparing = (async () => { await initializeWrite?.(); assertOpen() })()
-          void preparing.catch(() => { preparing = undefined })
+        if (prepared) return
+        const initialize = options?.initialize !== false, flight = prepare(initialize)
+        if (!await flight.promise && initialize) {
+          // A send may join a read-only probe of an empty repository. Only its
+          // explicit write responsibility is allowed to initialize that branch.
+          if (preparing === flight) preparing = undefined
+          await prepare(true).promise
         }
-        await preparing
       },
       close: () => {
         if (!closing) { closed = true; closing = release!() }

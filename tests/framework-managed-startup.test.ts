@@ -8,8 +8,10 @@ import { FrameworkRoleRuntime } from '../src/framework/role-runtime.js'
 import type { StoragePort } from '../src/contracts/ports.js'
 import type { FrameworkClientSettings } from '../src/framework/client-contracts.js'
 import { FilesOutcomeUnknownError } from '../src/framework/transactions.js'
+import { CoopCredentials } from '../src/experimental/private-git/credentials.js'
 
 async function fixture(t: test.TestContext, ownerRepo = 'Owner/repo') {
+  t.mock.method(CoopCredentials.prototype, 'resolve', async () => { throw new Error('Synthetic Git credentials unavailable; no real CLI or network in this fixture') })
   const root = await mkdtemp(join(tmpdir(), 'dss-managed-start-')), values = new Map<string, unknown>()
   const storage: StoragePort = { get: async key => structuredClone(values.get(key)) as never,
     set: async (key, value) => { values.set(key, structuredClone(value)) },
@@ -231,7 +233,7 @@ test('warm mode navigation publishes Git header before held contents and permits
     if (!beforeRelease) release.resolve()
     const header = await selection
     assert.equal(beforeRelease, true, 'warm selection awaited Git content instead of publishing header')
-    assert.equal(header.activeMode, 'git'); assert.equal(header.revision, 'git-settings'); assert.equal(gitReads, 0)
+    assert.equal(header.activeMode, 'git'); assert.equal(header.revision, 'git-settings'); assert.equal(gitReads, 1, 'selection starts the requested asynchronous preparation without waiting for it')
     const full = service.view({ mode: 'git' }); await entered.promise
     const local = await service.selectMode({ mode: 'local', headerOnly: true })
     assert.equal(local.activeMode, 'local'); assert.equal(await storage.get('framework-active-mode'), 'local')
@@ -253,4 +255,72 @@ test('mode selection response retains its captured mode when a later navigation 
     assert.equal((await older).activeMode, 'git', 'later navigation must not rewrite the older response identity')
     assert.equal(await storage.get('framework-active-mode'), 'local')
   } finally { releaseAck.resolve(); await older }
+})
+
+for (const active of ['git', 'local'] as const) test('saved enabled Git prewarms on every startup without joining or delaying Local: ' + active, async t => {
+  const { service, internal, storage } = await fixture(t), entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+  await storage.set('framework-active-mode', active); await storage.set('framework-git-enabled', true); await storage.set('framework-participation/git', false)
+  let probes = 0, closed = 0
+  const connection = { scope: 'warm-scope', prepareWrite: async (options: unknown) => { probes++; assert.deepEqual(options, { initialize: false }); entered.resolve(); await release.promise },
+    cancelPending: () => release.resolve(), close: async () => { closed++ } }
+  const access = internal.access.bind(internal)
+  internal.access = (mode: string) => {
+    if (mode !== 'git') return access(mode)
+    if (!internal.accesses.has(mode)) internal.accesses.set(mode, Promise.resolve({ connection }))
+    return internal.accesses.get(mode)
+  }
+  await service.initialize(); await entered.promise; await service.start()
+  const header = await service.view({ mode: 'git', headerOnly: true })
+  assert.equal(header.activeMode, 'git'); assert.equal(header.connection.participating, false)
+  assert.equal(internal.running.has('git'), false); assert.equal(await storage.get('framework-participation/git'), false)
+  await service.selectMode({ mode: 'git', headerOnly: true }); assert.equal(probes, 1, 'selection shares startup preparation')
+  const local = await service.selectMode({ mode: 'local', headerOnly: true })
+  await service.send({ mode: 'local', storageScope: local.storageScope, collaborationId: 'team', id: 'while-warming', createdAt: '2026-11-01T11:00:00Z', text: 'Local remains writable', recipient: 'human', device: 'test', timezoneOffsetMinutes: 0 })
+  assert.equal((await service.view({ mode: 'local' })).messages[0].id, 'while-warming')
+  await service.dispose(); assert.equal(closed, 1); assert.equal(internal.running.size, 0)
+})
+
+test('opening Git starts read-only preparation immediately while the real header remains usable', async t => {
+  const { service, internal, storage } = await fixture(t), entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+  await storage.set('framework-participation/git', false)
+  const access = internal.access.bind(internal); let probes = 0
+  const connection = { scope: 'warm-scope', prepareWrite: async () => { probes++; entered.resolve(); await release.promise }, cancelPending: () => release.resolve(), close: async () => {} }
+  internal.access = (mode: string) => { if (mode !== 'git') return access(mode); const pending = internal.accesses.get(mode) ?? Promise.resolve({ connection }); internal.accesses.set(mode, pending); return pending }
+  await service.start(); assert.equal(probes, 0)
+  const header = await service.selectMode({ mode: 'git', headerOnly: true }); await entered.promise
+  assert.equal(header.settings.ownerRepo, 'Owner/repo'); assert.equal(header.connection.participating, false)
+  assert.equal((await service.selectMode({ mode: 'local', headerOnly: true })).activeMode, 'local')
+  await service.dispose()
+})
+
+test('preparation failure is visible after acquisition removes itself and never schedules its own retry', async t => {
+  const { service, internal, storage } = await fixture(t)
+  await storage.set('framework-participation/git', false)
+  await service.start()
+  const access = internal.access.bind(internal); let attempts = 0
+  internal.access = (mode: string) => {
+    if (mode !== 'git') return access(mode)
+    attempts++
+    const pending = Promise.reject(new Error('HTTP 403 Access revoked'))
+    internal.accesses.set(mode, pending)
+    void pending.catch(() => internal.accesses.delete(mode))
+    return pending
+  }
+  await service.selectMode({ mode: 'git', headerOnly: true }); await Promise.all([...internal.writePreparations])
+  assert.match((await service.view({ mode: 'git', headerOnly: true })).connection.detail ?? '', /403 Access revoked/)
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(attempts, 1)
+})
+
+test('replaced scope cannot publish an old preparation error into the new settings', async t => {
+  const { service, internal, storage } = await fixture(t), release = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>()
+  await storage.set('framework-participation/git', false); await service.start()
+  const original = internal.access.bind(internal)
+  const oldConnection = { prepareWrite: async () => { entered.resolve(); await release.promise; throw new Error('old scope failure') }, cancelPending: () => release.resolve(), close: async () => {} }
+  internal.access = (mode: string) => { if (mode !== 'git') return original(mode); const pending = internal.accesses.get(mode) ?? Promise.resolve({ connection: oldConnection }); internal.accesses.set(mode, pending); return pending }
+  await service.selectMode({ mode: 'git', headerOnly: true }); await entered.promise
+  const old = internal.saved.get('git')
+  await internal.persistSettings('git', { revision: 'replacement', settings: { ...old.settings, repositoryDirectory: 'another-scope' } })
+  internal.accesses.delete('git')
+  release.resolve(); await Promise.all([...internal.writePreparations])
+  assert.equal((await service.view({ mode: 'git', headerOnly: true })).connection.detail, undefined)
 })

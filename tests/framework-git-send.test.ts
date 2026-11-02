@@ -529,3 +529,18 @@ for (const failure of ['member-status', 'task-metadata', 'tasks-directory', 'ins
   const next=await f.service.view({mode:'git'});assert.equal(next.tasks.length,2);assert.equal(releases,2)
   assert.equal(next.tasks.find(task=>task.taskId==='failing')!.members[0].status,'running','next owned view can read recovered data')
 })
+
+test('Git send joins read-only preparation started by opening Git and keeps one preparation request', async t => {
+  const f = await serviceFixture(t), entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>(), fetch = f.remote.fetch.bind(f.remote)
+  let held = false
+  f.remote.fetch = async (url, init) => { if (!held && new URL(url).pathname.includes('/commits/heads/')) { held = true; entered.resolve(); await release.promise } return fetch(url, init) }
+  const header = await f.service.selectMode({ mode: 'git', headerOnly: true }); await entered.promise
+  assert.equal(header.connection.participating, false)
+  let sent = false
+  const sending = f.service.send(f.input('early-prewarm')).then(() => { sent = true })
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(sent, false)
+  release.resolve(); await sending
+  assert.equal(f.remote.count('/commits/heads/'), 2, 'one preparation plus unchanged commit preflight; no duplicate send preparation')
+  assert.equal((await f.service.sentMessage(f.input('early-prewarm'))).message?.text, f.input('early-prewarm').text)
+  assert.equal((await f.storage.list('framework-instance/')).length, 0)
+})
