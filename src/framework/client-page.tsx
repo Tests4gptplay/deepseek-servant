@@ -19,7 +19,7 @@ export interface FrameworkPageProps {
   onPickDirectory?: () => Promise<string | null>
   onViewed?: (view: FrameworkClientView) => void
   onConversationVisible?: (visible: boolean) => void
-  modelControl?: (value: FrameworkClientModel | undefined, onChange: (value: FrameworkClientModel | undefined) => void, label: string, options?: { autoLabel?: string; autoHint?: string; followModel?: FrameworkClientModel }) => ReactNode
+  modelControl?: (value: FrameworkClientModel | undefined, onChange: (value: FrameworkClientModel | undefined) => void, label: string, options?: { composer?: boolean; autoLabel?: string; autoHint?: string; followModel?: FrameworkClientModel }) => ReactNode
   presetControl?: (value: string | undefined, onChange: (value: string | undefined) => void) => ReactNode
 }
 const roles: FrameworkClientRole[] = ['Foreground', 'Organizer', 'Planner', 'Worker', 'Recorder', 'Helper']
@@ -226,15 +226,17 @@ export function FrameworkPage(props: FrameworkPageProps) {
         <div className={css.composer}><textarea aria-label={tr('消息', 'Message')} value={draft} onChange={event => remember(event.target.value)}
           onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); send() } }} />
           {replyTo && <p className={css.muted}>{tr('回复', 'Reply to')} {replyTo} <Button size="sm" onClick={() => { setReplyTo(undefined); draftsByScope.current.set(scope, { text: draft, recipient }) }}>{tr('取消引用', 'Clear reply')}</Button></p>}
-          {view && props.modelControl && <fieldset disabled={!!modelSaving || changingMode} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }} aria-label={tr('前台模型', 'Foreground model')}>
-            {props.modelControl(view.settings.foreground, model => saveForegroundModel({ mode: view.activeMode, storageScope: view.storageScope,
-              expectedRevision: view.revision, commandId: crypto.randomUUID(), model }), tr('前台模型', 'Foreground model'))}
-            <span className={css.muted}>{tr('下轮对话使用；后台设为“跟随前台”时，后续后台任务沿用此选择。', 'Used for the next conversation turn. Future background tasks set to Follow Foreground follow this choice.')}</span>
-            {modelAttempt && !modelSaving && modelAttempt.mode === view.activeMode && modelAttempt.storageScope === view.storageScope
-              && <Button size="sm" onClick={() => saveForegroundModel(modelAttempt)}>{tr('核对并重试模型设置', 'Resolve and retry model setting')}</Button>}
-          </fieldset>}
           <div className={css.composerFooter}>{groupChat ? <SegmentedControl id="framework-recipient" label={tr('收件方', 'Recipient')} value={recipient} onChange={target => remember(draft, replyTo, target)} options={[{ value: 'ai', label: 'AI' }, { value: 'human', label: tr('群聊', 'People') }]} /> : <span className={css.muted}>AI</span>}
-            <Button variant="primary" disabled={!view || !draft.trim()} onClick={send}>{tr('发送', 'Send')}</Button></div>
+            <div className={css.composerActions}>
+              {view && props.modelControl && <fieldset disabled={!!modelSaving || changingMode} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }} aria-label={tr('前台模型', 'Foreground model')}
+                title={tr('下轮对话使用；后台设为“跟随前台”时，后续后台任务沿用此选择。', 'Used for the next conversation turn. Future background tasks set to Follow Foreground follow this choice.')}>
+                {props.modelControl(view.settings.foreground, model => saveForegroundModel({ mode: view.activeMode, storageScope: view.storageScope,
+                  expectedRevision: view.revision, commandId: crypto.randomUUID(), model }), tr('前台模型', 'Foreground model'), { composer: true })}
+              </fieldset>}
+              <Button variant="primary" disabled={!view || !draft.trim()} onClick={send}>{tr('发送', 'Send')}</Button>
+            </div></div>
+          {modelAttempt && !modelSaving && view && modelAttempt.mode === view.activeMode && modelAttempt.storageScope === view.storageScope
+            && <Button size="sm" onClick={() => saveForegroundModel(modelAttempt)}>{tr('核对并重试模型设置', 'Resolve and retry model setting')}</Button>}
         </div><p className={css.footnote}>{tr('切换页面或模式不停止已承接的后台工作。', 'Changing pages or mode does not stop accepted background work.')}</p>
       </div>}
       {tab === 'tasks' && <div className={`${css.taskLayout} ${task ? css.hasSelection : ''}`}><div className={css.taskList}>
@@ -246,11 +248,11 @@ export function FrameworkPage(props: FrameworkPageProps) {
           <section className={css.section}><h3>{tr('成员', 'Members')}</h3>{task.members.map(member => <div key={member.name} className={css.child}>{member.name} · {member.status}</div>)}</section>
           {view && <TaskControls key={scope + task.taskId} task={task} view={view} controller={controller} tr={tr} />}
           <RoleExecutions executions={task.executions} tr={tr} controller={controller} view={view} />
-          <section className={css.section}><h3>{tr('成果与证据', 'Results and evidence')}</h3>{task.resultPaths.map(path => <button key={path} className={css.artifact} onClick={() => run(open(path))}><code>{path}</code></button>)}</section>
+          <section className={css.section}><h3>{tr('成果与证据', 'Results and evidence')}</h3>{task.resultPaths.map(path => <button key={path} className={css.artifact} title={path} onClick={() => run(open(path))}><code>{path}</code></button>)}</section>
         </section>}</div>}
       {(tab === 'tasks' || tab === 'archives') && view && <LegacyTasks tasks={view.legacyTasks} controller={controller} mode={view.activeMode} storageScope={view.storageScope} open={open} openRecords={openLegacyRecords} exportRecords={exportLegacyRecords} tr={tr} />}
       {tab === 'knowledge' && view && <KnowledgePanel key={scope} api={props.api} view={view} tr={tr} />}
-      {tab === 'archives' && <div className={css.knowledge}>{view?.archives.map(item => <section className={css.knowledgeCard} key={item.path}><h3>{item.title}</h3><code>{item.taskId}</code><button className={css.artifact} onClick={() => run(open(item.path))}>{item.path}</button>{item.files?.map(path => <button className={css.artifact} key={path} onClick={() => run(open(path))}>{path}</button>)}{view.activeMode === 'local' && item.taskId && item.path.endsWith('/records.md') && <Button onClick={() => run(props.api.exportRecords({ mode: 'local', storageScope: view.storageScope, taskId: item.taskId! }).then(result => { if (controller.snapshot().value?.storageScope === view.storageScope) setExported(result.path) }))}>{tr('导出完整记录', 'Export complete records')}</Button>}</section>)}</div>}
+      {tab === 'archives' && <div className={css.knowledge}>{view?.archives.map(item => <section className={css.knowledgeCard} key={item.path}><h3>{item.title}</h3><code>{item.taskId}</code><button className={css.artifact} title={item.path} onClick={() => run(open(item.path))}>{item.path}</button>{item.files?.map(path => <button className={css.artifact} key={path} title={path} onClick={() => run(open(path))}>{path}</button>)}{view.activeMode === 'local' && item.taskId && item.path.endsWith('/records.md') && <Button onClick={() => run(props.api.exportRecords({ mode: 'local', storageScope: view.storageScope, taskId: item.taskId! }).then(result => { if (controller.snapshot().value?.storageScope === view.storageScope) setExported(result.path) }))}>{tr('导出完整记录', 'Export complete records')}</Button>}</section>)}</div>}
       {tab === 'resources' && <div className={css.knowledge}>{view?.resources.map(resource => <section className={css.knowledgeCard} key={resource.instanceUUID ?? resource.name}><div className={css.rowBetween}><h3>{resource.name}</h3><span className={css.badge}>{resource.status}</span></div>
         <p>{tr('Worker 席位', 'Worker seats')}：{resource.workerSeats ?? tr('未知', 'Unknown')}</p><code>{resource.instanceUUID}</code>{resource.detail && <p>{resource.detail}</p>}</section>)}
         <RoleExecutions executions={view?.executions ?? []} tr={tr} controller={controller} view={view} /></div>}

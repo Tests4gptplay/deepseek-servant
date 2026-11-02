@@ -2,6 +2,7 @@
 export const historicalBaseline = '0acd3ba39a2ae23d66759279b3c54c4637cd0ad5'
 
 export const currentSuites = [
+  'servant-model-catalog.test.ts',
   'framework-task-release.test.ts',
   'native-creation-cancellation.test.ts',
   'framework-wake-admission.test.ts',

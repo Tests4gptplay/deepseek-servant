@@ -72,10 +72,15 @@ test('actual Conversation renders conditional People and official model picker w
   current={...current,hasOtherInstanceRecords:true,resources:[]};await refresh();assert.ok([...document.querySelectorAll('button')].some(b=>b.textContent==='People'),'another record suffices even when the filtered resources array is empty')
   const textarea=document.querySelector('textarea[aria-label="Message"]')! as HTMLTextAreaElement
   await React.act(()=>{Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype,'value')!.set!.call(textarea,'Keep my draft');textarea.dispatchEvent(new dom.window.Event('input',{bubbles:true}))})
-  await click('Foreground model');assert.match(document.body.textContent!,/Auto/);await click('Second')
-  assert.equal(calls[0].model.model,'second');assert.equal(calls[0].storageScope,'git-scope');assert.equal(configure,0);assert.equal(textarea.value,'Keep my draft');assert.match(document.body.textContent!,/Used for the next conversation turn/)
-  await click('Foreground model');const auto=[...document.querySelectorAll('button')].find(b=>b.textContent?.includes('Auto')&&b.getAttribute('role')?.startsWith('menuitem'));assert.ok(auto,'Auto menu choice');await React.act(async()=>{auto.click()});assert.equal(calls[1].model,undefined)
-  fail=true;await click('Foreground model');await click('Second');assert.match(document.body.textContent!,/model save unknown/);assert.equal(current.settings.foreground,undefined)
+  const foreground=document.querySelector('button[aria-label="Foreground model"]')!;
+  const fieldset=foreground.closest('fieldset')!;
+  assert.ok([...fieldset.parentElement!.querySelectorAll('button')].some(button=>button.textContent==='Send'),'actual Foreground control shares the trailing row with Send');
+  assert.match(fieldset.title,/Used for the next conversation turn/);
+  const openModels=async()=>{await click('Foreground model');const row=[...document.querySelectorAll('button[role="menuitem"]')].find(button=>button.textContent?.startsWith('settings.model'));assert.ok(row,'composer opens the Model root row');await React.act(async()=>{row.click();await new Promise(resolve=>setImmediate(resolve))})};
+  await openModels();assert.match(document.body.textContent!,/Auto/);await click('Second')
+  assert.equal(calls[0].model.model,'second');assert.equal(calls[0].storageScope,'git-scope');assert.equal(configure,0);assert.equal(textarea.value,'Keep my draft');
+  await openModels();const auto=[...document.querySelectorAll('button')].find(b=>b.textContent?.includes('Auto')&&b.getAttribute('role')?.startsWith('menuitem'));assert.ok(auto,'Auto menu choice');await React.act(async()=>{auto.click()});assert.equal(calls[1].model,undefined)
+  fail=true;await openModels();await click('Second');assert.match(document.body.textContent!,/model save unknown/);assert.equal(current.settings.foreground,undefined)
   const failedId=calls.at(-1).commandId;fail=false;await click('Resolve and retry model setting');assert.equal(calls.at(-1).commandId,failedId);assert.equal((current.settings as FrameworkClientView['settings']).foreground?.model,'second')
   await click('People');current={...current,hasOtherInstanceRecords:false};await refresh();assert.equal([...document.querySelectorAll('button')].some(b=>b.textContent==='People'),false)
   await React.act(async()=>{textarea.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'Enter',bubbles:true}))});assert.equal(sends[0].recipient,'ai');assert.equal(sends[0].text,'Keep my draft');assert.equal(configure,0)

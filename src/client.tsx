@@ -12,7 +12,7 @@ import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client';
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types';
 import type { AgentPresetRoster } from '@deepseek-ai/dsh-agent-preset-registry/types';
 import { presetDisplayText } from '@deepseek-ai/dsh-agent-preset-registry/display';
-import { createServantModels, type NativeModelSessions, type NativeModelDirectories } from './client/models.js';
+import { createServantModels } from './client/models.js';
 import { ModelPicker } from './client/model-picker.js';
 import { PresetPicker } from './client/preset-picker.js';
 import { createRequestLifecycle } from './client/request-lifecycle.js';
@@ -55,12 +55,13 @@ export function apply(ctx: Context): void {
         return <span style={{ position: 'relative' }}><img src={typeof __SERVANT_STATUS_ICON_DATA_URI__ === 'undefined' ? '' : __SERVANT_STATUS_ICON_DATA_URI__} alt="DSS" style={{ width: 20, height: 20 }}/>{unread && <span title={t('notice.completed')} style={{ position: 'absolute', right: -4, top: -4 }}><StateDot state="done"/></span>}</span>;
     }
     ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'deepseek-servant.notice', locale: NS, inject: () => ({}) }, Notice));
-    const models = createServantModels(ctx.get('sessions', true) as unknown as NativeModelSessions, ctx.get('modelDirectories', true) as unknown as NativeModelDirectories, async () => {
+    const models = createServantModels(async () => {
         const response = await requests.request(undefined, signal => connection.rpc.call('/api', 'session/modelCatalog', { args: {} }, signal));
         if (!response.ok)
             throw Object.assign(new Error(response.error.message), { code: response.error.code, details: response.error.details });
         return response.value as ModelCatalog;
     });
+    ctx.effect(() => ctx.on('connection/reset', models.reset), 'dss.model-catalog-reset');
     const presetRemote = ctx.get('remote', true) as unknown as {
         agentPresets: {
             list(): Promise<{
