@@ -10,6 +10,10 @@ Git 模式把对话、任务、成员状态、归档和技能等业务资料保�
 
 设置填写 `owner/repo` 和仓库目录；目录可为仓库根或指定子目录。工作区是本实例原生工具执行的位置，与远端业务存储目录不是一回事。其他成员加入同一仓库和目录，并使用各自获授权的工作区；这不会授予远程操纵其他电脑的权限。
 
+前台回复和任务调度由仓库所有者账号的主理实例负责。它是在同一仓库、分支和目录中登记后使用该账号原名的实例，需要在线并已开启后台参与；同账号的其他实例使用带编号的别名。其他有写权限的协作者可以加入协作，但协作域、目录或显示名称不能把协作者变为仓库主理者。
+
+Foreground replies and task scheduling require the repository owner's primary instance to be online with background participation enabled. In a given repository, branch, and directory, this instance uses the owner's exact account name; additional instances of that account receive numbered aliases. Other collaborators with write access can participate. A collaboration, directory, or display name cannot make a collaborator the repository's primary instance.
+
 ## 前台访问不等于后台加入
 
 - 授权存储访问可查看历史、保存消息、读取及下载成果，不隐含登记成员、写心跳或启动六角色。

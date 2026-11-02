@@ -51,6 +51,10 @@ gh auth status --hostname github.com
 
 当前账号需有目标私库的读写权限。在 DSS 的 Git 设置中填写仓库与目录，点击 **保存并连接**；成功提示表示设置已保存且连接登记已读回。CLI 未安装、未登录或仓库授权不足时会显示实际错误，完成配置后再保存。**开始协作后台／退出协作后台** 控制后台参与；普通历史读取和发送消息不自动恢复已退出的后台。
 
+Git 协作的前台回复与任务调度由**仓库所有者账号的主理实例**负责：该实例须在线并已开始协作后台。主理实例是此账号在同一仓库、分支和目录中登记后使用账号原名的实例。其他有写权限的协作者实例加入同一范围参与协作；新建协作域或更改显示名称不改变主理资格。
+
+**Git setup:** Foreground replies and task scheduling run on the **repository owner's primary instance**, which must be online with background participation enabled. This is the instance registered under the owner's exact account name in the same repository, branch, and directory. Other collaborators with write access can join that scope. Creating a collaboration or changing a display name does not change primary ownership.
+
 参考：[GitHub CLI Windows 安装](https://github.com/cli/cli/blob/trunk/docs/install_windows.md)、[GitHub CLI 登录](https://cli.github.com/manual/gh_auth_login)。
 
 ## 从固定源码构建候选
