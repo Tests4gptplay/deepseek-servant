@@ -3,7 +3,15 @@ import assert from 'node:assert/strict'
 import { FrameworkClientController, getFrameworkClientController, type FrameworkClientApi, type FrameworkClientView, type FrameworkSendInput } from '../src/framework/client-contracts.js'
 const view = (mode: 'local' | 'git'): FrameworkClientView => ({ revision: mode + '-1', activeMode: mode, collaborationId: mode + '-team', storageScope: mode + '-storage', settings: { name: 'DSS', userName: '', localDirectory: '/test', ownerRepo: 'owner/repo', repositoryDirectory: '', collaborationId: mode + '-team', workerSeats: 0, workspace: '/test' }, connection: { status: 'unknown', participating: false }, messages: [], tasks: [], legacyTasks: [], archives: [], resources: [{ name: 'offline member', status: 'offline' }] })
 function api(extra: Partial<FrameworkClientApi> = {}): FrameworkClientApi {
-  return { knowledgeList: async () => ({ revision: 'H', items: [] }), knowledgeRead: async input => ({ revision: 'H', path: input.path, text: undefined }), knowledgeEdit: async () => ({ revision: 'H' } as any), knowledgeStatus: async () => ({ revision: 'H' } as any), gitMembers: async () => ({ invitations: [], collaborators: [] }), gitMemberAction: async () => {}, taskControl: async input => view(input.mode), stopExecution: async input => view(input.mode), invite: async () => ({ status: 'pending' }), view: async input => view(input.mode ?? 'local'), history: async () => ({ messages: [], revision: 'H' }), send: async () => ({ revision: 'H' }), configure: async input => ({ ...view(input.mode), settings: input.settings }), legacyControl: async input => view(input.mode), participation: async input => ({ ...view(input.mode), connection: { status: 'unknown', participating: input.enabled } }), selectMode: async input => view(input.mode), readFile: async input => ({ path: input.path, text: 'actual response seam', revision: 'H' }), subscribeChanged: () => () => {}, ...extra }
+  const result = { knowledgeList: async () => ({ revision: 'H', items: [] }), knowledgeRead: async input => ({ revision: 'H', path: input.path, text: undefined }), knowledgeEdit: async () => ({ revision: 'H' } as any), knowledgeStatus: async () => ({ revision: 'H' } as any), gitMembers: async () => ({ invitations: [], collaborators: [] }), gitMemberAction: async () => {}, taskControl: async input => view(input.mode), stopExecution: async input => view(input.mode), invite: async () => ({ status: 'pending' }), view: async input => view(input.mode ?? 'local'), send: async () => ({ revision: 'H' }), configure: async input => ({ ...view(input.mode), settings: input.settings }), legacyControl: async input => view(input.mode), participation: async input => ({ ...view(input.mode), connection: { status: 'unknown', participating: input.enabled } }), selectMode: async input => view(input.mode), readFile: async input => ({ path: input.path, text: 'actual response seam', revision: 'H' }), subscribeChanged: () => () => {}, ...extra }
+  const history = extra.history ?? (async (input: Parameters<FrameworkClientApi['history']>[0]) => {
+    const state = await result.view({ mode: input.mode, headerOnly: true })
+    return { messages: state.messages, moreBefore: state.pageBefore, moreAfter: state.pageAfter, revision: 'fixture-message-index', storageScope: input.storageScope ?? state.storageScope }
+  })
+  return { ...result, history: async (input, signal) => {
+    const page = await history(input, signal)
+    return { ...page, order: 'order' in page ? page.order : page.messages.map(message => message.id), storageScope: page.storageScope ?? input.storageScope ?? view(input.mode).storageScope }
+  } } as FrameworkClientApi
 }
 const draft: FrameworkSendInput = { mode: 'git', collaborationId: 'git-team', storageScope: 'git-storage', id: 'message-1', createdAt: '2026-10-31T00:00:00.000Z', text: '  exact original\n😀', recipient: 'ai', device: 'browser', timezoneOffsetMinutes: 540 }
 const deferred = <T>() => { let resolve!: (value: T) => void, reject!: (error: unknown) => void; const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej }); return { promise, resolve, reject } }
@@ -12,9 +20,10 @@ const savedDraftView = (): FrameworkClientView => ({ ...view('git'), messages: [
 
 test('authoritative message readback displays before held panels; older view cannot erase it and dirty still advances', async () => {
   const held = deferred<FrameworkClientView>(), entered = deferred<void>()
-  let armed = false, reads = 0
+  let armed = false, reads = 0, stored = false
   const controller = new FrameworkClientController(api({
-    sentMessage: async () => ({ message: savedDraftView().messages[0], order: [draft.id], revision: 'opaque-commit' }),
+    sentMessage: async () => { stored = true; return { message: savedDraftView().messages[0], order: [draft.id], revision: 'opaque-commit' } },
+    history: async () => ({ messages: stored ? savedDraftView().messages : [], order: stored ? [draft.id] : [], revision: 'actual-message-index' }),
     view: async input => {
       if (!armed || input.headerOnly) return view('git')
       if (++reads === 1) { entered.resolve(); return held.promise }
@@ -33,15 +42,15 @@ test('authoritative message readback displays before held panels; older view can
 })
 
 test('an old view may finish after readback without erasure; a later authoritative cleanup can remove it', async () => {
-  const held = deferred<FrameworkClientView>(), entered = deferred<void>(); let armed = false, reads = 0
-  const controller = new FrameworkClientController(api({ sentMessage: async () => ({ message: savedDraftView().messages[0], order: [draft.id], revision: 'H' }),
+  const held = deferred<FrameworkClientView>(), entered = deferred<void>(); let armed = false, reads = 0, stored = false
+  const controller = new FrameworkClientController(api({ history: async () => ({ messages: stored ? savedDraftView().messages : [], order: stored ? [draft.id] : [], revision: 'index' }), sentMessage: async () => { stored = true; return { message: savedDraftView().messages[0], order: [draft.id], revision: 'H' } },
     view: async input => { if (!armed || input.headerOnly) return view('git'); if (++reads === 1) { entered.resolve(); return held.promise } return view('git') },
   }))
   await controller.selectMode('git'); armed = true
   const old = controller.refresh(); await entered.promise; await controller.send(draft)
   held.resolve(view('git')); await old
   assert.equal(controller.snapshot().value?.messages[0].id, draft.id)
-  await controller.refresh(); assert.deepEqual(controller.snapshot().value?.messages, [])
+  stored = false; await controller.refresh(); assert.deepEqual(controller.snapshot().value?.messages, [])
   assert.equal(controller.pendingDrafts().length, 0, 'cleanup must not restore the old confirmed draft row')
 })
 
@@ -50,10 +59,9 @@ for (const later of ['fresh-view', 'mode-change', 'history-navigation'] as const
   const controller = new FrameworkClientController(api({ sentMessage: () => { entered.resolve(); return response.promise } }))
   await controller.selectMode('git')
   const sending = controller.send(draft); await entered.promise
-  if (later === 'fresh-view') await controller.refresh()
-  else if (later === 'mode-change') await controller.selectMode('local')
-  else await controller.navigateHistory({ date: '2026-10-30', limit: 20 })
-  response.resolve({ message: savedDraftView().messages[0], order: [draft.id], revision: 'old' }); await sending
+  const next = later === 'fresh-view' ? controller.refresh() : later === 'mode-change' ? controller.selectMode('local') : controller.navigateHistory({ date: '2026-10-30', limit: 20 })
+  if (later === 'mode-change') await next
+  response.resolve({ message: savedDraftView().messages[0], order: [draft.id], revision: 'old' }); await Promise.all([sending, next])
   assert.deepEqual(controller.snapshot().value?.messages, [])
   assert.equal(controller.snapshot().drafts[0].state, 'confirmed')
 })
@@ -72,8 +80,8 @@ test('out-of-order readback inserts by committed index and preserves newer messa
     if (input.id === draft.id) { entered.resolve(); return late.promise }
     return { message: { ...savedDraftView().messages[0], id: second.id, text: second.text }, order: [draft.id, second.id], revision: 'H2' }
   } }))
-  await controller.selectMode('git'); const first = controller.send(draft); await entered.promise; await controller.send(second)
-  late.resolve({ message: savedDraftView().messages[0], order: [draft.id], revision: 'H1' }); await first
+  await controller.selectMode('git'); const first = controller.send(draft); await entered.promise; const secondSend = controller.send(second)
+  late.resolve({ message: savedDraftView().messages[0], order: [draft.id], revision: 'H1' }); await Promise.all([first, secondSend])
   assert.deepEqual(controller.snapshot().value?.messages.map(message => message.id), [draft.id, second.id])
 })
 
@@ -94,8 +102,8 @@ test('later authoritative index absence prevents old readback from restoring a c
     return { message: { ...savedDraftView().messages[0], id: second.id, text: second.text }, order: [second.id], revision: 'after-cleanup-commit' }
   } }))
   await controller.selectMode('git'); const sending = controller.send(draft); await entered.promise
-  await controller.send(second)
-  first.resolve({ message: savedDraftView().messages[0], order: [draft.id], revision: 'before-cleanup-commit' }); await sending
+  const secondSend = controller.send(second)
+  first.resolve({ message: savedDraftView().messages[0], order: [draft.id], revision: 'before-cleanup-commit' }); await Promise.all([sending, secondSend])
   assert.deepEqual(controller.snapshot().value?.messages.map(message => message.id), [second.id])
   assert.equal(controller.pendingDrafts().length, 0, 'the removed message must not reappear as a confirmed draft')
 })
@@ -121,6 +129,7 @@ for (const navigation of ['none', 'same-mode', 'other-mode', 'changed-settings']
     selectMode: async input => input.mode === 'git' ? header() : view('local'),
     configure: async () => ({ ...header(), revision: 'new-settings' }),
     view: async input => { if (input.mode === 'local') return view('local'); entered.resolve(); return panels.promise },
+    history: async () => ({ messages: [], order: [], revision: 'cold-index', storageScope: 'git-storage' }),
     send: () => receipt.promise,
     sentMessage: async input => { reads++; assert.equal(input.storageScope, 'git-storage'); return { message: savedDraftView().messages[0], order: [draft.id], revision: 'H' } },
   }))
@@ -183,29 +192,33 @@ for (const action of ['stopExecution', 'taskControl', 'legacyControl', 'particip
 })
 test('confirmed send does not refresh a view which already contains the exact saved original', async () => {
   let reads = 0
-  const controller = new FrameworkClientController(api({ view: async () => { reads++; return savedDraftView() } }))
+  const controller = new FrameworkClientController(api({ history: async () => ({ messages: savedDraftView().messages, order: [draft.id], revision: 'index' }), view: async () => { reads++; return savedDraftView() } }))
   await controller.selectMode('git'); reads = 0
   await controller.send(draft)
   assert.equal(reads, 0); assert.equal(controller.snapshot().drafts[0].state, 'confirmed')
 })
-for (const scenario of ['includes-input', 'older-snapshot', 'independent-dirty'] as const) test('send receipt joins changed-owned read: ' + scenario, async () => {
-  const response = deferred<FrameworkClientView>(), entered = deferred<void>(), ack = deferred<{ revision: string }>()
-  let armed = false, reads = 0
-  const controller = new FrameworkClientController(api({ send: () => ack.promise, view: async input => {
-    if (!armed || input.headerOnly) return view('git')
-    reads++; if (reads === 1) { entered.resolve(); return response.promise }
-    return { ...savedDraftView(), resources: [{ name: 'new peer', status: 'online' }] }
-  } }))
-  await controller.selectMode('git'); armed = true
+for (const scenario of ['includes-input', 'older-snapshot', 'independent-dirty'] as const) test('send receipt joins changed-owned message read: ' + scenario, async () => {
+  const response = deferred<Awaited<ReturnType<FrameworkClientApi['history']>>>(), entered = deferred<void>(), ack = deferred<{ revision: string }>()
+  let armed = false, reads = 0, readbacks = 0
+  const controller = new FrameworkClientController(api({ send: () => ack.promise,
+    view: async () => ({ ...view('git'), resources: [{ name: 'new peer', status: 'online' }] }),
+    history: async () => {
+      if (!armed) return { messages: [], order: [], revision: 'initial' }
+      reads++; if (reads === 1) { entered.resolve(); return response.promise }
+      return { messages: savedDraftView().messages, order: [draft.id], revision: 'newer' }
+    }, sentMessage: async () => { readbacks++; return { message: savedDraftView().messages[0], order: [draft.id], revision: 'saved' } },
+  }))
+  await controller.selectMode('git'); await controller.refresh(); armed = true
   const sending = controller.send(draft), changedRead = controller.refresh()
   await entered.promise; ack.resolve({ revision: 'newCommit' })
-  await new Promise(resolve => setImmediate(resolve)); assert.equal(reads, 1)
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(reads, 1); assert.equal(readbacks, 0)
   const independent = scenario === 'independent-dirty' ? controller.refresh() : Promise.resolve()
-  response.resolve(scenario === 'older-snapshot' ? view('git') : savedDraftView())
+  response.resolve({ messages: scenario === 'older-snapshot' ? [] : savedDraftView().messages, order: scenario === 'older-snapshot' ? [] : [draft.id], revision: 'sample' })
   await Promise.all([sending, changedRead, independent])
-  assert.equal(reads, scenario === 'includes-input' ? 1 : 2)
+  assert.equal(readbacks, scenario === 'older-snapshot' ? 1 : 0)
+  assert.equal(reads, scenario === 'independent-dirty' ? 2 : 1)
   assert.equal(controller.snapshot().value?.messages[0].text, draft.text)
-  if (scenario === 'independent-dirty') assert.equal(controller.snapshot().value?.resources[0].name, 'new peer')
+  assert.equal(controller.snapshot().value?.resources[0].name, 'new peer')
 })
 
 test('late Local refresh cannot replace a subsequently selected Git conversation', async () => {
@@ -245,7 +258,7 @@ test('reusing a retained message ID with changed body is rejected rather than si
 })
 test('history pagination preserves confirmed order and deduplicates IDs, without mode leakage', async () => {
   const old = deferred<Awaited<ReturnType<FrameworkClientApi['history']>>>()
-  const controller = new FrameworkClientController(api({ view: async () => ({ ...view('local'), pageBefore: 'latest' }), history: () => old.promise }))
+  const controller = new FrameworkClientController(api({ view: async () => ({ ...view('local'), pageBefore: 'latest' }), history: input => input.beforeId ? old.promise : Promise.resolve({ messages: [], moreBefore: input.mode === 'local' ? 'latest' : undefined, revision: 'initial', order: [] }) }))
   await controller.refresh()
   const loading = controller.older(50)
   await controller.selectMode('git')
@@ -479,7 +492,7 @@ test('refresh during a pending mode selection requests that selected mode, not t
 test('refresh after loading older history retains that visible history and appends confirmed new messages', async () => {
   const msg = (id: string) => ({ id, participantId: 'A', createdAt: id, role: 'user' as const, text: id })
   let fresh = { ...view('local'), pageBefore: 'b', messages: [msg('b')] }
-  const controller = new FrameworkClientController(api({ view: async () => fresh, history: async () => ({ messages: [msg('a'), msg('b')], revision: 'H' }) }))
+  const controller = new FrameworkClientController(api({ view: async () => fresh, history: async input => ({ messages: input.beforeId ? [msg('a'), msg('b')] : fresh.messages, moreBefore: input.beforeId ? undefined : fresh.pageBefore, order: ['a', ...fresh.messages.map(m => m.id)], revision: 'H' }) }))
   await controller.refresh(); await controller.older(50)
   fresh = { ...fresh, messages: [msg('b'), msg('c')] }
   await controller.refresh()
@@ -499,14 +512,14 @@ test('archive discovery is explicitly requested and ordinary refresh keeps the l
 test('same mode and collaboration in different storage scopes do not mix pending messages or history', async () => {
   const history = deferred<Awaited<ReturnType<FrameworkClientApi['history']>>>(), sent: FrameworkSendInput[] = []
   let current = { ...view('git'), storageScope: 'repository-A', pageBefore: 'older' }
-  const controller = new FrameworkClientController(api({ view: async () => current, history: () => history.promise, send: async input => { sent.push({ ...input }); throw new Error('unknown') } }))
+  const controller = new FrameworkClientController(api({ view: async () => current, history: input => input.beforeId ? history.promise : Promise.resolve({ messages: [], moreBefore: 'older', revision: 'initial', order: [], storageScope: current.storageScope }), send: async input => { sent.push({ ...input }); throw new Error('unknown') } }))
   await controller.refresh()
   const original = { ...draft, storageScope: 'repository-A' }
   await assert.rejects(controller.send(original))
   const reading = controller.older(50)
   current = { ...view('git'), storageScope: 'repository-B', pageBefore: 'older' }
-  await controller.refresh()
-  history.resolve({ revision: 'A', messages: [{ id: 'A-private', participantId: 'A', role: 'user', createdAt: '', text: 'A only' }] }); await reading
+  const refresh = controller.refresh()
+  history.resolve({ revision: 'A', messages: [{ id: 'A-private', participantId: 'A', role: 'user', createdAt: '', text: 'A only' }] }); await Promise.all([reading, refresh])
   assert.deepEqual(controller.snapshot().value?.messages, [])
   assert.equal(controller.snapshot().drafts[0].input.storageScope, 'repository-A')
   assert.equal(sent.length, 1, 'changing storage never automatically resends old drafts')
@@ -524,12 +537,12 @@ test('explicit Host controls retain task and execution identity through API cont
 test('date/newer history windows remain separate from live refresh and latest resets navigation', async () => {
   const calls: Array<Parameters<FrameworkClientApi['history']>[0]> = []
   const message = (id: string) => ({ id, participantId: 'A', createdAt: '2026-10-31T00:00:00Z', role: 'user' as const, text: id })
-  const controller = new FrameworkClientController(api({ view: async () => ({ ...view('local'), messages: [message('latest')] }), history: async input => { calls.push(input); return { messages: [message(input.afterId ? 'newer' : 'dated')], moreAfter: input.afterId ? undefined : 'dated', revision: 'H' } } }))
+  const controller = new FrameworkClientController(api({ view: async () => ({ ...view('local'), messages: [message('latest')] }), history: async input => { calls.push(input); return { messages: [message(input.afterId ? 'newer' : input.date ? 'dated' : 'latest')], order: ['dated','newer','latest'], moreAfter: input.date && !input.afterId ? 'dated' : undefined, revision: 'H' } } }))
   await controller.refresh(); await controller.navigateHistory({ date: '2026-10-31', limit: 50 }); await controller.refresh()
   assert.deepEqual(controller.snapshot().value?.messages.map(item => item.id), ['dated'])
   await controller.navigateHistory({ date: '2026-10-31', afterId: 'dated', limit: 50 })
   assert.deepEqual(controller.snapshot().value?.messages.map(item => item.id), ['newer'])
-  assert.equal(calls[1].afterId, 'dated'); assert.equal(calls[1].storageScope, 'local-storage')
+  assert.equal(calls.find(call => call.afterId)?.afterId, 'dated'); assert.equal(calls.find(call => call.afterId)?.storageScope, 'local-storage')
   await controller.latest()
   assert.deepEqual(controller.snapshot().value?.messages.map(item => item.id), ['latest'])
   assert.equal(controller.snapshot().value?.historyWindow, undefined)
@@ -555,7 +568,7 @@ test('shared controller retains one changed subscription until final plugin/page
 test('pending mode navigation wins over old-scope history and controls without cancelling Host actions', async () => {
   const selected = deferred<FrameworkClientView>(), history = deferred<Awaited<ReturnType<FrameworkClientApi['history']>>>(), stopped = deferred<FrameworkClientView>()
   let stopCalls = 0
-  const controller = new FrameworkClientController(api({ selectMode: () => selected.promise, history: () => history.promise, stopExecution: () => { stopCalls++; return stopped.promise } }))
+  const controller = new FrameworkClientController(api({ selectMode: () => selected.promise, history: input => input.date ? history.promise : Promise.resolve({ messages: [], order: [], revision: 'initial' }), stopExecution: () => { stopCalls++; return stopped.promise } }))
   await controller.refresh()
   const switching = controller.selectMode('git')
   const reading = controller.navigateHistory({ date: '2026-10-31', limit: 50 })
@@ -576,7 +589,7 @@ test('quick mode return invalidates the earlier navigation and its late errors',
   local.resolve(view('local')); await returning
   git.reject(new Error('obsolete Git error')); await assert.rejects(outward, /obsolete/)
   assert.equal(controller.snapshot().value?.activeMode, 'local')
-  assert.equal(controller.snapshot().loading, false)
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(controller.snapshot().loading, false)
   assert.equal(controller.snapshot().error, undefined)
   await controller.navigateHistory({ date: '2026-10-31', limit: 50 })
   assert.equal(controller.snapshot().value?.historyWindow, true)
@@ -607,7 +620,7 @@ test('failed navigation releases history and retry while preserving the original
   assert.equal(controller.snapshot().value?.historyWindow, true)
   await controller.configure(input)
   assert.equal(controller.snapshot().value?.revision, 'saved')
-  assert.equal(controller.snapshot().loading, false)
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(controller.snapshot().loading, false)
 })
 
 test('quick return keeps the latest selection after an older successful mode response', async () => {
@@ -624,7 +637,7 @@ test('quick return keeps the latest selection after an older successful mode res
 
 test('older history requested during navigation cannot merge into the outgoing scope', async () => {
   const selected = deferred<FrameworkClientView>()
-  const controller = new FrameworkClientController(api({ view: async () => ({ ...view('local'), pageBefore: 'older' }), selectMode: () => selected.promise, history: async () => ({ messages: [{ id: 'old', participantId: 'A', createdAt: '', role: 'user', text: 'old' }], revision: 'H' }) }))
+  const controller = new FrameworkClientController(api({ view: async () => ({ ...view('local'), pageBefore: 'older' }), selectMode: () => selected.promise, history: async input => ({ messages: input.beforeId ? [{ id: 'old', participantId: 'A', createdAt: '', role: 'user', text: 'old' }] : [], order: ['old'], moreBefore: 'older', revision: 'H' }) }))
   await controller.refresh()
   const switching = controller.selectMode('git')
   await controller.older(50)
@@ -666,37 +679,37 @@ test('scroll older joins repeated requests and survives an unrelated live refres
   const msg = (id: string) => ({ id, participantId: 'qa', role: 'user' as const, createdAt: id, text: id })
   const page = deferred<Awaited<ReturnType<FrameworkClientApi['history']>>>()
   let calls = 0, fresh = { ...view('local'), messages: [msg('b'), msg('c')], pageBefore: 'b' }
-  const controller = new FrameworkClientController(api({ view: async () => fresh, history: () => { calls++; return page.promise } }))
+  const controller = new FrameworkClientController(api({ view: async () => fresh, history: input => { if (input.beforeId) { calls++; return page.promise } return Promise.resolve({ messages: fresh.messages, moreBefore: fresh.pageBefore, order: ['a', 'b', 'c', ...(fresh.messages.some(m => m.id === 'd') ? ['d'] : [])], revision: 'latest' }) } }))
   await controller.refresh()
   const first = controller.older(50), repeated = controller.older(50)
   fresh = { ...fresh, messages: [msg('c'), msg('d')], pageBefore: 'c' }
-  await controller.refresh()
-  page.resolve({ revision: 'H', messages: [msg('a'), msg('b')] })
-  await Promise.all([first, repeated])
+  const refresh = controller.refresh()
+  page.resolve({ revision: 'H', messages: [msg('a'), msg('b')], order: ['a','b','c'] })
+  await Promise.all([first, repeated, refresh])
   assert.equal(calls, 1)
   assert.deepEqual(controller.snapshot().value?.messages.map(x => x.id), ['a', 'b', 'c', 'd'])
 })
 test('date history prepends multiple pages rather than replacing the readers window', async () => {
   const msg = (id: string) => ({ id, participantId: 'qa', role: 'user' as const, createdAt: id, text: id })
-  const controller = new FrameworkClientController(api({ history: async input => ({ revision: 'H', messages: (input.beforeId ? ['a', 'b'] : ['c', 'd']).map(msg), moreBefore: input.beforeId ? undefined : 'c' }) }))
+  const controller = new FrameworkClientController(api({ history: async input => ({ revision: 'H', order: ['a','b','c','d'], messages: (input.beforeId ? ['a', 'b'] : ['c', 'd']).map(msg), moreBefore: input.beforeId ? undefined : 'c' }) }))
   await controller.refresh(); await controller.navigateHistory({ date: '2026-11-01', limit: 50 }); await controller.older(50)
   assert.deepEqual(controller.snapshot().value?.messages.map(x => x.id), ['a', 'b', 'c', 'd'])
   assert.equal(controller.snapshot().value?.historyDate, '2026-11-01')
 })
 test('late older response cannot contaminate a newly selected date', async () => {
   const page = deferred<Awaited<ReturnType<FrameworkClientApi['history']>>>()
-  const controller = new FrameworkClientController(api({ view: async () => ({ ...view('local'), pageBefore: 'b' }), history: input => input.beforeId ? page.promise : Promise.resolve({ revision: 'H', messages: [] }) }))
+  const controller = new FrameworkClientController(api({ view: async () => ({ ...view('local'), pageBefore: 'b' }), history: input => input.beforeId ? page.promise : Promise.resolve({ revision: 'H', messages: [], order: [], moreBefore: input.date ? undefined : 'b' }) }))
   await controller.refresh(); const old = controller.older(50)
-  await controller.navigateHistory({ date: '2026-10-01', limit: 50 })
-  page.resolve({ revision: 'H', messages: [{ id: 'stale', participantId: 'qa', role: 'user', createdAt: '', text: 'stale' }] }); await old
+  const nextDate = controller.navigateHistory({ date: '2026-10-01', limit: 50 })
+  page.resolve({ revision: 'H', messages: [{ id: 'stale', participantId: 'qa', role: 'user', createdAt: '', text: 'stale' }] }); await Promise.all([old, nextDate])
   assert.deepEqual(controller.snapshot().value?.messages, [])
 })
 test('a live invalidation does not discard the selected date while its history read is pending', async () => {
   const page = deferred<Awaited<ReturnType<FrameworkClientApi['history']>>>()
-  const controller = new FrameworkClientController(api({ history: () => page.promise }))
+  const controller = new FrameworkClientController(api({ history: input => input.date ? page.promise : Promise.resolve({ messages: [], order: ['dated'], revision: 'latest' }) }))
   await controller.refresh(); const date = controller.navigateHistory({ date: '2026-10-01', limit: 50 })
-  await controller.refresh()
-  page.resolve({ revision: 'H', messages: [{ id: 'dated', participantId: 'qa', createdAt: '', role: 'user', text: 'dated' }] }); await date
+  const refresh = controller.refresh()
+  page.resolve({ revision: 'H', messages: [{ id: 'dated', participantId: 'qa', createdAt: '', role: 'user', text: 'dated' }] }); await Promise.all([date, refresh])
   assert.equal(controller.snapshot().value?.historyDate, '2026-10-01')
   assert.deepEqual(controller.snapshot().value?.messages.map(x => x.id), ['dated'])
 })

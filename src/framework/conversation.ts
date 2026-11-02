@@ -203,7 +203,7 @@ export class FrameworkConversation {
     })
   }
   /** Caller chooses page size; no product message-length or history limit. */
-  page(limit: number, beforeId?: string, query: { afterId?: string; date?: string } = {}, borrowed?: FilesSnapshot, signal?: AbortSignal): Promise<{ messages: ConversationMessage[]; moreBefore?: string; moreAfter?: string; revision: string }> {
+  page(limit: number, beforeId?: string, query: { afterId?: string; date?: string } = {}, borrowed?: FilesSnapshot, signal?: AbortSignal): Promise<{ messages: ConversationMessage[]; moreBefore?: string; moreAfter?: string; revision: string; order: string[] }> {
     if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('Page size must be a positive integer.')
     if (beforeId && query.afterId) throw new Error('Choose one pagination direction.')
     if (query.date && !/^\d{4}-\d{2}-\d{2}$/.test(query.date)) throw new Error('Saved date must use YYYY-MM-DD.')
@@ -250,7 +250,7 @@ export class FrameworkConversation {
         messages = await Promise.all(selected.map(async (entry, i) => this.readAt(snapshot, entry, headers[i],
           await readText(this.files, snapshot, headers[i]!.textPath, manifests[i]))))
       } else messages = await Promise.all(selected.map(entry => this.readAt(snapshot, entry)))
-      return { messages,
+      return { messages, order: allEntries.map(entry => entry.id),
         ...(start && selected.length ? { moreBefore: selected[0].id } : {}),
         ...(selected.length && (this.scope.mode === 'git'
           ? allEntries.findIndex(entry => entry.id === selected[selected.length - 1].id) < allEntries.length - 1

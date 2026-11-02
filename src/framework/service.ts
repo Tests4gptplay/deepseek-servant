@@ -465,6 +465,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
     async view(input: {
         mode?: FrameworkMode;
         includeArchives?: boolean;
+        panelsOnly?: boolean;
         headerOnly?: boolean;
     } = {}, signal?: AbortSignal): Promise<FrameworkClientView> {
         signal?.throwIfAborted();
@@ -500,10 +501,12 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         // snapshot; independent refreshes still acquire their own remote HEAD.
         await withSnapshot(access.connection.files, async (snapshot) => {
             signal?.throwIfAborted();
-            const page = await access.conversation.page(20, undefined, {}, snapshot, signal);
-            signal?.throwIfAborted();
-            base.messages = page.messages;
-            base.pageBefore = page.moreBefore;
+            if (!input.panelsOnly) {
+                const page = await access.conversation.page(20, undefined, {}, snapshot, signal);
+                signal?.throwIfAborted();
+                base.messages = page.messages;
+                base.pageBefore = page.moreBefore;
+            }
             let observed = active?.resources ?? [];
             try { observed = active?.resources ?? await this.observe(access, mode, snapshot, signal); } catch (error) { report(error); }
             signal?.throwIfAborted();
@@ -594,7 +597,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 }));
             }
             } catch (error) { report(error); }
-        }, { signal, isolatePathErrors: true, files: [access.conversation.indexPath, 'technical/legacy-migrations/index.json'],
+        }, { signal, isolatePathErrors: true, files: [...(!input.panelsOnly ? [access.conversation.indexPath] : []), 'technical/legacy-migrations/index.json'],
             directories: ['tasks', ...(!active ? ['instances'] : [])] });
         signal?.throwIfAborted();
         if (active && this.running.get(mode) === active && active.connection.scope === access.connection.scope) {
@@ -717,7 +720,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 }
                 this.pendingRecordMove = undefined;
                 this.clearResolvedErrors('local', input.commandId); this.changed();
-                return this.view({ mode: 'local', includeArchives: true });
+                return this.view({ mode: 'local', includeArchives: true, panelsOnly: true });
             } catch (error) {
                 try { this.pendingRecordMove = await mover.pendingReceipt() ?? this.pendingRecordMove; } catch { /* Keep the already-owned intent if locator reconciliation remains unknown. */ }
                 this.report('local', error, input.storageScope, input.commandId); throw error;
@@ -879,7 +882,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 const current = await controls.task(input.taskId);
                 if (current?.commandId === input.commandId && current.intent === 'running') await active.runtime.resumeTask(input.taskId, input.commandId);
             }
-            this.changed(); return this.view({ mode: input.mode });
+            this.changed(); return this.view({ mode: input.mode, panelsOnly: true });
         });
         return operation;
     }
@@ -889,7 +892,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         const active = this.running.get(input.mode);
         if (!active) throw new Error('This Host does not own a running backend for the selected execution.');
         await active.runtime.requestExecutionStop(input.commandId, input.workId, input.executionId);
-        return this.view({ mode: input.mode });
+        return this.view({ mode: input.mode, panelsOnly: true });
     }
     private observe(access: Access, mode: FrameworkMode, snapshot?: FilesSnapshot, signal?: AbortSignal): Promise<ObservedInstance[]> {
         const c = access.connection;
@@ -907,7 +910,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         if (input.collaborationId !== this.config(input.mode).settings.collaborationId) throw new Error('Conversation selection changed.');
         const page = await active.conversation.page(input.limit, input.beforeId, { afterId: input.afterId, date: input.date }, undefined, signal);
         signal?.throwIfAborted();
-        return page;
+        return { ...page, storageScope: active.connection.scope };
     }
     send(input: FrameworkSendInput) {
         const operation = this.serialMode(input.mode, async () => { await this.modeReady(input.mode); this.assertOpen(); return this.sendStored(input); });
@@ -1031,7 +1034,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             }>(key);
             if (old && old.signature !== signature)
                 throw new Error('Configuration command identity changed.');
-            if (old?.confirmed) return this.view({ mode });
+            if (old?.confirmed) return this.view({ mode, panelsOnly: true });
             const previous = this.config(mode);
             if (!old && input.expectedRevision && input.expectedRevision !== previous.revision)
                 throw new Error('Settings changed; reload before applying this edit.');
@@ -1103,7 +1106,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             }
             finally { signal.removeEventListener('abort', cancelUpdate); }
             this.changed();
-            return this.view({ mode });
+            return this.view({ mode, panelsOnly: true });
             } finally { finishAccessTransition?.(); }
         }, input.commandId);
         void operation.finally(() => this.configurationOwners.delete(owner)).catch(() => {});
@@ -1145,7 +1148,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             else if (input.action === 'answer') await answerLegacyTask(access.connection.files, access.connection.transactions, input.commandId, { ...target, waitId: z.string().min(1).parse(input.waitId), answer: z.string().parse(input.answer) });
             else throw new Error('Unknown legacy control action.');
             this.changed();
-            return this.view({ mode: input.mode });
+            return this.view({ mode: input.mode, panelsOnly: true });
         });
         return operation;
     }
@@ -1167,7 +1170,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             owner?.controller.signal.throwIfAborted();
             if(enabled) await this.connect(mode, owner!.controller.signal);
             else { const running = this.running.get(mode); if(running) { try { await this.stopRunning(running); } finally { this.running.delete(mode); } } }
-            this.changed(); return enabled ? this.view({mode}) : this.settingsView(mode);
+            this.changed(); return enabled ? this.view({ mode, panelsOnly: true }) : this.settingsView(mode);
         });
         void operation.finally(() => { if (owner) this.configurationOwners.delete(owner); }).catch(() => {});
         return operation;
@@ -1182,7 +1185,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         await this.storage.set('framework-active-mode', mode);
         if (mode === 'git') this.prepareGit();
         this.changed();
-        return this.view({ mode, headerOnly: input.headerOnly });
+        return this.view({ mode, headerOnly: input.headerOnly, panelsOnly: true });
     }
     private async readFileBytes(files: FilesStore, snapshot: FilesSnapshot, path: string): Promise<Uint8Array | undefined> {
         const bytes = await files.readBytes(snapshot, path);

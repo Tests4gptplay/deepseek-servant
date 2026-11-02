@@ -391,6 +391,7 @@ test('Git send: late old read and old send ACK cannot replace newer same-scope a
   let holdRead = false
   const api = {
     view: async () => { const result = await f.service.view({ mode: 'git' }); if (holdRead) { holdRead = false; oldReadEntered.resolve(); await oldReadRelease.promise } return result },
+    history: (input, signal) => f.service.history(input, signal),
     send: async (input: FrameworkSendInput) => { const result = await f.service.send(input); ackEntered.resolve(); await ackRelease.promise; return result },
   } as FrameworkClientApi
   const controller = new FrameworkClientController(api)
@@ -472,7 +473,7 @@ test('Git readback respects a newer cleared index and original storage scope', a
 test('real GitFiles commit-index removal and later service readback cannot be undone by an old client readback', async t => {
   const f = await serviceFixture(t), entered = deferred<void>(), release = deferred<void>(), first = f.input('before-index-cleanup'), second = f.input('after-index-cleanup')
   const controller = new FrameworkClientController({
-    view: input => f.service.view({ ...input, mode: 'git' }), send: input => f.service.send(input),
+    view: input => f.service.view({ ...input, mode: 'git' }), history: (input, signal) => f.service.history(input, signal), send: input => f.service.send(input),
     sentMessage: async input => { const result = await f.service.sentMessage(input); if (input.id === first.id) { entered.resolve(); await release.promise } return result },
   } as FrameworkClientApi)
   await controller.refresh()
@@ -480,8 +481,8 @@ test('real GitFiles commit-index removal and later service readback cannot be un
   try {
     await f.connection.transactions.run('shared-index-cleanup', {}, {}, async () => [{ path: f.conversation.indexPath, content: JSON.stringify({ version: 1, messages: [] }) }])
     assert.equal((await f.service.sentMessage(first)).message, undefined)
-    await controller.send(second)
-    release.resolve();await sending
+    const later = controller.send(second)
+    release.resolve();await Promise.all([sending, later])
     assert.deepEqual(controller.snapshot().value?.messages.map(message => message.id), [second.id])
     assert.equal(controller.pendingDrafts().length, 0)
     assert.deepEqual((await f.service.history({ mode: 'git', collaborationId: second.collaborationId, storageScope: second.storageScope, limit: 20 })).messages.map(message => message.id), [second.id])
@@ -543,4 +544,54 @@ test('Git send joins read-only preparation started by opening Git and keeps one 
   assert.equal(f.remote.count('/commits/heads/'), 2, 'one preparation plus unchanged commit preflight; no duplicate send preparation')
   assert.equal((await f.service.sentMessage(f.input('early-prewarm'))).message?.text, f.input('early-prewarm').text)
   assert.equal((await f.storage.list('framework-instance/')).length, 0)
+})
+
+for (const held of ['readback-after-snapshot', 'readback-before-snapshot', 'latest-before-snapshot'] as const) test('one real message lane preserves empty index authority across cleanup: ' + held, async t => {
+  const f = await serviceFixture(t), entered = deferred<void>(), release = deferred<void>(), secondCommitted = deferred<void>()
+  const first = f.input('A'), second = f.input('B'), snapshots: string[] = []
+  let armed = false
+  const controller = new FrameworkClientController({
+    view: input => f.service.view({ ...input, mode: 'git' }),
+    history: async (input, signal) => {
+      if (armed && held === 'latest-before-snapshot') { armed = false; entered.resolve(); await release.promise; snapshots.push('latest') }
+      return f.service.history(input, signal)
+    },
+    send: async input => { const result = await f.service.send(input); if (input.id === second.id) secondCommitted.resolve(); return result },
+    sentMessage: async (input, signal) => {
+      if (input.id === first.id) {
+        if (held === 'readback-before-snapshot') { entered.resolve(); await release.promise }
+        snapshots.push('A'); const result = await f.service.sentMessage(input, signal)
+        if (held === 'readback-after-snapshot') { entered.resolve(); await release.promise }
+        return result
+      }
+      snapshots.push('B'); return f.service.sentMessage(input, signal)
+    },
+  } as FrameworkClientApi)
+  await controller.refresh()
+  armed = true
+  const older = held === 'latest-before-snapshot' ? controller.refresh() : controller.send(first)
+  await entered.promise
+  const newer = controller.send(second); await secondCommitted.promise
+  assert.equal(snapshots.includes('B'), false, 'a later RPC must not take an earlier snapshot while this lane is occupied')
+  await f.connection.transactions.run('cleanup-while-read-held', {}, {}, async () => [{ path: f.conversation.indexPath, content: JSON.stringify({ version: 1, messages: [] }) }])
+  release.resolve(); await Promise.all([older, newer])
+  assert.deepEqual(controller.snapshot().value?.messages, [])
+  assert.equal(controller.pendingDrafts().length, 0)
+  assert.deepEqual(snapshots, [held === 'latest-before-snapshot' ? 'latest' : 'A', 'B'])
+  assert.deepEqual((await f.service.history({ mode: 'git', collaborationId: first.collaborationId, storageScope: first.storageScope, limit: 20 })).order, [])
+})
+
+test('panels request does not read or return conversation data', async t => {
+  const f = await serviceFixture(t)
+  await f.service.send(f.input('retained-original'))
+  const page = f.conversation.page.bind(f.conversation)
+  f.conversation.page = async () => { throw new Error('panels must not read conversation') }
+  f.remote.requests.length = 0
+  const panels = await f.service.view({ mode: 'git', panelsOnly: true })
+  assert.deepEqual(panels.messages, [])
+  const queries = f.remote.requests.filter(row => row.body?.query?.startsWith('query DSSReadPlan'))
+  assert.ok(queries.length)
+  assert.ok(queries.every(row => !JSON.stringify(row.body.variables).includes('conversation-index')))
+  f.conversation.page = page
+  assert.equal((await f.service.history({ mode: 'git', collaborationId: 'same-team', limit: 20 })).messages[0].text, 'Original retained-original')
 })
