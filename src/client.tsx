@@ -12,7 +12,7 @@ import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client';
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types';
 import type { AgentPresetRoster } from '@deepseek-ai/dsh-agent-preset-registry/types';
 import { presetDisplayText } from '@deepseek-ai/dsh-agent-preset-registry/display';
-import { createServantModels } from './client/models.js';
+import { createServantModels, subscribeServantModelUpdates } from './client/models.js';
 import { ModelPicker } from './client/model-picker.js';
 import { PresetPicker } from './client/preset-picker.js';
 import { createRequestLifecycle } from './client/request-lifecycle.js';
@@ -62,6 +62,8 @@ export function apply(ctx: Context): void {
         return response.value as ModelCatalog;
     });
     ctx.effect(() => ctx.on('connection/reset', models.reset), 'dss.model-catalog-reset');
+    const modelEvents = ctx.get('remote', true) as unknown as { $on: Parameters<typeof subscribeServantModelUpdates>[0] };
+    ctx.effect(() => subscribeServantModelUpdates((event, listener) => modelEvents.$on(event, listener), models.invalidate), 'dss.model-catalog-updates');
     const presetRemote = ctx.get('remote', true) as unknown as {
         agentPresets: {
             list(): Promise<{

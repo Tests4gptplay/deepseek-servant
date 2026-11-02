@@ -19,7 +19,7 @@ export interface FrameworkPageProps {
   onPickDirectory?: () => Promise<string | null>
   onViewed?: (view: FrameworkClientView) => void
   onConversationVisible?: (visible: boolean) => void
-  modelControl?: (value: FrameworkClientModel | undefined, onChange: (value: FrameworkClientModel | undefined) => void, label: string, options?: { composer?: boolean; autoLabel?: string; autoHint?: string; followModel?: FrameworkClientModel }) => ReactNode
+  modelControl?: (value: FrameworkClientModel | undefined, onChange: (value: FrameworkClientModel | undefined) => void, label: string, options?: { composer?: boolean; disabled?: boolean; autoLabel?: string; autoHint?: string; followModel?: FrameworkClientModel }) => ReactNode
   presetControl?: (value: string | undefined, onChange: (value: string | undefined) => void) => ReactNode
 }
 const roles: FrameworkClientRole[] = ['Foreground', 'Organizer', 'Planner', 'Worker', 'Recorder', 'Helper']
@@ -231,7 +231,7 @@ export function FrameworkPage(props: FrameworkPageProps) {
               {view && props.modelControl && <fieldset disabled={!!modelSaving || changingMode} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }} aria-label={tr('前台模型', 'Foreground model')}
                 title={tr('下轮对话使用；后台设为“跟随前台”时，后续后台任务沿用此选择。', 'Used for the next conversation turn. Future background tasks set to Follow Foreground follow this choice.')}>
                 {props.modelControl(view.settings.foreground, model => saveForegroundModel({ mode: view.activeMode, storageScope: view.storageScope,
-                  expectedRevision: view.revision, commandId: crypto.randomUUID(), model }), tr('前台模型', 'Foreground model'), { composer: true })}
+                  expectedRevision: view.revision, commandId: crypto.randomUUID(), model }), tr('前台模型', 'Foreground model'), { composer: true, disabled: !!modelSaving || changingMode })}
               </fieldset>}
               <Button variant="primary" disabled={!view || !draft.trim()} onClick={send}>{tr('发送', 'Send')}</Button>
             </div></div>

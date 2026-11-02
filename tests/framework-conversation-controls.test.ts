@@ -86,5 +86,17 @@ test('actual Conversation renders conditional People and official model picker w
   await React.act(async()=>{textarea.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'Enter',bubbles:true}))});assert.equal(sends[0].recipient,'ai');assert.equal(sends[0].text,'Keep my draft');assert.equal(configure,0)
   assert.doesNotMatch(document.body.textContent!,/消息已提交|Message submitted/)
   await click('Settings'); assert.equal(document.querySelectorAll('button[aria-label=\"Foreground model\"]').length,1,'Settings does not duplicate the conversation Foreground picker'); const background=document.querySelector('button[aria-label=\"Background model\"]'); assert.ok(background); assert.match(background.textContent!,/Follow Foreground/); assert.match(background.textContent!,/Second/); await click('Background model'); assert.match(document.body.textContent!,/model and reasoning effort/); await click('Close')
+  // Exercise the real Page route with a searchable catalog and a later selected model.
+  models.groups[0]!.models.push(...['third','fourth','fifth','sixth'].map(id=>({id,name:id})))
+  current={...current,settings:{...current.settings,foreground:{provider:'p',model:'fifth'}}};await refresh();await render('en')
+  const key=async(target:Element,key:string)=>React.act(async()=>{target.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key,bubbles:true,cancelable:true}));await new Promise(resolve=>setImmediate(resolve))})
+  await openModels();let search=document.querySelector('input[aria-label="model.search"]')!;
+  assert.equal(document.activeElement,search);await key(search,'Tab')
+  assert.equal(calls.at(-1).model.model,'fifth','opening a large catalog and Tab retains the current model');assert.equal(document.activeElement,document.querySelector('button[aria-label="Foreground model"]'),'model save returns focus to the enabled composer trigger')
+  await openModels();search=document.querySelector('input[aria-label="model.search"]')!;
+  for(let i=0;i<5;i++)await key(search,'ArrowUp');await key(search,'Enter')
+  assert.equal(calls.at(-1).model,undefined,'Auto is keyboard reachable in the searchable catalog')
+  await openModels();const back=[...document.querySelectorAll('button[role="menuitem"]')].find(b=>b.textContent==='model.back')!;
+  back.focus();await key(back,'ArrowDown');assert.notEqual(document.activeElement,document.querySelector('input[aria-label="model.search"]'),'menu-row navigation does not get pulled into search')
  } finally {await React.act(()=>root.unmount());dom.window.close();for(const[k,v]of saved){if(v)Object.defineProperty(globalThis,k,v);else delete(globalThis as any)[k]}}
 })

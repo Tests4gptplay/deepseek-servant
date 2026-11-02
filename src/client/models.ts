@@ -8,12 +8,20 @@ export interface ServantModels {
   error: string | null
 }
 
+const catalogEvents = ['llm/adapters-updated', 'llm/models-updated', 'settings/document-updated', 'credentials/record-updated', 'credentials/reference-updated'] as const
+/** Use the same invalidation events as the official model catalog directory. */
+export function subscribeServantModelUpdates(subscribe: (event: typeof catalogEvents[number], listener: () => void) => () => void, invalidate: () => void) {
+  const disposers = catalogEvents.map(event => subscribe(event, invalidate))
+  return () => { for (const dispose of disposers) dispose() }
+}
+
 /** DSS Auto resolves the deployment default, never another Session's projected selection. */
 export function createServantModels(catalog: () => Promise<ModelCatalog>) {
   let state: ServantModels = { current: null, groups: [], failures: [], status: 'loading', error: null }
   const listeners = new Set<() => void>()
   let generation = 0
   let pending: Promise<void> | undefined
+  let dirty = false
   const publish = (next: ServantModels) => { state = next; for (const listener of listeners) listener() }
   const load = () => {
     if (pending) return pending
@@ -28,7 +36,11 @@ export function createServantModels(catalog: () => Promise<ModelCatalog>) {
       }
     })()
     pending = operation
-    void operation.finally(() => { if (pending === operation) pending = undefined })
+    void operation.finally(() => {
+      if (pending !== operation) return
+      pending = undefined
+      if (dirty && listeners.size) { dirty = false; void load() }
+    })
     return operation
   }
   return {
@@ -38,13 +50,20 @@ export function createServantModels(catalog: () => Promise<ModelCatalog>) {
         listeners.add(listener)
         if (listeners.size === 1) void load()
         return () => { listeners.delete(listener); if (!listeners.size) {
-          generation += 1; pending = undefined
+          generation += 1; pending = undefined; dirty = false
         } }
       },
     } satisfies HostObservable<ServantModels>,
     refresh: load,
+    invalidate: () => {
+      generation += 1
+      publish({ ...state, current: null, status: 'loading', error: null })
+      if (!listeners.size) return
+      if (pending) dirty = true
+      else void load()
+    },
     reset: () => {
-      generation += 1; pending = undefined
+      generation += 1; pending = undefined; dirty = false
       publish({ ...state, current: null, status: 'loading', error: null })
       if (listeners.size) void load()
     },

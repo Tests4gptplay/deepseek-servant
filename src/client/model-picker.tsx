@@ -17,13 +17,21 @@ export function ModelPicker({ value, models, onChange, onRefresh, disabled, labe
   const [query, setQuery] = useState('')
   const [highlighted, setHighlighted] = useState(0)
   const trigger = useRef<HTMLButtonElement>(null), content = useRef<HTMLDivElement>(null), search = useRef<HTMLInputElement>(null)
+  const restoreAfterSave = useRef(false)
+  useEffect(() => {
+    if (open || disabled || !restoreAfterSave.current) return
+    restoreAfterSave.current = false
+    // A pending save disables the containing fieldset and releases focus to
+    // body. Restore it after enablement, unless the user focused elsewhere.
+    if (document.activeElement === document.body || document.activeElement === trigger.current || content.current?.contains(document.activeElement)) trigger.current?.focus()
+  }, [open, disabled])
   const previousPane = useRef(homePane)
   const showSearch = !!composer && pane === 'model' && models.groups.reduce((count, group) => count + group.models.length, 0) > 4
   useEffect(() => {
     if (!open) { previousPane.current = homePane; return }
     const prior = previousPane.current; previousPane.current = pane
     if (composer && pane === 'root' && prior === 'root') trigger.current?.focus()
-    else if (showSearch) search.current?.focus()
+    else if (showSearch) { setHighlighted(Math.max(0, choiceIds.indexOf(selectedId!))); search.current?.focus() }
     else {
       const target = composer && pane === 'root'
         ? content.current?.querySelector<HTMLButtonElement>(`[data-model-entry="${prior}"] button`)
@@ -94,21 +102,21 @@ export function ModelPicker({ value, models, onChange, onRefresh, disabled, labe
     else if (id === 'effort-default') next = { provider: effective?.provider, model: effective?.model }
     else if (id.startsWith('effort:')) next = { ...effective, reasoningEffort: id.slice(7) }
     else next = routes.get(id)
-    if (next) { onChange(next); setOpen(false); trigger.current?.focus() }
+    if (next) { restoreAfterSave.current = true; onChange(next); setOpen(false) }
   }
-  const routeIds = [...routes.keys()], activeIndex = Math.min(highlighted, routeIds.length - 1)
+  const choiceIds = [...(query.trim() ? [] : ['auto']), ...routes.keys()], activeIndex = Math.min(highlighted, choiceIds.length - 1)
   const onKey = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!composer || event.nativeEvent.isComposing) return
     if ((event.key === 'Escape' || (event.key === 'Tab' && event.shiftKey)) && pane !== 'root') {
       event.preventDefault(); event.stopPropagation(); setPane('root'); setQuery(''); return
     }
-    if (!showSearch) return
+    if (!showSearch || event.target !== search.current) return
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault(); event.stopPropagation()
-      if (routeIds.length) setHighlighted((activeIndex + (event.key === 'ArrowDown' ? 1 : -1) + routeIds.length) % routeIds.length)
+      if (choiceIds.length) setHighlighted((activeIndex + (event.key === 'ArrowDown' ? 1 : -1) + choiceIds.length) % choiceIds.length)
       search.current?.focus()
     } else if (event.target === search.current && (event.key === 'Enter' || (event.key === 'Tab' && !event.shiftKey)) && activeIndex >= 0) {
-      event.preventDefault(); event.stopPropagation(); choose(routeIds[activeIndex]!)
+      event.preventDefault(); event.stopPropagation(); choose(choiceIds[activeIndex]!)
     }
   }
   useEffect(() => {
@@ -127,7 +135,7 @@ export function ModelPicker({ value, models, onChange, onRefresh, disabled, labe
     {composer && <div ref={content} onKeyDownCapture={onKey}>
       {showSearch && <div className={css.modelSearch}><Input ref={search} aria-label={t('model.search')} placeholder={t('model.search')} value={query} onChange={event => { setQuery(event.target.value); setHighlighted(0) }} /></div>}
       {items.map(item => 'type' in item ? item.type === 'separator' ? <div key={item.id} role="separator" className={css.modelDivider} /> : <div key={item.id} className={css.modelGroup}>{item.text}</div>
-        : <div key={item.id} data-model-entry={item.id} data-model-highlighted={showSearch && item.id === routeIds[activeIndex] || undefined} className={showSearch && item.id === routeIds[activeIndex] ? css.modelHighlighted : undefined}>
+        : <div key={item.id} data-model-entry={item.id} data-model-highlighted={showSearch && item.id === choiceIds[activeIndex] || undefined} className={showSearch && item.id === choiceIds[activeIndex] ? css.modelHighlighted : undefined}>
           <MenuItemButton current={selectedId === item.id} disabled={item.disabled} onSelect={() => choose(item.id)}><span className={css.modelChoice}>{item.label}{selectedId === item.id && <IconCheckOutlineRegular size={14} />}</span></MenuItemButton>
         </div>)}
     </div>}

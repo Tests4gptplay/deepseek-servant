@@ -36,17 +36,17 @@ test('actual registered main page only publishes visible Conversation selection;
  const observable=(initial:any)=>{let value=initial;const listeners=new Set<()=>void>();return{getSnapshot:()=>value,subscribe:(f:()=>void)=>{listeners.add(f);return()=>listeners.delete(f)},set:(v:any)=>{value=v;for(const f of listeners)f()}}}
  const panel=observable({activePanelId:'deepseek-servant'}),locale=observable({active:'en'}),sessionList=observable({byId:{}})
  let current:any={revision:'r1',activeMode:'local',storageScope:'local-root',collaborationId:'team',settings:{name:'Servant',userName:'You',localDirectory:'',ownerRepo:'',repositoryDirectory:'',collaborationId:'team',workerSeats:1,workspace:'',foreground:{provider:'p',model:'m',reasoningEffort:'high'}},connection:{participating:true,status:'connected'},messages:[],tasks:[],legacyTasks:[],archives:[],resources:[]}
- const catalogRequests:unknown[]=[];let catalogFailure=false, holdGit=false;const obsoleteSignals:AbortSignal[]=[]
+ const catalogRequests:unknown[]=[];let catalogFailure=false, holdGit=false, catalogModel='wrong';const obsoleteSignals:AbortSignal[]=[]
  const services:any={layout:{panelInfo:panel},connection:{rpc:{call:async(_a:string,method:string,payload:any,signal?:AbortSignal)=>{
   if(method==='session/modelCatalog'){
    catalogRequests.push(payload)
    if(catalogFailure)return{ok:false,error:{code:'gateway/internal',message:'catalog unavailable'}}
-   return{ok:true,value:{default:{provider:'other',model:'wrong'},groups:[{id:'other',name:'Other',models:[{id:'wrong',name:'Catalog model'}]}],failures:[]}}
+   return{ok:true,value:{default:{provider:'other',model:catalogModel},groups:[{id:'other',name:'Other',models:[{id:catalogModel,name:catalogModel==='wrong'?'Catalog model':'Updated default'}]}],failures:[]}}
   }
   if(method.endsWith('/selectMode'))current={...current,activeMode:payload.mode,storageScope:payload.mode+'-root'}
   if(holdGit&&method.endsWith('/view')&&!payload.headerOnly&&payload.mode==='git'){assert.ok(signal);obsoleteSignals.push(signal);return new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}))}
   return{ok:true,value:method.endsWith('/maintenanceView')?{localDirectory:'',usage:{totalBytes:0,groups:[]}}:current}
- }}},sessions:{list:sessionList,binding:()=>undefined,retainInfo:()=>observable({retainedBy:{}})},modelDirectories:{},remote:{agentPresets:{list:async()=>({ok:true,value:{presets:[]}})}}}
+ }}},sessions:{list:sessionList,binding:()=>undefined,retainInfo:()=>observable({retainedBy:{}})},modelDirectories:{},remote:{$on:bus.on.bind(bus),agentPresets:{list:async()=>({ok:true,value:{presets:[]}})}}}
 
  const ctx:any={get:(name:string)=>services[name],on:bus.on.bind(bus),emit:bus.emit.bind(bus),effect:(f:()=>any)=>{const off=f();if(typeof off==='function')cleanup.push(off)},locale:{register:()=>()=>{},bind:()=>((s:string)=>s),subscribe:locale.subscribe,getSnapshot:locale.getSnapshot},slots:{inject:(_n:string,f:()=>void)=>f(),register:(meta:any,component:any)=>{slots.push({meta,component})}}}
  const query=()=>{const answers:unknown[]=[];bus.emit('ui/foreground-model/query',v=>answers.push(v));return answers}
@@ -65,6 +65,10 @@ test('actual registered main page only publishes visible Conversation selection;
   await React.act(async()=>streams[0].dispatchEvent(new dom.window.Event('changed')))
   assert.deepEqual(query(),[null],'Auto is unresolved even when the native catalog offers another default')
   assert.match(document.querySelector('button[aria-label="Foreground model"]')!.textContent!,/Catalog model/,'actual catalog result reaches ModelPicker')
+
+  catalogModel='updated';await React.act(async()=>{bus.emit('settings/document-updated',{} as any);await new Promise(resolve=>setImmediate(resolve))})
+  assert.match(document.querySelector('button[aria-label="Foreground model"]')!.textContent!,/Updated default/,'mounted closed Auto trigger refreshes through the official settings event')
+  assert.deepEqual(query(),[null],'catalog invalidation never turns Auto into an explicit model publication')
 
   Object.defineProperty(document,'visibilityState',{value:'hidden',configurable:true})
   await React.act(()=>document.dispatchEvent(new dom.window.Event('visibilitychange')));assert.deepEqual(query(),[])

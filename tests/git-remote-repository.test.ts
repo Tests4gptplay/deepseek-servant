@@ -5,6 +5,7 @@ import { captureGitLegacy, prepareLegacyMigration, applyLegacyMigration } from '
 import { MemoryStorage } from './support.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { parse } from 'graphql'
 import { createHash } from 'node:crypto'
 import { GitHubRepository, GitCommitOutcomeUnknownError } from '../src/experimental/private-git/git-repository.js'
 import { GitHubClient, GitConflictError, GitHubError } from '../src/experimental/private-git/github.js'
@@ -97,6 +98,7 @@ class Remote {
     }
     if (method === 'POST' && path === '/graphql') {
       const input = body.variables.input
+      parse(body.query)
       assert.match(body.query, /createCommitOnBranch/)
       assert.equal(input.branch.repositoryNameWithOwner, 'example/private')
       assert.equal(input.branch.branchName, this.branch)

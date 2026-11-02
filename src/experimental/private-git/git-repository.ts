@@ -529,7 +529,7 @@ export class GitHubRepository implements GitRepository {
       let result: { data?: { createCommitOnBranch?: { commit?: { oid: string; tree?: { oid?: string } | null } } }; errors?: Array<{ message: string; type?: string }> } | undefined
       let failure: unknown
       try {
-        result = await session.request('POST', '/graphql', { query: 'mutation DSSCommit($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid tree { oid } } }', variables: { input } })
+        result = await session.request('POST', '/graphql', { query: 'mutation DSSCommit($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid tree { oid } } } }', variables: { input } })
       } catch (error) {
         if (error instanceof GitHubError && [401, 403].includes(error.status)) {
           if (error.retryAt === undefined) this.checked = undefined

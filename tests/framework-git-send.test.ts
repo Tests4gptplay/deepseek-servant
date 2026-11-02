@@ -112,6 +112,7 @@ class Remote {
     }
     if (method === 'POST' && path === '/graphql') {
       const input = body.variables.input
+      ;(await import('graphql')).parse(body.query)
       assert.match(body.query, /createCommitOnBranch/)
       assert.equal(input.branch.repositoryNameWithOwner, 'example/private')
       assert.equal(input.branch.branchName, this.branch)
