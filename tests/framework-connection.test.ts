@@ -713,6 +713,49 @@ for (const phase of ['head', 'peer-heartbeat'] as const) test(`actual runtime sh
   } finally { hold = false; connection.cancelPending(); await runtime.dispose(); await connection.close(); await peer.close() }
 })
 
+test('real GitFiles source ownership pins each source view and preserves atomic CAS after unrelated progress', { timeout: 10000 }, async () => {
+  const { FrameworkHostLoop } = await import('../src/framework/host-loop.js')
+  const { GitFiles } = await import('../src/framework/transactions.js')
+  const remote = new Remote({ 'Workspace/tasks/A_P.md': 'held Git source A', 'Workspace/tasks/B_O.md': 'independent Git source B', 'Workspace/state/Foreground_first': '' })
+  const records = memory(), access = await openFrameworkStorage(gitSettings, dependencies(remote, records))
+  assert.ok(access.files instanceof GitFiles)
+  const files = access.files, gate = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>(), bDone = Promise.withResolvers<void>()
+  const read = files.read.bind(files), at = files.at.bind(files), transaction = access.transactions.run.bind(access.transactions)
+  const revisions: string[] = [], wakes: any[] = [], errors: unknown[] = []
+  let heldReads = 0
+  files.at = async revision => { revisions.push(revision); return at(revision) }
+  files.read = async (snapshot, path) => { if (path === 'tasks/A_P.md') { heldReads++; entered.resolve(); await gate.promise }; return read(snapshot, path) }
+  access.transactions.run = async (id, request, options, build) => {
+    const receipt = await transaction(id, request, options, build)
+    if ((request as any).source === 'tasks/B_O.md') bDone.resolve()
+    return receipt
+  }
+  const loop = new FrameworkHostLoop(files, access.transactions, records, { member: 'A', primary: true, scope: access.scope }, () => ['A'], {
+    startup: async () => {}, observe: async () => {}, executing: () => false, error: error => { errors.push(error) },
+    wake: async wake => { wakes.push(wake) }, sealBusiness: async () => {}, clean: async () => {}, releaseTask: async () => {},
+  })
+  const listedRevision = remote.head, first = loop.poll()
+  try {
+    await Promise.all([entered.promise, bDone.promise])
+    assert.deepEqual(revisions.slice(0, 2), [listedRevision, listedRevision])
+    assert.ok(wakes.some(wake => wake.sources.some((source: any) => source.path === 'state/Foreground_first')))
+    assert.equal([...remote.commits.get(remote.head)!.files.keys()].filter(path => /^Workspace\/tasks\/[^/]+\.json$/.test(path)).length, 1)
+    remote.change({ 'Workspace/state/Foreground_later': '' })
+    await (loop as any).drive(); await (loop as any).running
+    assert.ok(wakes.some(wake => wake.sources.some((source: any) => source.path === 'state/Foreground_later')))
+    assert.equal(heldReads, 1)
+    gate.resolve(); await first
+    await loop.poll(); await loop.poll()
+    const head = remote.commits.get(remote.head)!.files
+    const tasks = [...head].filter(([path]) => /^Workspace\/tasks\/[^/]+\.json$/.test(path)).map(([, body]) => JSON.parse(body))
+    assert.equal(tasks.length, 2)
+    const taskA = tasks.find(task => task.sourcePath === 'tasks/A_P.md')!
+    assert.equal(head.get('Workspace/tasks/A_P.md'), 'Task ID: ' + taskA.taskId + '\nheld Git source A')
+    assert.equal(head.get('Workspace/task-runs/' + taskA.taskId + '/A/A_Inbox/A_' + taskA.taskId + '.md'), 'held Git source A')
+    assert.deepEqual(errors, [])
+  } finally { gate.resolve(); await first; await loop.stop(); await access.close() }
+})
+
 test('verified Local relocation preserves original transaction and instance identity without aliasing ordinary directories', async t => {
   const { LocalLocationRegistry, LocalLocationMovedError } = await import('../src/framework/local-location.js')
   const { prepareLocalRecordCopy } = await import('../src/framework/maintenance.js')

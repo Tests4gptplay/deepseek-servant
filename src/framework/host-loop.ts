@@ -54,11 +54,12 @@ const singleton = (role: RecoveryRole) => role === 'Foreground' || role === 'Org
 /** One-second discovery targets entry files, this member's Inbox/state and global short signals. */
 export class FrameworkHostLoop {
   private readonly taskLanes = new Map<string, { metadata: FrameworkTaskIndex; running?: Promise<void> }>()
+  private readonly sourceOperations = new Map<string, Promise<void>>()
   private saving: Promise<void> = Promise.resolve()
   private readonly seenSources = new Map<string, string>()
   private record: LoopRecord = { initial: {}, completed: {} }
   private timer?: ReturnType<typeof setTimeout>
-  private running?: Promise<void>
+  private running?: Promise<Promise<void>[]>
   private observing?: Promise<void>
   private connected = false
   private stopping = false
@@ -94,7 +95,7 @@ export class FrameworkHostLoop {
     this.connected = false
     if (this.timer) clearTimeout(this.timer)
     this.timer = undefined
-    const settled = await Promise.allSettled([this.observing, this.running, ...[...this.taskLanes.values()].map(lane => lane.running)])
+    const settled = await Promise.allSettled([this.observing, this.running, ...this.sourceOperations.values(), ...[...this.taskLanes.values()].map(lane => lane.running)])
     const failures = settled.filter((item): item is PromiseRejectedResult => item.status === 'rejected').map(item => item.reason)
     if (failures.length === 1) throw failures[0]
     if (failures.length) throw new AggregateError(failures, 'Host loop operations did not settle successfully')
@@ -117,22 +118,24 @@ export class FrameworkHostLoop {
   /** Explicit callers still await the actual remote poll, not just admission. */
   async poll(): Promise<void> {
     await this.observeLocal()
-    await this.remotePoll()
-    const settled = await Promise.allSettled([...this.taskLanes.values()].map(lane => lane.running))
+    const owned = await this.remotePoll()
+    // Preserve failures even if an independent lane settled before the root
+    // directory pass returned and removed it from the active ownership map.
+    const settled = await Promise.allSettled([...new Set([...owned, ...this.sourceOperations.values(), ...[...this.taskLanes.values()].map(lane => lane.running)])])
     const failures = settled.filter((item): item is PromiseRejectedResult => item.status === 'rejected').map(item => item.reason)
     if (failures.length === 1) throw failures[0]
-    if (failures.length) throw new AggregateError(failures, 'Task discovery failed')
+    if (failures.length) throw new AggregateError(failures, 'Owned discovery failed')
   }
-  private remotePoll(): Promise<void> {
-    if (this.stopping) return Promise.resolve()
+  private remotePoll(): Promise<Promise<void>[]> {
+    if (this.stopping) return Promise.resolve([])
     if (this.running) return this.running
-    const operation = Promise.resolve().then(() => { if (!this.stopping) return this.runPoll() })
+    const operation = Promise.resolve().then(() => this.stopping ? [] : this.runPoll())
     this.running = operation
     void operation.finally(() => { if (this.running === operation) this.running = undefined }).catch(() => {})
     return operation
   }
   private save(): Promise<void> {
-    // Task lanes share this durable Host record; snapshot it at the ordered write.
+    // Task/source lanes share this durable Host record; snapshot it at the ordered write.
     const write = this.saving.catch(() => {}).then(() => this.storage.set(this.key, structuredClone(this.record)))
     this.saving = write
     return write
@@ -142,54 +145,30 @@ export class FrameworkHostLoop {
     return (await this.actions.wake({ id: digest(JSON.stringify([role, taskId, workerId, snapshot.revision, sources.map(source => source.path)])),
       role, taskId, workerId, sources: sources.map(({ path, version }) => ({ path, version })), reason: 'notification' })) !== false
   }
-  private async runPoll(): Promise<void> {
+  private async runPoll(): Promise<Promise<void>[]> {
+    const owned: Promise<void>[] = []
     try { await this.actions.observe() } catch (error) { this.actions.error(error) }
-    if (this.stopping) return
+    if (this.stopping) return owned
     const snapshot = await this.files.snapshot().catch(error => { this.actions.discoveryInterrupted?.(); throw error })
     let scheduled = false
     try {
-      if (this.stopping) return
+      if (this.stopping) return owned
       try { await this.actions.discover?.(snapshot) } catch (error) { this.actions.error(error) }
-      if (this.stopping) return
+      if (this.stopping) return owned
       const entries = await this.files.listDirectory(snapshot, 'tasks/')
       const taskEntries = entries.filter(entry => /^tasks\/[^/]+\.json$/.test(entry.path))
       const present = new Set(taskEntries.map(entry => entry.path))
       for (const [path, lane] of this.taskLanes) if (!present.has(path) && !lane.running) this.taskLanes.delete(path)
-      for (const entry of taskEntries) this.startTask(entry, snapshot.revision)
-      if (this.stopping) return
+      for (const entry of taskEntries) {
+        this.startTask(entry, snapshot.revision)
+        const operation = this.taskLanes.get(entry.path)?.running
+        if (operation) owned.push(operation)
+      }
+      if (this.stopping) return owned
       if (this.identity.primary) {
         for (const entry of entries.filter(entry => /_(P|O)\.md$/.test(entry.path))) {
-          if (this.seenSources.get(entry.path) === entry.version) continue
-          const sourceTask = taskIdentity(await this.files.read(snapshot, entry.path) ?? '')
-          if (sourceTask) {
-            const cleanup = this.files instanceof LocalFiles
-              ? await readJson<CleanupRecord & { historyCleared?: boolean }>(this.files, snapshot, cleanupRecordPath(sourceTask)) : undefined
-            if (this.record.completed[sourceTask]?.released || cleanup?.phase === 'released' && cleanup.historyCleared === true) {
-              this.seenSources.set(entry.path, entry.version)
-              continue
-            }
-          }
-          const command = 'initialize:' + digest(entry.path + ':' + entry.version)
-          let assignment = this.record.initial[command]
-          if (!assignment) {
-            assignment = { taskId: randomUUID(), owner: this.identity.member, members: [...this.members()] }
-            this.record.initial[command] = assignment
-            await this.save()
-          }
-          if (this.stopping) return
-          let mutated: boolean | undefined
-          try {
-            await this.transactions.run(command, { source: entry.path, ...assignment }, { snapshot, expectedRevision: snapshot.revision, reevaluate: true },
-              async checked => {
-                const changes = (await initializeTask(this.files, checked, entry.path, assignment.owner, assignment.members, assignment.taskId)).changes
-                mutated = changes.length > 0
-                return changes
-              })
-          } catch (error) { if (error instanceof FilesConflictError) return; throw error }
-          this.seenSources.set(entry.path, entry.version)
-          if (mutated === false) continue
-          // A mutation invalidates this poll's snapshot for later business decisions.
-          return
+          const operation = this.startSource(entry, snapshot.revision)
+          if (operation) owned.push(operation)
         }
       }
       const global = await this.files.listDirectory(snapshot, 'state/')
@@ -205,6 +184,52 @@ export class FrameworkHostLoop {
       // can drain accepted work, but cannot admit new work after view release.
       if (scheduled && !this.stopping) await this.actions.admitDiscovered?.()
     }
+    return owned
+  }
+  private startSource(entry: FileEntry, revision: string): Promise<void> | undefined {
+    if (this.stopping) return
+    const pending = this.sourceOperations.get(entry.path)
+    if (pending) return pending
+    if (this.seenSources.get(entry.path) === entry.version) return
+    const operation = Promise.resolve().then(async () => {
+      if (this.stopping) return
+      const snapshot = this.files instanceof GitFiles ? await this.files.at(revision) : await this.files.snapshot()
+      try {
+        if (this.stopping) return
+        const current = snapshot.revision === revision ? entry
+          : (await this.files.listDirectory(snapshot, 'tasks/')).find(item => item.path === entry.path)
+        if (!current || this.seenSources.get(current.path) === current.version || this.stopping) return
+        const sourceTask = taskIdentity(await this.files.read(snapshot, current.path) ?? '')
+        if (this.stopping) return
+        if (sourceTask) {
+          const cleanup = this.files instanceof LocalFiles
+            ? await readJson<CleanupRecord & { historyCleared?: boolean }>(this.files, snapshot, cleanupRecordPath(sourceTask)) : undefined
+          if (this.record.completed[sourceTask]?.released || cleanup?.phase === 'released' && cleanup.historyCleared === true) {
+            this.seenSources.set(current.path, current.version)
+            return
+          }
+        }
+        if (this.stopping) return
+        const command = 'initialize:' + digest(current.path + ':' + current.version)
+        const assignment = this.record.initial[command] ??= { taskId: randomUUID(), owner: this.identity.member, members: [...this.members()] }
+        // Reaffirm the same assignment before dispatch, including after a failed
+        // prior save. Never use an in-memory-only Task identity for initialization.
+        await this.save()
+        if (this.stopping) return
+        try {
+          await this.transactions.run(command, { source: current.path, ...assignment }, { snapshot, expectedRevision: snapshot.revision, reevaluate: true },
+            async checked => (await initializeTask(this.files, checked, current.path, assignment.owner, assignment.members, assignment.taskId)).changes)
+        } catch (error) { if (error instanceof FilesConflictError) return; throw error }
+        this.seenSources.set(current.path, current.version)
+        // Ordinary discovery reads the committed Task on a subsequent view.
+        // Initialization never emits business wakes from its pre-commit view.
+      } finally { await snapshot.release() }
+    })
+    this.sourceOperations.set(entry.path, operation)
+    void operation.catch(error => this.actions.error(error)).finally(() => {
+      if (this.sourceOperations.get(entry.path) === operation) this.sourceOperations.delete(entry.path)
+    })
+    return operation
   }
   private startTask(entry: FileEntry, revision: string): void {
     if (this.stopping) return

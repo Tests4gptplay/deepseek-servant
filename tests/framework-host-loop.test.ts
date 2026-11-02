@@ -720,3 +720,137 @@ test('a held Task read cannot block another Task signal or its later poll; close
     gate.release(); await Promise.all([polling, stopping]); assert.equal(stopped, true)
   } finally { gate.release(); await polling }
 }))
+
+test('a held source header cannot block global signals, another source or later discovery', () => fixture(async f => {
+  const source = 'tasks/A_P.md', gate = phaseBarrier(), read = f.files.read.bind(f.files)
+  await put(f.files, source, 'held source A')
+  await put(f.files, 'tasks/B_O.md', 'independent source B')
+  await put(f.files, 'state/Foreground_first', '')
+  let reads = 0
+  f.files.read = async (snapshot, path) => { if (path === source) { reads++; gate.enter(); await gate.waiting }; return read(snapshot, path) }
+  const first = f.loop.poll(); await gate.entered
+  try {
+    await driverSettled()
+    assert.ok(f.wakes.some(wake => wake.sources.some(item => item.path === 'state/Foreground_first')))
+    await withSnapshot(f.files, async snapshot => {
+      const entries = await f.files.listDirectory(snapshot, 'tasks/')
+      const tasks = await Promise.all(entries.filter(entry => entry.path.endsWith('.json')).map(entry => readJson<TaskMetadata>(f.files, snapshot, entry.path)))
+      assert.equal(tasks.length, 1); assert.equal(tasks[0]?.sourcePath, 'tasks/B_O.md')
+    })
+    await put(f.files, 'state/Foreground_later', '')
+    await (f.loop as any).drive(); await driverSettled()
+    assert.ok(f.wakes.some(wake => wake.sources.some(item => item.path === 'state/Foreground_later')))
+    assert.equal(reads, 1, 'ticks do not duplicate the held source read')
+    assert.ok(f.wakes.every(wake => !wake.taskId || wake.sources.every(item => item.path !== source)))
+  } finally { gate.release(); await first }
+  await f.loop.poll(); await f.loop.poll()
+  await withSnapshot(f.files, async snapshot => assert.equal((await f.files.listDirectory(snapshot, 'tasks/')).filter(entry => entry.path.endsWith('.json')).length, 2))
+  assert.deepEqual(f.errors, [])
+}))
+
+test('an admitted source transaction remains atomic and singular across reentry and close', () => fixture(async f => {
+  const source = 'tasks/atomic_P.md', gate = phaseBarrier(), commit = f.files.commit.bind(f.files)
+  await put(f.files, source, 'exact original requirement')
+  let initializations = 0, staged: readonly { path: string; content?: string | null }[] = []
+  f.files.commit = async (snapshot, changes, message) => {
+    if (changes.some(change => change.path === source)) { initializations++; staged = changes; gate.enter(); await gate.waiting }
+    return commit(snapshot, changes, message)
+  }
+  const first = f.loop.poll(); await gate.entered
+  let closing: Promise<void> | undefined, second: Promise<void> | undefined, stopped = false
+  try {
+    const metadata = staged.find(change => /^tasks\/[^/]+\.json$/.test(change.path))!
+    const task = JSON.parse(metadata.content!) as TaskMetadata
+    assert.ok(staged.some(change => change.path === paths.inbox(task.taskId, 'A')))
+    await withSnapshot(f.files, async snapshot => {
+      assert.equal(await f.files.read(snapshot, source), 'exact original requirement')
+      assert.equal((await f.files.listDirectory(snapshot, 'tasks/')).filter(entry => entry.path.endsWith('.json')).length, 0)
+    })
+    second = f.loop.poll(); await driverSettled(); assert.equal(initializations, 1)
+    assert.equal(f.wakes.length, 0, 'no business wake before the atomic task transaction')
+    closing = f.loop.stop().then(() => { stopped = true })
+    await driverSettled(); assert.equal(stopped, false, 'close joins the already dispatched transaction')
+  } finally { gate.release(); await Promise.all([first, second, closing]) }
+  assert.equal(initializations, 1); assert.equal(f.wakes.length, 0)
+  await withSnapshot(f.files, async snapshot => {
+    const taskEntry = (await f.files.listDirectory(snapshot, 'tasks/')).find(entry => entry.path.endsWith('.json'))!
+    const task = (await readJson<TaskMetadata>(f.files, snapshot, taskEntry.path))!
+    assert.equal(await f.files.read(snapshot, source), 'Task ID: ' + task.taskId + '\nexact original requirement')
+    assert.equal(await f.files.read(snapshot, paths.inbox(task.taskId, 'A')), 'exact original requirement')
+    assert.equal(await f.files.read(snapshot, paths.state('A', task.taskId) + '/Planner_Inbox'), undefined)
+  })
+  await f.loop.start(); await f.loop.poll()
+  assert.ok(f.wakes.some(wake => wake.role === 'Planner')); assert.equal(initializations, 1)
+  assert.deepEqual(f.errors, [])
+}))
+
+for (const outcome of ['released', 'cancelled'] as const) test(`close during source reading keeps ownership and fences later initialization: ${outcome}`, () => fixture(async f => {
+  const source = 'tasks/closing_O.md', gate = phaseBarrier(), read = f.files.read.bind(f.files)
+  const cancellation = new DOMException('exact source read cancellation', 'AbortError')
+  await put(f.files, source, 'new work after restart')
+  f.files.read = async (snapshot, path) => {
+    if (path === source) { gate.enter(); await gate.waiting; if (outcome === 'cancelled') throw cancellation }
+    return read(snapshot, path)
+  }
+  const first = f.loop.poll().then(() => undefined, error => error); await gate.entered
+  let stopped = false
+  const closing = f.loop.stop().then(() => { stopped = true }, error => { stopped = true; return error })
+  try { await driverSettled(); assert.equal(stopped, false); assert.equal(f.wakes.length, 0) }
+  finally { gate.release() }
+  const [pollError, stopError] = await Promise.all([first, closing])
+  assert.equal(pollError, outcome === 'cancelled' ? cancellation : undefined)
+  assert.equal(stopError, outcome === 'cancelled' ? cancellation : undefined)
+  assert.deepEqual(f.errors, outcome === 'cancelled' ? [cancellation] : [])
+  f.files.read = read
+  await withSnapshot(f.files, async snapshot => {
+    assert.equal(await f.files.read(snapshot, source), 'new work after restart')
+    assert.equal((await f.files.listDirectory(snapshot, 'tasks/')).filter(entry => entry.path.endsWith('.json')).length, 0)
+  })
+  await f.loop.start(); await f.loop.poll()
+  assert.ok(f.wakes.some(wake => wake.role === 'Organizer'))
+}))
+
+test('source assignment save failure stays visible after its lane settles and retries persistence before dispatch', () => fixture(async f => {
+  const source = 'tasks/save_P.md', rootGate = phaseBarrier(), failed = phaseBarrier(), failure = new Error('assignment storage refused')
+  await put(f.files, source, 'durable assignment first'); await put(f.files, 'state/Foreground_during-failure', '')
+  const internal = f.loop as any, records = internal.storage as StoragePort, set = records.set.bind(records), list = f.files.listDirectory.bind(f.files)
+  let saves = 0, holdRoot = true
+  records.set = async (key, value) => { if (key === internal.key && ++saves <= 2) throw failure; await set(key, value) }
+  f.files.listDirectory = async (snapshot, path) => { if (holdRoot && path === 'state/') { rootGate.enter(); await rootGate.waiting }; return list(snapshot, path) }
+  f.hooks.error = error => { f.errors.push(error); failed.enter() }
+  const first = f.loop.poll(), rejected = assert.rejects(first, error => error === failure)
+  await Promise.all([failed.entered, rootGate.entered]); await driverSettled()
+  assert.equal(internal.sourceOperations.size, 0, 'failed lane settled before the directory pass returned')
+  const assignment = Object.values(internal.record.initial)[0] as { taskId: string }
+  holdRoot = false; rootGate.release(); await rejected
+  assert.ok(f.wakes.some(wake => wake.role === 'Foreground'))
+  assert.equal(await records.get(internal.key), undefined)
+  await assert.rejects(f.loop.poll(), error => error === failure)
+  await withSnapshot(f.files, async snapshot => assert.equal(await f.files.read(snapshot, paths.task(assignment.taskId)), undefined))
+  await f.loop.poll()
+  const persisted = await records.get<any>(internal.key)
+  assert.equal(Object.values(persisted.initial).length, 1)
+  assert.equal((Object.values(persisted.initial)[0] as any).taskId, assignment.taskId)
+  await withSnapshot(f.files, async snapshot => assert.equal((await readJson<TaskMetadata>(f.files, snapshot, paths.task(assignment.taskId)))?.sourcePath, source))
+  assert.deepEqual(f.errors, [failure, failure])
+}))
+
+test('source transaction failure preserves its exact error and assignment while unrelated signals proceed', () => fixture(async f => {
+  const source = 'tasks/retry_O.md', failure = new Error('initialization commit refused'), commit = f.files.commit.bind(f.files)
+  await put(f.files, source, 'same source responsibility'); await put(f.files, 'state/Foreground_unrelated', '')
+  let attempts = 0, firstTask: string | undefined
+  f.files.commit = async (snapshot, changes, message) => {
+    if (changes.some(change => change.path === source)) {
+      const metadata = changes.find(change => /^tasks\/[^/]+\.json$/.test(change.path))!
+      if (++attempts === 1) { firstTask = metadata.path; throw failure }
+      assert.equal(metadata.path, firstTask)
+    }
+    return commit(snapshot, changes, message)
+  }
+  await assert.rejects(f.loop.poll(), error => error === failure)
+  assert.deepEqual(f.errors, [failure]); assert.ok(f.wakes.some(wake => wake.role === 'Foreground'))
+  assert.ok(f.wakes.every(wake => !wake.taskId), 'failed initialization cannot publish a business wake')
+  await withSnapshot(f.files, async snapshot => assert.equal(await f.files.read(snapshot, firstTask!), undefined))
+  await f.loop.poll(); await f.loop.poll()
+  assert.equal(attempts, 2); assert.ok(f.wakes.some(wake => wake.role === 'Organizer'))
+}))
