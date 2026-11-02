@@ -2000,6 +2000,7 @@ export class FrameworkRoleRuntime {
   }
   private cancelledByShutdown(error: unknown): boolean {
     return this.shutdownReason !== undefined && (error === this.shutdownReason || (error instanceof Error && error.name === 'AbortError' && error.cause === this.shutdownReason)
+      || (error instanceof AggregateError && error.errors.length > 0 && error.errors.every(item => this.cancelledByShutdown(item)))
       || (error instanceof DshAgentCreationCancelled && error.executionStopped && error.reason === this.shutdownReason))
   }
   private error(error: unknown, context?: Record<string, unknown>): void {

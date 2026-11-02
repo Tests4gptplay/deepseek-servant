@@ -2735,3 +2735,23 @@ for (const outcome of ['confirmed', 'unknown', 'unrelated-error'] as const) test
   else await assert.rejects(runtime.processObservations(), error => error === failure)
   assert.equal([...rows.values()].find(row => row.pending?.id === 'late-probe').complete, outcome === 'confirmed')
 })
+
+for (const mixed of [false, true]) test(`concurrent source shutdown distinguishes owned cancellation from independent failures: mixed=${mixed}`, async t => {
+  const { runtime, files, errors } = await runtimeFixture(t), entered = Promise.withResolvers<void>()
+  const gates = new Map(['tasks/A_P.md', 'tasks/B_P.md'].map(path => [path, Promise.withResolvers<void>()]))
+  await withSnapshot(files, snapshot => files.commit(snapshot, [...gates.keys()].map(path => ({ path, content: 'original ' + path })), 'two independent sources'))
+  const read = files.read.bind(files), failure = new Error('independent source read failed'); let reads = 0
+  files.read = async (snapshot, path) => {
+    if (gates.has(path)) { if (++reads === 2) entered.resolve(); await gates.get(path)!.promise }
+    return read(snapshot, path)
+  }
+  runtime.environment.cancelPending = (reason: unknown) => { for (const [path, gate] of gates) gate.reject(mixed && path === 'tasks/B_P.md' ? failure : reason) }
+  const polling = runtime.loop.poll().catch((error: unknown) => error); await entered.promise
+  if (mixed) await assert.rejects(runtime.dispose(), error => error instanceof AggregateError && error.errors.includes(failure))
+  else await runtime.dispose()
+  const pollError = await polling
+  assert.ok(pollError instanceof AggregateError)
+  assert.equal(pollError.errors.length, 2)
+  assert.deepEqual(errors, mixed ? [failure] : [])
+  await withSnapshot(files, async snapshot => assert.equal((await files.listDirectory(snapshot, 'tasks/')).filter(entry => entry.path.endsWith('.json')).length, 0))
+})
