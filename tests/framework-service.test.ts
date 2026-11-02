@@ -1252,6 +1252,35 @@ for (const alreadyMigrated of [false, true, 'offline', 'slow', 'closing', 'send'
   } finally { release(); await service.dispose(); await fs.rm(root, { recursive: true, force: true }) }
 })
 
+for (const active of [false, true]) test(`Local view: one SQLite read transaction with active backend=${active}`, async t => {
+  const { service, local } = await fixture(t), internal = service as any
+  await service.send({ ...input('local', 'local-snapshot'), recipient: 'human' })
+  if (!active) internal.running.delete('local')
+  const other = await LocalFiles.open(local.directory)
+  t.after(() => other.close())
+  const access = await internal.access('local'), page = access.conversation.page.bind(access.conversation)
+  let change = true
+  access.conversation.page = async (...args: Parameters<FrameworkConversation['page']>) => {
+    const value = await page(...args)
+    if (change) {
+      change = false
+      await withSnapshot(other, snapshot => other.commit(snapshot, [{ path: 'tasks/after-page.json', content: JSON.stringify({ version: 1, taskId: 'after-page', route: 'P', owner: 'User', status: 'running', sourcePath: 'tasks/after-page_P.md' }) }], 'concurrent metadata'))
+    }
+    return value
+  }
+  let acquired = 0, released = 0
+  const snapshot = local.snapshot.bind(local)
+  local.snapshot = async () => { acquired++; const s = await snapshot(), close = s.release.bind(s); s.release = async () => { released++; await close() }; return s }
+  const before = await service.view({ mode: 'local' })
+  assert.equal(acquired, 1); assert.equal(released, 1)
+  assert.equal(before.messages[0].id, 'local-snapshot')
+  assert.deepEqual(before.tasks, [], 'later SQLite commit must not enter an already acquired page view')
+  const after = await service.view({ mode: 'local' })
+  assert.equal(acquired, 2); assert.equal(released, 2)
+  assert.deepEqual(after.tasks.map(row => row.taskId), ['after-page'])
+  assert.equal(after.connection.participating, active)
+})
+
 test('optional processing read failure preserves actual saved conversation in service view', async t => {
   const {service}=await fixture(t), internal=service as any
   await service.send(input('local','retained'))

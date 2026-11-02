@@ -21,6 +21,30 @@ async function fixture(t: test.TestContext) {
 }
 const message = (id: string, extra: Partial<ConversationSend> = {}): ConversationSend => ({ id, participantId: 'account-A', createdAt: '2026-10-31T00:00:00.000Z', role: 'user', text: 'Original 😀\ntext', device: 'phone', recipient: 'ai', ...extra })
 
+test('page borrows the caller snapshot without releasing it; standalone history observes later commits', async t => {
+  const f = await fixture(t)
+  await f.service.send('old', message('old'))
+  const old = await f.files.snapshot(), release = old.release.bind(old)
+  let releases = 0
+  old.release = async () => { releases++; await release() }
+  try {
+    await f.service.send('new', message('new'))
+    const page = await f.service.page(20, undefined, {}, old)
+    assert.equal(page.revision, old.revision); assert.deepEqual(page.messages.map(row => row.id), ['old'])
+    assert.equal(releases, 0)
+    assert.ok(await f.files.read(old, f.service.indexPath), 'caller still owns a live snapshot')
+    assert.deepEqual((await f.service.page(20)).messages.map(row => row.id), ['old', 'new'])
+  } finally { await old.release() }
+  assert.equal(releases, 1)
+})
+
+test('a page cannot borrow a snapshot from another store or a released snapshot', async t => {
+  const first = await fixture(t), second = await fixture(t), snapshot = await first.files.snapshot()
+  await assert.rejects(second.service.page(20, undefined, {}, snapshot), /Snapshot was released or belongs to another store/)
+  await snapshot.release()
+  await assert.rejects(first.service.page(20, undefined, {}, snapshot), /Snapshot was released or belongs to another store/)
+})
+
 test('shared collaboration merges participants, preserves raw provenance and separates human discussion', async t => {
   const { service, files } = await fixture(t)
   await service.send('send-a', message('a'))

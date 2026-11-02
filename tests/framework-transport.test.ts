@@ -198,23 +198,23 @@ test('cancelled view drains an acquired snapshot exactly once without starting t
   const { service, internal, files } = await fixture(t), access = await internal.accesses.get('local')
   const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
   const page = access.conversation.page.bind(access.conversation), snapshot = files.snapshot.bind(files)
-  let pageDone = false, releases = 0, inspected = 0
-  access.conversation.page = async (...args: any[]) => { const result = await page(...args); pageDone = true; return result }
+  let pages = 0, releases = 0, inspected = 0
+  access.conversation.page = (...args: any[]) => { pages++; return page(...args) }
   access.taskIndex = { list: async () => { inspected++; return [] } }
   files.snapshot = async () => {
     const owned = await snapshot()
-    if (pageDone) {
-      const finish = owned.release.bind(owned)
-      owned.release = async () => { releases++; await finish() }
-      entered.resolve(); await release.promise
-    }
+    // The view now owns one snapshot for page/instances/tasks. Hold that actual
+    // acquisition rather than waiting for the removed second task snapshot.
+    const finish = owned.release.bind(owned)
+    owned.release = async () => { releases++; await finish() }
+    entered.resolve(); await release.promise
     return owned
   }
   const abort = new AbortController(), reason = new Error('snapshot consumer left')
   const pending = service.view({ mode: 'local' }, abort.signal)
   await entered.promise; abort.abort(reason); release.resolve()
   await assert.rejects(pending, error => error === reason)
-  assert.equal(releases, 1); assert.equal(inspected, 0); assert.equal(internal.errors.size, 0)
+  assert.equal(releases, 1); assert.equal(pages, 0); assert.equal(inspected, 0); assert.equal(internal.errors.size, 0)
 })
 
 

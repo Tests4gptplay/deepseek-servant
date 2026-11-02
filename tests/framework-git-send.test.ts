@@ -296,6 +296,91 @@ test('Git send: account switched during actual HTTP preflight cannot take over a
 })
 
 import { FrameworkClientController, type FrameworkClientApi } from '../src/framework/client-contracts.js'
+test('Git view: one fresh HEAD keeps messages, instances, tasks and archives on the same revision', async t => {
+  const f = await serviceFixture(t)
+  await f.service.send(f.input('same-snapshot'))
+  const peer = 'Workspace/instances/peer_Workers1_00000000-0000-4000-8000-000000000099.json'
+  const task = (id: string) => JSON.stringify({ version: 1, taskId: id, route: 'P', owner: 'alice', status: 'running', sourcePath: 'tasks/' + id + '_P.md' })
+  f.remote.change({ [peer]: JSON.stringify({ sequence: 1, updatedAt: '2026-10-31T00:00:00Z', status: 'stopped' }),
+    'Workspace/tasks/before.json': task('before'), 'Workspace/archives/before/records.md': 'old archive' })
+  const files = f.connection.files, snapshot = files.snapshot.bind(files)
+  let acquired = 0, released = 0
+  files.snapshot = async () => { acquired++; const s = await snapshot(), release = s.release.bind(s); s.release = async () => { released++; await release() }; return s }
+  const page = f.conversation.page.bind(f.conversation)
+  let change = true
+  f.conversation.page = async (...args) => {
+    const value = await page(...args)
+    if (change) { change = false; f.remote.change({ [peer]: JSON.stringify({ sequence: 2, updatedAt: '2026-10-31T00:00:01Z', status: 'running' }),
+      'Workspace/tasks/after.json': task('after'), 'Workspace/archives/after/records.md': 'new archive' }) }
+    return value
+  }
+  f.remote.requests.length = 0
+  const first = await f.service.view({ mode: 'git', includeArchives: true })
+  assert.equal(f.remote.count('/commits/heads/'), 1)
+  assert.equal(acquired, 1); assert.equal(released, 1)
+  assert.equal(first.messages[0].text, f.input('same-snapshot').text)
+  assert.equal(first.resources[0].status, 'stopped')
+  assert.deepEqual(first.tasks.map(row => row.taskId), ['before'])
+  assert.deepEqual(first.archives.map(row => row.taskId), ['before'])
+  const second = await f.service.view({ mode: 'git', includeArchives: true })
+  assert.equal(f.remote.count('/commits/heads/'), 2, 'a new view still checks the remote branch')
+  assert.equal(acquired, 2); assert.equal(released, 2)
+  assert.equal(second.resources[0].status, 'online')
+  assert.deepEqual(second.tasks.map(row => row.taskId), ['after', 'before'])
+  assert.deepEqual(second.archives.map(row => row.taskId), ['after', 'before'])
+  assert.equal(second.connection.participating, false)
+  assert.equal(f.remote.count('/graphql'), 0, 'passive views never restart registration or heartbeat')
+})
+
+test('Git view: cancellation settles the borrowed page before releasing once and skips later branches', async t => {
+  const f = await serviceFixture(t), entered = deferred<void>(), release = deferred<void>(), abort = new AbortController()
+  await f.service.send(f.input('cancel-view'))
+  const page = f.conversation.page.bind(f.conversation), files = f.connection.files, snapshot = files.snapshot.bind(files)
+  let releases = 0, observed = 0
+  files.snapshot = async () => { const s = await snapshot(), close = s.release.bind(s); s.release = async () => { releases++; await close() }; return s }
+  f.conversation.page = async (...args) => { const value = await page(...args); entered.resolve(); await release.promise; return value }
+  const observe = (f.service as any).observe.bind(f.service)
+  ;(f.service as any).observe = (...args: any[]) => { observed++; return observe(...args) }
+  const reason = new Error('owned UI read cancelled'), reading = f.service.view({ mode: 'git' }, abort.signal)
+  const rejected = assert.rejects(reading, error => error === reason)
+  await entered.promise; abort.abort(reason)
+  const releasesWhileBorrowed = releases
+  release.resolve(); await rejected
+  assert.equal(releasesWhileBorrowed, 0, 'outer owner must retain the snapshot while its borrowed reader is pending')
+  assert.equal(releases, 1); assert.equal(observed, 0)
+  f.conversation.page = page
+  assert.equal((await f.service.view({ mode: 'git' })).messages[0].id, 'cancel-view')
+})
+
+test('Git view: changing the authorized scope invalidates an old borrowed read without exposing it in the new scope', async t => {
+  const f = await serviceFixture(t), entered = deferred<void>(), release = deferred<void>()
+  await f.service.send(f.input('old-scope'))
+  const page = f.conversation.page.bind(f.conversation)
+  f.conversation.page = async (...args) => { const value = await page(...args); entered.resolve(); await release.promise; return value }
+  const reading = f.service.view({ mode: 'git' }), reason = new Error('original scope closed')
+  const rejected = assert.rejects(reading, error => error === reason)
+  await entered.promise; f.connection.cancelPending(reason)
+  const next = await f.install('Other')
+  release.resolve(); await rejected
+  const current = await f.service.view({ mode: 'git' })
+  assert.equal(current.storageScope, next.connection.scope); assert.deepEqual(current.messages, [])
+  f.remote.forbidden = true
+  await assert.rejects(f.service.view({ mode: 'git' }), /Access revoked/)
+})
+
+test('Git view: active backend resources are reused without adding a frontend instance scan', async t => {
+  const f = await serviceFixture(t)
+  await f.service.send(f.input('active-view'))
+  ;(f.service as any).running.set('git', { connection: { scope: f.connection.scope, registration: { member: 'alice', workerSeats: 0 } },
+    resources: [{ member: 'peer', primary: false, instanceUUID: '00000000-0000-4000-8000-000000000099', workerSeats: 1, availability: 'offline' }], runtime: {} })
+  const list = f.connection.files.listDirectory.bind(f.connection.files)
+  f.connection.files.listDirectory = async (snapshot, prefix) => { assert.notEqual(prefix, 'instances/', 'active resources already own this observation'); return list(snapshot, prefix) }
+  f.remote.requests.length = 0
+  const view = await f.service.view({ mode: 'git' })
+  assert.equal(view.resources[0].status, 'offline'); assert.equal(view.hasOtherInstanceRecords, true)
+  assert.equal(f.remote.count('/commits/heads/'), 1)
+})
+
 test('Git send: late old read and old send ACK cannot replace newer same-scope authoritative history', async t => {
   const f = await serviceFixture(t), oldReadEntered = deferred<void>(), oldReadRelease = deferred<void>(), ackEntered = deferred<void>(), ackRelease = deferred<void>()
   let holdRead = false

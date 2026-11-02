@@ -172,11 +172,11 @@ export class FrameworkConversation {
     })
   }
   /** Caller chooses page size; no product message-length or history limit. */
-  page(limit: number, beforeId?: string, query: { afterId?: string; date?: string } = {}): Promise<{ messages: ConversationMessage[]; moreBefore?: string; moreAfter?: string; revision: string }> {
+  page(limit: number, beforeId?: string, query: { afterId?: string; date?: string } = {}, borrowed?: FilesSnapshot): Promise<{ messages: ConversationMessage[]; moreBefore?: string; moreAfter?: string; revision: string }> {
     if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('Page size must be a positive integer.')
     if (beforeId && query.afterId) throw new Error('Choose one pagination direction.')
     if (query.date && !/^\d{4}-\d{2}-\d{2}$/.test(query.date)) throw new Error('Saved date must use YYYY-MM-DD.')
-    return withSnapshot(this.files, async snapshot => {
+    const inspect = async (snapshot: FilesSnapshot) => {
       const allEntries = (await this.index(snapshot)).messages
       let entries = allEntries
       // Local calendar pages remain day-scoped. Git calendar selection is only
@@ -206,7 +206,10 @@ export class FrameworkConversation {
         ...(selected.length && (this.scope.mode === 'git'
           ? allEntries.findIndex(entry => entry.id === selected[selected.length - 1].id) < allEntries.length - 1
           : end < entries.length) ? { moreAfter: selected[selected.length - 1].id } : {}), revision: snapshot.revision }
-    })
+    }
+    // A composite view owns its snapshot until every reader settles. Standalone
+    // history/page requests still acquire and release a fresh snapshot here.
+    return borrowed ? inspect(borrowed) : withSnapshot(this.files, inspect)
   }
   /** Only explicit assistant replies complete an exchange; human discussion and
    * unanswered inputs do not consume the six-exchange context budget. */
