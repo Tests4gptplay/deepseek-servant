@@ -20,10 +20,10 @@ https://github.com/Tests4gptplay/deepseek-servant/releases/download/v0.5.0-rc.2/
 
 验证：源码回归 1321/1321、类型检查、官方安装文件核对及 Web 启动与正常冷启动通过。测试覆盖说明见包内 `docs/TESTING.md`。
 
-源码：[`75f4e693caedc9afdedc2d36d6c007bb819ed747`](https://github.com/Tests4gptplay/deepseek-servant/commit/75f4e693caedc9afdedc2d36d6c007bb819ed747)。
+源码：[`d688ea542c1e194054e8bc0eaa60db15d4933d20`](https://github.com/Tests4gptplay/deepseek-servant/commit/d688ea542c1e194054e8bc0eaa60db15d4933d20)。
 
-安装包：`deepseek-servant-0.5.0-rc.2.tgz`，5,565,642 字节，23 个生产文件。
+安装包：`deepseek-servant-0.5.0-rc.2.tgz`，5,565,610 字节，23 个生产文件。
 
-SHA-256：`67e4ce4cf5190e39fde6f2a2b0b614f2be92af1665a592c5249b88e929bd94aa`。
+SHA-256：`85b39854a14ffbfc1322d702e75db5b4711a53c2dbbb1debacbaadff59c47268`。
 
 [安装指南](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.5.0-rc.2/docs/INSTALLATION.md) · [使用指南](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.5.0-rc.2/docs/USAGE.md)

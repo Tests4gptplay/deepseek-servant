@@ -56,10 +56,11 @@ require(set(pkg['files']) | {'package.json'} == ALLOWED, 'package.files differs 
 require('dsh' not in pkg.get('engines', {}), 'Unexpected Host version gate.')
 require(all(value == '*' for name, value in pkg['peerDependencies'].items() if name.startswith('@deepseek-ai/')), 'Unexpected Host peer-version gate.')
 spec = 'github:Tests4gptplay/deepseek-servant#v0.5.0-rc.2'
+url = 'https://github.com/Tests4gptplay/deepseek-servant/releases/download/v0.5.0-rc.2/' + m['archive']
 for name in ('README.md', 'docs/INSTALLATION.md', 'docs/releases/0.5.0.md'):
     require(spec in payload[name].decode(), 'Wrong fixed Git installation source: ' + name)
+    require(url in payload[name].decode(), 'Wrong fixed TGZ installation source: ' + name)
 notes = (META / 'NOTES.md').read_text()
-url = 'https://github.com/Tests4gptplay/deepseek-servant/releases/download/v0.5.0-rc.2/' + m['archive']
 require(spec in notes and url in notes and m['sha256'] in notes, 'Release notes do not match the package.')
 print(json.dumps({'sourceCommit': m['sourceCommit'], 'releaseCommit': git('rev-parse', 'HEAD').decode().strip(),
                   'archive': archive.name, 'bytes': len(data), 'sha256': digest, 'payloadFiles': len(payload),
