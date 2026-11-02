@@ -17,6 +17,7 @@ class Remote {
   trees = new Map<string, Array<{ path: string; type: 'tree' | 'blob'; sha: string; size?: number }>>()
   blobs = new Map<string, string>()
   requests: Array<{ method: string; path: string; body: any }> = []
+  credentialResolutions = 0
   branch = 'main'
   repositoryId = 77
   inviteStatus: 201 | 204 | 403 = 201
@@ -149,7 +150,7 @@ function memory(): StoragePort {
 }
 const gitSettings = { mode: 'git' as const, ownerRepo: 'example/private', repositoryDirectory: 'Workspace', workerSeats: 2 }
 function dependencies(remote: Remote, storage = memory(), now = () => 0) {
-  return { storage, now, credentials: { resolve: async () => ({ value: 'synthetic-not-a-secret', source: 'fixture' }) },
+  return { storage, now, credentials: { resolve: async () => { remote.credentialResolutions++; return { value: 'synthetic-not-a-secret', source: 'fixture' } } },
     fetch: (url: string, init?: RequestInit) => remote.fetch(url, init) }
 }
 
@@ -273,7 +274,7 @@ test('Git send: response-read outage keeps original recoverable operation and co
   const f = await serviceFixture(t), originalFetch = f.remote.fetch.bind(f.remote)
   f.remote.fetch = async (url, init) => {
     const response = await originalFetch(url, init)
-    if (new URL(url).pathname === '/graphql') { f.remote.failReads = true; throw new Error('controlled response and readback outage') }
+    if (new URL(url).pathname === '/graphql' && JSON.parse(String(init?.body)).query.startsWith('mutation DSSCommit')) { f.remote.failReads = true; throw new Error('controlled response and readback outage') }
     return response
   }
   await assert.rejects(f.service.send(f.input('readback')), (error: any) => { assert.equal(typeof error.operationId, 'string'); assert.ok(error.operationId); return true })
@@ -425,6 +426,27 @@ test('Git send readback fetches only the saved message in one Commit query while
     assert.match(f.remote.requests[0].body.query, /^query DSSReadPlan/)
     assert.ok(Object.values(f.remote.requests[0].body.variables).every(value => typeof value !== 'string' || !/\/(tasks|instances|archives)(\/|$)/.test(value)))
   } finally { release.resolve(); await reading }
+})
+
+test('Git send plans known predicates together and skips Local-only business receipts while preserving write authority', async t => {
+  const f = await serviceFixture(t), input = { ...f.input('planned-send'), storageScope: undefined }
+  await f.connection.prepareWrite(); f.remote.requests.length = 0; f.remote.credentialResolutions = 0
+  const read = f.connection.files.read.bind(f.connection.files)
+  f.connection.files.read = async (snapshot, path) => { assert.ok(!path.startsWith('technical/transaction-receipts/')); return read(snapshot, path) }
+  const receipt = await f.service.send(input)
+  assert.equal(receipt.storageScope, f.connection.scope)
+  assert.equal(f.remote.credentialResolutions, 2, 'one predicate read session and one fresh write session')
+  const queries = f.remote.requests.filter(row => row.body?.query?.startsWith('query DSSReadPlan'))
+  assert.equal(queries.length, 1); assert.equal(queries[0].body.variables.ref, 'refs/heads/main')
+  assert.equal(Object.keys(queries[0].body.variables).filter(key => /^p\d+$/.test(key)).length, 3)
+  assert.equal(f.remote.count('/git/trees/'), 0); assert.equal(f.remote.count('/git/blobs/'), 0)
+  assert.equal(f.remote.count('/user'), 1); assert.equal(f.remote.count('/commits/heads/'), 1)
+  const mutations = f.remote.requests.filter(row => row.body?.query?.startsWith('mutation DSSCommit'))
+  assert.equal(mutations.length, 1); assert.equal(mutations[0].body.variables.input.expectedHeadOid.length, 40)
+  const count = f.remote.credentialResolutions, requests = f.remote.requests.length
+  assert.equal((await f.service.send(input)).replay, true)
+  assert.equal(f.remote.credentialResolutions, count); assert.equal(f.remote.requests.length, requests)
+  assert.equal((await f.conversation.read(input.id))?.text, input.text)
 })
 
 test('Git readback never substitutes submitted text for corrupted remote bytes and does not retry denied fields', async t => {

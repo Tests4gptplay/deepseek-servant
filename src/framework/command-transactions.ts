@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { StoragePort } from '../contracts/ports.js'
-import { FilesConflictError, FilesOutcomeUnknownError, GitFiles, type FileChange, type FileReceipt, type FilesSnapshot, type FilesStore } from './transactions.js'
+import { FilesConflictError, FilesOutcomeUnknownError, GitFiles, withReadOperation, type FileChange, type FileReadPlan, type FileReceipt, type FilesSnapshot, type FilesStore } from './transactions.js'
 
 interface CommandRecord {
   id: string
@@ -13,6 +13,8 @@ interface CommandRecord {
 export interface CommandOptions {
   expectedRevision?: string
   snapshot?: FilesSnapshot
+  /** Known business predicates share the command's original snapshot. */
+  readPlan?: FileReadPlan
   /** Caller explicitly requests a fresh business evaluation after a proven conflict. */
   reevaluate?: boolean
 }
@@ -67,50 +69,59 @@ export class FrameworkTransactions {
         else throw new FilesConflictError(record.expectedRevision)
       }
     }
-    const ownedSnapshot = !options.snapshot || !!record
-    const snapshot = record?.operationId && this.files instanceof GitFiles
-      ? await this.files.at(record.expectedRevision) : record ? await this.files.snapshot() : options.snapshot ?? await this.files.snapshot()
-    try {
-      const receiptPath = 'technical/transaction-receipts/' + hash(id) + '.json'
-      // A Local process can exit after COMMIT but before saving its local command acknowledgement.
-      // This receipt is part of the same authoritative transaction as the business changes.
-      const existing = await this.files.read(snapshot, receiptPath)
-      if (existing !== undefined) {
-        const saved = JSON.parse(existing) as { requestHash: string }
-        if (saved.requestHash !== requestHash) throw new Error('Stored command receipt does not match its arguments.')
-        const receipt = { revision: snapshot.revision, replay: true }
-        await this.records.set(key, { ...(record ?? { id, requestHash, expectedRevision: snapshot.revision }), receipt })
+    const evaluate = async () => {
+      const ownedSnapshot = !options.snapshot || !!record
+      const snapshot = record?.operationId && this.files instanceof GitFiles
+        ? await this.files.at(record.expectedRevision) : record ? await this.files.snapshot(options.readPlan) : options.snapshot ?? await this.files.snapshot(options.readPlan)
+      try {
+        const receiptPath = 'technical/transaction-receipts/' + hash(id) + '.json'
+        // A Local process can exit after COMMIT but before saving its local command acknowledgement.
+        // This receipt is part of the same authoritative transaction as the business changes.
+        // Git commands persist operation identities and reconcile commit metadata;
+        // they never write this Local-only business receipt to the repository.
+        const existing = this.files instanceof GitFiles ? undefined : await this.files.read(snapshot, receiptPath)
+        if (existing !== undefined) {
+          const saved = JSON.parse(existing) as { requestHash: string }
+          if (saved.requestHash !== requestHash) throw new Error('Stored command receipt does not match its arguments.')
+          const receipt = { revision: snapshot.revision, replay: true }
+          await this.records.set(key, { ...(record ?? { id, requestHash, expectedRevision: snapshot.revision }), receipt })
+          return receipt
+        }
+        if ((options.expectedRevision && snapshot.revision !== options.expectedRevision)
+          || (record && snapshot.revision !== record.expectedRevision)) throw new FilesConflictError(record?.expectedRevision ?? options.expectedRevision!)
+        if (!record) {
+          record = { id, requestHash, expectedRevision: snapshot.revision }
+          await this.records.set(key, record)
+        }
+        if (options.readPlan && this.files.prefetch) await this.files.prefetch(snapshot, options.readPlan)
+        const changes = await build(snapshot)
+        if (!changes.length) {
+          const receipt = { revision: snapshot.revision, replay: false }
+          await this.records.set(key, { ...record, receipt })
+          return receipt
+        }
+        const combined = this.files instanceof GitFiles ? changes : [...changes, { path: receiptPath, content: JSON.stringify({ requestHash }) + '\n' }]
+        const message = 'DSS command ' + hash(id)
+        if (this.files instanceof GitFiles && !record.operationId) {
+          const prepared = await this.files.prepare(snapshot, combined, message)
+          record = { ...record, operationId: prepared.id }
+          // Mapping is durable before any network write, even if the process exits here.
+          await this.records.set(key, record)
+        }
+        const receipt = this.files instanceof GitFiles
+          ? await this.files.commitPrepared(snapshot, combined, message, record.operationId!)
+          : await this.files.commit(snapshot, combined, message)
+        const { verifiedWrites: _liveVerification, ...persistedReceipt } = receipt
+        await this.records.set(key, { ...record, receipt: persistedReceipt })
         return receipt
-      }
-      if ((options.expectedRevision && snapshot.revision !== options.expectedRevision)
-        || (record && snapshot.revision !== record.expectedRevision)) throw new FilesConflictError(record?.expectedRevision ?? options.expectedRevision!)
-      if (!record) {
-        record = { id, requestHash, expectedRevision: snapshot.revision }
-        await this.records.set(key, record)
-      }
-      const changes = await build(snapshot)
-      if (!changes.length) {
-        const receipt = { revision: snapshot.revision, replay: false }
-        await this.records.set(key, { ...record, receipt })
-        return receipt
-      }
-      const combined = this.files instanceof GitFiles ? changes : [...changes, { path: receiptPath, content: JSON.stringify({ requestHash }) + '\n' }]
-      const message = 'DSS command ' + hash(id)
-      if (this.files instanceof GitFiles && !record.operationId) {
-        const prepared = await this.files.prepare(snapshot, combined, message)
-        record = { ...record, operationId: prepared.id }
-        // Mapping is durable before any network write, even if the process exits here.
-        await this.records.set(key, record)
-      }
-      const receipt = this.files instanceof GitFiles
-        ? await this.files.commitPrepared(snapshot, combined, message, record.operationId!)
-        : await this.files.commit(snapshot, combined, message)
-      const { verifiedWrites: _liveVerification, ...persistedReceipt } = receipt
-      await this.records.set(key, { ...record, receipt: persistedReceipt })
-      return receipt
-    } catch (error) {
-      if (error instanceof FilesConflictError && record) await this.records.set(key, { ...record, conflicted: true })
-      throw error
-    } finally { if (ownedSnapshot) await snapshot.release() }
+      } catch (error) {
+        if (error instanceof FilesConflictError && record) await this.records.set(key, { ...record, conflicted: true })
+        throw error
+      } finally { if (ownedSnapshot) await snapshot.release() }
+    }
+    // Planned predicates reuse one operation-owned read session. The existing
+    // commit boundary still resolves write credentials and checks authority.
+    // Confirmed command replays returned above never open a remote session.
+    return options.readPlan ? withReadOperation(this.files, evaluate) : evaluate()
   }
 }

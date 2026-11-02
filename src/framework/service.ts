@@ -905,7 +905,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         const receipt = await active.conversation.send('client-message:' + body.id, { ...body, role: 'user', participantId,
             username: active.connection.repository?.identity.login || (this.config(mode).settings.userName || active.connection.identity.login) }, { reevaluate: true });
         this.changed();
-        return receipt;
+        return { ...receipt, storageScope: active.connection.scope };
     }
     async sentMessage(input: FrameworkSendInput, signal?: AbortSignal) {
         signal?.throwIfAborted();

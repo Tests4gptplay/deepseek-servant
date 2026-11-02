@@ -60,7 +60,14 @@ export class FrameworkConversation {
    * No UI AbortSignal is accepted: closing a view does not revoke a durable send.
    */
   send(commandId: string, message: ConversationSend, options: CommandOptions = {}): Promise<FileReceipt> {
-    return this.transactions.run(this.command(commandId), { scope: this.scope, message }, options, async snapshot => {
+    const date = new Date(message.createdAt)
+    if (!Number.isFinite(date.getTime())) return Promise.reject(new Error('Message createdAt must be a valid timestamp.'))
+    const root = 'conversations/' + (this.scope.mode === 'local' ? 'local/' : '') + segment(message.participantId) + '/' + date.toISOString().slice(0, 10) + '/' + message.createdAt.replace(/\D/g, '') + '-' + segment(message.id)
+    const textPath = root + '/text', path = root + '/entry.json'
+    const notificationBase = message.role === 'user' && message.recipient === 'ai'
+      ? 'state/' + foregroundNotification(message.username ?? message.participantId, date, message.timezoneOffsetMinutes ?? 0) : undefined
+    const readPlan = { files: [this.indexPath, path, ...(notificationBase ? [notificationBase] : [])] }
+    return this.transactions.run(this.command(commandId), { scope: this.scope, message }, { ...options, readPlan }, async snapshot => {
       const index = await this.index(snapshot)
       const previous = index.messages.find(entry => entry.id === message.id)
       if (previous) {
@@ -72,19 +79,15 @@ export class FrameworkConversation {
         }
         return []
       }
-      const date = new Date(message.createdAt)
-      if (!Number.isFinite(date.getTime())) throw new Error('Message createdAt must be a valid timestamp.')
-      const root = 'conversations/' + (this.scope.mode === 'local' ? 'local/' : '') + segment(message.participantId) + '/' + date.toISOString().slice(0, 10) + '/' + message.createdAt.replace(/\D/g, '') + '-' + segment(message.id)
-      const textPath = root + '/text', path = root + '/entry.json'
-      const { text, username, timezoneOffsetMinutes, ...fields } = message
+      const { text, username: _username, timezoneOffsetMinutes: _offset, ...fields } = message
       if (await this.files.read(snapshot, path) !== undefined) throw new ConversationRecordError(path, 'identity', 'Message path already belongs to another indexed record.')
       const entry: ConversationEntry = { ...fields, collaborationId: this.scope.collaborationId, textPath: this.scope.mode === 'git' ? 'dss-coop/' + textPath : textPath, textHash: hash(text) }
       const changes: FileChange[] = [...textChanges(textPath, text, this.scope.mode === 'git'), { path, content: json(entry) }]
       // The suffix only disambiguates actual same-name notification collisions.
       // Stable message identity preserves timestamp meaning across devices/replays.
       let notification: string | undefined
-      if (message.role === 'user' && message.recipient === 'ai') {
-        const base = 'state/' + foregroundNotification(username ?? message.participantId, date, timezoneOffsetMinutes ?? 0)
+      if (notificationBase) {
+        const base = notificationBase
         notification = base
         if (await this.files.read(snapshot, base) !== undefined) notification += '-' + hash(this.scope.mode + '\0' + this.scope.collaborationId + '\0' + message.id)
         changes.push({ path: notification, content: '' })

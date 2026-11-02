@@ -79,7 +79,7 @@ export interface FrameworkClientApi {
     | { action: 'planning'; confirmation: 'clear-work-planning-notes' })): Promise<ManualCleanupResult>
   view(input: { mode?: FrameworkMode; includeArchives?: boolean; headerOnly?: boolean }, signal?: AbortSignal): Promise<FrameworkClientView>
   history(input: { mode: FrameworkMode; collaborationId: string; storageScope?: string; beforeId?: string; afterId?: string; date?: string; limit: number }, signal?: AbortSignal): Promise<{ messages: FrameworkClientMessage[]; moreBefore?: string; moreAfter?: string; revision: string }>
-  send(input: FrameworkSendInput): Promise<{ revision: string; replay?: boolean }>
+  send(input: FrameworkSendInput): Promise<{ revision: string; replay?: boolean; storageScope?: string }>
   sentMessage?(input: FrameworkSendInput, signal?: AbortSignal): Promise<{ message?: FrameworkClientMessage; revision: string; order: string[] }>
   configure(input: { mode: FrameworkMode; commandId: string; expectedRevision?: string; settings: FrameworkClientSettings }): Promise<FrameworkClientView>
   foregroundModel(input: { mode: FrameworkMode; storageScope?: string; commandId: string; expectedRevision: string; model?: FrameworkClientModel }): Promise<FrameworkClientView>
@@ -163,13 +163,15 @@ export class FrameworkClientController {
   private displayView(value: FrameworkClientView, epoch: number): FrameworkClientView {
     return this.processingAvailable && epoch === this.processingEpoch ? value : { ...value, foregroundProcessing: undefined }
   }
-  private async load(operation: (publishIntermediate: (value: FrameworkClientView) => void, isCurrent: () => boolean) => Promise<FrameworkClientView>, scopedMode?: FrameworkMode): Promise<void> {
+  private async load(operation: (publishIntermediate: (value: FrameworkClientView) => void, isCurrent: () => boolean) => Promise<FrameworkClientView>, scopedMode?: FrameworkMode, fullView = true): Promise<void> {
     // An action still belongs to its original scope, but its result must not
     // replace a newer mode/settings navigation. Do not cancel the Host action.
     if (scopedMode && (this.navigation || (this.requestedMode && scopedMode !== this.requestedMode))) { await operation(() => {}, () => false); return }
     const generation = ++this.generation, processingEpoch = this.processingAvailable ? this.processingEpoch : -1
+    const messageRead = fullView ? ++this.messageReadEpoch : undefined
+    const project = (value: FrameworkClientView) => this.displayView(fullView ? this.refreshView(value, true, true, messageRead) : value, processingEpoch)
     this.publish({ loading: true, error: undefined })
-    try { const value = await operation(value => { if (generation === this.generation) this.publish({ value: this.displayView(value, processingEpoch) }) }, () => generation === this.generation); if (generation === this.generation) this.publish({ value: this.displayView(value, processingEpoch), loading: false }) }
+    try { const value = await operation(value => { if (generation === this.generation) this.publish({ value: project(value) }) }, () => generation === this.generation); if (generation === this.generation) this.publish({ value: project(value), loading: false }) }
     catch (error) { if (generation === this.generation) this.publish({ loading: false, error: error instanceof Error ? error.message : String(error) }); throw error }
   }
   private async navigate(operation: () => Promise<FrameworkClientView>, mode: FrameworkMode, hydrate = false): Promise<void> {
@@ -262,7 +264,7 @@ export class FrameworkClientController {
       request = owned.promise
     }
     return this.refreshView(await request, includeArchives || !!hydration?.includeArchives)
-  })
+  }, undefined, false)
   private refreshView(value: FrameworkClientView, includeArchives: boolean, previousLoaded = true, messageRead?: number): FrameworkClientView {
     const fresh = { ...value }
     const current = this.current.value, key = frameworkScopeKey(fresh.activeMode, fresh.collaborationId, fresh.storageScope)
@@ -305,7 +307,7 @@ export class FrameworkClientController {
       // A successful stop returns only local settings/connection facts. It must
       // not reacquire Git access or erase the already readable conversation.
       return { ...current, settings: result.settings, revision: result.revision, connection: result.connection, foregroundProcessing: undefined }
-    }, mode)
+    }, mode, enabled)
   }
   configure = (input: Parameters<FrameworkClientApi['configure']>[0]): Promise<void> => this.navigate(() => this.api.configure(input), input.mode)
   foregroundModel = (input: Parameters<FrameworkClientApi['foregroundModel']>[0]): Promise<void> => {
@@ -318,7 +320,7 @@ export class FrameworkClientController {
       if (!current) return saved
       if (current.activeMode !== input.mode || scope !== frameworkScopeKey(current.activeMode, current.collaborationId, current.storageScope)) return current
       return { ...current, settings: saved.settings, revision: saved.revision }
-    }, input.mode)
+    }, input.mode, false)
   }
 
   async navigateHistory(input: { date?: string; beforeId?: string; afterId?: string; limit: number }): Promise<void> {
@@ -379,28 +381,40 @@ export class FrameworkClientController {
     if (retained.state === 'confirmed') return Promise.resolve()
     const update = (state: FrameworkDraft['state'], error?: string) => this.publish({ drafts: this.current.drafts.map(draft => draft.input.id === input.id ? { ...draft, state, error } : draft) })
     update('sending')
-    const operation = this.api.send(retained.input).then(async () => {
+    const operation = this.api.send(retained.input).then(async receipt => {
       update('confirmed')
-      const scope = frameworkScopeKey(input.mode, input.collaborationId, input.storageScope)
+      // A cold settings header may not know the storage identity yet. Bind the
+      // read to the actual successful destination, never an undefined wildcard.
+      const storageScope = input.storageScope ?? receipt.storageScope
+      const scope = frameworkScopeKey(input.mode, input.collaborationId, storageScope)
       const currentScope = () => { const view = this.current.value; return !!view && frameworkScopeKey(view.activeMode, view.collaborationId, view.storageScope) === scope }
       const delivered = () => this.current.value?.messages.some(message => message.id === input.id && message.role === 'user' && message.text === input.text)
       if (!currentScope() || delivered()) return
       if (this.api.sentMessage) {
         const epoch = ++this.messageReadEpoch, navigation = this.navigationGeneration, history = this.historyGeneration
         try {
-          const result = await this.api.sentMessage(retained.input, this.historyReads.signal)
+          const result = await this.api.sentMessage({ ...retained.input, storageScope }, this.historyReads.signal)
           if (!currentScope() || navigation !== this.navigationGeneration || history !== this.historyGeneration || this.navigation
             || (this.messageReads.get(scope) ?? 0) > epoch || this.current.value?.historyWindow) return
           const message = result.message
           if (!message) return // A later authoritative cleanup may have removed it.
           if (message.id !== input.id || message.role !== 'user' || message.text !== input.text || !result.order.includes(message.id)) throw new Error('Saved message readback differs from the original input.')
           const pending = this.confirmedMessages.get(scope) ?? new Map()
-          pending.set(message.id, { message, order: result.order, epoch }); this.confirmedMessages.set(scope, pending)
-          this.publish({ value: { ...this.current.value!, messages: this.mergeConfirmed(this.current.value!.messages, message, result.order) } })
+          let order = result.order
+          // A later append can already have supplied a strict extension of this
+          // index while an earlier readback was in flight. Keep that known order.
+          for (const known of pending.values()) {
+            const positions = order.map(id => known.order.indexOf(id))
+            if (known.order.length > order.length && positions.every((position, i) => position >= 0 && (!i || position > positions[i - 1]!))) order = known.order
+          }
+          pending.set(message.id, { message, order, epoch }); this.confirmedMessages.set(scope, pending)
+          this.publish({ value: { ...this.current.value!, messages: this.mergeConfirmed(this.current.value!.messages, message, order) } })
         } catch (error) {
           // The commit is confirmed; a failed read must not relabel it UNKNOWN
           // or manufacture a message from the draft. Independent dirty work lives on.
-          if (currentScope() && navigation === this.navigationGeneration && history === this.historyGeneration && (this.messageReads.get(scope) ?? 0) <= epoch) this.publish({ error: error instanceof Error ? error.message : String(error) })
+          if (!currentScope() || navigation !== this.navigationGeneration || history !== this.historyGeneration || this.navigation
+            || (this.messageReads.get(scope) ?? 0) > epoch) return
+          this.publish({ error: error instanceof Error ? error.message : String(error) })
           throw error
         }
         return

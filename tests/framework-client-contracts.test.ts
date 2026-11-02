@@ -72,8 +72,45 @@ test('out-of-order readback inserts by committed index and preserves newer messa
     return { message: { ...savedDraftView().messages[0], id: second.id, text: second.text }, order: [draft.id, second.id], revision: 'H2' }
   } }))
   await controller.selectMode('git'); const first = controller.send(draft); await entered.promise; await controller.send(second)
-  late.resolve({ message: savedDraftView().messages[0], order: [draft.id, second.id], revision: 'H2' }); await first
+  late.resolve({ message: savedDraftView().messages[0], order: [draft.id], revision: 'H1' }); await first
   assert.deepEqual(controller.snapshot().value?.messages.map(message => message.id), [draft.id, second.id])
+})
+
+for (const error of [new DOMException('This operation was aborted', 'AbortError'), new Error('readback permission denied')]) test('withdrawn readback rejection never bubbles into the new page: ' + error.name, async () => {
+  const response = deferred<never>(), entered = deferred<void>()
+  const controller = new FrameworkClientController(api({ sentMessage: () => { entered.resolve(); return response.promise } }))
+  await controller.selectMode('git'); const sending = controller.send(draft); await entered.promise
+  await controller.selectMode('local'); response.reject(error); await assert.doesNotReject(sending)
+  assert.equal(controller.snapshot().error, undefined); assert.equal(controller.snapshot().value?.activeMode, 'local')
+  assert.equal(controller.snapshot().drafts[0].state, 'confirmed')
+})
+
+for (const destination of ['git-storage', 'different-storage']) test('cold unbound input uses confirmed destination without treating undefined as wildcard: ' + destination, async () => {
+  const receipt = deferred<{ revision: string; storageScope: string }>(); let seen: FrameworkSendInput | undefined
+  const controller = new FrameworkClientController(api({ send: () => receipt.promise,
+    sentMessage: async input => { seen = input; return { message: savedDraftView().messages[0], order: [draft.id], revision: 'H' } },
+  }))
+  await controller.selectMode('git')
+  const original = { ...draft, storageScope: undefined }, sending = controller.send(original)
+  receipt.resolve({ revision: 'H', storageScope: destination }); await sending
+  assert.equal(seen?.storageScope, destination === 'git-storage' ? destination : undefined)
+  assert.deepEqual(controller.snapshot().drafts[0].input, original, 'original write identity remains unchanged')
+  assert.equal(controller.snapshot().value?.messages.length, destination === 'git-storage' ? 1 : 0)
+})
+
+for (const action of ['stopExecution', 'taskControl', 'legacyControl', 'participation'] as const) test('every full action response preserves a later authoritative message: ' + action, async () => {
+  const response = deferred<FrameworkClientView>(), entered = deferred<void>()
+  const controller = new FrameworkClientController(api({ [action]: () => { entered.resolve(); return response.promise },
+    sentMessage: async () => ({ message: savedDraftView().messages[0], order: [draft.id], revision: 'new-commit' }),
+  }))
+  await controller.selectMode('git')
+  const input = { mode: 'git', storageScope: 'git-storage', commandId: 'control', taskId: 'T', intent: 'paused', workId: 'W', executionId: 'E', migrationId: 'M', oldTaskId: 'Old', action: 'resume' } as any
+  const control = action === 'participation' ? controller.participation(true) : controller[action](input)
+  await entered.promise; await controller.send(draft)
+  assert.equal(controller.snapshot().value?.messages[0].id, draft.id)
+  response.resolve({ ...view('git'), connection: { status: 'changed by control', participating: true } }); await control
+  assert.equal(controller.snapshot().value?.messages[0].id, draft.id)
+  assert.equal(controller.snapshot().value?.connection.status, 'changed by control')
 })
 test('confirmed send does not refresh a view which already contains the exact saved original', async () => {
   let reads = 0
