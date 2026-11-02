@@ -829,7 +829,7 @@ async function routedNativeOpen(t: test.TestContext, routes: Record<string, unkn
   await runtime.wake({ id: 'route-helper', role: 'Helper', reason: 'helper', sources: [] })
   await runtime.runQueue(); await runtime.errorTail
   assert.deepEqual(errors, [])
-  return opened
+  return opened.sort((a, b) => a.role.localeCompare(b.role))
 }
 test('runtime native.open keeps an explicit background route independent from Foreground', async t => {
   const foreground = { provider: 'controlled-front-provider', model: 'front-model', reasoningEffort: 'high' }
@@ -1990,7 +1990,7 @@ test('marker discovery uses the supplied view and does not acquire per-Task snap
   assert.equal(reads, 1)
 })
 
-test('whole runtime poll shares one post-maintenance view for roster, tasks and absent recovery markers', async t => {
+test('runtime resource maintenance owns a separate view while task and marker discovery share their view', async t => {
   const { runtime, files, storage, errors } = await runtimeFixture(t)
   const { InstanceRegistration } = await import('../src/framework/instances.js')
   const registration = new InstanceRegistration(files, runtime.transactions, storage, {repositoryId:'local',repositoryOwner:'A',login:'A',instanceUUID:'00000000-0000-4000-8000-000000000001',workerSeats:2})
@@ -2001,7 +2001,8 @@ test('whole runtime poll shares one post-maintenance view for roster, tasks and 
   files.snapshot = async () => { acquisitions++; return snapshot() }
   runtime.environment.observeResources = async (current: any) => { resources++; assert.equal((await registration.observe(current)).length,1) }
   await runtime.loop.poll()
-  assert.equal(acquisitions, 1)
+  await Promise.all([...runtime.maintenance.values()])
+  assert.equal(acquisitions, 2)
   assert.equal(resources,1)
   assert.deepEqual(errors,[])
 })
@@ -2564,4 +2565,83 @@ test('shutdown preserves one owner failure while stopping remaining owners and o
   runtime.observations = { dispose: async () => { stopped.push('observations') } }
   await assert.rejects(runtime.dispose(), (error: unknown) => error === failure)
   assert.deepEqual(stopped, ['one', 'two', 'observations'])
+})
+
+const admissionCheckpoint = () => new Promise<void>(resolve => setImmediate(resolve))
+for (const phase of ['opening', 'sending'] as const) test(`independent role admission passes a held ${phase} while same work stays single`, async t => {
+  const { runtime, rows } = await runtimeFixture(t)
+  const gate = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>(), calls: string[] = []
+  runtime.gateway.exists = async () => false
+  runtime.native.open = async (identity: any) => {
+    calls.push('open:' + identity.workId)
+    if (identity.role === 'Planner' && phase === 'opening') { entered.resolve(); await gate.promise }
+    return { send: async () => { calls.push('send:' + identity.workId); if (identity.role === 'Planner' && phase === 'sending') { entered.resolve(); await gate.promise } } }
+  }
+  await runtime.wake({ id: 'held-A', role: 'Planner', reason: 'notification', sources: [] })
+  await runtime.wake({ id: 'free-B', role: 'Recorder', taskId: 'B', reason: 'business-complete', sources: [] })
+  const running = runtime.runQueue()
+  await entered.promise
+  try {
+    await admissionCheckpoint()
+    assert.equal([...rows.values()].find(row => row.request?.id === 'free-B')?.delivered, true)
+    await runtime.runQueue(false, undefined, false)
+    assert.equal(calls.filter(call => call === 'open:' + runtime.roleKey('Planner')).length, 1)
+    assert.equal([...rows.values()].find(row => row.request?.id === 'held-A')?.delivered, undefined)
+  } finally { gate.resolve(); await running }
+})
+
+test('heartbeat and resource reads do not block existing signal discovery and stay individually owned', async t => {
+  const { runtime, files, errors } = await runtimeFixture(t)
+  const heartbeat = Promise.withResolvers<void>(), resources = Promise.withResolvers<void>()
+  let beats = 0, reads = 0
+  runtime.environment.heartbeat = async () => { beats++; await heartbeat.promise }
+  runtime.environment.observeResources = async () => { reads++; await resources.promise }
+  runtime.startOwnedPump = () => {} // Test durable discovery, not a model boundary.
+  await withSnapshot(files, view => files.commit(view, [{ path: 'state/Worker_A_Direct_metrics', content: '' }], 'notification'))
+  let finished = false
+  const polling = runtime.loop.poll().then(() => { finished = true })
+  try {
+    await admissionCheckpoint()
+    assert.equal(finished, true)
+    await runtime.loop.poll()
+    assert.equal(beats, 1); assert.equal(reads, 1)
+  } finally { heartbeat.resolve(); resources.resolve(); await polling; await runtime.dispose() }
+  assert.deepEqual(errors, [])
+})
+
+test('native probe acceptance does not hold the local tick or duplicate the pending probe', async t => {
+  const { runtime, rows } = await runtimeFixture(t), gate = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>()
+  const sent: string[] = []
+  runtime.checkWakeAdmissions = async () => {}; runtime.restorePending = async () => {}
+  runtime.observations = { tick: async () => {}, mayApply: async () => true, dispose: async () => {} }
+  const identities = ['A', 'B'].map(id => ({ role: 'Planner', workId: id, executionId: 'e-' + id }))
+  for (const identity of identities) {
+    runtime.roleRecords.set(identity.workId, { identity, sessionId: identity.workId, generation: 1 })
+    await runtime.enqueueObservation({ ...pending, id: 'probe-' + identity.workId, action: { ...pending.action, identity } })
+  }
+  runtime.native.get = (workId: string) => ({ sessionId: workId, send: async (_text: string, id: string) => {
+    sent.push(id); if (workId === 'A') { entered.resolve(); await gate.promise }
+  } })
+  let tickDone = false
+  const tick = runtime.loop.actions.observeLocal().then(() => { tickDone = true })
+  await entered.promise
+  try {
+    await admissionCheckpoint()
+    assert.equal(tickDone, true); assert.deepEqual(sent, ['probe-A', 'probe-B'])
+    await runtime.loop.actions.observeLocal(); assert.equal(sent.filter(id => id === 'probe-A').length, 1)
+    assert.equal([...rows.values()].find(row => row.pending?.id === 'probe-A')?.complete, false)
+  } finally { gate.resolve(); await tick; await runtime.processObservations() }
+  assert.equal([...rows.values()].find(row => row.pending?.id === 'probe-A')?.complete, true)
+})
+
+test('startup recovery scan settles before native admission so the Host driver can start', async t => {
+  const { runtime } = await runtimeFixture(t), gate = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>()
+  runtime.gateway.exists = async () => false
+  runtime.native.open = async () => { entered.resolve(); await gate.promise; return { send: async () => {} } }
+  await runtime.wake({ id: 'persisted-wake', role: 'Planner', reason: 'notification', sources: [] })
+  let ready = false
+  const starting = runtime.startup().then(() => { ready = true })
+  await entered.promise
+  try { await admissionCheckpoint(); assert.equal(ready, true) }
+  finally { gate.resolve(); await starting; await runtime.pumping; await Promise.all([...runtime.workOperations?.values() ?? []]) }
 })

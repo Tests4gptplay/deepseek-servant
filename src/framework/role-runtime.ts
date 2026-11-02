@@ -92,6 +92,10 @@ export class FrameworkRoleRuntime {
   private readonly roleRecords = new Map<string, RoleRecord>()
   private stopOperations?: Map<string, TrackedStop>
   private pumping?: Promise<void>
+  private admissions?: Map<string, Promise<void>>
+  private workerAdmissions?: Set<string>
+  private observationOperations?: Map<string, Promise<void>>
+  private maintenance?: Map<string, Promise<void>>
   private helperPumping?: Promise<void>
   private restoring?: Promise<void>
   private readonly targetedPumps = new Map<string, Promise<void>>()
@@ -128,7 +132,7 @@ export class FrameworkRoleRuntime {
     this.cleaner = new FrameworkCleaner(files, this.transactions, task => this.releaseTask(task))
     this.loop = new FrameworkHostLoop(files, this.transactions, records, config, () => environment.members(), {
       wake: request => this.wake(request), admitDiscovered: async () => { this.startOwnedPump() }, executing: (role, task, worker) => this.executing(role, task, worker),
-      changed: () => environment.changed?.(), startup: () => this.startup(), observeLocal: async () => { await this.checkWakeAdmissions(); if (!this.closed) void this.restorePending().catch(error => this.error(error)); await this.observations.tick(); if (!this.closed) await this.processObservations(false, 'native') }, observe: () => this.observe(), discover: snapshot => this.discover(snapshot), discoveryInterrupted: () => environment.observationInterrupted?.(), error: error => this.error(error),
+      changed: () => environment.changed?.(), startup: () => this.startup(), observeLocal: async () => { await this.checkWakeAdmissions(); if (!this.closed) void this.restorePending().catch(error => this.error(error)); await this.observations.tick(); if (!this.closed) await this.processObservations(false, 'native', false) }, observe: () => this.observe(), discover: snapshot => this.discover(snapshot), discoveryInterrupted: () => environment.observationInterrupted?.(), error: error => this.error(error),
       sealBusiness: task => this.sealBusiness(task.taskId), clean: (task, snapshot) => this.clean(task, snapshot), releaseTask: taskId => this.releaseLocalTask(taskId),
     })
   }
@@ -338,6 +342,12 @@ export class FrameworkRoleRuntime {
     return intent?.workId === record.identity.workId && intent.executionId === record.identity.executionId
       && intent.phase === 'stopping'
   }
+  private occupiedWorkerSeats(excluding?: string): number {
+    const occupied = new Set(this.workerAdmissions ?? [])
+    for (const record of this.roleRecords.values()) if (this.workerSeatOccupied(record)) occupied.add(record.identity.workId)
+    if (excluding) occupied.delete(excluding)
+    return occupied.size
+  }
   /** Optional local display evidence, never a shared scheduling or completion signal. */
   async foregroundProcessing(): Promise<{ executionId: string; turnId: string; startedAt: number } | undefined> {
     const record = [...this.roleRecords.values()].find(row => row.identity.role === 'Foreground')
@@ -453,8 +463,7 @@ export class FrameworkRoleRuntime {
         const held = (request.role === 'Foreground' && !!this.pendingForegroundResets?.size)
           || taskHeld || firstPending.get(key) !== current.request.id || (!current.recovery && continuationOwners.has(key))
           || (!!record && !ownAdmission && this.active(record))
-          || (request.role === 'Worker' && [...this.roleRecords.values()].filter(item =>
-            !(ownAdmission && item.identity.executionId === record!.identity.executionId) && this.workerSeatOccupied(item)).length >= this.config.workerSeats)
+          || (request.role === 'Worker' && this.occupiedWorkerSeats(ownAdmission ? key : undefined) >= this.config.workerSeats)
         const confirmed = record?.delivery?.request.id === request.id && record.delivery.confirmed
         if (held || confirmed) return current.admission?.eligibleSince !== undefined ? { ...current,
           admission: current.admission.reportedAt === undefined ? undefined : { reportedAt: current.admission.reportedAt } } : undefined
@@ -492,17 +501,24 @@ export class FrameworkRoleRuntime {
    * The original pump promise remains available to explicit waiting callers and disposal. */
   private startOwnedPump(): void {
     if (this.closed || this.pumping) return
-    const operation = this.pump()
+    const operation = this.pump(false)
     // Attach once per owned flight, not once per discovery tick while it is held.
     void operation.catch(error => this.error(error))
   }
-  private pump(): Promise<void> {
+  private pump(waitForAdmissions = true): Promise<void> {
     if (this.closed) return Promise.resolve()
-    if (this.pumping) return this.pumping
-    const operation = Promise.resolve().then(() => { if (!this.closed) return this.runQueue() })
-    this.pumping = operation
-    void operation.finally(() => { if (this.pumping === operation) this.pumping = undefined }).catch(() => {})
-    return operation
+    if (!this.pumping) {
+      const operation = Promise.resolve().then(() => { if (!this.closed) return this.runQueue(false, undefined, false) })
+      this.pumping = operation
+      void operation.finally(() => { if (this.pumping === operation) this.pumping = undefined }).catch(() => {})
+    }
+    const scan = this.pumping
+    return waitForAdmissions ? scan.then(() => this.settleOperations([...(this.admissions?.values() ?? [])], 'Native admissions failed')) : scan
+  }
+  private async settleOperations(operations: Promise<unknown>[], message: string): Promise<void> {
+    const failures = (await Promise.allSettled(operations)).filter((item): item is PromiseRejectedResult => item.status === 'rejected').map(item => item.reason)
+    if (failures.length === 1) throw failures[0]
+    if (failures.length) throw new AggregateError(failures, message)
   }
   private async serialWork<T>(workId: string, operation: () => Promise<T>): Promise<T> {
     const operations = this.workOperations ??= new Map()
@@ -527,7 +543,10 @@ export class FrameworkRoleRuntime {
       adoptedId = parentId
     }
   }
-  private async runQueue(helperOnly = false, onlyWakeId?: string): Promise<void> {
+  private async runQueue(helperOnly = false, onlyWakeId?: string, waitForAdmissions = true): Promise<void> {
+    const operations: Promise<void>[] = []
+    const admissions = this.admissions ??= new Map<string, Promise<void>>()
+    const startedWork = new Set<string>()
     const queued = await this.records.list<WakeRecord>(this.prefix + 'wakes/')
     const continuationOwners = new Set(queued.filter(row => !row.value.delivered && row.value.recovery)
       .map(row => this.requestKey(row.value.request)))
@@ -544,8 +563,9 @@ export class FrameworkRoleRuntime {
       if (row.value.delivered) continue
       const workId = this.requestKey(row.value.request)
       if (!row.value.recovery && continuationOwners.has(workId)) continue
-      if (this.workOperations?.has(workId)) continue
-      await this.serialWork(workId, async () => {
+      if (this.workOperations?.has(workId) && !startedWork.has(workId)) continue
+      startedWork.add(workId)
+      const operation = this.serialWork(workId, async () => {
       if (this.closed) return
       const currentWake = await this.records.get<WakeRecord>(row.key)
       if (this.closed || !currentWake || currentWake.delivered) return
@@ -635,7 +655,6 @@ export class FrameworkRoleRuntime {
         await this.saveRole({ ...record, stopped: true })
         record = this.roleRecords.get(key)
       }
-      if (request.role === 'Worker' && [...this.roleRecords.values()].filter(item => this.workerSeatOccupied(item)).length >= this.config.workerSeats) return
       // A confirmed native stop is only one part of an admitted observation.
       // Its same-execution marker/continuation must settle before a new input can
       // replace that owner; unrelated work remains independently admissible.
@@ -643,6 +662,13 @@ export class FrameworkRoleRuntime {
         !row.value.complete && row.value.stopStarted
         && row.value.pending.action.identity.workId === key
         && row.value.pending.action.identity.executionId === record!.identity.executionId)) return
+      if (this.closed) return
+      if (request.role === 'Worker') {
+        // Reserve synchronously before any durable write or native factory await.
+        // The same work owns one seat across opening, sending and active execution.
+        if (this.occupiedWorkerSeats(key) >= this.config.workerSeats) return
+        ;(this.workerAdmissions ??= new Set()).add(key)
+      }
       if (!record || record.stopped) {
         record = { identity: { workId: key, executionId: randomUUID(), role: request.role,
           ...(request.taskId && !['Foreground','Organizer','Helper'].includes(request.role) ? { taskId: request.taskId } : {}),
@@ -654,9 +680,12 @@ export class FrameworkRoleRuntime {
       await this.updateWake(row.key, current => current && !current.delivered ? { ...current,
         admission: { ...current.admission, eligibleSince: current.admission?.eligibleSince ?? this.admissionNow(), phase: 'opening', executionId: record!.identity.executionId } } : undefined)
       const binding = this.binding(record, request)
+      const resume = await this.gateway.exists(record.sessionId)
+      const recentExchanges = request.role === 'Foreground'
+        ? (await this.conversation.recentExchanges()).map(exchange => [exchange.human, ...exchange.assistants].map(message => ({ id: message.id, role: message.role, text: message.text, at: message.createdAt, source: message.participantId }))) : undefined
+      if (this.closed) return
       const agent = await this.native.open(record.identity, { sessionId: record.sessionId, cwd: this.config.workspace,
-        presetId: this.config.presetId, model: (request.role === 'Foreground' ? this.config.foreground : this.config.background ?? this.config.foreground) ?? this.config.model, resume: await this.gateway.exists(record.sessionId),
-        ...(request.role === 'Foreground' ? { recentExchanges: (await this.conversation.recentExchanges()).map(exchange => [exchange.human, ...exchange.assistants].map(message => ({ id: message.id, role: message.role, text: message.text, at: message.createdAt, source: message.participantId }))) } : {}),
+        presetId: this.config.presetId, model: (request.role === 'Foreground' ? this.config.foreground : this.config.background ?? this.config.foreground) ?? this.config.model, resume, ...(recentExchanges ? { recentExchanges } : {}),
         setup: (scope, actual) => {
           if (row.value.recovery) scope.systemPrompt.section({ name: 'deepseek-servant:recovery-input', order: 102, interpolate: false,
             text: 'This owned execution is resuming after interruption. Before continuing, inspect the existing native inputs and saved Task material. Preserve original input identities; do not repeat already completed effects. Recovery facts: ' + JSON.stringify(request.context ?? {}) })
@@ -684,6 +713,7 @@ export class FrameworkRoleRuntime {
           return installFrameworkRoleTools(scope, actual, binding, this.services())
         },
       })
+      if (this.closed) return
       let recoveryInput: unknown
       if (request.taskId && request.sources.some(source => source.path.split('/').at(-1)?.endsWith('_Helper'))) {
         const path = this.recoveryInputPath(request.taskId, this.config.member, request.role)
@@ -725,6 +755,7 @@ export class FrameworkRoleRuntime {
       // in the resumed turn; ordinary input retains its original delivery mode.
       await this.updateWake(row.key, current => current && !current.delivered ? { ...current,
         admission: { ...current.admission, eligibleSince: current.admission?.eligibleSince ?? this.admissionNow(), phase: 'sending', executionId: record!.identity.executionId } } : undefined)
+      if (this.closed) return
       await agent.send(text, messageId, recovery ? 'steer' : 'followup', 'deepseek-servant', recovery ? {
         replayInactiveClaim: (recovery.targetExecutionId !== undefined && recovery.confirmedStoppedExecutions?.includes(recovery.targetExecutionId)) === true,
       } : undefined)
@@ -737,9 +768,14 @@ export class FrameworkRoleRuntime {
         if (cancellation === undefined || (error !== cancellation && !(error instanceof Error && error.name === 'AbortError' && error.cause === cancellation)
           && !(error instanceof DshAgentCreationCancelled && error.executionStopped && error.reason === cancellation)))
           this.error(error, { wakeId: row.value.request.id, role: row.value.request.role })
-      }
+      } finally { this.workerAdmissions?.delete(workId) }
       })
+      admissions.set(workId, operation)
+      operations.push(operation)
+      void operation.finally(() => { if (admissions.get(workId) === operation) admissions.delete(workId) }).catch(() => {})
+      if (!waitForAdmissions) void operation.catch(error => this.error(error, { wakeId: row.value.request.id, role: row.value.request.role }))
     }
+    if (waitForAdmissions) await this.settleOperations(operations, 'Native admissions failed')
   }
   /** Persist completed visible originals before retiring their native context.
    * Interrupted turns remain owned by the existing recovery responsibility. */
@@ -1133,7 +1169,7 @@ export class FrameworkRoleRuntime {
       } catch (error) { this.error(error, { identity: record.identity, sessionId: record.sessionId, stage: 'startup-member-input-inspection' }) }
     }
     if (targets.length || continuations.length) await this.wake({ id: 'startup-helper:' + randomUUID(), role: 'Helper', reason: 'startup-recovery', sources: [], context: { targets, continuations } })
-    await this.pump()
+    this.startOwnedPump()
   }
   private async currentTask(record: RoleRecord): Promise<string | undefined> {
     if (record.identity.taskId) return record.identity.taskId
@@ -1230,9 +1266,20 @@ export class FrameworkRoleRuntime {
     })
     await this.pump()
   }
+  private startMaintenance(key: string, action: () => Promise<void>): void {
+    const maintenance = this.maintenance ??= new Map()
+    if (this.closed || maintenance.has(key)) return
+    const operation = Promise.resolve().then(() => { if (!this.closed) return action() })
+    maintenance.set(key, operation)
+    void operation.catch(error => this.error(error)).finally(() => { if (maintenance.get(key) === operation) maintenance.delete(key) })
+  }
   private async observe(): Promise<void> {
     if (this.closed) return
-    try { await this.environment.heartbeat() } catch (error) { this.error(error) }
+    this.startMaintenance('heartbeat', () => this.environment.heartbeat())
+    // Own a separate view: discovery's borrowed snapshot must never outlive its poll.
+    if (this.environment.observeResources) this.startMaintenance('resources', () => withSnapshot(this.files, async snapshot => {
+      if (!this.closed) await this.environment.observeResources!(snapshot)
+    }))
     if (this.closed) return
     try { await this.applyUserControls(false) } catch (error) { this.error(error) }
     if (this.closed) return
@@ -1247,7 +1294,6 @@ export class FrameworkRoleRuntime {
   }
   private async discover(snapshot: FilesSnapshot): Promise<void> {
     if (this.closed) return
-    try { await this.environment.observeResources?.(snapshot) } catch (error) { this.error(error) }
     if (!this.closed) await this.observeRecoveryMarkers(snapshot)
   }
   private async ownerRecoveryChanges(snapshot: FilesSnapshot, taskId: string): Promise<Array<{ path: string; content: string }>> {
@@ -1295,21 +1341,29 @@ export class FrameworkRoleRuntime {
     const key = this.prefix + 'observations/' + hash(pending.id)
     if (!await this.records.get(key)) await this.records.set(key, { pending, complete: false })
   }
-  private async processObservations(startedOnly = false, lane: 'all' | 'native' | 'settle' = 'all'): Promise<void> {
-    // Execution changes may enqueue observation writes; never perform them inside tick's queue.
-    const errors: unknown[] = []
+  private async processObservations(startedOnly = false, lane: 'all' | 'native' | 'settle' = 'all', waitForDelivery = true): Promise<void> {
+    // Each durable action owns its delivery, outside tick's metadata queue. A
+    // pending accept cannot hold another execution or the next local 5/5/30 tick.
+    const owned = this.observationOperations ??= new Map<string, Promise<void>>()
+    const operations: Promise<void>[] = []
     for (const row of await this.records.list<ObservationRecord>(this.prefix + 'observations/')) {
+      if (this.closed) break
       if (row.value.complete || (startedOnly && !row.value.stopStarted)) continue
       if (lane === 'settle' && (row.value.pending.action.stage !== 3 || !row.value.stopStarted)) continue
-      try {
-        if (this.closed) return
-        if (await this.arrangeObservation(row.value.pending, lane) === false) continue
-        if (this.closed) return
-        await this.records.set(row.key, { ...(await this.records.get<ObservationRecord>(row.key) ?? row.value), complete: true })
-      } catch (error) { errors.push(error) }
+      let operation = owned.get(row.key)
+      if (!operation) {
+        operation = Promise.resolve().then(async () => {
+          if (this.closed || await this.arrangeObservation(row.value.pending, lane) === false || this.closed) return
+          await this.records.set(row.key, { ...(await this.records.get<ObservationRecord>(row.key) ?? row.value), complete: true })
+        })
+        owned.set(row.key, operation)
+        const tracked = operation
+        void operation.finally(() => { if (owned.get(row.key) === tracked) owned.delete(row.key) }).catch(() => {})
+        if (!waitForDelivery) void operation.catch(error => this.error(error, { identity: row.value.pending.action.identity, probeId: row.value.pending.id }))
+      }
+      operations.push(operation)
     }
-    if (errors.length === 1) throw errors[0]
-    if (errors.length) throw new AggregateError(errors, 'Native observation arrangements failed')
+    if (waitForDelivery) await this.settleOperations(operations, 'Native observation arrangements failed')
   }
   private async arrangeObservation(pending: ScheduledObservation, lane: 'all' | 'native' | 'settle' = 'all'): Promise<boolean | void> {
     const action = pending.action
@@ -1980,6 +2034,8 @@ export class FrameworkRoleRuntime {
         // Unknown commit wrappers and independent errors remain failures.
         if (!this.cancelledByShutdown(error)) failures.push(error)
       }
+      for (const settled of await Promise.allSettled([...(this.maintenance?.values() ?? [])]))
+        if (settled.status === 'rejected' && !this.cancelledByShutdown(settled.reason)) failures.push(settled.reason)
       for (const settled of await Promise.allSettled(openingStops)) {
         if (settled.status === 'rejected') failures.push(settled.reason)
         else if (settled.value.status === 'unconfirmed') failures.push(new Error(settled.value.reason))
@@ -2004,6 +2060,8 @@ export class FrameworkRoleRuntime {
           }
         } catch (error) { failures.push(error) }
       }
+      for (const settled of await Promise.allSettled([...(this.observationOperations?.values() ?? [])]))
+        if (settled.status === 'rejected' && !this.cancelledByShutdown(settled.reason)) failures.push(settled.reason)
       try { await this.observations.dispose() } catch (error) { failures.push(error) }
     } catch (error) { failures.push(error) } finally {
       // Native idle notifications can already own capture/retirement work even

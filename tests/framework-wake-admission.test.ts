@@ -312,7 +312,7 @@ test('actual Helper restores a timed-out Recorder wake without fabricating an ex
   }))))
   await runtime.wake({ id: 'other-held', role: 'Foreground', reason: 'notification', sources: [] })
   await runtime.wake({ id: 'never-admitted-recorder', role: 'Recorder', taskId: task.taskId, reason: 'business-complete', sources: [] })
-  await (runtime.loop as any).actions.observeLocal(); const pumping = internal.pump(); await entered.promise
+  await (runtime.loop as any).actions.observeLocal(); const pumping = internal.runQueue(false, 'other-held'); await entered.promise
   f.cleanups.push(async () => { released = true; gate.resolve(); await pumping })
   f.advance(46_000)
   for (let turn = 0; turn < 2; turn++) {

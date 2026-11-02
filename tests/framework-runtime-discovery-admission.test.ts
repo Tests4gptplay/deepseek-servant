@@ -137,7 +137,8 @@ test('actual constructor discovery callback opens and sends newly persisted Plan
   await runtime.loop.poll()
   const admission = runtime.pumping
   assert.ok(admission || (await storage.list<any>(runtime.prefix + 'wakes/')).some(row => row.value.delivered), 'this poll registered admission or already confirmed it')
-  await admission // Owned native admission, not a second discovery tick or a model-turn wait.
+  await admission
+  await Promise.all([...runtime.admissions.values()]) // Owned native accepts, without a second discovery tick or model-turn wait.
   assert.equal(opens.length, 1)
   assert.equal(sent.length, 1)
   assert.equal(sent[0].text.taskId, taskId)
