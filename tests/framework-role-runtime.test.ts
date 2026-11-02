@@ -1990,7 +1990,7 @@ test('marker discovery uses the supplied view and does not acquire per-Task snap
   assert.equal(reads, 1)
 })
 
-test('runtime resource maintenance owns a separate view while task and marker discovery share their view', async t => {
+test('runtime tasks share only their own recovery view while resource maintenance owns a separate view', async t => {
   const { runtime, files, storage, errors } = await runtimeFixture(t)
   const { InstanceRegistration } = await import('../src/framework/instances.js')
   const registration = new InstanceRegistration(files, runtime.transactions, storage, {repositoryId:'local',repositoryOwner:'A',login:'A',instanceUUID:'00000000-0000-4000-8000-000000000001',workerSeats:2})
@@ -2002,7 +2002,7 @@ test('runtime resource maintenance owns a separate view while task and marker di
   runtime.environment.observeResources = async (current: any) => { resources++; assert.equal((await registration.observe(current)).length,1) }
   await runtime.loop.poll()
   await Promise.all([...runtime.maintenance.values()])
-  assert.equal(acquisitions, 2)
+  assert.equal(acquisitions, 5, 'three task views, one discovery view and one independent resource view')
   assert.equal(resources,1)
   assert.deepEqual(errors,[])
 })
@@ -2644,4 +2644,94 @@ test('startup recovery scan settles before native admission so the Host driver c
   await entered.promise
   try { await admissionCheckpoint(); assert.equal(ready, true) }
   finally { gate.resolve(); await starting; await runtime.pumping; await Promise.all([...runtime.workOperations?.values() ?? []]) }
+})
+
+test('pending native openings reserve Worker seats before persistence and hot reduction cannot over-admit', async t => {
+  const { runtime, rows } = await runtimeFixture(t), gates = new Map(['A', 'B'].map(id => [id, Promise.withResolvers<void>()]))
+  const entered = Promise.withResolvers<void>(), active = new Set<string>(), opened: string[] = []
+  runtime.gateway.exists = async () => false
+  runtime.native.get = (workId: string) => active.has(workId) ? { observe: () => ({ state: 'running' }) } : undefined
+  runtime.native.open = async (identity: any) => {
+    opened.push(identity.workerId)
+    if (opened.length === 2) entered.resolve()
+    await gates.get(identity.workerId)?.promise
+    return { send: async () => { active.add(identity.workId) } }
+  }
+  for (const workerId of ['A', 'B', 'C']) await runtime.wake({ id: 'seat-' + workerId, role: 'Worker', workerId, reason: 'user-resume', sources: [] })
+  const admitting = runtime.runQueue(); await entered.promise
+  try {
+    await admissionCheckpoint(); assert.deepEqual(opened, ['A', 'B']); assert.equal(runtime.occupiedWorkerSeats(), 2)
+    runtime.updateWorkerSeats(1)
+    await runtime.runQueue(); assert.deepEqual(opened, ['A', 'B'])
+    gates.get('B')!.resolve(); await admissionCheckpoint()
+    active.delete(runtime.roleKey('Worker', undefined, 'B'))
+    await runtime.runQueue(); assert.deepEqual(opened, ['A', 'B'])
+    assert.equal([...rows.values()].find(row => row.request?.id === 'seat-C').admission, undefined)
+  } finally { gates.get('A')!.resolve(); gates.get('B')!.resolve(); await admitting }
+  active.clear(); await runtime.runQueue()
+  assert.deepEqual(opened, ['A', 'B', 'C']); assert.equal(runtime.workerAdmissions.size, 0)
+})
+
+test('a held exact admission restoration does not block another restore or new signal discovery', async t => {
+  const { runtime, storage, files, rows } = await runtimeFixture(t), gate = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>()
+  const busyA = Promise.withResolvers<void>(), busyB = Promise.withResolvers<void>(), stops: string[] = []
+  runtime.startOwnedPump = () => {} // Durable discovery is asserted independently of model execution.
+  for (const workId of ['A', 'B']) {
+    const identity = { workId, executionId: 'e-' + workId, role: 'Recorder', taskId: 'T-' + workId }
+    runtime.roleRecords.set(workId, { identity, sessionId: 's-' + workId, generation: 1 })
+    await storage.set(runtime.prefix + 'restores/' + workId, { commandId: workId, createdAt: '2026-11-02T00:00:00Z', input: { target: identity }, complete: false })
+  }
+  runtime.workOperations = new Map([['A', busyA.promise], ['B', busyB.promise]])
+  runtime.native.get = () => ({ observe: () => ({ state: 'idle' }) })
+  runtime.native.stop = async (workId: string) => {
+    stops.push(workId)
+    if (workId === 'A') { entered.resolve(); await gate.promise; runtime.workOperations.delete('A'); busyA.resolve() }
+    else { runtime.workOperations.delete('B'); busyB.resolve() }
+    return { status: 'stopped' }
+  }
+  runtime.arrangeNativeContinuation = async (record: any) => ({ id: 'restore-' + record.identity.workId })
+  await withSnapshot(files, view => files.commit(view, [{ path: 'state/Foreground_independent', content: '' }], 'actual unrelated notification'))
+  let returned = false
+  const poll = runtime.loop.poll().then(() => { returned = true }); await entered.promise
+  try {
+    await admissionCheckpoint()
+    assert.equal(returned, true); assert.equal((await storage.get<any>(runtime.prefix + 'restores/B')).complete, true)
+    assert.equal((await storage.get<any>(runtime.prefix + 'restores/A')).complete, false)
+    assert.ok([...rows.values()].some(row => row.request?.role === 'Foreground'))
+    await runtime.loop.poll(); assert.equal(stops.filter(id => id === 'A').length, 1)
+  } finally { gate.resolve(); await poll; await runtime.restoring }
+  assert.equal((await storage.get<any>(runtime.prefix + 'restores/A')).complete, true)
+})
+
+test('background Helper probe failure preserves its original action and does not recursively wake Helper', async t => {
+  const { runtime, rows, errors } = await runtimeFixture(t), failure = new Error('exact probe accept failure')
+  const identity = { workId: 'helper', executionId: 'helper-e', role: 'Helper' }, sent: string[] = []
+  runtime.roleRecords.set('helper', { identity, sessionId: 'helper-s', generation: 1 })
+  runtime.observations = { mayApply: async () => true }
+  let fails = true
+  runtime.native.get = () => ({ sessionId: 'helper-s', send: async (_text: string, id: string) => { sent.push(id); if (fails) throw failure } })
+  await runtime.enqueueObservation({ ...pending, id: 'same-probe', action: { ...pending.action, identity } })
+  await runtime.processObservations(false, 'native', false); await admissionCheckpoint(); await runtime.errorTail
+  assert.deepEqual(errors, [failure]); assert.equal([...rows.values()].find(row => row.pending?.id === 'same-probe').complete, false)
+  assert.equal([...rows.values()].filter(row => row.request?.role === 'Helper').length, 0)
+  fails = false; await runtime.processObservations()
+  assert.deepEqual(sent, ['same-probe', 'same-probe']); assert.equal([...rows.values()].find(row => row.pending?.id === 'same-probe').complete, true)
+})
+
+for (const outcome of ['confirmed', 'unknown', 'unrelated-error'] as const) test(`late probe handle closure requires its exact stop receipt: ${outcome}`, async t => {
+  const { DshAgentAdmissionClosed } = await import('../src/adapters/dsh/host-types.js')
+  const { runtime, rows } = await runtimeFixture(t)
+  const identity = { role: 'Planner', workId: 'late', executionId: 'late-e' }
+  const record = { identity, sessionId: 'late-s', generation: 1 }
+  runtime.roleRecords.set('late', record)
+  runtime.observations = { mayApply: async () => true }
+  const failure = outcome === 'unrelated-error' ? new Error('real persistence failure') : new DshAgentAdmissionClosed('late-s')
+  runtime.native.get = () => ({ sessionId: 'late-s', send: async () => {
+    runtime.roleRecords.set('late', { ...record, stopped: outcome !== 'unknown' })
+    throw failure
+  } })
+  await runtime.enqueueObservation({ ...pending, id: 'late-probe', action: { ...pending.action, identity } })
+  if (outcome === 'confirmed') await runtime.processObservations()
+  else await assert.rejects(runtime.processObservations(), error => error === failure)
+  assert.equal([...rows.values()].find(row => row.pending?.id === 'late-probe').complete, outcome === 'confirmed')
 })

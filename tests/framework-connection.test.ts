@@ -676,7 +676,8 @@ for (const phase of ['head', 'peer-heartbeat'] as const) test(`actual runtime sh
   const remote = new Remote(), storage = memory(), started = Promise.withResolvers<void>()
   let hold = false, aborted: unknown, reason: unknown
   const connection = await openFrameworkConnection(gitSettings, { ...dependencies(remote, storage), fetch: async (url, init) => {
-    const matches = phase === 'head' ? url.includes('/commits/heads/') : url.includes('/git/blobs/') || url.endsWith('/graphql') && String(init?.body).includes('query DSSReadPlan')
+    const matches = phase === 'head' ? url.includes('/commits/heads/')
+      : url.includes('/git/blobs/') || url.endsWith('/graphql') && String(init?.body).includes('query DSSReadPlan') && String(init?.body).includes('instances')
     if (hold && matches) {
       started.resolve()
       return new Promise<Response>((_resolve, reject) => init!.signal!.addEventListener('abort', () => { aborted = init!.signal!.reason; reject(aborted) }, { once: true }))
@@ -688,20 +689,22 @@ for (const phase of ['head', 'peer-heartbeat'] as const) test(`actual runtime sh
   const runtime = new FrameworkRoleRuntime({} as any, connection.files, storage,
     { scope: connection.scope, member: connection.registration.member, primary: false, workspace: '/synthetic', workerSeats: 2, mode: 'git', collaborationId: 'test' },
     { members: () => [connection.registration.member], resources: () => [], heartbeat: async () => {},
-      observeResources: async snapshot => { await connection.members(snapshot) }, error: error => { errors.push(error) },
+      observeResources: phase === 'peer-heartbeat' ? async snapshot => { await connection.members(snapshot) } : undefined,
+      error: error => { errors.push(error) },
       cancelPending: value => { reason = value; hold = false; connection.cancelPending(value) } })
-  // The real loop/discovery/read/disposal chain runs. This case has no native
-  // role execution and skips unrelated maintenance actions, not transport or storage.
-  ;(runtime as any).observe = async () => {}
+  // The real loop, independently owned resource read and disposal chain run.
+  // This case has no native role execution or synthetic transport cancellation.
   try {
     hold = true
     const polling = (runtime as any).loop.poll().then(() => undefined, (error: unknown) => error)
     await started.promise
+    // Resource publication/read ownership is independent of discovery now.
+    if (phase === 'peer-heartbeat') assert.equal(await polling, undefined)
     await runtime.dispose()
     const pollError = await polling
     assert.equal(aborted, reason)
     if (phase === 'head') assert.equal(pollError, reason)
-    else assert.equal(pollError, undefined, 'discovery boundary already handled its cancelled peer read')
+    else assert.equal(pollError, undefined, 'independently owned peer read does not reject discovery')
     assert.deepEqual(errors, [])
     await connection.close()
     const roster = await peer.members()

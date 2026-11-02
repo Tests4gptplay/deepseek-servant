@@ -57,3 +57,11 @@ export class DshAgentCreationCancelled extends Error {
     this.name = 'DshAgentCreationCancelled'
   }
 }
+
+/** This exact owned handle has closed admission; no native input was accepted. */
+export class DshAgentAdmissionClosed extends Error {
+  constructor(readonly sessionId: string) {
+    super('Servant Agent is closing or disposed: ' + sessionId)
+    this.name = 'DshAgentAdmissionClosed'
+  }
+}

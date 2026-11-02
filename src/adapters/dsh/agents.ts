@@ -1,4 +1,4 @@
-import { DshAgentCreationCancelled } from './host-types.js'
+import { DshAgentAdmissionClosed, DshAgentCreationCancelled } from './host-types.js'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentOptions } from '@deepseek-ai/dsh-agent'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
@@ -81,6 +81,12 @@ export class DshAgentGateway {
     }
     let lastError: { message: string; turn: number; step: number } | undefined
     let setupEntered = false, setupReturned = false
+    // The factory can detach pre-setup persistence on abort and return before its
+    // handle cleanup settles. Keep that acquisition owned. Setup is the phase
+    // we can fence ourselves; after setup, await the actual handle and dispose it.
+    const creation = new AbortController()
+    const cancelSetup = () => { if (setupEntered && !setupReturned) creation.abort(request.signal?.reason) }
+    request.signal?.addEventListener('abort', cancelSetup, { once: true })
     const setup = async (agentCtx: Context, agent: Agent) => {
       setupEntered = true
       request.signal?.throwIfAborted()
@@ -110,10 +116,10 @@ export class DshAgentGateway {
     }
     let native: AgentHandle
     try { native = request.resume
-      ? await this.ctx.agents.resume({ resumeSessionId: sessionId, agentOptions, setup, signal: request.signal })
+      ? await this.ctx.agents.resume({ resumeSessionId: sessionId, agentOptions, setup, signal: creation.signal })
       : await this.ctx.agents.create({
           sessionId,
-          signal: request.signal,
+          signal: creation.signal,
           agentOptions,
           meta: { cwd: request.cwd, ...(presetId === undefined ? {} : { agentPreset: presetId }) },
           setup,
@@ -123,9 +129,9 @@ export class DshAgentGateway {
         setupEntered && !setupReturned && !this.hasLiveOwner(request.sessionId), request.signal.reason,
         setupEntered && !setupReturned
           ? 'Creation was cancelled before setup returned: publication is fenced. Native rollback resource cleanup is not independently acknowledged.'
-          : 'Native creation was cancelled before a handle was returned; native execution cleanup has not been confirmed.')
+          : 'Native creation failed before its owned handle returned: ' + errorChain(error) + '. Native execution cleanup has not been confirmed.')
       throw error
-    }
+    } finally { request.signal?.removeEventListener('abort', cancelSetup) }
     const agent = native.agent
     const cancelAfterNative = async () => {
       if (!request.signal?.aborted) return
@@ -170,11 +176,11 @@ export class DshAgentGateway {
       sessionId: request.sessionId,
       actualAgent: agent,
       send: async (text, messageId, mode = 'followup', source = request.role === 'foreground' ? 'user' : 'deepseek-servant', recovery) => {
-        if (closing || disposed) throw new Error(`Servant Agent is closing or disposed: ${request.sessionId}`)
+        if (closing || disposed) throw new DshAgentAdmissionClosed(request.sessionId)
         const predecessor = messageAdmissions.get(messageId)
         const operation = admit(async () => {
           await predecessor?.catch(() => undefined)
-          if (closing || disposed) throw new Error(`Servant Agent is closing or disposed: ${request.sessionId}`)
+          if (closing || disposed) throw new DshAgentAdmissionClosed(request.sessionId)
           if (recovery) {
             if (source !== 'deepseek-servant' || (mode !== 'followup' && mode !== 'steer')) throw new Error('Recovery delivery must be a waking plugin followup or steer input.')
             const input = deriveNativeInputs(agent.session.snapshotEvents(), {

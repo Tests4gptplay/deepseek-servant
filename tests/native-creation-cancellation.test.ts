@@ -46,3 +46,34 @@ test('gateway cancellation during history flush joins flush and real disposal, p
  const error=await opening;assert.ok(error instanceof DshAgentCreationCancelled);assert.equal(error.cause,reason);assert.equal(error.executionStopped,!fails);assert.equal(disposals,1);assert.equal(gateway.get('flush-'+fails),undefined)
  }
 })
+
+for (const phase of ['persistence', 'publication'] as const) test(`gateway cancellation during ${phase} keeps real acquisition owned until its stop can be confirmed`, { timeout: 5000 }, async t => {
+ const ctx = await fixture(t), gateway = new DshAgentGateway(ctx), gate = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>()
+ const controller = new AbortController(), reason = new Error('close exact creation'), sessionId = 'owned-' + phase
+ if (phase === 'persistence') {
+  const persistence = ctx.sessionPersistence, create = persistence.create.bind(persistence)
+  t.mock.method(persistence, 'create', async (...args: Parameters<typeof create>) => { entered.resolve(); await gate.promise; return create(...args) })
+ } else ctx.on('agent/created', async ({ agent }) => { if (String(agent.id) === sessionId) { entered.resolve(); await gate.promise } })
+ let settled = false
+ const opening = gateway.create({ sessionId, cwd: process.cwd(), role: 'worker', signal: controller.signal }).catch(error => error).finally(() => { settled = true })
+ await entered.promise; controller.abort(reason)
+ await new Promise<void>(resolve => setImmediate(resolve)); assert.equal(settled, false, 'no detached acquisition or assumed rollback')
+ gate.resolve()
+ const failure = await opening
+ assert.ok(failure instanceof DshAgentCreationCancelled); assert.equal(failure.cause, reason); assert.equal(failure.executionStopped, true)
+ assert.equal(gateway.hasLiveOwner(sessionId), false); assert.equal(gateway.get(sessionId), undefined)
+ const next = await gateway.create({ sessionId, cwd: process.cwd(), role: 'worker', resume: await gateway.exists(sessionId) }); await next.dispose()
+})
+
+test('post-setup cancellation preserves failure from the actual returned handle disposal', async () => {
+ const gate = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>(), c = new AbortController()
+ const closeFailure = new Error('actual owned handle close failed')
+ const ctx = { get: () => undefined, agents: { get: () => undefined, create: async (options: any) => {
+  await options.setup({ on: () => {} }, { session: {} }); entered.resolve(); await gate.promise
+  return { agent: {}, dispose: async () => { throw closeFailure } }
+ } } } as unknown as Context
+ const opening = new DshAgentGateway(ctx).create({ sessionId: 'post-setup-failure', cwd: '/synthetic', role: 'worker', signal: c.signal }).catch(error => error)
+ await entered.promise; c.abort(new Error('close')); gate.resolve()
+ const error = await opening
+ assert.ok(error instanceof DshAgentCreationCancelled); assert.equal(error.executionStopped, false); assert.match(error.message, /actual owned handle close failed/)
+})

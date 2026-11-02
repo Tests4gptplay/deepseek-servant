@@ -699,3 +699,24 @@ test('accepted post-discovery admission failure remains the original owned poll 
   await assert.rejects(f.loop.poll(), error => error === failure)
   assert.equal(f.wakes.length, 1, 'durable responsibility is preserved for ordinary recovery')
 }))
+
+test('a held Task read cannot block another Task signal or its later poll; close drains that exact lane', () => fixture(async f => {
+  for (const taskId of ['held-A', 'ready-B']) await put(f.files, paths.task(taskId), encodeJson({ version: 1, taskId, route: 'P', owner: 'A', status: 'running', sourcePath: 'inputs/' + taskId }))
+  const firstSignal = paths.state('A', 'ready-B') + '/Worker_child_Planner'
+  await put(f.files, firstSignal, '')
+  const gate = phaseBarrier(), read = f.files.readBytes.bind(f.files); let heldReads = 0
+  f.files.readBytes = async (snapshot, path) => { if (path === paths.task('held-A')) { heldReads++; gate.enter(); await gate.waiting }; return read(snapshot, path) }
+  const polling = f.loop.poll(); await gate.entered
+  try {
+    await driverSettled()
+    assert.ok(f.wakes.some(wake => wake.taskId === 'ready-B' && wake.workerId === 'child'))
+    await withSnapshot(f.files, snapshot => f.files.commit(snapshot, [{ path: firstSignal, content: null }, { path: paths.state('A', 'ready-B') + '/Worker_next_Planner', content: '' }], 'next actual notification'))
+    await (f.loop as any).drive(); await driverSettled()
+    assert.ok(f.wakes.some(wake => wake.taskId === 'ready-B' && wake.workerId === 'next'))
+    assert.equal(heldReads, 1, 'one admitted read per Task; ticks never stack duplicate reads')
+    let stopped = false
+    const stopping = f.loop.stop().then(() => { stopped = true })
+    await driverSettled(); assert.equal(stopped, false)
+    gate.release(); await Promise.all([polling, stopping]); assert.equal(stopped, true)
+  } finally { gate.release(); await polling }
+}))

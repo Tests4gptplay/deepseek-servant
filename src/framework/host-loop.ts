@@ -7,7 +7,7 @@ import { cleanupRecordPath, type CleanupRecord } from './cleaner.js'
 import type { RecoveryRole } from './recovery.js'
 import type { FrameworkTransactions } from './command-transactions.js'
 import { discoverInbox, initializeTask, taskIdentity, paths, readJson, type TaskMetadata } from './task-files.js'
-import { FilesConflictError, type FileEntry, type FilesSnapshot, type FilesStore } from './transactions.js'
+import { FilesConflictError, GitFiles, type FileEntry, type FilesSnapshot, type FilesStore } from './transactions.js'
 
 export interface RoleWake {
   id: string
@@ -33,10 +33,12 @@ export interface HostLoopActions {
   startup(): Promise<void>
   /** Local execution metadata only; must not wait for remote Files operations. */
   observeLocal?(): Promise<void>
-  /** Owned remote maintenance remains ordered before discovery. */
+  /** Schedule owned maintenance without joining unrelated remote work. */
   observe(): Promise<void>
-  /** Borrow this poll's post-maintenance view; do not release it or reuse it after writes. */
+  /** Borrow this poll's view; do not release it or reuse it after writes. */
   discover?(snapshot: FilesSnapshot): Promise<void>
+  /** This Task owns its fixed state checks; another Task cannot hold this view. */
+  discoverTask?(task: TaskMetadata, snapshot: FilesSnapshot): Promise<void>
   discoveryInterrupted?(): void
   error(error: unknown): void
   changed?(): void
@@ -51,7 +53,8 @@ const singleton = (role: RecoveryRole) => role === 'Foreground' || role === 'Org
 
 /** One-second discovery targets entry files, this member's Inbox/state and global short signals. */
 export class FrameworkHostLoop {
-  private readonly metadata: FrameworkTaskIndex
+  private readonly taskLanes = new Map<string, { metadata: FrameworkTaskIndex; running?: Promise<void> }>()
+  private saving: Promise<void> = Promise.resolve()
   private readonly seenSources = new Map<string, string>()
   private record: LoopRecord = { initial: {}, completed: {} }
   private timer?: ReturnType<typeof setTimeout>
@@ -64,7 +67,6 @@ export class FrameworkHostLoop {
     private readonly storage: StoragePort, private readonly identity: { member: string; primary: boolean; scope: string },
     private readonly members: () => readonly string[], private readonly actions: HostLoopActions) {
     this.key = 'framework-host/' + digest(identity.scope)
-    this.metadata = new FrameworkTaskIndex(files, error => actions.error(error), () => actions.changed?.())
   }
   async start(): Promise<void> {
     if (this.connected) return
@@ -92,7 +94,7 @@ export class FrameworkHostLoop {
     this.connected = false
     if (this.timer) clearTimeout(this.timer)
     this.timer = undefined
-    const settled = await Promise.allSettled([this.observing, this.running])
+    const settled = await Promise.allSettled([this.observing, this.running, ...[...this.taskLanes.values()].map(lane => lane.running)])
     const failures = settled.filter((item): item is PromiseRejectedResult => item.status === 'rejected').map(item => item.reason)
     if (failures.length === 1) throw failures[0]
     if (failures.length) throw new AggregateError(failures, 'Host loop operations did not settle successfully')
@@ -116,6 +118,10 @@ export class FrameworkHostLoop {
   async poll(): Promise<void> {
     await this.observeLocal()
     await this.remotePoll()
+    const settled = await Promise.allSettled([...this.taskLanes.values()].map(lane => lane.running))
+    const failures = settled.filter((item): item is PromiseRejectedResult => item.status === 'rejected').map(item => item.reason)
+    if (failures.length === 1) throw failures[0]
+    if (failures.length) throw new AggregateError(failures, 'Task discovery failed')
   }
   private remotePoll(): Promise<void> {
     if (this.stopping) return Promise.resolve()
@@ -125,7 +131,12 @@ export class FrameworkHostLoop {
     void operation.finally(() => { if (this.running === operation) this.running = undefined }).catch(() => {})
     return operation
   }
-  private async save(): Promise<void> { await this.storage.set(this.key, this.record) }
+  private save(): Promise<void> {
+    // Task lanes share this durable Host record; snapshot it at the ordered write.
+    const write = this.saving.catch(() => {}).then(() => this.storage.set(this.key, structuredClone(this.record)))
+    this.saving = write
+    return write
+  }
   private async wake(role: RecoveryRole, snapshot: FilesSnapshot, sources: FileEntry[], taskId?: string, workerId?: string): Promise<boolean> {
     if (this.stopping || !sources.length || this.actions.executing(role, singleton(role) ? undefined : taskId, workerId)) return false
     return (await this.actions.wake({ id: digest(JSON.stringify([role, taskId, workerId, snapshot.revision, sources.map(source => source.path)])),
@@ -137,26 +148,23 @@ export class FrameworkHostLoop {
     const snapshot = await this.files.snapshot().catch(error => { this.actions.discoveryInterrupted?.(); throw error })
     let scheduled = false
     try {
+      if (this.stopping) return
       try { await this.actions.discover?.(snapshot) } catch (error) { this.actions.error(error) }
       if (this.stopping) return
       const entries = await this.files.listDirectory(snapshot, 'tasks/')
-      const tasks = await this.metadata.list(snapshot, entries)
+      const taskEntries = entries.filter(entry => /^tasks\/[^/]+\.json$/.test(entry.path))
+      const present = new Set(taskEntries.map(entry => entry.path))
+      for (const [path, lane] of this.taskLanes) if (!present.has(path) && !lane.running) this.taskLanes.delete(path)
+      for (const entry of taskEntries) this.startTask(entry, snapshot.revision)
       if (this.stopping) return
-      const locallyReleased = new Set(Object.entries(this.record.completed).filter(([, value]) => value.released).map(([id]) => id))
-      const manuallyCleared = new Set<string>(), unreadableCleanup = new Set<string>()
-      if (this.files instanceof LocalFiles) for (const task of tasks) {
-        if (this.record.completed[task.taskId]?.released) continue
-        try {
-          const cleanup = await readJson<CleanupRecord & { historyCleared?: boolean }>(this.files, snapshot, cleanupRecordPath(task.taskId))
-          if (cleanup?.version === 1 && cleanup.taskId === task.taskId && cleanup.phase === 'released' && cleanup.historyCleared === true) manuallyCleared.add(task.taskId)
-        } catch (error) { this.actions.error(error); unreadableCleanup.add(task.taskId) }
-      }
       if (this.identity.primary) {
         for (const entry of entries.filter(entry => /_(P|O)\.md$/.test(entry.path))) {
           if (this.seenSources.get(entry.path) === entry.version) continue
-          if (manuallyCleared.size || unreadableCleanup.size || locallyReleased.size) {
-            const sourceTask = taskIdentity(await this.files.read(snapshot, entry.path) ?? '')
-            if (sourceTask && (manuallyCleared.has(sourceTask) || unreadableCleanup.has(sourceTask) || locallyReleased.has(sourceTask))) {
+          const sourceTask = taskIdentity(await this.files.read(snapshot, entry.path) ?? '')
+          if (sourceTask) {
+            const cleanup = this.files instanceof LocalFiles
+              ? await readJson<CleanupRecord & { historyCleared?: boolean }>(this.files, snapshot, cleanupRecordPath(sourceTask)) : undefined
+            if (this.record.completed[sourceTask]?.released || cleanup?.phase === 'released' && cleanup.historyCleared === true) {
               this.seenSources.set(entry.path, entry.version)
               continue
             }
@@ -191,35 +199,82 @@ export class FrameworkHostLoop {
         if (!direct || direct.member !== this.identity.member) continue
         scheduled = await this.wake(direct.role, snapshot, [source], undefined, direct.role === 'Worker' ? direct.id : undefined) || scheduled
       }
-      for (const task of tasks) {
+    } finally {
+      await snapshot.release()
+      // The poll owns this admission through its existing running promise. Close
+      // can drain accepted work, but cannot admit new work after view release.
+      if (scheduled && !this.stopping) await this.actions.admitDiscovered?.()
+    }
+  }
+  private startTask(entry: FileEntry, revision: string): void {
+    if (this.stopping) return
+    let lane = this.taskLanes.get(entry.path)
+    if (!lane) {
+      lane = { metadata: new FrameworkTaskIndex(this.files, error => this.actions.error(error), () => this.actions.changed?.()) }
+      this.taskLanes.set(entry.path, lane)
+    }
+    if (lane.running) return
+    const owned = lane
+    const operation = Promise.resolve().then(async () => {
+      if (this.stopping) return
+      const snapshot = this.files instanceof GitFiles ? await this.files.at(revision) : await this.files.snapshot()
+      let scheduled = false
+      try {
         if (this.stopping) return
-        try {
-        if (this.record.completed[task.taskId]?.released || unreadableCleanup.has(task.taskId)) continue
-        if (manuallyCleared.has(task.taskId)) {
+        // A task lane never borrows a poll view that another Task can hold open.
+        // Git reopens the listed commit without another HEAD read. Refresh the
+        // entry only when an independent Local view advanced before acquisition.
+        const current = snapshot.revision === revision ? entry
+          : (await this.files.listDirectory(snapshot, 'tasks/')).find(item => item.path === entry.path)
+        if (!current) return
+        const [task] = await owned.metadata.list(snapshot, [current])
+        if (!task || this.stopping) return
+        await this.actions.discoverTask?.(task, snapshot)
+        if (!this.stopping) scheduled = await this.scanTask(task, current, snapshot)
+      } finally {
+        await snapshot.release()
+        if (scheduled && !this.stopping) await this.actions.admitDiscovered?.()
+      }
+    })
+    owned.running = operation
+    void operation.catch(error => this.actions.error(error)).finally(() => { if (owned.running === operation) owned.running = undefined })
+  }
+  private async scanTask(task: TaskMetadata, entry: FileEntry, snapshot: FilesSnapshot): Promise<boolean> {
+    let scheduled = false, manuallyCleared = false
+    try {
+      if (this.files instanceof LocalFiles && !this.record.completed[task.taskId]?.released) {
+        const cleanup = await readJson<CleanupRecord & { historyCleared?: boolean }>(this.files, snapshot, cleanupRecordPath(task.taskId))
+        manuallyCleared = cleanup?.version === 1 && cleanup.taskId === task.taskId && cleanup.phase === 'released' && cleanup.historyCleared === true
+      }
+      await (async () => {
+        if (this.stopping) return
+        if (this.record.completed[task.taskId]?.released) return
+        if (manuallyCleared) {
           await this.actions.releaseTask(task.taskId)
           const completion = this.record.completed[task.taskId] ??= {}
           completion.released = true
           await this.save()
-          continue
+          return
         }
         if (task.status === 'complete') {
           const completion = this.record.completed[task.taskId] ??= {}
-          if (completion.released) continue
+          if (completion.released) return
           if (!completion.sealed) {
             try { await this.actions.sealBusiness(task); completion.sealed = true; await this.save() }
             catch (error) { this.actions.error(error) }
           }
           if (this.identity.primary && task.owner === this.identity.member) {
             for (const role of ['Foreground', 'Recorder'] as const) if (!completion[role]) {
+              if (this.stopping) return
               try {
               const created = await this.actions.wake({ id: 'complete:' + task.taskId + ':' + role, role, taskId: task.taskId,
-                sources: [{ path: paths.task(task.taskId), version: entries.find(entry => entry.path === paths.task(task.taskId))!.version }], reason: 'business-complete' })
+                sources: [{ path: paths.task(task.taskId), version: entry.version }], reason: 'business-complete' })
               scheduled = created !== false || scheduled
               completion[role] = true; await this.save()
               } catch (error) { this.actions.error(error) }
             }
             // The cleaner also resumes a committed deletion whose local release was interrupted.
-            if (await this.actions.clean(task, snapshot)) { completion.released = true; await this.save() }
+            if (!this.stopping && await this.actions.clean(task, snapshot)) { completion.released = true; await this.save() }
           } else {
             try {
               const cleanup = await readJson<CleanupRecord>(this.files, snapshot, cleanupRecordPath(task.taskId))
@@ -231,11 +286,12 @@ export class FrameworkHostLoop {
               }
             } catch (error) { this.actions.error(error) }
           }
-          continue
+          return
         }
-        if (task.status !== 'running') continue
+        if (task.status !== 'running') return
         const changes = await discoverInbox(this.files, snapshot, task.taskId, this.identity.member)
         if (changes.length) {
+          if (this.stopping) return
           try {
             await this.transactions.run('inbox:' + task.taskId + ':' + digest(JSON.stringify(changes)), changes.map(({ path, content }) => ({ path, hash: digest(content ?? '') })),
               { snapshot, expectedRevision: snapshot.revision, reevaluate: true }, async () => changes)
@@ -259,13 +315,8 @@ export class FrameworkHostLoop {
           }
           scheduled = await this.wake('Organizer', snapshot, organizer, task.taskId) || scheduled
         }
-        } catch (error) { this.actions.error(error) }
-      }
-    } finally {
-      await snapshot.release()
-      // The poll owns this admission through its existing running promise. Close
-      // can drain accepted work, but cannot admit new work after view release.
-      if (scheduled && !this.stopping) await this.actions.admitDiscovered?.()
-    }
+      })()
+    } catch (error) { this.actions.error(error) }
+    return scheduled
   }
 }
