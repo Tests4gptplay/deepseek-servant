@@ -14,7 +14,7 @@
 github:Tests4gptplay/deepseek-servant#v0.5.0-rc.2
 ```
 
-如同版 [Release](https://github.com/Tests4gptplay/deepseek-servant/releases) 列有 `.tgz` 资产，也可将该资产的下载地址填入同一个输入框，或下载后填写运行 DSH 的电脑上文件的完整绝对路径，无需解压。安装后启用插件。
+[RC2 Release](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.0-rc.2) 提供备用安装包 [deepseek-servant-0.5.0-rc.2.tgz](https://github.com/Tests4gptplay/deepseek-servant/releases/download/v0.5.0-rc.2/deepseek-servant-0.5.0-rc.2.tgz)。可将该下载地址填入同一个输入框，或下载后填写运行 DSH 的电脑上文件的完整绝对路径，无需解压。安装后启用插件。
 
 包内版本显示 **0.5.0**，本测试候选由固定标签 **v0.5.0-rc.2** 标识。RC1 同样显示 0.5.0，升级时应核对安装来源变为 RC2。
 
