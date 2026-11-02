@@ -122,7 +122,7 @@ export function FrameworkPage(props: FrameworkPageProps) {
       if (sameDocumentScope()) setExported(result.path)
     } catch (reason) { if (sameDocumentScope()) setError(reason instanceof Error ? reason.message : String(reason)) }
   }
-  const pending = snapshot.drafts.filter(item => frameworkScopeKey(item.input.mode, item.input.collaborationId, item.input.storageScope) === scope && (item.state !== 'confirmed' || !view?.messages.some(message => message.id === item.input.id)))
+  const pending = controller.pendingDrafts()
   const messages = useRef<HTMLDivElement>(null), followBottom = useRef(true), previousTop = useRef(0)
   const historyOperation = useRef<object>(), renderedScope = useRef(scope); renderedScope.current = scope
   const prepend = useRef<{ id?: string; offset: number; top: number; first?: string; done: boolean }>()

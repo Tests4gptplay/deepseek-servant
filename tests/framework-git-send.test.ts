@@ -157,7 +157,7 @@ function dependencies(remote: Remote, storage = memory(), now = () => 0) {
 
 import { FrameworkService } from '../src/framework/service.js'
 import { FrameworkConversation } from '../src/framework/conversation.js'
-import type { FrameworkSendInput } from '../src/framework/client-contracts.js'
+import { FrameworkClientController, type FrameworkClientApi, type FrameworkSendInput } from '../src/framework/client-contracts.js'
 async function serviceFixture(t: test.TestContext) {
   const remote = new Remote(), storage = memory()
   const settings = { name: 'Test', userName: '', localDirectory: '', ownerRepo: 'example/private', repositoryDirectory: 'Workspace', collaborationId: 'same-team', workerSeats: 0, workspace: '' }
@@ -467,6 +467,25 @@ test('Git readback respects a newer cleared index and original storage scope', a
   const result = await f.service.sentMessage(input)
   assert.equal(result.message, undefined); assert.deepEqual(result.order, [])
   await assert.rejects(f.service.sentMessage({ ...input, storageScope: 'another-scope' }), /scope|storage|destination/i)
+})
+
+test('real GitFiles commit-index removal and later service readback cannot be undone by an old client readback', async t => {
+  const f = await serviceFixture(t), entered = deferred<void>(), release = deferred<void>(), first = f.input('before-index-cleanup'), second = f.input('after-index-cleanup')
+  const controller = new FrameworkClientController({
+    view: input => f.service.view({ ...input, mode: 'git' }), send: input => f.service.send(input),
+    sentMessage: async input => { const result = await f.service.sentMessage(input); if (input.id === first.id) { entered.resolve(); await release.promise } return result },
+  } as FrameworkClientApi)
+  await controller.refresh()
+  const sending = controller.send(first);await entered.promise
+  try {
+    await f.connection.transactions.run('shared-index-cleanup', {}, {}, async () => [{ path: f.conversation.indexPath, content: JSON.stringify({ version: 1, messages: [] }) }])
+    assert.equal((await f.service.sentMessage(first)).message, undefined)
+    await controller.send(second)
+    release.resolve();await sending
+    assert.deepEqual(controller.snapshot().value?.messages.map(message => message.id), [second.id])
+    assert.equal(controller.pendingDrafts().length, 0)
+    assert.deepEqual((await f.service.history({ mode: 'git', collaborationId: second.collaborationId, storageScope: second.storageScope, limit: 20 })).messages.map(message => message.id), [second.id])
+  } finally { release.resolve();await sending }
 })
 
 for (const failure of ['member-status', 'task-metadata', 'tasks-directory', 'instances-directory'] as const) test('Git view: a failed batch '+failure+' retains its original consumer error boundary', async t => {

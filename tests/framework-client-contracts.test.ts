@@ -42,6 +42,7 @@ test('an old view may finish after readback without erasure; a later authoritati
   held.resolve(view('git')); await old
   assert.equal(controller.snapshot().value?.messages[0].id, draft.id)
   await controller.refresh(); assert.deepEqual(controller.snapshot().value?.messages, [])
+  assert.equal(controller.pendingDrafts().length, 0, 'cleanup must not restore the old confirmed draft row')
 })
 
 for (const later of ['fresh-view', 'mode-change', 'history-navigation'] as const) test('late single-message readback cannot replace newer ' + later, async () => {
@@ -85,6 +86,20 @@ for (const error of [new DOMException('This operation was aborted', 'AbortError'
   assert.equal(controller.snapshot().drafts[0].state, 'confirmed')
 })
 
+test('later authoritative index absence prevents old readback from restoring a cleaned message', async () => {
+  const first = deferred<Awaited<ReturnType<NonNullable<FrameworkClientApi['sentMessage']>>>>(), entered = deferred<void>()
+  const second = { ...draft, id: 'after-cleanup', text: 'new conversation message' }
+  const controller = new FrameworkClientController(api({ sentMessage: async input => {
+    if (input.id === draft.id) { entered.resolve(); return first.promise }
+    return { message: { ...savedDraftView().messages[0], id: second.id, text: second.text }, order: [second.id], revision: 'after-cleanup-commit' }
+  } }))
+  await controller.selectMode('git'); const sending = controller.send(draft); await entered.promise
+  await controller.send(second)
+  first.resolve({ message: savedDraftView().messages[0], order: [draft.id], revision: 'before-cleanup-commit' }); await sending
+  assert.deepEqual(controller.snapshot().value?.messages.map(message => message.id), [second.id])
+  assert.equal(controller.pendingDrafts().length, 0, 'the removed message must not reappear as a confirmed draft')
+})
+
 for (const destination of ['git-storage', 'different-storage']) test('cold unbound input uses confirmed destination without treating undefined as wildcard: ' + destination, async () => {
   const receipt = deferred<{ revision: string; storageScope: string }>(); let seen: FrameworkSendInput | undefined
   const controller = new FrameworkClientController(api({ send: () => receipt.promise,
@@ -120,6 +135,36 @@ for (const navigation of ['none', 'same-mode', 'other-mode', 'changed-settings']
   assert.deepEqual(controller.snapshot().drafts[0].input, original)
   panels.resolve(view('git')); await new Promise(resolve => setImmediate(resolve))
   if (navigation === 'none') assert.equal(controller.snapshot().value?.messages[0]?.id, draft.id, 'earlier panel snapshot cannot erase readback')
+})
+
+for (const failureOrder of ['before-header', 'after-header'] as const) test('cold failed draft remains visible after scope resolves and retries unchanged: ' + failureOrder, async () => {
+  const panels = deferred<FrameworkClientView>(), entered = deferred<void>(), failure = deferred<never>(), sent: FrameworkSendInput[] = []
+  const controller = new FrameworkClientController(api({ selectMode: async () => ({ ...view('git'), storageScope: undefined }),
+    view: async () => { entered.resolve(); return panels.promise },
+    send: async input => { sent.push({ ...input }); if (sent.length === 1) return failure.promise; return { revision: 'H', storageScope: 'git-storage' } },
+    sentMessage: async () => ({ message: savedDraftView().messages[0], order: [draft.id], revision: 'H' }),
+  }))
+  await controller.selectMode('git'); await entered.promise
+  const original = { ...draft, storageScope: undefined }, sending = controller.send(original), rejected = assert.rejects(sending, /conflict or unknown/)
+  assert.equal(controller.pendingDrafts().length, 1)
+  if (failureOrder === 'after-header') { panels.resolve(view('git')); await new Promise(resolve => setImmediate(resolve)) }
+  failure.reject(new Error('conflict or unknown')); await rejected
+  panels.resolve(view('git')); await new Promise(resolve => setImmediate(resolve))
+  assert.equal(controller.pendingDrafts()[0]?.state, 'unknown'); assert.deepEqual(controller.pendingDrafts()[0]?.input, original)
+  await controller.send(controller.pendingDrafts()[0]!.input)
+  assert.deepEqual(sent, [original, original]); assert.equal(controller.pendingDrafts().length, 0)
+  assert.equal(controller.snapshot().value?.messages[0]?.text, original.text)
+})
+
+test('unresolved cold draft never binds to a newly navigated header with the same mode and conversation', async () => {
+  const held = deferred<FrameworkClientView>();let next = false
+  const header = () => ({ ...view('git'), storageScope: undefined })
+  const controller = new FrameworkClientController(api({ selectMode: async () => header(), view: async () => next ? { ...view('git'), storageScope: 'different-storage' } : held.promise, send: async () => { throw new Error('unknown') } }))
+  await controller.selectMode('git'); await assert.rejects(controller.send({ ...draft, storageScope: undefined }))
+  assert.equal(controller.pendingDrafts().length, 1)
+  next = true; await controller.selectMode('git'); await new Promise(resolve => setImmediate(resolve))
+  assert.equal(controller.pendingDrafts().length, 0);assert.equal(controller.snapshot().drafts.length, 1)
+  held.resolve(view('git')); await new Promise(resolve => setImmediate(resolve));assert.equal(controller.pendingDrafts().length, 0)
 })
 
 for (const action of ['stopExecution', 'taskControl', 'legacyControl', 'participation'] as const) test('every full action response preserves a later authoritative message: ' + action, async () => {

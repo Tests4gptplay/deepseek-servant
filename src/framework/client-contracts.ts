@@ -129,6 +129,10 @@ export class FrameworkClientController {
   private readonly messageReads = new Map<string, number>()
   private readonly confirmedMessages = new Map<string, Map<string, { message: FrameworkClientMessage; order: string[]; epoch: number }>>()
   private readonly sends = new Map<string, Promise<void>>()
+  // Display ownership is separate from immutable write arguments. A cold
+  // header may resolve after the original send has failed or become UNKNOWN.
+  private readonly draftOwners = new Map<string, { navigation: number; revision: string; storageScope?: string }>()
+  private readonly acknowledgedDrafts = new Set<string>()
   constructor(readonly api: FrameworkClientApi) {}
   retainConnection(): () => void {
     if (this.connectionReferences++ === 0) {
@@ -159,7 +163,29 @@ export class FrameworkClientController {
   private publish(change: Partial<FrameworkClientSnapshot>): void {
     const before = this.current.value, after = change.value
     if (before && after && frameworkScopeKey(before.activeMode, before.collaborationId, before.storageScope) !== frameworkScopeKey(after.activeMode, after.collaborationId, after.storageScope)) this.historyGeneration++
-    this.current = { ...this.current, ...change }; for (const listener of this.listeners) listener() }
+    this.current = { ...this.current, ...change }
+    if (after?.storageScope !== undefined && !this.navigation) for (const draft of this.current.drafts) {
+      const owner = this.draftOwners.get(draft.input.id)
+      if (owner && owner.storageScope === undefined && owner.navigation === this.navigationGeneration
+        && owner.revision === after.revision && draft.input.mode === after.activeMode && draft.input.collaborationId === after.collaborationId) owner.storageScope = after.storageScope
+    }
+    if (after) for (const draft of this.current.drafts) {
+      const scope = draft.input.storageScope ?? this.draftOwners.get(draft.input.id)?.storageScope
+      if (draft.state === 'confirmed' && scope === after.storageScope && draft.input.mode === after.activeMode
+        && draft.input.collaborationId === after.collaborationId && after.messages.some(message => message.id === draft.input.id && message.role === 'user' && message.text === draft.input.text)) this.acknowledgedDrafts.add(draft.input.id)
+    }
+    for (const listener of this.listeners) listener() }
+  pendingDrafts(): readonly FrameworkDraft[] {
+    const view = this.current.value
+    if (!view) return []
+    return this.current.drafts.filter(draft => {
+      if (draft.input.mode !== view.activeMode || draft.input.collaborationId !== view.collaborationId) return false
+      const owner = this.draftOwners.get(draft.input.id), scope = draft.input.storageScope ?? owner?.storageScope
+      const belongs = scope !== undefined ? scope === view.storageScope
+        : view.storageScope === undefined && !!owner && owner.navigation === this.navigationGeneration && owner.revision === view.revision && !this.navigation
+      return belongs && (draft.state !== 'confirmed' || (!this.acknowledgedDrafts.has(draft.input.id) && !view.messages.some(message => message.id === draft.input.id)))
+    })
+  }
   private displayView(value: FrameworkClientView, epoch: number): FrameworkClientView {
     return this.processingAvailable && epoch === this.processingEpoch ? value : { ...value, foregroundProcessing: undefined }
   }
@@ -371,6 +397,10 @@ export class FrameworkClientController {
   retain(input: FrameworkSendInput): void {
     const existing = this.current.drafts.find(draft => draft.input.id === input.id)
     if (existing) { if (JSON.stringify(existing.input) !== JSON.stringify(input)) throw new Error('Retained message identity has different content.'); return }
+    const view = this.current.value
+    if (input.storageScope === undefined && view && !this.navigation && view.activeMode === input.mode && view.collaborationId === input.collaborationId) {
+      this.draftOwners.set(input.id, { navigation: this.navigationGeneration, revision: view.revision, storageScope: view.storageScope })
+    }
     this.publish({ drafts: [...this.current.drafts, { input: { ...input }, state: 'draft' }] })
   }
   send(input: FrameworkSendInput): Promise<void> {
@@ -409,9 +439,14 @@ export class FrameworkClientController {
           if (!currentScope() || navigation !== this.navigationGeneration || history !== this.historyGeneration || this.navigation
             || (this.messageReads.get(scope) ?? 0) > epoch || this.current.value?.historyWindow) return
           const message = result.message
-          if (!message) return // A later authoritative cleanup may have removed it.
+          if (!message) { this.acknowledgedDrafts.add(input.id); this.publish({}); return } // A later authoritative cleanup may have removed it.
           if (message.id !== input.id || message.role !== 'user' || message.text !== input.text || !result.order.includes(message.id)) throw new Error('Saved message readback differs from the original input.')
           const pending = this.confirmedMessages.get(scope) ?? new Map()
+          const later = [...pending.values()].filter(known => known.epoch > epoch).sort((a, b) => b.epoch - a.epoch)[0]
+          // A later owned message read also establishes authoritative absence.
+          // Preserve missing earlier text only when that later index still lists
+          // its identity; a cleaned-up message must not be resurrected.
+          if (later && !later.order.includes(message.id)) { this.acknowledgedDrafts.add(input.id); this.publish({}); return }
           let order = result.order
           // A later append can already have supplied a strict extension of this
           // index while an earlier readback was in flight. Keep that known order.
@@ -420,6 +455,7 @@ export class FrameworkClientController {
             if (known.order.length > order.length && positions.every((position, i) => position >= 0 && (!i || position > positions[i - 1]!))) order = known.order
           }
           pending.set(message.id, { message, order, epoch }); this.confirmedMessages.set(scope, pending)
+          this.acknowledgedDrafts.add(input.id)
           this.publish({ value: { ...this.current.value!, messages: this.mergeConfirmed(this.current.value!.messages, message, order) } })
         } catch (error) {
           // The commit is confirmed; a failed read must not relabel it UNKNOWN
