@@ -41,8 +41,8 @@ export class GitHubClient {
     this.signal = options?.signal ? AbortSignal.any([this.requests.signal, options.signal]) : this.requests.signal
   }
   cancel(reason?: unknown): void { this.requests.abort(reason); this.requests = new AbortController(); this.signal = this.requests.signal }
-  async session<T>(operation: (session: GitHubSession) => Promise<T>): Promise<T> {
-    const signal = this.signal
+  async session<T>(operation: (session: GitHubSession) => Promise<T>, ownerSignal?: AbortSignal): Promise<T> {
+    const signal = ownerSignal ? AbortSignal.any([this.signal, ownerSignal]) : this.signal
     signal.throwIfAborted()
     const token = await this.tokenSource(signal)
     signal.throwIfAborted()

@@ -76,6 +76,13 @@ test('all six scoped prompts are substantive and unavailable optional capabiliti
   assert.ok(!f.prompts.join('\n').includes('Do not call create_goal'))
   await assert.rejects(f.call('dss_snapshot', {}, 'foreign', { id: 'another' } as Agent), /scoped Agent/)
 })
+test('Recorder injected instructions name the save tool and its verified automatic Cleaner signal', async t => {
+  const f = await fixture(t, 'Recorder'), prompt = f.prompts.join('\n')
+  assert.ok(f.definitions.has('dss_recorder_save'))
+  assert.match(prompt, /Use dss_recorder_save/)
+  assert.match(prompt, /successful read-back publishes this Task’s Cleaner signal automatically/)
+  assert.match(prompt, /Do not manually create that signal/)
+})
 test('Foreground submission writes only the common task, without an Inbox signal or initialized tree', async t => {
   const f = await fixture(t, 'Foreground'), view = await f.snapshot()
   await f.call('dss_submit_task', { snapshotId: view.snapshotId, name: 'new', route: 'O', text: '# Original\nBody' })
@@ -368,7 +375,7 @@ test('Recorder may retain real binary evidence while verifying its authored UTF8
 test('only Helper exposes the explicit overall-restoration request, without an automatic restart', async t => {
   const requests: unknown[] = []
   const configure = (services: FrameworkRoleServices) => { services.helper = {
-    request: async () => ({}), restore: async () => ({}), healthyCycle: async () => ({}),
+    request: async () => ({}), restore: async () => ({}),
     restoreHost: async (binding, input, id) => { requests.push({ role: binding.role, input, id }); return { arranged: true } },
   } }
   const helper = await fixture(t, 'Helper', {}, 'P', configure)
@@ -646,4 +653,185 @@ for (const role of ['Organizer', 'Planner', 'Worker', 'Recorder'] as const) test
     : role === 'Worker' ? { name: 'dss_worker_deliver', input: { reply: 'Reopen', records: [] } }
     : { name: 'dss_recorder_save', input: { outputs: [{ path: paths.archive(f.task.taskId) + '/records.md', text: 'Recreated history' }] } }
   await assert.rejects(f.call(request.name, { ...request.input, snapshotId: snapshot.snapshotId }), /history.*cleared|new Task/)
+})
+
+for (const role of ['Organizer', 'Recorder', 'Planner', 'Worker', 'Helper'] as const) test(`${role} exposes only its bound Host-probe reset and receives one shared mechanical rule`, async t => {
+  const resets: unknown[] = []
+  const f = await fixture(t, role, role === 'Worker' ? { workerId: 'child' } : {}, 'P', services => {
+    Object.assign(services, { observation: { reset: async (binding: FrameworkRoleBinding, input: unknown, id: string, signal: AbortSignal) => {
+      resets.push({ binding, input, id, aborted: signal.aborted }); return { reset: true }
+    } } })
+  })
+  assert.equal(f.definitions.has('dss_reset_observation'), true)
+  assert.deepEqual(await f.call('dss_reset_observation', { probeId: 'actual-host-probe' }, 'reset-one'), { reset: true })
+  assert.deepEqual(resets, [{ binding: f.binding, input: { probeId: 'actual-host-probe' }, id: 'agent:reset-one', aborted: false }])
+  const schema = f.definitions.get('dss_reset_observation').parameters
+  assert.deepEqual(Object.keys(schema.properties), ['probeId'])
+  assert.equal(f.definitions.has('dss_inquire'), false); assert.equal(f.definitions.has('dss_inquiry_reply'), false)
+  const prompt = f.prompts.join('\n')
+  assert.equal(prompt.split('# Shared runtime rules (AGENTS)').length - 1, 1)
+  assert.match(prompt, /dss_reset_observation\(\{probeId\}\)/)
+  assert.match(prompt, /No text reply is required/)
+  assert.match(prompt, /does not consume or reset.*recovery/)
+  assert.match(prompt, /first 5 minutes.*next 5 minutes.*further 30 minutes/s)
+})
+test('Foreground keeps its existing prompt and has no mechanical reset tool or shared rule', async t => {
+  let calls = 0
+  const f = await fixture(t, 'Foreground', {}, 'P', services => {
+    Object.assign(services, { observation: { reset: async () => { calls++; return {} } } })
+  })
+  assert.equal(f.definitions.has('dss_reset_observation'), false)
+  assert.doesNotMatch(f.prompts.join('\n'), /Shared runtime rules \(AGENTS\)|dss_reset_observation/)
+  assert.equal(calls, 0)
+})
+test('Helper keeps actual-error and overall recovery duties without daily inspection or marker 5530 rules', async t => {
+  const f = await fixture(t, 'Helper', {}, 'P', services => { services.helper = {
+    request: async () => ({}), restore: async () => ({}), restoreHost: async () => ({}),
+  } })
+  for (const name of ['dss_help', 'dss_restore', 'dss_restore_host']) assert.equal(f.definitions.has(name), true)
+  assert.equal(f.definitions.has('dss_healthy_cycle'), false)
+  assert.doesNotMatch(frameworkRolePrompt('Helper'), /first two five-minute no-progress stages ask you to inspect|independent 5\/5\/30 expiry|Reset stages only after a full healthy cycle/)
+  assert.match(frameworkRolePrompt('Helper'), /every 30 minutes/)
+  assert.match(frameworkRolePrompt('Worker'), /Worker Note \(notes\.md\)/)
+  assert.match(frameworkRolePrompt('Worker'), /handoff\.json/)
+})
+test('reset tool keeps scoped native caller and cancellation/error ownership at the service boundary', async t => {
+  const failure = new Error('probe evidence is unavailable'); let calls = 0
+  const f = await fixture(t, 'Planner', {}, 'P', services => {
+    services.observation = { reset: async () => { calls++; throw failure } }
+  })
+  await assert.rejects(f.call('dss_reset_observation', { probeId: 'p' }, 'foreign-reset', { id: 'foreign' } as Agent), /scoped Agent/)
+  assert.equal(calls, 0)
+  const controller = new AbortController(), reason = new Error('owner stopped before reset'); controller.abort(reason)
+  await assert.rejects(f.definitions.get('dss_reset_observation').execute({ probeId: 'p' }, {
+    agent: f.agent, callId: 'aborted-reset', signal: controller.signal, concludeTurn() {},
+  }), error => error === reason)
+  assert.equal(calls, 0)
+  await assert.rejects(f.call('dss_reset_observation', { probeId: 'p' }, 'missing-probe'), error => error === failure)
+  assert.equal(calls, 1)
+})
+
+test('installed Planner Markdown calls for recovery-aware result review without adding a quality gate to marker consumption', async t => {
+  const f = await fixture(t, 'Planner'), injected = f.prompts.join('\n')
+  assert.match(injected, /Every recovery means the task chain has been interrupted or restored/)
+  assert.match(injected, /pay extra attention to completeness, consistency and omissions/)
+  assert.match(injected, /This additional result review is not a prerequisite for consuming recovery/)
+  assert.match(injected, /Do not wait for every Worker ACK, business quality completion or total completion merely to consume recovery/)
+  for (const role of ['Foreground', 'Organizer', 'Worker', 'Recorder', 'Helper'] as const)
+    assert.doesNotMatch(frameworkRolePrompt(role), /This additional result review is not a prerequisite/)
+  const marker = paths.state('A', f.task.taskId) + '/recovery'
+  await withSnapshot(f.files, snapshot => f.files.commit(snapshot, [{ path: marker, content: '' }], 'recover-for-review'))
+  const view = await f.snapshot()
+  await f.call('dss_recovery_consume', { snapshotId: view.snapshotId, continuation: 'Normal chain can continue; completeness and result quality remain under review.' }, 'consume-before-quality-complete')
+  await withSnapshot(f.files, async snapshot => {
+    assert.equal(await f.files.read(snapshot, marker), undefined)
+    assert.notEqual((await readJson<TaskMetadata>(f.files, snapshot, paths.task(f.task.taskId)))?.status, 'complete')
+    assert.match(await f.files.read(snapshot, paths.member(f.task.taskId, 'A') + '/Planner_Memory.md') ?? '', /remain under review/)
+  })
+})
+
+test('installed Helper Markdown matches exact admission restoration schema and role-specific recovery ownership', async t => {
+  const requests: unknown[] = [], unknown = new FilesOutcomeUnknownError('original-restore-operation')
+  let uncertain = false
+  const f = await fixture(t, 'Helper', {}, 'P', services => { services.helper = {
+    request: async () => ({}), restoreHost: async () => ({}),
+    restore: async (binding, input, id) => { requests.push({ role: binding.role, input, id }); if (uncertain) throw unknown; return { arranged: true } },
+  } })
+  const injected = f.prompts.join('\n')
+  assert.match(injected, /45-second native-admission diagnostic/)
+  assert.match(injected, /context\.target/)
+  assert.match(injected, /dss_restore\(\{target, facts, hypotheses, actionsTaken, continuation\}\)/)
+  assert.match(injected, /If context\.target is absent, do not invent an execution identity/)
+  assert.match(injected, /arranged: true means the request was arranged, not that restoration completed/)
+  assert.match(injected, /Foreground recovery does not create a recovery marker/)
+  assert.match(injected, /Organizer or Recorder.*Task owner's fixed recovery marker/)
+  assert.match(injected, /finally sealed Task's remaining recovery marker is reclaimed by Cleaner/)
+  assert.doesNotMatch(injected, /Foreground, Organizer and Recorder.*do not create member recovery/)
+  assert.equal(requests.length, 0, 'installing diagnostic instructions is not an automatic restore')
+  const target = { workId: 'Organizer:actual', executionId: 'actual-execution', role: 'Organizer' as const }
+  const input = { target, facts: 'Exact native admission is pending', hypotheses: 'Opening might be held', actionsTaken: 'Preserved original evidence', continuation: 'Resume the original wake after confirmed settlement' }
+  assert.deepEqual(await f.call('dss_restore', input, 'restore-admission'), { arranged: true })
+  assert.deepEqual(requests, [{ role: 'Helper', input, id: 'agent:restore-admission' }])
+  await assert.rejects(f.call('dss_restore', { ...input, target: undefined }, 'missing-target'))
+  assert.equal(requests.length, 1, 'missing identity is not manufactured by tool registration')
+  uncertain = true
+  await assert.rejects(f.call('dss_restore', input, 'unknown-restore'), error => error === unknown)
+})
+
+test('Recorder tool archives working binary evidence before Cleaner removes its entire Task namespace', async t => {
+  let transactions!: FrameworkTransactions
+  const f = await fixture(t, 'Recorder', {}, 'O', (_services, tx) => { transactions = tx })
+  const work = paths.run(f.task.taskId) + '/unique-result.bin', binary = Uint8Array.from([0,255,128,4])
+  const complete = { ...f.task, status: 'complete' as const, resultPaths: [work] }
+  await withSnapshot(f.files, snapshot => f.files.commit(snapshot, [
+    { path: work, bytes: binary }, { path: paths.task(f.task.taskId), content: JSON.stringify(complete) },
+    { path: paths.state(f.task.owner, f.task.taskId) + '/recovery', content: '' },
+    { path: 'technical/recovery-inputs/' + f.task.taskId + '/A/Organizer.json', content: '{"input":"old recovery responsibility"}' },
+  ], 'sealed Task with unique result and old recovery input'))
+  const originalRecord = 'AI-authored report referencing ' + work
+  const view = await f.snapshot()
+  await f.call('dss_recorder_save', { snapshotId: view.snapshotId,
+    outputs: [{ path: paths.archive(f.task.taskId) + '/records.md', text: originalRecord }], retainedPaths: [work] })
+  const { FrameworkCleaner } = await import('../src/framework/cleaner.js')
+  const cleaner = new FrameworkCleaner(f.files, transactions, async () => {})
+  await withSnapshot(f.files, snapshot => cleaner.clean(complete, snapshot))
+  await withSnapshot(f.files, async snapshot => {
+    const current = JSON.parse((await f.files.read(snapshot, paths.task(f.task.taskId)))!)
+    assert.deepEqual(await f.files.readBytes(snapshot, current.resultPaths[0]), binary)
+    assert.equal(await f.files.read(snapshot, paths.archive(f.task.taskId) + '/records.md'), originalRecord)
+    for (const root of [paths.run(f.task.taskId), 'Recorder Cache/' + f.task.taskId,
+      paths.state(f.task.owner, f.task.taskId), 'technical/recovery-inputs/' + f.task.taskId]) assert.deepEqual(await f.files.list(snapshot, root), [])
+  })
+})
+
+test('Helper restore accepts an exact pending wake without manufacturing an execution, and rejects ambiguous or absent selectors', async t => {
+  const requests: unknown[] = []
+  const f = await fixture(t, 'Helper', {}, 'P', services => { services.helper = {
+    request: async () => ({}), restoreHost: async () => ({}),
+    restore: async (binding, input, id) => { requests.push({ role: binding.role, input, id }); return { arranged: true } },
+  } })
+  const parameters = f.definitions.get('dss_restore').parameters
+  assert.equal(parameters.type, 'object', 'provider-facing root remains an object')
+  assert.deepEqual(parameters.required, ['facts', 'hypotheses', 'actionsTaken', 'continuation'])
+  assert.equal(parameters.properties.target.type, 'object'); assert.equal(parameters.properties.wakeId.type, 'string')
+  assert.equal(parameters.anyOf, undefined, 'selector alternatives do not replace the root object')
+  const facts = { facts: 'Actual eligible wake is still queued', hypotheses: 'Admission requires inspection', actionsTaken: 'Preserved the original wake', continuation: 'Continue this same pending responsibility' }
+  const input = { ...facts, wakeId: 'original-pending-recorder-wake' }
+  assert.deepEqual(await f.call('dss_restore', input, 'wake-restore'), { arranged: true })
+  assert.deepEqual(requests, [{ role: 'Helper', input, id: 'agent:wake-restore' }])
+  assert.equal(Object.hasOwn((requests[0] as any).input, 'target'), false)
+  assert.equal(Object.hasOwn((requests[0] as any).input, 'executionId'), false)
+  for (const invalid of [facts, { ...facts, wakeId: '' }, { ...input, target: { workId: 'work', executionId: 'execution', role: 'Recorder' } }, { ...facts, target: { role: 'Recorder' } }])
+    await assert.rejects(f.call('dss_restore', invalid))
+  assert.equal(requests.length, 1, 'invalid selectors must not reach recovery service')
+  const prompt = f.prompts.join('\n')
+  assert.match(prompt, /dss_restore\(\{wakeId, facts, hypotheses, actionsTaken, continuation\}\)/)
+  assert.match(prompt, /already completed admission, do not restart it merely because an older diagnostic arrived/)
+  assert.match(prompt, /Supply exactly one selector, target or wakeId/)
+})
+
+
+test('common role read tools scope authority per call without wrapping native reset or holding it across tools', async t => {
+  for (const role of ['Foreground', 'Organizer', 'Planner', 'Worker', 'Recorder', 'Helper'] as const) {
+    let scopes = 0, active = false, resets = 0
+    const f = await fixture(t, role, {}, 'O', services => {
+      services.files.withReadOperation = async operation => {
+        assert.equal(active, false); scopes++; active = true
+        try { return await operation() } finally { active = false }
+      }
+      services.observation = { reset: async () => { assert.equal(active, false); resets++; return { reset: true } } } as any
+    })
+    const view = await f.snapshot()
+    assert.equal(scopes, 1); assert.equal(active, false)
+    // Own archive metadata is readable without requiring Recorder Cache roots.
+    await f.call('dss_read', { snapshotId: view.snapshotId, path: paths.archive(f.task.taskId) + '/records.md' })
+    await f.call('dss_list', { snapshotId: view.snapshotId, directory: paths.archive(f.task.taskId) + '/' })
+    assert.equal(scopes, 3); assert.equal(active, false)
+    await f.call('dss_snapshot_release', { snapshotId: view.snapshotId })
+    assert.equal(scopes, 3)
+    if (role !== 'Foreground') {
+      await f.call('dss_reset_observation', { probeId: 'native-probe' })
+      assert.equal(resets, 1); assert.equal(scopes, 3)
+    }
+  }
 })

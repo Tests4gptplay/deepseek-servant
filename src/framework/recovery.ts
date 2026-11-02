@@ -23,7 +23,7 @@ export interface ObservationState {
 }
 export type ProgressKind = 'model-text' | 'reasoning' | 'tool-progress' | 'connection-heartbeat'
 export interface ObservationAction {
-  kind: 'probe-helper' | 'warn-helper' | 'inspect-role' | 'restore-helper' | 'change-strategy'
+  kind: 'probe-helper' | 'warn-helper' | 'probe-role' | 'warn-role' | 'restore-helper' | 'restart-role'
   identity: WorkIdentity
   stage: 1 | 2 | 3
   elapsedMs: number
@@ -37,51 +37,41 @@ export function recordProgress(state: ObservationState, kind: ProgressKind, now:
   return kind === 'connection-heartbeat' ? state : { ...state, lastProgressAt: Math.max(state.lastProgressAt, now) }
 }
 export function dueObservation(state: ObservationState, now: number): { state: ObservationState; action?: ObservationAction } {
-  if (state.stage === 3) return { state }
+  if (state.identity.role === 'Foreground' || state.stage === 3) return { state }
   const since = Math.max(state.stageStartedAt, state.lastProgressAt)
   if (now - since < OBSERVATION_INTERVALS_MS[state.stage]) return { state }
   const stage = (state.stage + 1) as 1 | 2 | 3
   const kind = state.identity.role === 'Helper'
     ? stage === 1 ? 'probe-helper' : stage === 2 ? 'warn-helper' : 'restore-helper'
-    : stage === 3 ? 'change-strategy' : 'inspect-role'
+    : stage === 1 ? 'probe-role' : stage === 2 ? 'warn-role' : 'restart-role'
   // The next interval starts at the actual check, rather than issuing all overdue checks at once.
   return { state: { ...state, stage, stageStartedAt: now }, action: {
     kind, identity: { ...state.identity }, stage, elapsedMs: now - state.cycleStartedAt,
     silentMs: now - state.lastProgressAt,
   } }
 }
-/** A replacement is still the same work: do not reset the observation stage or cycle.
- * Start timing the new execution after its actual stop/start overhead, not while it was stopped.
- */
+/** A genuinely new execution starts its own mechanical observation cycle.
+ * Resuming the same execution preserves its stage and excludes stopped time. */
 export function rebindObservation(state: ObservationState, executionId: string, resumedAt: number): ObservationState {
-  return { ...state, identity: { ...state.identity, executionId }, stageStartedAt: Math.max(state.stageStartedAt, resumedAt) }
-}
-export interface HealthyCycleEvidence { continuouslyNormal: boolean; noNewRecoveryAnomaly: boolean }
-export function completeHealthyObservationCycle(state: ObservationState, now: number, evidence: HealthyCycleEvidence): ObservationState {
-  if (state.stage !== 3 || now - state.cycleStartedAt < OBSERVATION_CYCLE_MS || !evidence.continuouslyNormal || !evidence.noNewRecoveryAnomaly) return state
-  // Only a Helper assessment of a full healthy cycle may reset this object's phase.
-  return { ...state, cycleStartedAt: now, stageStartedAt: now, stage: 0 }
+  if (state.identity.executionId !== executionId) return createObservation({ ...state.identity, executionId }, resumedAt)
+  return { ...state, stageStartedAt: Math.max(state.stageStartedAt, resumedAt) }
 }
 
 export interface MemberIdentity { taskId: string; member: string }
 export interface RecoveryWatch extends MemberIdentity {
   cycleStartedAt: number
   stageStartedAt: number
-  stage: ObservationStage
+  stage: number
 }
 export function createRecoveryWatch(identity: MemberIdentity, now: number): RecoveryWatch {
   return { ...identity, cycleStartedAt: now, stageStartedAt: now, stage: 0 }
 }
-export function dueRecoveryWatch(state: RecoveryWatch, now: number): { state: RecoveryWatch; action?: { kind: 'recovery-check'; taskId: string; member: string; stage: 1 | 2 | 3; elapsedMs: number } } {
-  if (state.stage === 3 || now - state.stageStartedAt < OBSERVATION_INTERVALS_MS[state.stage]) return { state }
-  const stage = (state.stage + 1) as 1 | 2 | 3
+export function dueRecoveryWatch(state: RecoveryWatch, now: number): { state: RecoveryWatch; action?: { kind: 'recovery-check'; taskId: string; member: string; stage: number; elapsedMs: number } } {
+  if (now - state.stageStartedAt < 30 * 60_000) return { state }
+  const stage = state.stage + 1
   return { state: { ...state, stage, stageStartedAt: now }, action: {
     kind: 'recovery-check', taskId: state.taskId, member: state.member, stage, elapsedMs: now - state.cycleStartedAt,
   } }
-}
-export function completeHealthyRecoveryCycle(state: RecoveryWatch, now: number, evidence: HealthyCycleEvidence): RecoveryWatch {
-  return state.stage === 3 && evidence.continuouslyNormal && evidence.noNewRecoveryAnomaly
-    ? createRecoveryWatch(state, now) : state
 }
 export function canConsumeRecovery(actor: Pick<WorkIdentity, 'role' | 'taskId' | 'member'>, marker: MemberIdentity): boolean {
   return actor.role === 'Planner' && actor.taskId === marker.taskId && actor.member === marker.member
@@ -94,7 +84,7 @@ export function consumeRecoveryWatch(state: RecoveryWatch, actor: Pick<WorkIdent
   return canContinue ? undefined : state
 }
 export type HelperTrigger = 'ai-help' | 'host-error' | 'no-progress-warning' | 'warning'
-export function invokesHelper(trigger: HelperTrigger): boolean { return trigger !== 'warning' }
+export function invokesHelper(trigger: HelperTrigger): boolean { return trigger === 'ai-help' || trigger === 'host-error' }
 
 export interface WorkerRecoveryInput {
   workerId: string

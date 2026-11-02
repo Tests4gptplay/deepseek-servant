@@ -1,3 +1,4 @@
+import { DshAgentCreationCancelled } from './host-types.js'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentOptions } from '@deepseek-ai/dsh-agent'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
@@ -55,6 +56,8 @@ export class DshAgentGateway {
   }
 
   private async createOwned(request: DshAgentRequest): Promise<OwnedDshAgent> {
+    const checkBeforeNative = () => { if (request.signal?.aborted) throw new DshAgentCreationCancelled(true, request.signal.reason) }
+    checkBeforeNative()
     const sessionId = SessionId(request.sessionId)
     if (this.ctx.agents.get(sessionId) !== undefined) {
       throw new Error(`Servant cannot acquire an Agent already owned by another runtime: ${sessionId}`)
@@ -63,7 +66,10 @@ export class DshAgentGateway {
     if (request.presetId !== undefined && presets === undefined) {
       throw new Error('The selected Servant preset requires the DSH agent preset registry.')
     }
-    const presetId = presets === undefined ? undefined : (await presets.resolve(request.presetId)).id
+    let presetId: string | undefined
+    try { presetId = presets === undefined ? undefined : (await presets.resolve(request.presetId)).id }
+    catch (error) { checkBeforeNative(); throw error }
+    checkBeforeNative()
     // Native prompt variables read Agent.options before the request waterfall.
     // Resolve Auto through the Host's default selection before creating the scope.
     const route: DshModelRoute | undefined = request.model ?? this.ctx.get('agentDefaultModel')?.currentSelection()
@@ -74,11 +80,15 @@ export class DshAgentGateway {
       ...(route?.maxTokens === undefined ? {} : { maxTokens: route.maxTokens }),
     }
     let lastError: { message: string; turn: number; step: number } | undefined
+    let setupEntered = false, setupReturned = false
     const setup = async (agentCtx: Context, agent: Agent) => {
+      setupEntered = true
+      request.signal?.throwIfAborted()
       agentCtx.on('agent/error', event => {
         if (event.agent === agent) lastError = { message: errorChain(event.error), turn: event.turn, step: event.step }
       })
       if (presets !== undefined && presetId !== undefined) await presets.mount(agentCtx, presetId)
+      request.signal?.throwIfAborted()
       // A resumed Auto execution retains its admitted route; a new execution
       // captures the current Host default. Couple prompt and request selection.
       const loggedHeader = request.resume && request.model === undefined
@@ -93,17 +103,38 @@ export class DshAgentGateway {
           reasoningEffort: reasoningEffort as ReasoningEffortId,
         }) }, assembled: undefined,
       }))
-      return await request.setup?.(agentCtx, agent)
+      const commit = await request.setup?.(agentCtx, agent)
+      request.signal?.throwIfAborted()
+      setupReturned = true
+      return commit
     }
-    const native: AgentHandle = request.resume
-      ? await this.ctx.agents.resume({ resumeSessionId: sessionId, agentOptions, setup })
+    let native: AgentHandle
+    try { native = request.resume
+      ? await this.ctx.agents.resume({ resumeSessionId: sessionId, agentOptions, setup, signal: request.signal })
       : await this.ctx.agents.create({
           sessionId,
+          signal: request.signal,
           agentOptions,
           meta: { cwd: request.cwd, ...(presetId === undefined ? {} : { agentPreset: presetId }) },
           setup,
         })
+    } catch (error) {
+      if (request.signal?.aborted) throw new DshAgentCreationCancelled(
+        setupEntered && !setupReturned && !this.hasLiveOwner(request.sessionId), request.signal.reason,
+        setupEntered && !setupReturned
+          ? 'Creation was cancelled before setup returned: publication is fenced. Native rollback resource cleanup is not independently acknowledged.'
+          : 'Native creation was cancelled before a handle was returned; native execution cleanup has not been confirmed.')
+      throw error
+    }
     const agent = native.agent
+    const cancelAfterNative = async () => {
+      if (!request.signal?.aborted) return
+      try { await native.dispose() }
+      catch (error) { throw new DshAgentCreationCancelled(false, request.signal.reason,
+        'Native creation cancellation cleanup failed: ' + errorChain(error)) }
+      throw new DshAgentCreationCancelled(true, request.signal.reason)
+    }
+    await cancelAfterNative()
     if (!request.resume && request.recentExchanges?.length) {
       try {
         agent.inject(freezeMessage({ id: MessageId('servant-history:' + request.sessionId), role: 'user',
@@ -111,8 +142,16 @@ export class DshAgentGateway {
           'Recent completed conversation exchanges, verbatim and chronological. These are historical originals for context; the next actual user input supplies the current request. Use dss_conversation_read with mode page and beforeId to page through earlier originals, or mode message and reference set to a known message id for one original.\n'
           + JSON.stringify(request.recentExchanges) }] }))
         await this.ctx.sessions.flush(agent.session)
-      } catch (error) { await native.dispose(); throw error }
+      } catch (error) {
+        try { await native.dispose() } catch (cleanup) {
+          if (request.signal?.aborted) throw new DshAgentCreationCancelled(false, request.signal.reason, errorChain(cleanup))
+          throw new AggregateError([error, cleanup], 'Native history admission and cleanup failed')
+        }
+        if (request.signal?.aborted) throw new DshAgentCreationCancelled(true, request.signal.reason)
+        throw error
+      }
     }
+    await cancelAfterNative()
     let disposed = false, closing = false
     let disposal: Promise<void> | undefined
     const admissions = new Set<Promise<void>>()
@@ -165,7 +204,10 @@ export class DshAgentGateway {
             id: MessageId(messageId), role: 'user',
             content: [{ type: 'text', text }], source: source === 'user' ? { kind: 'user' as const } : { kind: 'deepseek-servant' as const },
           })
-          agent[mode](message)
+          // The official initiator boundary rejects a closing Host before the
+          // native driver mutates its inbox/activity promise. A late admission
+          // must not strand whenIdle during concurrent root teardown.
+          this.ctx.agents.withInitiator(agent, () => agent[mode](message))
           await this.ctx.sessions.flush(agent.session)
         })
         messageAdmissions.set(messageId, operation)

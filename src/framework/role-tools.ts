@@ -1,3 +1,4 @@
+import { prepareRecorderRetention } from './recorder-retention.js'
 import { LocalFiles } from './local-files.js'
 import { foregroundMemoryGuide } from '../contracts/foreground-memory.js'
 import { captureCleanupInputs, captureCleanupReferences, cleanupRecordPath, type CleanupRecord, type RetentionManifest } from './cleaner.js'
@@ -11,7 +12,7 @@ import { toolParameters } from '../contracts/schemas.js'
 import { prepareFrameworkSkillIndex } from './skills.js'
 import { frameworkRolePrompt } from './role-prompts.js'
 import type { WorkIdentity, MemberIdentity } from './recovery.js'
-import { filePath, FilesConflictError, type FilesStore, type FilesSnapshot, type FileChange, type FileReceipt } from './transactions.js'
+import { filePath, withReadOperation, FilesConflictError, type FilesStore, type FilesSnapshot, type FileChange, type FileReceipt } from './transactions.js'
 import { paths, readJson, encodeJson, claimSignals, deliverMember, completeMember, type TaskMetadata } from './task-files.js'
 
 export interface FrameworkRoleBinding extends WorkIdentity {
@@ -24,6 +25,9 @@ export interface FrameworkRoleBinding extends WorkIdentity {
   collaborationId?: string
   direct?: { inputPath: string; signalPath: string; resultPath?: string; recipientSignal?: string }
 }
+export type HelperRestoreInput = { facts: string; hypotheses: string; actionsTaken: string; continuation: string } &
+  ({ target: WorkIdentity; wakeId?: never } | { wakeId: string; target?: never })
+
 export interface FrameworkRoleServices {
   files: FilesStore
   transact(id: string, request: unknown, options: { expectedRevision?: string; snapshot?: FilesSnapshot },
@@ -42,11 +46,11 @@ export interface FrameworkRoleServices {
   artifacts?: { preserve(agent: Agent, input: { sourcePath: string; destinationPath: string; taskId: string }, binding: FrameworkRoleBinding,
     commandId: string, options: { expectedRevision?: string; snapshot?: FilesSnapshot; signal?: AbortSignal }): Promise<unknown> }
   capacity?(agent: Agent, input: { taskId: string; paths: string[] }): Promise<unknown>
+  observation?: { reset(binding: FrameworkRoleBinding, input: { probeId: string }, commandId: string, signal: AbortSignal): Promise<unknown> }
   helper?: {
     request(binding: FrameworkRoleBinding, facts: string, commandId: string): Promise<unknown>
-    restore(binding: FrameworkRoleBinding, input: { target: WorkIdentity; facts: string; hypotheses: string; actionsTaken: string; continuation: string }, commandId: string): Promise<unknown>
+    restore(binding: FrameworkRoleBinding, input: HelperRestoreInput, commandId: string): Promise<unknown>
     restoreHost(binding: FrameworkRoleBinding, input: { facts: string; hypotheses: string; actionsTaken: string; continuation: string }, commandId: string): Promise<unknown>
-    healthyCycle(input: { workId?: string; member?: MemberIdentity; continuouslyNormal: boolean; noNewRecoveryAnomaly: boolean }, commandId: string): Promise<unknown>
   }
 }
 export function workerPaths(taskId: string, member: string, childId: string) {
@@ -111,6 +115,11 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
         return result === undefined ? null : JSON.parse(JSON.stringify(result))
       } })
   }
+  // Only storage-reading tools open this short authority scope. Native/control
+  // tools never acquire Git credentials merely to reset or request recovery.
+  const registerRead = <T extends z.ZodType>(name: string, description: string, schema: T,
+    execute: (input: z.infer<T>, exec: ToolRunContext) => Promise<unknown>) =>
+    register(name, description, schema, (input, exec) => withReadOperation(files, () => execute(input, exec)))
   const view = (id: string): View => { const value = views.get(id); if (!value) throw new Error('Snapshot is released; open and read a current snapshot.'); return value }
   const taskId = (value: View): string => {
     const id = binding.taskId ?? value.taskId
@@ -194,7 +203,7 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
     if (!links?.links.some(link => link.kind === 'file' ? path === link.path : path.startsWith(link.path))) throw new Error('Read original Recorder material through this Task’s Cache links.')
   }
 
-  register('dss_snapshot', 'Open one fixed storage revision for business reads and conditional writes. Release it after use.', z.object({ taskId: z.string().optional() }), async input => {
+  registerRead('dss_snapshot', 'Open one fixed storage revision for business reads and conditional writes. Release it after use.', z.object({ taskId: z.string().optional() }), async input => {
     if (binding.taskId && input.taskId && input.taskId !== binding.taskId) throw new Error('This execution is bound to another task.')
     const snapshot = await files.snapshot(), selected = input.taskId ?? binding.taskId
     const id = Buffer.from(JSON.stringify({ revision: snapshot.revision, taskId: selected, nonce: randomUUID() } satisfies ViewReference)).toString('base64url')
@@ -204,7 +213,7 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
     catch (error) { await close(id); throw error }
   })
   register('dss_snapshot_release', 'Release a fixed view when no longer needed.', z.object(snapshotInput), async input => { await close(input.snapshotId); return { released: true } })
-  register('dss_read', 'Read exact logical file content at the opened revision.', z.object({ ...snapshotInput, path: z.string() }), async input => {
+  registerRead('dss_read', 'Read exact logical file content at the opened revision.', z.object({ ...snapshotInput, path: z.string() }), async input => {
     const current = view(input.snapshotId); await recorderReadable(current, input.path)
     const bytes = await files.readBytes(current.snapshot, input.path)
     if (bytes === undefined) return { path: input.path, revision: current.snapshot.revision, exists: false }
@@ -215,7 +224,7 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
     return { path: input.path, revision: current.snapshot.revision, exists: true, binary: true, bytes: bytes.byteLength,
       sha256: createHash('sha256').update(bytes).digest('hex'), hint: 'Use the artifact download interface for the original bytes.' }
   })
-  register('dss_list', 'List direct file metadata at one directory, without loading business bodies.', z.object({ ...snapshotInput, directory: z.string() }), async input => {
+  registerRead('dss_list', 'List direct file metadata at one directory, without loading business bodies.', z.object({ ...snapshotInput, directory: z.string() }), async input => {
     const current = view(input.snapshotId); await recorderReadable(current, input.directory)
     return { revision: current.snapshot.revision, files: await files.listDirectory(current.snapshot, input.directory) }
   })
@@ -343,7 +352,7 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
         exec.concludeTurn(); return receipt
       })
   }
-  if (binding.role === 'Worker' && !binding.direct) register('dss_worker_deliver', 'Atomically append long Reply/report references, notify the Planner, and clear current-round notes to zero bytes only on committed delivery.',
+  if (binding.role === 'Worker' && !binding.direct) register('dss_worker_deliver', 'Atomically append long Reply/report references, notify the Planner, and clear the current-round Worker Note (notes.md) to zero bytes only on committed delivery.',
     z.object({ ...snapshotInput, reply: z.string(), records: outputFiles.default([]), handoff: z.string().optional() }), async (input, exec) => {
       const receipt = await mutate(input.snapshotId, input, exec, async (_snapshot, current) => {
         await requireDrained(current)
@@ -421,10 +430,11 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
           if (selected.owner !== binding.owner || selected.status !== 'complete') throw new Error('Recorder finalization belongs to the principal’s globally complete task.')
           const index = await prepareFrameworkSkillIndex(files, current.snapshot, outputs)
           skillIssues = index.issues
-          const retention: RetentionManifest = { outputs: outputs.map(output => output.path), retainedPaths: input.retainedPaths,
+          const originalRetention: RetentionManifest = { outputs: outputs.map(output => output.path), retainedPaths: input.retainedPaths,
             recorderCommand: command(exec), inputs: await captureCleanupInputs(files, current.snapshot, selected),
             verifiedReferences: await captureCleanupReferences(files, current.snapshot, [...outputs.map(output => output.path), ...input.retainedPaths], outputs) }
-          return [...outputs, ...index.changes, { path: paths.archive(id) + '/retention.json', content: encodeJson(retention) },
+          const archival = await prepareRecorderRetention(files, current.snapshot, selected, originalRetention, outputs)
+          return [...archival.changes, ...index.changes, { path: paths.archive(id) + '/retention.json', content: encodeJson(archival.retention) },
             { path: paths.state(binding.owner, id) + '/Cleaner', content: null }]
         })
         services.skillsChanged?.()
@@ -436,11 +446,12 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
                 const saved = await files.readBytes(snapshot, output.path)
                 if (saved === undefined || !Buffer.from(saved).equals(Buffer.from(output.content, 'utf8'))) throw new Error('Saved archive read-back differs: ' + output.path)
               }
-              for (const path of input.retainedPaths) if (await files.readBytes(snapshot, filePath(path)) === undefined) throw new Error('Retained reference is not accessible: ' + path)
               const retention = await readJson<RetentionManifest>(files, snapshot, paths.archive(id) + '/retention.json')
               if (retention?.recorderCommand !== command(exec)) throw new Error('Recorder retention belongs to a different save operation; reread the current archive.')
-              const referenceHashes = await captureCleanupReferences(files, snapshot, [...outputs.map(output => output.path), ...input.retainedPaths])
-              for (const path of [...outputs.map(output => output.path), ...input.retainedPaths]) {
+              const references = [...retention.outputs, ...retention.retainedPaths]
+              for (const path of references) if (await files.readBytes(snapshot, path) === undefined) throw new Error('Retained reference is not accessible: ' + path)
+              const referenceHashes = await captureCleanupReferences(files, snapshot, references)
+              for (const path of references) {
                 if (!retention.verifiedReferences?.[path] || referenceHashes[path] !== retention.verifiedReferences[path]) throw new Error('Saved retained reference differs from its evaluated bytes: ' + path)
               }
               return [{ path: paths.state(binding.owner, id) + '/Cleaner', content: '' }]
@@ -460,21 +471,30 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
           command(exec), { expectedRevision: current.snapshot.revision, signal: exec.signal, ...(held ? { snapshot: held.snapshot } : {}) })
       } finally { await close(input.snapshotId) }
     })
+  if (binding.role !== 'Foreground' && services.observation) register('dss_reset_observation',
+    'After actually receiving a native Host probe or warning, reset only this execution’s inactivity cycle using that input’s probeId. This does not consume recovery or send a text reply.',
+    z.object({ probeId: z.string() }),
+    (input, exec) => services.observation!.reset(binding, input, command(exec), exec.signal))
   if (services.helper) {
     register('dss_help', 'Report an actual fault and ask Helper to inspect preserved facts; this is not an automatic restart.', z.object({ facts: z.string() }),
       (input, exec) => services.helper!.request(binding, input.facts, command(exec)))
     if (binding.role === 'Helper') {
       const identity = z.object({ workId: z.string(), executionId: z.string(), role: z.enum(['Foreground', 'Organizer', 'Planner', 'Worker', 'Recorder', 'Helper']),
         taskId: z.string().optional(), member: z.string().optional(), workerId: z.string().optional() })
-      register('dss_restore', 'Request restoration after preserving business records. Native stop confirmation and authorized target ownership remain Host responsibilities.',
-        z.object({ target: identity, facts: z.string(), hypotheses: z.string(), actionsTaken: z.string(), continuation: z.string() }),
-        (input, exec) => services.helper!.restore(binding, input, command(exec)))
+      const restoreFacts = { facts: z.string(), hypotheses: z.string(), actionsTaken: z.string(), continuation: z.string() }
+      register('dss_restore', 'Request restoration of an exact execution target or a real pending wake after preserving business records. Supply exactly one selector; native admission and stop confirmation remain Host responsibilities.',
+        z.object({ ...restoreFacts, target: identity.optional(), wakeId: z.string().min(1).optional() })
+          .refine(input => (input.target !== undefined) !== (input.wakeId !== undefined), 'Supply exactly one selector: target or wakeId.'),
+        (input, exec) => {
+          const { target, wakeId, ...facts } = input
+          if (target !== undefined) return services.helper!.restore(binding, { ...facts, target }, command(exec))
+          if (wakeId !== undefined) return services.helper!.restore(binding, { ...facts, wakeId }, command(exec))
+          throw new Error('Restoration requires an execution target or a pending wake.')
+        })
       register('dss_restore_host', 'Request overall restoration after preserving facts: restore Host scheduling/error state, scan Task/member eligibility and notify the relevant managers. This does not stop all Agents.',
         z.object({ facts: z.string(), hypotheses: z.string(), actionsTaken: z.string(), continuation: z.string() }),
         (input, exec) => services.helper!.restoreHost(binding, input, command(exec)))
-      register('dss_healthy_cycle', 'Record a full-cycle health assessment; the Host checks the existing observation stage before any reset.',
-        z.object({ workId: z.string().optional(), member: z.object({ taskId: z.string(), member: z.string() }).optional(), continuouslyNormal: z.boolean(), noNewRecoveryAnomaly: z.boolean() }),
-        (input, exec) => services.helper!.healthyCycle(input, command(exec)))
+
     }
   }
 }

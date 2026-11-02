@@ -29,5 +29,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     ctx.provide('deepseekServant', { service });
     const closeTransport = installFrameworkTransport(ctx, service);
     ctx.effect(() => () => disposeResources([closeTransport, () => service.dispose(), () => storage.close()]), 'dss.framework');
-    await service.start();
+    // Registration readiness is not completion of an owned repository migration.
+    // The service retains, reports and drains its per-mode startup work.
+    await service.initialize();
 }

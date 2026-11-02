@@ -16,7 +16,8 @@ const services = {
   onError: (error: unknown) => { throw error },
   conversation: { foregroundRoot: 'assistants/collaborations/local/schema', read: unavailable, send: unavailable, claim: unavailable },
   artifacts: { preserve: unavailable }, capacity: unavailable,
-  helper: { request: unavailable, restore: unavailable, restoreHost: unavailable, healthyCycle: unavailable },
+  observation: { reset: unavailable },
+  helper: { request: unavailable, restore: unavailable, restoreHost: unavailable },
 } as unknown as FrameworkRoleServices
 const roles = ['Foreground', 'Organizer', 'Planner', 'Worker', 'Recorder', 'Helper'] as const
 
@@ -36,9 +37,16 @@ for (const role of roles) test(`official ToolRuntime registers and projects ${ro
       Foreground: ['dss_conversation_read', 'dss_conversation_send', 'dss_conversation_claim', 'dss_submit_direct'],
       Organizer: ['dss_member_dispatch', 'dss_complete'], Planner: ['dss_worker_assign', 'dss_complete'],
       Worker: ['dss_worker_deliver'], Recorder: ['dss_recorder_capacity', 'dss_recorder_save'],
-      Helper: ['dss_restore', 'dss_restore_host', 'dss_healthy_cycle'],
+      Helper: ['dss_restore', 'dss_restore_host'],
     }[role]
     for (const name of expected) assert.ok(schemas.some(schema => schema.name === name), 'role branch is actually registered: ' + name)
+    const reset = schemas.find(schema => schema.name === 'dss_reset_observation')
+    assert.equal(!!reset, role !== 'Foreground')
+    if (reset) {
+      assert.deepEqual(Object.keys(reset.parameters.properties ?? {}), ['probeId'])
+      assert.deepEqual(reset.parameters.required, ['probeId'])
+    }
+    assert.ok(!schemas.some(schema => ['dss_healthy_cycle', 'dss_inquire', 'dss_inquiry_reply'].includes(schema.name)))
     assert.ok(schemas.some(schema => schema.name === 'dss_preserve_artifact'), 'optional artifact service is covered')
     assert.deepEqual(ctx.get('tools')!.schemas(), [], 'Agent tools do not leak globally')
     assert.deepEqual(ctx.get('tools')!.schemas({}), [], 'Agent tools do not leak to another Agent')

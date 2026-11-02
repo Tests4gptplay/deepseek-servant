@@ -68,3 +68,38 @@ test('mode and shared view subscriptions have independent ownership without stre
   f.reset(); assert.equal(f.streams.filter(s => !s.closes).length, 1)
   stopMode(); assert(f.streams.every(s => s.closes === 1))
 })
+
+test('availability follows all owned carriers, errors invalidate without notifications, and old generations cannot restore it', () => {
+  Object.defineProperty(globalThis, 'document', { value: { baseURI: 'http://localhost/' }, configurable: true })
+  const streams: Stream[] = [], states: boolean[] = []; let reset = () => {}, reads = 0
+  const stop = subscribeEventStreams(['one', 'two'], () => reads++, listener => { reset = listener; return () => {} }, url => {
+    const stream = new Stream(url); streams.push(stream); return stream as unknown as EventSource
+  }, state => states.push(state))
+  assert.equal(states.at(-1), false)
+  streams[0].emit('open'); assert.equal(states.at(-1), false)
+  streams[1].emit('open'); assert.equal(states.at(-1), true)
+  const before = reads; streams[0].emit('error')
+  assert.equal(states.at(-1), false); assert.equal(reads, before)
+  reset(); assert.equal(states.at(-1), false)
+  streams[0].emit('open'); streams[1].emit('open'); assert.equal(states.at(-1), false)
+  streams[2].emit('open'); streams[3].emit('open'); assert.equal(states.at(-1), true)
+  stop(); assert.equal(states.at(-1), false)
+  streams[2].emit('open'); assert.equal(states.at(-1), false)
+})
+
+test('official state and SSE availability combine without either independently reviving the display', () => {
+  Object.defineProperty(globalThis, 'document', { value: { baseURI: 'http://localhost/' }, configurable: true })
+  let state: 'connected' | 'disconnected' | 'connecting' = 'connected', stateListener = () => {}, reads = 0
+  const states: boolean[] = [], stream = new Stream(new URL('http://localhost/events'))
+  const stop = subscribeEventStreams(['events'], () => reads++, () => () => {}, () => stream as unknown as EventSource,
+    value => states.push(value), { getSnapshot: () => state, subscribe: listener => { stateListener = listener; return () => { stateListener = () => {} } } })
+  stream.emit('open'); assert.equal(states.at(-1), true)
+  const before = reads
+  state = 'disconnected'; stateListener(); assert.equal(states.at(-1), false); assert.equal(reads, before)
+  stream.emit('open'); assert.equal(states.at(-1), false, 'SSE open cannot override official disconnect')
+  state = 'connected'; stateListener(); assert.equal(states.at(-1), true)
+  stream.emit('error'); assert.equal(states.at(-1), false)
+  state = 'connecting'; stateListener(); state = 'connected'; stateListener()
+  assert.equal(states.at(-1), false, 'official connected cannot override a lost SSE carrier')
+  stop()
+})

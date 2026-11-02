@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { legacyDeclaredArtifacts } from './legacy-artifacts.js'
 import type { StoragePort } from '../contracts/ports.js'
 import type { SkillRecord, ProjectFact, Preference } from '../contracts/knowledge.js'
 import type { Assistant } from '../contracts/assistant.js'
@@ -16,7 +17,7 @@ import { prepareFrameworkSkillIndex, frameworkSkillIndexPath } from './skills.js
 import { FrameworkConversation, type ConversationScope } from './conversation.js'
 import { initializeTask, paths, encodeJson, type TaskMetadata } from './task-files.js'
 import { workerPaths } from './role-tools.js'
-import { filePath, withSnapshot, type FilesStore, type FilesSnapshot, type FileChange } from './transactions.js'
+import { GitFiles, filePath, withSnapshot, type FilesStore, type FilesSnapshot, type FileChange } from './transactions.js'
 
 type Continuation = 'running' | 'wait-result' | 'wait-user' | 'paused' | 'cancelled' | 'complete' | 'unresolved'
 export interface LegacyNativeExecution {
@@ -78,7 +79,7 @@ export interface MigrationOptions {
   members: Record<string, string>
   /** Already captured through an authorized filesystem/artifact capability.
    * The migration module never opens an old absolute path itself. */
-  artifacts?: Array<{ sourcePath: string; bytes: Uint8Array }>
+  artifacts?: Array<{ taskId?: string; artifactId?: string; sourcePath: string; bytes: Uint8Array }>
   nativeOwnershipReconciled?: Record<string, Array<{ executionId: string; generation: number; settled: boolean }>>
   conversations?: Array<{ scope: ConversationScope; assistantId?: string; participantId?: string; entryPaths?: string[];
     foregroundIdentity?: { participantId: string; instanceId: string } }>
@@ -125,7 +126,17 @@ function localContinuation(task: Task): Continuation {
 export function legacyLocalProfile(capture: LegacyCapture, assistantId = 'default'): Pick<Assistant, 'settings' | 'workspace' | 'sessionId' | 'priorSessionIds' | 'sessionWorkspaces'> | undefined {
   const record = capture.records.find(record => record.key === 'assistant/' + assistantId)
   if (!record) return undefined
-  const assistant = JSON.parse(decode(record.bytes)) as Assistant
+  return legacyProfileFields(JSON.parse(decode(record.bytes)), assistantId)
+}
+
+/** Startup configuration lookup does not enumerate or capture historical bodies. */
+export async function readLegacyLocalProfile(storage: Pick<StoragePort, 'get'>, assistantId = 'default'): Promise<ReturnType<typeof legacyLocalProfile>> {
+  const assistant = await storage.get<Assistant>('assistant/' + assistantId)
+  return assistant === undefined ? undefined : legacyProfileFields(structuredClone(assistant), assistantId)
+}
+
+function legacyProfileFields(value: unknown, assistantId: string): ReturnType<typeof legacyLocalProfile> {
+  const assistant = value as Assistant
   if (assistant.schemaVersion !== 1 || assistant.id !== assistantId || !assistant.settings || !assistant.workspace) throw new Error('Invalid legacy assistant profile.')
   return { settings: assistant.settings, workspace: assistant.workspace, sessionId: assistant.sessionId,
     priorSessionIds: assistant.priorSessionIds ?? [], sessionWorkspaces: assistant.sessionWorkspaces ?? {} }
@@ -468,6 +479,11 @@ export async function prepareLegacyMigration(source: LegacyCapture, files: Files
   const ambiguousArtifactReferences = new Set<string>(), legacySkillBodyPaths = new Set<string>()
   const manifest: MigrationManifest = { version: 1, id: options.id, baseline: source.baseline, source: { mode: source.mode, revision: source.revision }, owner: options.owner, members: { ...options.members },
     records: [], references: {}, referenceHashes: {}, tasks: [], issues: [...source.issues], pendingAdapters: [], messages: [] }
+  const declared = new Map<string, ReturnType<typeof legacyDeclaredArtifacts>>()
+  if (source.mode === 'local') for (const task of source.tasks) {
+    try { declared.set(task.id, legacyDeclaredArtifacts(task.original as Task)) }
+    catch (error) { manifest.issues.push(error instanceof Error ? error.message : String(error)); manifest.pendingAdapters.push('artifact-declarations:' + task.id) }
+  }
   if (source.records.some(record => /^(conversations?\/|conversation-index\/|conversation:)/.test(record.key))) manifest.pendingAdapters.push('conversation-index')
   if (source.records.some(record => /^(assistants?\/|assistant:|work-planning\/)/.test(record.key))) manifest.pendingAdapters.push('assistant-and-foreground-memory')
   if (source.records.some(record => /^(skills?\/|knowledge\/|settings\/|setting:)/.test(record.key))) manifest.pendingAdapters.push('knowledge-and-settings')
@@ -640,8 +656,11 @@ export async function prepareLegacyMigration(source: LegacyCapture, files: Files
     if (['running', 'wait-result'].includes(task.continuation) && task.participants.length && task.participants.every(participant => participant.continuation === 'unresolved')) task.continuation = 'unresolved'
     const id = legacyMigratedTaskId(options.id, task.id), recordPath = paths.archive(id) + '/legacy/task.json'
     add({ path: recordPath, content: encodeJson(task.original) })
-    if (source.mode === 'local') for (const artifact of Object.values((task.original as Task).reports).flatMap(report => report.artifacts)) {
-      const captured = options.artifacts?.find(item => item.sourcePath === artifact.path)
+    if (source.mode === 'local') for (const artifact of declared.get(task.id) ?? []) {
+      const captured = options.artifacts?.find(item => item.taskId === task.id && item.sourcePath === artifact.path && (item.artifactId === artifact.id
+        || item.artifactId === undefined && (declared.get(task.id) ?? []).filter(ref => ref.path === artifact.path).length === 1))
+        ?? options.artifacts?.find(item => item.taskId === undefined && item.sourcePath === artifact.path
+          && [...declared.values()].flat().filter(ref => ref.path === artifact.path).length === 1)
       if (!captured) { manifest.pendingAdapters.push('artifact-bytes:' + task.id + ':' + artifact.id); continue }
       const bytes = captured.bytes.slice(), digest = hash(bytes)
       if (artifact.sha256 && artifact.sha256 !== digest) throw new Error('Legacy artifact bytes differ from the recorded hash: ' + artifact.id)
@@ -735,8 +754,12 @@ export async function prepareLegacyMigration(source: LegacyCapture, files: Files
 export async function applyLegacyMigration(files: FilesStore, transactions: FrameworkTransactions, plan: LegacyMigrationPlan): Promise<{ manifest: MigrationManifest; verified: true; complete: boolean }> {
   const changes = plan.changes.map(change => change.bytes === undefined ? { ...change } : { path: change.path, bytes: change.bytes.slice() })
   const evidence = changes.map(change => ({ path: change.path, sha256: hash(change.bytes ?? utf8(change.content!)) }))
-  await transactions.run('legacy-migration:' + plan.manifest.id, { manifest: structuredClone(plan.manifest), evidence }, { expectedRevision: plan.expectedRevision }, async () => changes)
+  const receipt = await transactions.run('legacy-migration:' + plan.manifest.id, { manifest: structuredClone(plan.manifest), evidence }, { expectedRevision: plan.expectedRevision }, async () => changes)
   await withSnapshot(files, async snapshot => {
+    // Complete same-authority byte verification may be handed off by a resumed
+    // Git operation. Different HEAD/scope, old receipts or partial results still
+    // follow the original full readback below. The fresh snapshot is mandatory.
+    if (files instanceof GitFiles && files.matchesVerifiedWrites(snapshot, receipt, evidence)) return
     for (const expected of evidence) {
       const actual = await files.readBytes(snapshot, expected.path)
       if (actual === undefined || hash(actual) !== expected.sha256) throw new Error('Migration read-back differs; retain the original source and same operation: ' + expected.path)

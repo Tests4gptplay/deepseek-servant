@@ -6,11 +6,27 @@
   <img src="https://raw.githubusercontent.com/Tests4gptplay/deepseek-servant/v0.3.0/docs/images/deepseek-servant-maids-duo.webp" alt="DeepSeek Servant 短裙与长裙女仆角色设计">
 </p>
 
-## 安装与升级
+## 安装测试版 RC2
 
-当前分支为 **0.5.0 候选**。收到候选 `.tgz` 后，在 DSH 的 **插件 → 添加插件 → 包名或地址** 填写运行 DSH 的电脑上该文件的完整路径，核对版本并启用。
+在 DSH 的 **插件 → 添加插件 → 包名或地址** 输入固定来源：
 
-公开发行包见 [Releases](https://github.com/Tests4gptplay/deepseek-servant/releases)。历史已发布版本为 **0.4.1**；当前候选的发布状态及内容见 [0.5.0 说明](docs/releases/0.5.0.md)。Desktop、Web 和升级步骤见[安装指南](docs/INSTALLATION.md)。
+```text
+github:Tests4gptplay/deepseek-servant#v0.5.0-rc.2
+```
+
+如同版 [Release](https://github.com/Tests4gptplay/deepseek-servant/releases) 列有 `.tgz` 资产，也可将该资产的下载地址填入同一个输入框，或下载后填写运行 DSH 的电脑上文件的完整绝对路径，无需解压。安装后启用插件。
+
+包内版本显示 **0.5.0**，本测试候选由固定标签 **v0.5.0-rc.2** 标识。RC1 同样显示 0.5.0，升级时应核对安装来源变为 RC2。
+
+**升级：** 先停止 DSS 任务并保留原数据。填写上面的 RC2 来源；若宿主提示已安装，先在插件管理中卸载该插件条目，再安装 RC2。保留 DSH 数据目录、Local 库及任务工作区，不执行记录清理或手工删除数据。按宿主提示重启；Desktop 需要时完整退出托盘进程再打开。升级后检查原设置、对话、任务记录与成果可读取。
+
+**Web：** 在运行服务的环境停止对应 profile 后执行，再重新启动该 profile：
+
+```sh
+dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.5.0-rc.2'
+```
+
+使用 Release 资产时，将命令中的来源换成对应 TGZ 下载地址。Desktop 与 Web 分别管理安装。启用后从侧栏打开 DeepSeek Servant，详见[使用说明](docs/USAGE.md)。模型提供者与工具权限由 DSH 管理。
 
 ## 统一框架能力
 

@@ -252,7 +252,7 @@ test('restored search excerpts and explicit character pages match the fixed base
   type Original = { append(a: string, s: string, value: { id: string; role: 'user'; text: string }): Promise<{ ref: string }>;
     search(a: string, query: string, cursor?: number, limit?: number): Promise<{ matches: Array<{ excerpt: string }> }>;
     read(a: string, ref: string, cursor: number, limit: number): Promise<{ text: string; nextCursor?: number }> }
-  const module = await loadBaselineModule<{ ConversationStore: new (storage: MemoryStorage, zone: string) => Original }>('src/application/conversation-store.ts')
+  const module = await loadBaselineModule<{ ConversationStore: new (storage: InstanceType<typeof MemoryStorage>, zone: string) => Original }>('src/application/conversation-store.ts')
   const old = new module.ConversationStore(new MemoryStorage(), 'UTC'), { service } = await fixture(t)
   const original = '历史'.repeat(40_000) + 'ExactMatch' + '🚀结尾'.repeat(20_000)
   const prior = await old.append('assistant', 'session', { id: 'same-original', role: 'user', text: original })
@@ -304,4 +304,16 @@ test('Git calendar is an inclusive selected-day starting cursor, not a permanent
   assert.deepEqual(latest.messages.map(m => m.id), ['3-3']); assert.equal(latest.moreAfter, undefined)
   assert.deepEqual((await service.page(2, undefined, { date: '2026-10-04' })).messages.map(m => m.id), ['3-2', '3-3'])
   assert.deepEqual((await service.page(2, undefined, { date: '2026-09-30' })).messages, [])
+})
+
+test('recent exchanges reuse already checked human headers within their fixed snapshot', async t => {
+  const { service, files } = await fixture(t)
+  await service.send('input', message('human'))
+  await service.send('reply', message('reply', { role: 'assistant', recipient: 'human', replyTo: 'human', text: 'Exact reply' }))
+  const read = files.read.bind(files), headers: string[] = []
+  files.read = async (snapshot, path) => { if (path.endsWith('/entry.json')) headers.push(path); return read(snapshot, path) }
+  const exchanges = await service.recentExchanges()
+  assert.equal(exchanges[0].human.text, 'Original 😀\ntext')
+  assert.equal(exchanges[0].assistant.text, 'Exact reply')
+  assert.equal(headers.length, new Set(headers).size, 'same immutable header is not read twice')
 })

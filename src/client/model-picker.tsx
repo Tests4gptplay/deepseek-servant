@@ -21,7 +21,7 @@ export function ModelPicker({ value, models, onChange, onRefresh, disabled, labe
   const effort = effective?.reasoningEffort ?? selectedModel?.reasoning?.defaultEffort
   const effortName = selectedModel?.reasoning?.efforts.find(choice => choice.id === effort)?.name ?? effort
   const modelName = selectedModel?.name ?? effective?.model
-  const caption = [auto ? 'Auto' : undefined, modelName, effortName].filter(Boolean).join(' · ')
+  const caption = [auto ? (autoLabel ?? 'Auto') : undefined, modelName, effortName].filter(Boolean).join(' · ')
   const routes = new Map<string, ModelRoute>()
   const items: MenuEntry[] = []
   if (pane === 'root') {

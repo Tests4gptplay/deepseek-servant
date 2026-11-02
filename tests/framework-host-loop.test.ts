@@ -532,3 +532,170 @@ test('a reused source filename with a new explicit Task ID initializes the new T
   assert.ok(f.wakes.some(wake => wake.taskId === fresh && wake.role === 'Planner'))
   assert.equal(f.wakes.some(wake => wake.taskId === old), false)
 }))
+
+function phaseBarrier() {
+  let release!: () => void, enter!: () => void
+  return { waiting: new Promise<void>(resolve => { release = resolve }), entered: new Promise<void>(resolve => { enter = resolve }),
+    release: () => release(), enter: () => enter() }
+}
+const driverSettled = () => new Promise<void>(resolve => setImmediate(resolve))
+test('the existing timer persists local observation during one held remote flight without confirming startup', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  await fixture(async f => {
+    const hold = phaseBarrier(); let local = 0, remote = 0, started = false
+    f.hooks.observeLocal = async () => { local++ }
+    f.hooks.observe = async () => { remote++; hold.enter(); await hold.waiting }
+    const starting = f.loop.start().then(() => { started = true })
+    await hold.entered
+    for (let n = 0; n < 3; n++) { t.mock.timers.tick(1000); await driverSettled() }
+    assert.equal(local, 4); assert.equal(remote, 1); assert.equal(started, false)
+    let explicitReturned = false
+    const explicit = f.loop.poll().then(() => { explicitReturned = true })
+    await driverSettled(); assert.equal(local, 5); assert.equal(remote, 1); assert.equal(explicitReturned, false)
+    hold.release(); await starting; await explicit
+    assert.equal(started, true); assert.deepEqual(f.errors, [])
+    // No catch-up burst on settlement: only the next original timer starts work.
+    await driverSettled(); assert.equal(remote, 1)
+    t.mock.timers.tick(1000); await driverSettled(); assert.equal(remote, 2)
+  })
+})
+test('startup recovery barrier admits neither timer observation nor ordinary remote work', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  await fixture(async f => {
+    const hold = phaseBarrier(); let local = 0, remote = 0
+    f.hooks.startup = async () => { hold.enter(); await hold.waiting }
+    f.hooks.observeLocal = async () => { local++ }; f.hooks.observe = async () => { remote++ }
+    const starting = f.loop.start(); await hold.entered
+    t.mock.timers.tick(5000); await driverSettled(); assert.equal(local, 0); assert.equal(remote, 0)
+    hold.release(); await starting; assert.equal(local, 1); assert.equal(remote, 1)
+  })
+})
+test('stop drains both owned lanes and prevents late local completion admitting remote work', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  await fixture(async f => {
+    const remote = phaseBarrier(), local = phaseBarrier(); let localCalls = 0, remoteCalls = 0, stopped = false
+    f.hooks.observeLocal = async () => { if (++localCalls > 1) { local.enter(); await local.waiting } }
+    f.hooks.observe = async () => { remoteCalls++; remote.enter(); await remote.waiting }
+    const starting = f.loop.start(); await remote.entered
+    t.mock.timers.tick(1000); await local.entered
+    const stop = f.loop.stop().then(() => { stopped = true })
+    remote.release(); await starting; await driverSettled(); assert.equal(stopped, false)
+    local.release(); await stop
+    t.mock.timers.tick(5000); await driverSettled(); assert.equal(localCalls, 2); assert.equal(remoteCalls, 1)
+  })
+})
+test('local observation failure is reported without pretending it succeeded or blocking remote discovery', () => fixture(async f => {
+  const failure = new Error('local observation persistence failed'); let remote = 0
+  f.hooks.observeLocal = async () => { throw failure }; f.hooks.observe = async () => { remote++ }
+  await f.loop.poll(); assert.equal(remote, 1); assert.deepEqual(f.errors, [failure])
+}))
+test('explicit poll and stop retain the exact remote snapshot error, not a cancellation substitute', () => fixture(async f => {
+  const hold = phaseBarrier(), failure = new Error('independent remote failure')
+  const original = f.files.snapshot.bind(f.files)
+  f.files.snapshot = async () => { hold.enter(); await hold.waiting; throw failure }
+  const polling = f.loop.poll(); const rejected = assert.rejects(polling, e => e === failure)
+  await hold.entered; const stopped = f.loop.stop(); const stopRejected = assert.rejects(stopped, e => e === failure)
+  hold.release(); await rejected; await stopRejected; f.files.snapshot = original
+}))
+test('timer-owned remote failure is reported once and remains drain-owned through stop', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  await fixture(async f => {
+    await f.loop.start()
+    const hold = phaseBarrier(), failure = new Error('non-cancellation remote snapshot failure')
+    const original = f.files.snapshot.bind(f.files)
+    f.files.snapshot = async () => { hold.enter(); await hold.waiting; throw failure }
+    t.mock.timers.tick(1000); await hold.entered
+    const stopped = f.loop.stop(), rejected = assert.rejects(stopped, e => e === failure)
+    hold.release(); await rejected; await driverSettled()
+    assert.deepEqual(f.errors, [failure]); f.files.snapshot = original
+  })
+})
+test('stop before the admitted local microtask prevents a not-yet-started observation hook', () => fixture(async f => {
+  let local = 0, remote = 0
+  f.hooks.observeLocal = async () => { local++ }; f.hooks.observe = async () => { remote++ }
+  const poll = f.loop.poll(), stopping = f.loop.stop()
+  await Promise.all([poll, stopping]); assert.equal(local, 0); assert.equal(remote, 0)
+}))
+test('stop at synchronous remote admission drains the already owned observation', () => fixture(async f => {
+  const hold = phaseBarrier(); let stopped = false, settled = false, stop: Promise<void> | undefined
+  f.hooks.observe = async () => { stop = f.loop.stop().then(() => { stopped = true }); hold.enter(); await hold.waiting; settled = true }
+  const poll = f.loop.poll(); await hold.entered
+  try { await driverSettled(); assert.equal(settled, false); assert.equal(stopped, false, 'stop must retain the admitted remote operation') }
+  finally { hold.release(); await poll; await stop }
+}))
+
+test('new durable discovery admits in the same poll only after releasing its borrowed snapshot', () => fixture(async f => {
+  await put(f.files, 'state/Planner_A_Direct_immediate', '')
+  const snapshot = f.files.snapshot.bind(f.files); let released = false, admissions = 0
+  f.files.snapshot = async () => { const view = await snapshot(), release = view.release.bind(view); released = false
+    view.release = async () => { await release(); released = true }; return view }
+  const persisted = new Set<string>()
+  f.hooks.wake = async request => { if (persisted.has(request.id)) return false; persisted.add(request.id); f.wakes.push(request); return true }
+  f.hooks.admitDiscovered = async () => { assert.equal(released, true); assert.equal(f.wakes.length, 1); admissions++ }
+  await f.loop.poll()
+  assert.equal(admissions, 1, 'new durable wake does not wait for the next one-second tick')
+  await f.loop.poll()
+  assert.equal(admissions, 1, 'deduplicated discovery does not run an extra admission/body pass')
+}))
+
+test('discovery snapshot release crossing close never starts a new admission', () => fixture(async f => {
+  await put(f.files, 'state/Planner_A_Direct_closing', '')
+  const entered = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>()
+  const snapshot = f.files.snapshot.bind(f.files); let admissions = 0
+  f.files.snapshot = async () => { const view = await snapshot(), release = view.release.bind(view)
+    view.release = async () => { entered.resolve(); await gate.promise; await release() }; return view }
+  f.hooks.admitDiscovered = async () => { admissions++ }
+  const poll = f.loop.poll(); await entered.promise
+  const stopping = f.loop.stop(); gate.resolve(); await Promise.all([poll, stopping])
+  assert.equal(f.wakes.length, 1); assert.equal(admissions, 0)
+}))
+
+test('same-poll admission remains owned and stop drains its accepted callback', () => fixture(async f => {
+  await put(f.files, 'state/Planner_A_Direct_owned', '')
+  const entered = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>(); let stopped = false
+  f.hooks.admitDiscovered = async () => { entered.resolve(); await gate.promise }
+  const poll = f.loop.poll()
+  // The preceding test proves invocation separately; avoid waiting forever on the old implementation.
+  await Promise.race([entered.promise, poll])
+  assert.equal(f.wakes.length, 1)
+  const stopping = f.loop.stop().then(() => { stopped = true })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  try { assert.equal(stopped, false, 'stop must join admission already accepted by this poll') }
+  finally { gate.resolve(); await Promise.all([poll, stopping]) }
+}))
+
+test('failed snapshot release leaves durable discovery pending rather than admitting against a borrowed view', () => fixture(async f => {
+  await put(f.files, 'state/Planner_A_Direct_release_error', '')
+  const snapshot = f.files.snapshot.bind(f.files), failure = new Error('snapshot release failed'); let admissions = 0
+  f.files.snapshot = async () => { const view = await snapshot(), release = view.release.bind(view)
+    view.release = async () => { await release(); throw failure }; return view }
+  f.hooks.admitDiscovered = async () => { admissions++ }
+  await assert.rejects(f.loop.poll(), error => error === failure)
+  assert.equal(f.wakes.length, 1); assert.equal(admissions, 0)
+}))
+
+test('total completion batches new Foreground and Recorder receipts into one post-release admission', () => fixture(async f => {
+  const taskId = 'admission-complete-task'
+  await put(f.files, paths.task(taskId), encodeJson({ version: 1, taskId, route: 'O', sourcePath: 'tasks/source_O.md', owner: 'A', status: 'complete' }))
+  let admissions = 0
+  f.hooks.admitDiscovered = async () => { admissions++; assert.deepEqual(f.wakes.map(wake => wake.role), ['Foreground', 'Recorder']) }
+  await f.loop.poll(); assert.equal(admissions, 1)
+  await f.loop.poll(); assert.equal(admissions, 1, 'completion replay does not arrange another admission')
+}))
+
+test('uncertain discovery persistence does not claim a newly confirmed wake or suppress its error', () => fixture(async f => {
+  await put(f.files, 'state/Planner_A_Direct_uncertain', '')
+  const failure = new Error('Wake persistence outcome is unknown'); let admissions = 0
+  f.hooks.wake = async () => { throw failure }
+  f.hooks.admitDiscovered = async () => { admissions++ }
+  await assert.rejects(f.loop.poll(), error => error === failure)
+  assert.equal(admissions, 0)
+}))
+
+test('accepted post-discovery admission failure remains the original owned poll failure', () => fixture(async f => {
+  await put(f.files, 'state/Planner_A_Direct_failed_admission', '')
+  const failure = new Error('Native admission failed')
+  f.hooks.admitDiscovered = async () => { throw failure }
+  await assert.rejects(f.loop.poll(), error => error === failure)
+  assert.equal(f.wakes.length, 1, 'durable responsibility is preserved for ordinary recovery')
+}))

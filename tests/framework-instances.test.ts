@@ -644,3 +644,87 @@ test('confirmed old stopped pending is still followed by exactly one running pub
   const body = JSON.parse((await withSnapshot(f.files, current => f.files.read(current, registered.path)))!)
   assert.equal(body.sequence, 3); assert.equal(body.status, 'running')
 })
+
+test('publication borrows only its live preparation snapshot and reuses only verified own heartbeat version', async t => {
+  const f = await fixture(t); let now = 0
+  const instance = new InstanceRegistration(f.files, f.transactions, f.storage, f.config, () => now), first = await instance.register()
+  const snapshot = f.files.snapshot.bind(f.files), read = f.files.read.bind(f.files), run = f.transactions.run.bind(f.transactions)
+  const releases: number[] = []; let ownReads = 0, borrowed = 0
+  f.files.snapshot = async () => { const value = await snapshot(), release = value.release.bind(value), index = releases.push(0) - 1
+    value.release = async () => { releases[index]++; await release() }; return value }
+  f.files.read = async (current, path) => { if (path === first.path) ownReads++; return read(current, path) }
+  f.transactions.run = (async (...args) => { assert.ok(args[2].snapshot, 'new publication keeps its exact preparation snapshot alive'); borrowed++; return run(...args) }) as typeof run
+  now = 30_000; await instance.tick()
+  assert.equal(borrowed, 1)
+  assert.equal(ownReads, 1, 'only fresh post-write heartbeat readback; no reread of verified old own version')
+  assert.equal(releases.length, 2, 'preparation and fresh readback only')
+  assert.deepEqual(releases, [1, 1], 'each owned snapshot released exactly once')
+  const before = ownReads; await instance.observe(); assert.equal(ownReads, before, 'readback hands its real version to observer')
+})
+
+test('publication rechecks changed own body and advances from remote sequence, rejecting corrupt replacement', async t => {
+  const f = await fixture(t), instance = f.create(), first = await instance.register()
+  await withSnapshot(f.files, s => f.files.commit(s, [{ path: first.path, content: JSON.stringify({ sequence: 50, updatedAt: '1970-01-01T00:00:01Z', status: 'running' }) }], 'changed own version'))
+  f.time(30_000); await instance.tick()
+  assert.equal(JSON.parse((await withSnapshot(f.files, s => f.files.read(s, first.path)))!).sequence, 51)
+  await withSnapshot(f.files, s => f.files.commit(s, [{ path: first.path, content: '{invalid' }], 'corrupt own version'))
+  f.time(60_000); await assert.rejects(instance.tick())
+  assert.equal(await withSnapshot(f.files, s => f.files.read(s, first.path)), '{invalid', 'verified cache cannot hide new corruption')
+})
+
+test('uncertain publication never borrows a new preparation view on replay and releases failed preparation once', async t => {
+  const f = await fixture(t), instance = new InstanceRegistration(f.files, f.transactions, f.storage, f.config, () => 0), snapshot = f.files.snapshot.bind(f.files), run = f.transactions.run.bind(f.transactions)
+  const releases: number[] = []; let original: unknown, calls = 0
+  f.files.snapshot = async () => { const value = await snapshot(), release = value.release.bind(value), index = releases.push(0) - 1
+    value.release = async () => { releases[index]++; await release() }; return value }
+  f.transactions.run = (async (...args) => {
+    if (++calls === 1) { assert.ok(args[2].snapshot); original = structuredClone(args[1]); throw new FilesOutcomeUnknownError('synthetic-unknown') }
+    assert.equal(args[2].snapshot, undefined, 'existing pending uses durable transaction resolution, not a new borrowed snapshot')
+    assert.deepEqual(args[1], original); return run(...args)
+  }) as typeof run
+  await assert.rejects(instance.register(), { name: 'FilesOutcomeUnknownError' })
+  assert.deepEqual(releases, [1])
+  await instance.register()
+  assert.ok(releases.every(count => count === 1)); assert.equal(calls, 2)
+})
+
+test('verified own heartbeat publication does not download its unchanged body again', async t => {
+  const f = await fixture(t), instance = f.create(), first = await instance.register(), read = f.files.read.bind(f.files)
+  let ownReads = 0
+  f.files.read = async (snapshot, path) => { if (path === first.path) ownReads++; return read(snapshot, path) }
+  f.time(30_000); await instance.tick()
+  assert.equal(ownReads, 1, 'fresh readback remains required but the old verified version is reusable')
+})
+
+test('cancel after reserving heartbeat releases borrowed preparation once and keeps its exact pending payload', async t => {
+  const f = await fixture(t), owner = new AbortController(), set = f.storage.set.bind(f.storage), snapshot = f.files.snapshot.bind(f.files)
+  let releases = 0, commits = 0
+  f.files.snapshot = async () => { const value = await snapshot(), release = value.release.bind(value)
+    value.release = async () => { releases++; await release() }; return value }
+  const commit = f.files.commit.bind(f.files)
+  f.files.commit = async (...args) => { commits++; return commit(...args) }
+  f.storage.set = async (key, value) => { await set(key, value); if (key.startsWith('framework-instance/') && (value as any).pending) owner.abort() }
+  const instance = new InstanceRegistration(f.files, f.transactions, f.storage, f.config, () => 0)
+  await assert.rejects(instance.register(owner.signal), { name: 'AbortError' })
+  assert.equal(releases, 1); assert.equal(commits, 0)
+  const pending = (await f.storage.list<any>('framework-instance/'))[0]!.value.pending
+  assert.equal(pending.heartbeat.sequence, 1); assert.ok(pending.revision); assert.ok(pending.id)
+})
+
+for (const boundary of ['preparation', 'release'] as const) test(`non-publication ${boundary} conflict is propagated unchanged without clearing pending or retrying`, async t => {
+  const f = await fixture(t), original = new FilesConflictError('synthetic-non-publication'), run = f.transactions.run.bind(f.transactions)
+  let dispatches = 0
+  f.transactions.run = (async (...args) => { dispatches++; return run(...args) }) as typeof run
+  if (boundary === 'preparation') f.files.listDirectory = async () => { throw original }
+  else {
+    const snapshot = f.files.snapshot.bind(f.files)
+    f.files.snapshot = async () => { const value = await snapshot(), release = value.release.bind(value)
+      value.release = async () => { await release(); throw original }; return value }
+  }
+  const instance = new InstanceRegistration(f.files, f.transactions, f.storage, f.config, () => 0)
+  await assert.rejects(instance.register(), error => error === original)
+  assert.equal(dispatches, boundary === 'preparation' ? 0 : 1)
+  const saved = (await f.storage.list<any>('framework-instance/'))[0]?.value
+  if (boundary === 'release') assert.ok(saved.pending, 'successful commit with failed view release retains its pending receipt for resolution')
+  else assert.equal(saved, undefined)
+})

@@ -6,8 +6,10 @@ import { GitHubRepository, GitCommitOutcomeUnknownError, type GitCommitOperation
 export type FileChange = { path: string; content: string | null; bytes?: never } | { path: string; bytes: Uint8Array; content?: never }
 export interface FileEntry { path: string; version: string; bytes?: number; empty?: boolean }
 export interface FilesSnapshot { readonly revision: string; release(): Promise<void> }
-export interface FileReceipt { revision: string; replay: boolean; operationId?: string }
+export interface FileReceipt { revision: string; replay: boolean; operationId?: string; /** Live metadata-only verification; never persist this snapshot. */ verifiedWrites?: GitSnapshot }
 export interface FilesStore {
+  /** One owned callback; no credential/session survives its completion. */
+  withReadOperation?<T>(operation: () => Promise<T>): Promise<T>
   snapshot(): Promise<FilesSnapshot>
   read(snapshot: FilesSnapshot, path: string): Promise<string | undefined>
   readBytes(snapshot: FilesSnapshot, path: string): Promise<Uint8Array | undefined>
@@ -46,9 +48,15 @@ export function validateChanges(changes: readonly FileChange[]): void {
     paths.add(change.path)
   }
 }
+export function withReadOperation<T>(store: FilesStore, operation: () => Promise<T>): Promise<T> {
+  return store.withReadOperation ? store.withReadOperation(operation) : operation()
+}
 export async function withSnapshot<T>(store: FilesStore, operation: (snapshot: FilesSnapshot) => Promise<T>): Promise<T> {
-  const snapshot = await store.snapshot()
-  try { return await operation(snapshot) } finally { await snapshot.release() }
+  const owned = async () => {
+    const snapshot = await store.snapshot()
+    try { return await operation(snapshot) } finally { await snapshot.release() }
+  }
+  return withReadOperation(store, owned)
 }
 export interface GitOperationRecord {
   operation: GitCommitOperation
@@ -65,6 +73,7 @@ export interface GitOperationStore {
 export class GitFiles implements FilesStore {
   private readonly snapshots = new WeakMap<FilesSnapshot, GitSnapshot>()
   constructor(readonly repository: GitHubRepository, readonly operations: GitOperationStore) {}
+  withReadOperation<T>(operation: () => Promise<T>): Promise<T> { return this.repository.withReadOperation(operation) }
   private wrap(native: GitSnapshot): FilesSnapshot {
     const snapshot: FilesSnapshot = { revision: native.head, release: async () => { this.snapshots.delete(snapshot) } }
     this.snapshots.set(snapshot, native)
@@ -121,6 +130,9 @@ export class GitFiles implements FilesStore {
     try {
       const result = await this.repository.commitPrepared(native, changes, message, operation)
       receipt = { revision: result.commit, replay: result.replay, operationId: operation.id }
+      // Internal handoff only: generic role/API serializers must not expose a
+      // live repository snapshot as a model or client business field.
+      if (result.verifiedWrites) Object.defineProperty(receipt, 'verifiedWrites', { value: result.verifiedWrites })
     } catch (error) {
       if (error instanceof GitConflictError) throw new FilesConflictError(operation.expectedHead, { cause: error })
       if (error instanceof GitCommitOutcomeUnknownError) throw new FilesOutcomeUnknownError(operation.id, { cause: error })
@@ -140,12 +152,19 @@ export class GitFiles implements FilesStore {
     const remote = changes.map(change => ({ ...change, path: 'dss-coop/' + change.path }))
     return this.dispatch(native, remote, message, record.operation)
   }
+  matchesVerifiedWrites(snapshot: FilesSnapshot, receipt: FileReceipt,
+    expected: readonly { path: string; sha256: string | null }[]): boolean {
+    return this.repository.matchesVerifiedWrites(this.native(snapshot), receipt.verifiedWrites,
+      expected.map(write => ({ ...write, path: 'dss-coop/' + filePath(write.path) })))
+  }
   /** Check a persisted uncertain operation before deciding whether to retry or re-evaluate. */
   async resolve(id: string): Promise<GitCommitResolution> {
     const record = await this.operations.get(id)
     if (!record) throw new Error('No persisted operation: ' + id)
     const resolution = await this.repository.resolveCommit(record.operation)
-    await this.operations.save({ operation: record.operation, resolution })
+    const persisted = resolution.status === 'confirmed'
+      ? { status: resolution.status, commit: resolution.commit, head: resolution.head } : resolution
+    await this.operations.save({ operation: record.operation, resolution: persisted })
     return resolution
   }
 }

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import type { Context } from '@deepseek-ai/cordis'
+import { Context } from '@deepseek-ai/cordis'
 import type { DshAgentGateway } from '../src/adapters/dsh/agents.js'
 import type { OwnedDshAgent } from '../src/adapters/dsh/host-types.js'
 import type { ExecutionObservations, ScheduledObservation } from '../src/framework/execution-observation.js'
@@ -8,7 +8,7 @@ import { NativeExecutions, pendingNativeStopJobs, type NativeStopEvidenceHooks, 
 import type { WorkIdentity } from '../src/framework/recovery.js'
 
 // Adapter boundary tests: the fake event source is not evidence of real Host quiescence.
-function fixture(job = false, evidence?: NativeStopEvidenceHooks) {
+function fixture(job = false, evidence?: NativeStopEvidenceHooks, host?: Context) {
   const listeners = new Set<(session: unknown, event: any) => void>()
   const history: any[] = []
   const session = { snapshotEvents: () => history }, agent = { id: 'session', session }
@@ -16,7 +16,7 @@ function fixture(job = false, evidence?: NativeStopEvidenceHooks) {
   const roles: string[] = []
   const handle = { sessionId: 'session', actualAgent: agent, dispose: async () => { assert.equal(unbound, true); count++; await dispose() },
     observe: () => ({ state: 'running', jobs: hasJob ? [{ id: 'job', owner: 'session', status: 'running' }] : [] }) } as unknown as OwnedDshAgent
-  const ctx = { on: (name: string, listener: (session: unknown, event: any) => void) => {
+  const ctx = host ?? { on: (name: string, listener: (session: unknown, event: any) => void) => {
     assert.equal(name, 'session/event'); listeners.add(listener); return () => { listeners.delete(listener) }
   } } as unknown as Context
   const gateway = { create: async (request: { role: string }) => { roles.push(request.role); return handle } } as unknown as DshAgentGateway
@@ -208,4 +208,80 @@ test('registration racing initial evidence persistence cannot be overwritten by 
   assert.deepEqual(writes.map(value => [value.phase, value.jobs]), [
     ['stopping', []], ['stopping', ['job']], ['stopping', []], ['disposed', []],
   ])
+})
+
+test('pending opening cancellation reaches exact native creation before its serialized open settles', async () => {
+  const entered = Promise.withResolvers<void>()
+  let received: AbortSignal | undefined
+  const gateway = { create: async (request: { signal?: AbortSignal }) => {
+    received = request.signal; entered.resolve()
+    await new Promise<void>((_resolve, reject) => request.signal?.addEventListener('abort', () => reject(request.signal!.reason), { once: true }))
+    throw new Error('unreachable')
+  } } as unknown as DshAgentGateway
+  const runtime = new NativeExecutions({} as Context, gateway, {} as ExecutionObservations)
+  const identity: WorkIdentity = { workId: 'opening-work', executionId: 'opening-exec', role: 'Worker' }
+  const opening = runtime.open(identity, request).catch(error => error)
+  await entered.promise
+  const stopped = (runtime as any).cancelOpening(identity.workId, identity.executionId)
+  assert.equal(received?.aborted, true, 'abort cannot queue behind the pending open')
+  const result = await stopped
+  await opening
+  assert.equal(result.status, 'unconfirmed', 'plain native rejection is not teardown confirmation')
+  await assert.rejects(runtime.open({ ...identity, executionId: 'replacement' }, request), /confirm|creation/i)
+})
+
+test('confirmed opening cancellation persists identity and blocks replacement until acknowledgement', async () => {
+  const { DshAgentCreationCancelled } = await import('../src/adapters/dsh/host-types.js')
+  const entered = Promise.withResolvers<void>(), confirming = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+  let calls = 0, signal: AbortSignal | undefined
+  const evidence: NativeStopEvidence[] = []
+  const gateway = { create: async (input: { signal?: AbortSignal }) => {
+    calls++; signal = input.signal; entered.resolve()
+    await new Promise<void>((_resolve, reject) => input.signal!.addEventListener('abort', () => reject(new DshAgentCreationCancelled(true, input.signal!.reason, 'unpublished; resource diagnostic retained')), { once: true }))
+    throw new Error('unreachable')
+  } } as unknown as DshAgentGateway
+  const runtime = new NativeExecutions({} as Context, gateway, {} as ExecutionObservations, { save: async row => {
+    evidence.push(row); if (row.phase === 'disposed') { confirming.resolve(); await release.promise }
+  } })
+  const identity: WorkIdentity = { workId: 'owned-open', executionId: 'owned-exec', role: 'Worker' }
+  const opening = runtime.open(identity, request).catch(error => error)
+  await entered.promise
+  assert.deepEqual(await runtime.cancelOpening(identity.workId, 'other-exec'), { status: 'superseded' })
+  assert.equal(signal!.aborted, false)
+  const reason = new Error('Helper cancellation identity'), stop = runtime.cancelOpening(identity.workId, identity.executionId, reason)
+  await confirming.promise
+  const error = await opening; assert.equal(error.cause, reason)
+  await assert.rejects(runtime.open({ ...identity, executionId: 'replacement' }, request), /confirm/)
+  assert.equal(calls, 1)
+  release.resolve(); assert.deepEqual(await stop, { status: 'stopped' })
+  assert.deepEqual(evidence.map(row => row.phase), ['stopping', 'disposed'])
+  assert.match(evidence[1]!.reason!, /resource diagnostic/)
+})
+
+// Real Cordis lifecycle, adapter boundary producer: final history remains
+// authoritative even when root unload has already removed every event listener.
+for (const reported of [true, false, undefined] as const) test(`root unload does not register new effects; producer evidence ${reported}`, async () => {
+  const ctx = new Context(), writes: NativeStopEvidence[] = []
+  const f = fixture(true, { save: async row => { writes.push(structuredClone(row)) } }, ctx)
+  f.setDispose(async () => {
+    assert.equal(writes[0]?.phase, 'stopping')
+    if (reported !== undefined) f.settled(reported)
+    f.clearJobs()
+  })
+  await f.runtime.open(f.identity, request)
+  let result: Awaited<ReturnType<NativeExecutions['stop']>> | undefined
+  ctx.effect(() => async () => { result = await f.runtime.stop('work', 'exec') })
+  await ctx.fiber.dispose()
+  assert.equal(result?.status, reported === true ? 'stopped' : 'unconfirmed')
+  assert.equal(writes.at(-1)?.phase, reported === true ? 'disposed' : 'stopping')
+})
+test('root unload late job history cannot be mistaken for an empty stopped registry', async () => {
+  const ctx = new Context(), f = fixture(false, undefined, ctx)
+  f.setDispose(async () => { f.registered('late-job'); f.clearJobs() })
+  await f.runtime.open(f.identity, request)
+  let result: Awaited<ReturnType<NativeExecutions['stop']>> | undefined
+  ctx.effect(() => async () => { result = await f.runtime.stop('work', 'exec') })
+  await ctx.fiber.dispose()
+  assert.equal(result?.status, 'unconfirmed')
+  if (result?.status === 'unconfirmed') assert.deepEqual(result.jobs, ['late-job'])
 })

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash, randomUUID } from 'node:crypto'
 import type { GitChange, GitFileChange, GitReceipt, GitRepository, GitSnapshot, RepoBinding, RepoConnection } from './contracts.js'
 import { GitConflictError, GitHubClient, GitHubError, inspectPrivateRepo, repositoryPath, type GitHubSession, type TokenSource } from './github.js'
@@ -20,7 +21,7 @@ export interface GitCommitOperation {
   writes: Array<{ path: string; sha256: string | null }>
 }
 export type GitCommitResolution =
-  | { status: 'confirmed'; commit: string; head: string }
+  | { status: 'confirmed'; commit: string; head: string; verifiedWrites?: GitSnapshot }
   // A request can still be in flight. Only the SAME operation at the SAME H may be retried.
   | { status: 'pending'; head: string }
   | { status: 'conflict'; head: string }
@@ -48,12 +49,14 @@ interface ScopeMetadata {
 interface TreeNode {
   sha: string
   entries?: TreeEntry[]
-  pending?: Promise<TreeEntry[]>
+  /** Only completed immutable entries cross owners; transport belongs to its session. */
+  pending?: WeakMap<GitHubSession, Promise<TreeEntry[]>>
   children: Map<string, TreeNode>
   /** Last expanded view of this path, until its replacement is actually read. */
   previous?: TreeNode
 }
-interface SnapshotState { scope: RemoteScope; head: string; root: TreeNode; nodes: Map<string, TreeNode>; loaded: Set<string> }
+interface ReadOperation { session?: GitHubSession; scope: RemoteScope; signal: AbortSignal; binding: string; active: boolean; reusable: boolean; pending: Set<Promise<unknown>> }
+interface SnapshotState { scope: RemoteScope; head: string; root: TreeNode; nodes: Map<string, TreeNode>; loaded: Set<string>; verifiedWrites?: ReadonlyArray<Readonly<{ path: string; sha256: string | null }>> }
 const sha256 = (value: string | Uint8Array) => createHash('sha256').update(value).digest('hex')
 function changeBytes(change: GitChange): Buffer | null {
   if (change.bytes !== undefined) {
@@ -73,6 +76,7 @@ const encodePath = (path: string) => path.split('/').map(encodeURIComponent).joi
  * a checked transaction. Conflicts return to the caller for business re-evaluation.
  */
 export class GitHubRepository implements GitRepository {
+  private readonly readOperations = new AsyncLocalStorage<ReadOperation>()
   private scopes = new AbortController()
   private checked?: { key: string; authorizationScope: object; connection: RepoConnection }
   private metadata?: ScopeMetadata
@@ -89,12 +93,81 @@ export class GitHubRepository implements GitRepository {
     this.metadata = undefined
   }
   async releaseCache(): Promise<void> { this.cancel(); this.states = new WeakMap() }
-  private async session<T>(operation: (session: GitHubSession) => Promise<T>): Promise<T> {
-    try { return await this.client.session(operation) }
+  private async session<T>(operation: (session: GitHubSession) => Promise<T>, ownerSignal?: AbortSignal): Promise<T> {
+    const owner = this.readOperations.getStore()
+    if (owner) {
+      if (!owner.active) throw new Error('Read operation ownership has ended.')
+      // A fresh authority/write operation cuts off reuse of pre-write credentials.
+      owner.reusable = false
+    }
+    try { return await this.client.session(operation, ownerSignal) }
     catch (error) {
       if (error instanceof GitHubError && [401, 403].includes(error.status) && error.retryAt === undefined) { this.checked = undefined; this.metadata = undefined }
       throw error
     }
+  }
+  /** Reuse an actual authorized session only inside this awaited callback.
+   * No token is persisted or cached beyond GitHubClient.session's operation. */
+  async withReadOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.readOperations.getStore()
+    // An explicitly requested new operation starts fresh; an escaped direct
+    // read still rejects in readSession/state instead of borrowing this owner.
+    if (previous && !previous.active) return this.readOperations.exit(() => this.withReadOperation(operation))
+    if (previous?.reusable) { this.checkReadOperation(previous); return operation() }
+    const controller = new AbortController()
+    return this.session(async session => {
+      const scope = await this.scope(session)
+      const owner: ReadOperation = { session, scope, signal: controller.signal, binding: this.readBindingKey(), active: true, reusable: true, pending: new Set() }
+      return this.readOperations.run(owner, async () => {
+        let result!: T, failure: unknown, failed = false
+        try { result = await operation() } catch (error) { failure = error; failed = true }
+        finally { owner.active = false }
+        const outstanding = [...owner.pending]
+        if (outstanding.length) {
+          if (!failed) { failure = scope.signal.aborted ? scope.signal.reason : new Error('Read operation callback ended with unawaited requests.'); failed = true }
+          controller.abort(failure)
+        }
+        const settled = await Promise.allSettled(outstanding)
+        const errors = [...new Set([...(failed ? [failure] : []),
+          ...settled.flatMap(value => value.status === 'rejected' ? [value.reason] : [])])]
+        owner.pending.clear(); owner.session = undefined
+        if (!errors.length) {
+          try {
+            this.check(scope)
+            if (owner.reusable && this.metadata !== scope.metadata) throw new GitHubError(409, 'The GitHub read authority changed. Start a new read operation.')
+          } catch (error) { errors.push(error) }
+        }
+        if (errors.length === 1) throw errors[0]
+        if (errors.length) throw new AggregateError(errors, 'Owned read operation failed.')
+        return result
+      })
+    }, controller.signal)
+  }
+  private readBindingKey(): string {
+    const value = this.binding()
+    return JSON.stringify([value.ownerRepo, value.repositoryId, value.participantId, value.branch, value.repositoryDirectory])
+  }
+  private checkReadOperation(owner: ReadOperation): void {
+    if (!owner.active) throw new Error('Read operation ownership has ended.')
+    this.check(owner.scope)
+    if (owner.binding !== this.readBindingKey() || this.metadata !== owner.scope.metadata) {
+      throw new GitHubError(409, 'The GitHub read authority changed. Start a new read operation.')
+    }
+  }
+  private async readSession<T>(operation: (session: GitHubSession) => Promise<T>): Promise<T> {
+    const owner = this.readOperations.getStore()
+    if (!owner) return this.session(operation)
+    if (!owner.active) throw new Error('Read operation ownership has ended.')
+    if (owner.reusable) this.checkReadOperation(owner)
+    const pending = (owner.reusable ? operation(owner.session!) : this.session(operation, owner.signal)).catch(error => {
+      if (error instanceof GitHubError && [401, 403].includes(error.status) && error.retryAt === undefined) {
+        owner.reusable = false; this.checked = undefined; this.metadata = undefined
+      }
+      throw error
+    })
+    owner.pending.add(pending)
+    void pending.then(() => owner.pending.delete(pending), () => owner.pending.delete(pending))
+    return pending
   }
   async connect(): Promise<RepoConnection> {
     return this.session(async session => (await this.scope(session, true, true)).connection)
@@ -166,24 +239,27 @@ export class GitHubRepository implements GitRepository {
   snapshot(_afterWrite = false): Promise<GitSnapshot> {
     // Each invocation reads the remote branch; no pre-write request is reused by
     // read-back. Only immutable tree responses may be shared across snapshots.
-    return this.session(async session => {
+    return this.readSession(async session => {
       const scope = await this.scope(session)
       return this.makeSnapshot(session, scope, await this.head(session, scope))
     })
   }
   async at(revision: string): Promise<GitSnapshot> {
     if (!/^[0-9a-f]{40,64}$/.test(revision)) throw new Error('Use a Git commit id.')
-    return this.session(async session => this.makeSnapshot(session, await this.scope(session), revision))
+    return this.readSession(async session => this.makeSnapshot(session, await this.scope(session), revision))
   }
   private state(snapshot: GitSnapshot): SnapshotState {
+    if (this.readOperations.getStore()?.active === false) throw new Error('Read operation ownership has ended.')
     const state = this.states.get(snapshot)
     if (!state) throw new Error('Use a snapshot obtained from this repository.')
     this.check(state.scope)
     return state
   }
   private async tree(session: GitHubSession, state: SnapshotState, node: TreeNode): Promise<TreeEntry[]> {
-    if (!node.entries && !node.pending) {
-      node.pending = session.request<{ tree: TreeEntry[]; truncated: boolean }>('GET', state.scope.path + '/git/trees/' + node.sha).then(result => {
+    let pending = node.pending?.get(session)
+    if (!node.entries && !pending) {
+      node.pending ??= new WeakMap()
+      pending = session.request<{ tree: TreeEntry[]; truncated: boolean }>('GET', state.scope.path + '/git/trees/' + node.sha).then(result => {
         this.check(state.scope)
         // Non-recursive trees avoid the recursive API's 100,000 entry/7 MB cap.
         if (result.truncated) throw new Error('GitHub returned a truncated directory tree: ' + node.sha)
@@ -201,9 +277,10 @@ export class GitHubRepository implements GitRepository {
         node.entries = result.tree
         node.previous = undefined
         return result.tree
-      }).catch(error => { node.pending = undefined; throw error })
+      }).finally(() => { node.pending!.delete(session) })
+      node.pending.set(session, pending)
     }
-    const entries = node.entries ?? await node.pending!
+    const entries = node.entries ?? await pending!
     this.check(state.scope)
     // Replacing the root releases deleted/unreachable branches from the active
     // view. Other fixed snapshots alone retain any older graph they still use.
@@ -232,7 +309,7 @@ export class GitHubRepository implements GitRepository {
    */
   async listDirectory(snapshot: GitSnapshot, prefix: string): Promise<Array<{ path: string; sha: string; type: 'blob' | 'tree' | 'commit'; size?: number }>> {
     const root = prefix.replace(/\/$/, ''), state = this.state(snapshot)
-    return this.session(async session => {
+    return this.readSession(async session => {
       const entry = await this.entry(session, snapshot, this.physical(state.scope, root))
       if (!entry || entry.type !== 'tree') return []
       const children = await this.tree(session, state, entry.node!)
@@ -242,7 +319,7 @@ export class GitHubRepository implements GitRepository {
   }
   async directories(snapshot: GitSnapshot, prefix: string): Promise<string[]> {
     const root = prefix.replace(/\/$/, ''), state = this.state(snapshot)
-    return this.session(async session => {
+    return this.readSession(async session => {
       const entry = await this.entry(session, snapshot, this.physical(state.scope, root))
       if (!entry || entry.type !== 'tree') return []
       return (await this.tree(session, state, entry.node!)).filter(item => item.type === 'tree').map(item => root + '/' + item.path + '/')
@@ -251,7 +328,7 @@ export class GitHubRepository implements GitRepository {
   async list(snapshot: GitSnapshot, prefix: string): Promise<void> {
     const root = prefix.replace(/\/$/, ''), state = this.state(snapshot)
     if (state.loaded.has(root)) return
-    await this.session(async session => {
+    await this.readSession(async session => {
       const entry = await this.entry(session, snapshot, this.physical(state.scope, root)), files = new Map<string, string>()
       const visit = async (node: TreeNode, logical: string): Promise<void> => {
         for (const child of await this.tree(session, state, node)) {
@@ -273,7 +350,7 @@ export class GitHubRepository implements GitRepository {
   }
   async readBytes(snapshot: GitSnapshot, path: string): Promise<Uint8Array | undefined> {
     const state = this.state(snapshot)
-    return this.session(async session => {
+    return this.readSession(async session => {
       const entry = await this.entry(session, snapshot, this.physical(state.scope, path))
       const sha = entry?.type === 'blob' ? entry.sha : undefined
       snapshot.reads?.set(path, sha)
@@ -379,7 +456,11 @@ export class GitHubRepository implements GitRepository {
           const content = await this.readBytes(snapshot, write.path)
           if ((content === undefined ? null : sha256(content)) !== write.sha256) return { status: 'unknown', head, reason: 'Operation content verification differs from its prepared hashes.' }
         }
-        return { status: 'confirmed', commit: cursor, head }
+        this.check(scope)
+        // Only a complete byte/hash pass grants this existing snapshot metadata
+        // a reusable result. No business bodies or new credential are retained.
+        this.state(snapshot).verifiedWrites = Object.freeze(operation.writes.map(write => Object.freeze({ ...write })))
+        return { status: 'confirmed', commit: cursor, head, verifiedWrites: snapshot }
       }
       // First-parent ancestry is sufficient for commits appended to this branch by
       // createCommitOnBranch. A rewritten/missing ancestry remains UNKNOWN, never
@@ -388,6 +469,19 @@ export class GitHubRepository implements GitRepository {
     }
     return cursor === operation.expectedHead ? { status: 'conflict', head }
       : { status: 'unknown', head, reason: 'Expected base is not on the current first-parent chain; history may have been rewritten.' }
+  }
+  /** Reuse only a complete verification owned by this repository's current
+   * authority epoch. Callers must still obtain a fresh authoritative snapshot. */
+  matchesVerifiedWrites(current: GitSnapshot, verified: GitSnapshot | undefined,
+    expected: readonly { path: string; sha256: string | null }[]): boolean {
+    const now = this.states.get(current), prior = verified && this.states.get(verified)
+    if (!now || !prior?.verifiedWrites || now.head !== prior.head
+      || now.scope.signal.aborted || prior.scope.signal.aborted
+      || now.scope.metadata !== this.metadata || now.scope.metadata !== prior.scope.metadata) return false
+    if (expected.length !== prior.verifiedWrites.length) return false
+    const actual = new Map(prior.verifiedWrites.map(write => [write.path, write.sha256]))
+    const paths = new Set(expected.map(write => write.path))
+    return paths.size === expected.length && expected.every(write => actual.has(write.path) && actual.get(write.path) === write.sha256)
   }
   /** Safe after process restart: the receipt metadata alone locates and verifies
    * a successful commit even if other people committed after it. No body mirror.
@@ -400,7 +494,7 @@ export class GitHubRepository implements GitRepository {
       return { status: 'unknown', reason: error instanceof Error ? error.message : String(error) }
     }
   }
-  async commitPrepared(base: GitSnapshot, changes: readonly GitChange[], message: string, operation: GitCommitOperation): Promise<GitReceipt> {
+  async commitPrepared(base: GitSnapshot, changes: readonly GitChange[], message: string, operation: GitCommitOperation): Promise<GitReceipt & { verifiedWrites?: GitSnapshot }> {
     // Capture mutable byte arrays before any network await. The payload sent must
     // remain the exact one whose hashes were checked against the persisted receipt.
     changes = changes.map(change => {
@@ -419,7 +513,7 @@ export class GitHubRepository implements GitRepository {
       const head = await this.head(session, scope)
       if (head !== base.head) {
         const resolution = await this.resolve(session, scope, operation, head)
-        if (resolution.status === 'confirmed') return { commit: resolution.commit, replay: true }
+        if (resolution.status === 'confirmed') return { commit: resolution.commit, replay: true, ...(resolution.verifiedWrites ? { verifiedWrites: resolution.verifiedWrites } : {}) }
         if (resolution.status === 'conflict') throw new GitConflictError()
         throw new GitCommitOutcomeUnknownError(operation)
       }
@@ -432,10 +526,10 @@ export class GitHubRepository implements GitRepository {
       const input = { branch: { repositoryNameWithOwner: scope.connection.repository.fullName, branchName: scope.connection.repository.branch }, expectedHeadOid: base.head,
         message: { headline: message.split('\n')[0], body: message.split('\n').slice(1).join('\n') + '\n\nDSS-Operation: ' + operation.id + '\nDSS-Request-SHA256: ' + operation.requestHash },
         fileChanges: { additions, deletions }, clientMutationId: operation.id }
-      let result: { data?: { createCommitOnBranch?: { commit?: { oid: string } } }; errors?: Array<{ message: string; type?: string }> } | undefined
+      let result: { data?: { createCommitOnBranch?: { commit?: { oid: string; tree?: { oid?: string } | null } } }; errors?: Array<{ message: string; type?: string }> } | undefined
       let failure: unknown
       try {
-        result = await session.request('POST', '/graphql', { query: 'mutation DSSCommit($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }', variables: { input } })
+        result = await session.request('POST', '/graphql', { query: 'mutation DSSCommit($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid tree { oid } } }', variables: { input } })
       } catch (error) {
         if (error instanceof GitHubError && [401, 403].includes(error.status)) {
           if (error.retryAt === undefined) this.checked = undefined
@@ -446,12 +540,23 @@ export class GitHubRepository implements GitRepository {
         failure = error
       }
       const oid = result?.data?.createCommitOnBranch?.commit?.oid
-      if (oid) return { commit: oid, replay: false }
+      if (oid) {
+        // Commit.tree is immutable metadata for this exact successful mutation.
+        // A later snapshot still fetches branch HEAD and only reuses this tree
+        // when that fresh authority equals oid; changed HEAD uses its own commit.
+        // Missing/partial/invalid metadata never replaces the normal read path.
+        const tree = result?.data?.createCommitOnBranch?.commit?.tree?.oid
+        const gitOid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
+        if (!result?.errors?.length && gitOid.test(oid) && typeof tree === 'string' && gitOid.test(tree)) {
+          scope.metadata.latestTree = { head: oid, tree }
+        }
+        return { commit: oid, replay: false }
+      }
       // Every ambiguous transport/GraphQL response uses the same read-back path.
       // A newer HEAD alone is NOT proof of rejection: our commit may precede it.
       let resolution: GitCommitResolution | undefined
       try { resolution = await this.resolve(session, scope, operation) } catch { /* keep UNKNOWN */ }
-      if (resolution?.status === 'confirmed') return { commit: resolution.commit, replay: false }
+      if (resolution?.status === 'confirmed') return { commit: resolution.commit, replay: false, ...(resolution.verifiedWrites ? { verifiedWrites: resolution.verifiedWrites } : {}) }
       if (resolution?.status === 'conflict') throw new GitConflictError()
       // A syntactically valid GraphQL rejection at the unchanged H reports the
       // upstream reason. Missing/partial data and transport failures stay UNKNOWN.

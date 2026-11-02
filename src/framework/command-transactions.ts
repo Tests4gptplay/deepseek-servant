@@ -28,6 +28,15 @@ export class FrameworkTransactions {
   constructor(readonly files: FilesStore, private readonly records: StoragePort, scope: string) {
     this.prefix = 'framework-commands/' + hash(scope) + '/'
   }
+  /** Read only the acknowledgement this command already persisted. This does
+   * not resolve an UNKNOWN operation or validate the caller's saved content. */
+  async confirmed(id: string, request: unknown): Promise<FileReceipt | undefined> {
+    const requestHash = hash(JSON.stringify(request)), active = this.pending.get(id);
+    if (active && active.hash !== requestHash) throw new Error('A native command identity cannot be reused with different arguments.');
+    const record = await this.records.get<CommandRecord>(this.prefix + hash(id));
+    if (record && record.requestHash !== requestHash) throw new Error('A native command identity cannot be reused with different arguments.');
+    return record?.receipt ? { ...record.receipt } : undefined;
+  }
   run(id: string, request: unknown, options: CommandOptions, build: CommandBuilder): Promise<FileReceipt> {
     const requestHash = hash(JSON.stringify(request))
     const active = this.pending.get(id)
@@ -47,7 +56,8 @@ export class FrameworkTransactions {
       const resolution = await this.files.resolve(record.operationId)
       if (resolution.status === 'confirmed') {
         const receipt = { revision: resolution.commit, replay: true, operationId: record.operationId }
-        await this.records.set(key, { ...record, receipt })
+        await this.records.set(key, { ...record, receipt: { ...receipt } })
+        if (resolution.verifiedWrites) Object.defineProperty(receipt, 'verifiedWrites', { value: resolution.verifiedWrites })
         return receipt
       }
       if (resolution.status === 'unknown') throw new FilesOutcomeUnknownError(record.operationId)
@@ -95,7 +105,8 @@ export class FrameworkTransactions {
       const receipt = this.files instanceof GitFiles
         ? await this.files.commitPrepared(snapshot, combined, message, record.operationId!)
         : await this.files.commit(snapshot, combined, message)
-      await this.records.set(key, { ...record, receipt })
+      const { verifiedWrites: _liveVerification, ...persistedReceipt } = receipt
+      await this.records.set(key, { ...record, receipt: persistedReceipt })
       return receipt
     } catch (error) {
       if (error instanceof FilesConflictError && record) await this.records.set(key, { ...record, conflicted: true })

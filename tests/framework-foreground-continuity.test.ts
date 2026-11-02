@@ -1,4 +1,5 @@
 import test, { type TestContext } from 'node:test'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -16,6 +17,7 @@ import AgentDefaultModel from '@deepseek-ai/dsh-agent-default-model'
 import * as JsonlPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import type { StoragePort } from '../src/contracts/ports.js'
 import { FrameworkRoleRuntime } from '../src/framework/role-runtime.js'
+import { withSnapshot } from '../src/framework/transactions.js'
 import { LocalFiles } from '../src/framework/local-files.js'
 import { DshSessionReader } from '../src/adapters/dsh/sessions.js'
 import type { OwnedDshAgent } from '../src/adapters/dsh/host-types.js'
@@ -33,12 +35,14 @@ async function until(check: () => boolean | Promise<boolean>, label: string) {
     await new Promise(resolve => setTimeout(resolve, 10))
   }
 }
-async function fixture(t: TestContext, rounds: number, silent = false, interrupted = false, explicitSend?: 'same' | 'different', resetBackground = false) {
+async function fixture(t: TestContext, rounds: number, silent = false, interrupted = false, explicitSend?: 'same' | 'different', resetBackground = false, earlyReceipt = false) {
   const root = await mkdtemp(join(tmpdir(), 'dss-current-foreground-'))
   const ctx = new Context(), files = await LocalFiles.open(join(root, 'files'))
   let runtime: FrameworkRoleRuntime | undefined
+  let releaseWork!: () => void, workEntered = false, changes = 0, changesBeforeReceipt = 0
+  const workBarrier = new Promise<void>(resolve => { releaseWork = resolve })
   const extraDisposers: Array<() => Promise<void>> = []
-  t.after(async () => { try { for (const dispose of extraDisposers) await dispose(); await runtime?.dispose() } finally { await ctx.fiber.dispose(); await files.close(); await rm(root, { recursive: true, force: true }) } })
+  t.after(async () => { releaseWork(); try { for (const dispose of extraDisposers) await dispose(); await runtime?.dispose() } finally { await ctx.fiber.dispose(); await files.close(); await rm(root, { recursive: true, force: true }) } })
   await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); await ctx.plugin(SessionProjections)
   await ctx.plugin(SystemPrompt); await ctx.plugin(Tools); await ctx.plugin(Agents); await ctx.plugin(JobsLocal)
   await ctx.plugin(JsonlPersistence, { root: join(root, 'sessions'), compression: 'none' })
@@ -46,6 +50,11 @@ async function fixture(t: TestContext, rounds: number, silent = false, interrupt
   await ctx.plugin(AgentLoop, { agents: [] })
   let call = 0
   const owners: OwnedDshAgent[] = []
+  if (earlyReceipt) {
+    await withSnapshot(files, snapshot => files.commit(snapshot, [{ path: 'debug/user-request.txt', content: 'Actual material requested for inspection.' }], 'Inspection fixture'))
+    const readBytes = files.readBytes.bind(files)
+    files.readBytes = async (snapshot, path) => { if (path === 'debug/user-request.txt') { workEntered = true; await workBarrier } return readBytes(snapshot, path) }
+  }
   const script = Array.from({ length: rounds }, (_, round) => [
     () => {
       const owner = runtime!.native.get(foregroundWork)
@@ -59,6 +68,15 @@ async function fixture(t: TestContext, rounds: number, silent = false, interrupt
       assert.ok(pending.messages.some((message: any) => message.id === 'user-' + round && message.text === question(round)))
       return toolCallResponse('conversation-' + (++call), 'dss_conversation_claim', { expectedRevision: pending.revision, messageIds: pending.messages.map((message: any) => message.id), list: 'Read original question ' + round, cache: 'Current conversation responsibility ' + round })
     },
+    ...(earlyReceipt ? [
+      () => { changesBeforeReceipt = changes; return toolCallResponse('receipt-' + round, 'dss_conversation_send', { id: 'receipt-' + round, text: 'I have your request. I will inspect the saved material now.', intent: 'human', replyTo: 'user-' + round }) },
+      () => toolCallResponse('snapshot-' + round, 'dss_snapshot', {}),
+      (options: any) => {
+        const snapshot = options.messages.filter((message: any) => message.role === 'tool').flatMap(texts).flatMap((text: string) => { try { return [JSON.parse(text)] } catch { return [] } }).findLast((value: any) => value.snapshotId)
+        assert.ok(snapshot, 'Substantive read uses the actual fixed snapshot tool result')
+        return toolCallResponse('inspect-' + round, 'dss_read', { snapshotId: snapshot.snapshotId, path: 'debug/user-request.txt' })
+      },
+    ] : []),
     ...(explicitSend ? [() => toolCallResponse('conversation-' + (++call), 'dss_conversation_send', { id: 'explicit-answer-' + round, text: answer(round), intent: 'human', replyTo: 'user-' + round })] : []),
     () => textResponse(silent ? '' : answer(round) + (explicitSend === 'different' ? '\nAdditional actual native final.' : '')),
   ]).flat()
@@ -73,21 +91,23 @@ async function fixture(t: TestContext, rounds: number, silent = false, interrupt
   const rows = new Map<string, unknown>(), errors: unknown[] = []
   let heartbeats = 0
   const storage: StoragePort = { get: async key => structuredClone(rows.get(key)) as never, set: async (key, value) => { rows.set(key, structuredClone(value)) }, list: async prefix => [...rows].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value: structuredClone(value) })) as never }
-  runtime = new FrameworkRoleRuntime(ctx, files, storage, { scope: 'native-foreground', member: 'synthetic-A', primary: true, workspace: root, workerSeats: 0, mode: 'local', collaborationId: 'native-foreground' }, { members: () => ['synthetic-A'], resources: () => [], heartbeat: async () => { heartbeats++ }, error: error => errors.push(error) })
+  runtime = new FrameworkRoleRuntime(ctx, files, storage, { scope: 'native-foreground', member: 'synthetic-A', primary: true, workspace: root, workerSeats: 0, mode: 'local', collaborationId: 'native-foreground' }, { members: () => ['synthetic-A'], resources: () => [], heartbeat: async () => { heartbeats++ }, error: error => errors.push(error), changed: () => { changes++ } })
   await runtime.start()
   const exchange = async (round: number) => {
     await runtime!.conversation.send('user-' + round, { id: 'user-' + round, participantId: 'synthetic-A', role: 'user', text: question(round), createdAt: new Date(Date.UTC(2026, 10, 1, 0, round)).toISOString(), recipient: 'ai' })
     await runtime!.wake({ id: 'conversation-round-' + round, role: 'Foreground', reason: 'notification', sources: [] })
-    await until(() => adapter.requests.length >= (round + 1) * (explicitSend ? 4 : 3), 'Actual native round must finish its tools and answer')
+    await until(() => adapter.requests.length >= (round + 1) * (earlyReceipt ? 6 : explicitSend ? 4 : 3), 'Actual native round must finish its tools and answer')
     const owned = owners[round]!
     assert.ok(owned, 'Actual Foreground owner must exist')
     await owned.whenIdle()
     assert.equal(owned.observe().error, undefined)
     assert.deepEqual(errors, [])
-    await ctx.sessions.flush(owned.actualAgent.session)
+    // The completed Foreground may retire during this fixture durability barrier.
+    // The official backend barrier reconciles closed writers without hiding other failures.
+    await ctx.sessionPersistence.flush()
     return owned
   }
-  return { runtime, adapter, exchange, ctx, storage, root, files, errors, extraDisposers, heartbeats: () => heartbeats }
+  return { runtime, adapter, exchange, ctx, storage, root, files, errors, extraDisposers, heartbeats: () => heartbeats, releaseWork, workEntered: () => workEntered, changes: () => changes, changesBeforeReceipt: () => changesBeforeReceipt, owners }
 }
 
 test('current native Foreground finishes two interactions in separate sessions and records actual answers', async t => {
@@ -268,4 +288,145 @@ for (const outcome of ['confirmed', 'unknown'] as const) test(`Local Foreground 
   assert.equal(later.observe().state, 'running', 'Replayed old reset must not cancel a newly admitted conversation')
   assert.equal(runtime.native.get(planner.workId), background)
   assert.equal(background.observe().state, 'running')
+})
+
+
+test('Foreground persists a natural receipt before substantive native tool work and keeps the final answer in the same exchange', async t => {
+  const f = await fixture(t, 2, false, false, undefined, false, true)
+  assert.equal(await f.runtime.foregroundProcessing(), undefined, 'Queued input is not a running turn')
+  const running = f.exchange(0)
+  await until(f.workEntered, 'The actual substantive dss_read must reach its controlled file barrier')
+  const messages = (await f.runtime.conversation.page(100)).messages
+  const receipt = messages.find(message => message.id === 'receipt-0')
+  assert.equal(receipt?.text, 'I have your request. I will inspect the saved material now.')
+  assert.equal(receipt?.replyTo, 'user-0')
+  assert.equal(messages.filter(message => message.role === 'assistant').length, 1, 'Final answer is not fabricated while the real tool is blocked')
+  assert.ok(f.changes() > f.changesBeforeReceipt(), 'The persisted receipt emits the actual runtime changed notification before turn end')
+  const processing = await f.runtime.foregroundProcessing()
+  assert.ok(processing, 'A persisted receipt and actual native turn expose processing')
+  assert.ok(processing.startedAt > 0)
+  assert.deepEqual(await f.runtime.foregroundProcessing(), processing, 'Read/refresh preserves the original native start')
+  ;(f.runtime as unknown as { foregroundVisibility?: unknown }).foregroundVisibility = undefined
+  assert.deepEqual(await f.runtime.foregroundProcessing(), processing, 'Reattached display verifies actual persisted owned output without inventing an ACK')
+  const owned = f.owners[0]!
+  let idle = false
+  void owned.whenIdle().then(() => { idle = true })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(idle, false, 'The receipt does not terminate Foreground while substantive work remains')
+  const prompt = f.adapter.requests[0]!.messages.filter(message => message.role === 'system').flatMap(texts).join('\n')
+  assert.match(prompt, /Before substantive work/)
+  assert.match(prompt, /dss_conversation_send/)
+  assert.match(prompt, /simple question directly/)
+  f.releaseWork(); await running
+  const toolResults = f.adapter.requests[5]!.messages.filter(message => message.role === 'tool').flatMap(texts)
+  assert.ok(toolResults.some(text => text.includes('Actual material requested for inspection.')), 'The substantive tool returns the actual stored material after release')
+  await until(async () => (await f.runtime.conversation.page(100)).messages.some(message => message.text === answer(0)), 'Native final follows the early persisted receipt')
+  assert.equal(await f.runtime.foregroundProcessing(), undefined, 'Final capture/retirement ends processing')
+  const group = (await f.runtime.conversation.recentExchanges())[0]!
+  assert.deepEqual(group.assistants.map(message => [message.text, message.replyTo]), [[receipt!.text, 'user-0'], [answer(0), 'user-0']])
+  const requestStart = f.adapter.requests.length
+  const next = await f.exchange(1)
+  assert.notEqual(next.sessionId, owned.sessionId)
+  const seed = f.adapter.requests[requestStart]!.messages.filter(message => message.source?.kind === 'deepseek-servant-history').flatMap(texts).join('\n')
+  const originals = JSON.parse(seed.slice(seed.indexOf('\n') + 1)) as Array<Array<{ text: string }>>
+  assert.equal(originals.length, 1, 'Receipt and final are one complete exchange, not two rounds')
+  assert.deepEqual(originals[0]!.map(message => message.text), [question(0), receipt!.text, answer(0)])
+  assert.deepEqual(f.errors, [])
+})
+
+for (const explicit of [undefined, 'same'] as const) test(`visible final hides processing before completedRound storage ack: ${explicit}`, async t => {
+ const f=await fixture(t,1,false,false,explicit,false,true), runtime=f.runtime as any
+ const save=runtime.saveRole.bind(runtime)
+ let release!:()=>void, held=false
+ const gate=new Promise<void>(resolve=>{release=resolve})
+ runtime.saveRole=async (record:any,...args:any[])=>{if(record.completedRound){held=true;await gate} return save(record,...args)}
+ const running=f.exchange(0)
+ try {
+  await until(f.workEntered,'actual substantive work')
+  assert.ok(await runtime.foregroundProcessing())
+  f.releaseWork()
+  await until(()=>held,'actual final capture reaches completion persistence')
+  assert.ok((await runtime.conversation.page(100)).messages.some((m:any)=>m.text===answer(0)), 'Actual final is already durably visible')
+  assert.equal(await runtime.foregroundProcessing(),undefined)
+ } finally { release(); f.releaseWork(); await running }
+})
+
+for (const explicit of [undefined, 'same'] as const) test(`visible final notifies before completedRound storage ack: ${explicit}`, async t => {
+ const f=await fixture(t,1,false,false,explicit,false,true), runtime=f.runtime as any
+ const save=runtime.saveRole.bind(runtime)
+ let release!:()=>void, held=false
+ let atSave = -1, atVerifiedFinal = -1, finalDisplay: unknown
+ Object.defineProperty(runtime, 'foregroundFinal', { configurable: true, get: () => finalDisplay, set: value => { finalDisplay = value; atVerifiedFinal = f.changes() } })
+ const conversationSend = runtime.conversation.send.bind(runtime.conversation)
+ runtime.conversation.send = async (commandId:string,...args:any[]) => { const result = await conversationSend(commandId,...args); if(commandId.startsWith('native-capture/')) atSave = f.changes(); return result }
+ const gate=new Promise<void>(resolve=>{release=resolve})
+ runtime.saveRole=async (record:any,...args:any[])=>{if(record.completedRound){held=true;await gate} return save(record,...args)}
+ const running=f.exchange(0)
+ try {
+  await until(f.workEntered,'actual substantive work')
+  assert.ok(await runtime.foregroundProcessing())
+  const beforeFinal = f.changes()
+  f.releaseWork()
+  await until(()=>held,'actual final capture reaches completion persistence')
+  assert.ok((await runtime.conversation.page(100)).messages.some((m:any)=>m.text===answer(0)), 'Actual final is already durably visible')
+  assert.equal(await runtime.foregroundProcessing(),undefined)
+  console.log('FINAL_NOTIFICATION', { explicit: explicit ?? 'native-capture', beforeFinal, atSave, atVerifiedFinal, afterFinal: f.changes() })
+  assert.ok(atVerifiedFinal >= 0 && f.changes() > atVerifiedFinal, 'verified final display completion must notify before lifecycle receipt persistence')
+ } finally { release(); f.releaseWork(); await running }
+})
+
+
+test('fixture durability barrier tolerates only native writers closed by completed Foreground retirement', async t => {
+  const f = await fixture(t, 1)
+  const boundary = new AsyncLocalStorage<boolean>()
+  const persistence = f.ctx.sessionPersistence
+  const create = persistence.create.bind(persistence), flushBackend = persistence.flush.bind(persistence)
+  let gated = false, retiredHandleError = false
+  persistence.create = async (...args: Parameters<typeof create>) => {
+    const handle = await create(...args), flush = handle.flush.bind(handle)
+    handle.flush = async (...options: Parameters<typeof flush>) => {
+      if (boundary.getStore() && !gated) {
+        gated = true
+        await until(() => !f.ctx.agents.get(handle.id), 'The product must naturally retire its completed native owner')
+        try { return await flush(...options) } catch (error) {
+          retiredHandleError = error instanceof Error && error.name === 'SessionHandleClosedError'
+          throw error
+        }
+      }
+      return flush(...options)
+    }
+    return handle
+  }
+  persistence.flush = (...args: Parameters<typeof flushBackend>) => boundary.run(true, () => flushBackend(...args))
+  const owned = await f.exchange(0)
+  assert.equal(gated, true, 'The fixture barrier must overlap the actual writer retirement')
+  assert.equal(retiredHandleError, true, 'The unchanged native handle rejects its post-close flush')
+  assert.equal(f.ctx.agents.get(owned.actualAgent.id), undefined)
+  const events = await new DshSessionReader(f.ctx).events(owned.sessionId)
+  assert.ok(events.some(event => event.type === 'turn/end'), 'Cold native history retains its completed turn')
+  const messages = (await f.runtime.conversation.page(100)).messages
+  assert.deepEqual(messages.filter(message => message.role === 'assistant').map(message => [message.text, message.replyTo]), [[answer(0), 'user-0']])
+  assert.deepEqual(f.errors, [])
+})
+
+test('fixture backend durability barrier still reports an actual non-retirement writer failure', async t => {
+  const f = await fixture(t, 1, false, false, undefined, false, true)
+  const persistence = f.ctx.sessionPersistence, create = persistence.create.bind(persistence)
+  const failure = new Error('Synthetic native writer durability failure')
+  const boundary = new AsyncLocalStorage<boolean>()
+  let inject = false
+  persistence.create = async (...args: Parameters<typeof create>) => {
+    const handle = await create(...args), flush = handle.flush.bind(handle)
+    handle.flush = (...options: Parameters<typeof flush>) => inject && boundary.getStore() ? Promise.reject(failure) : flush(...options)
+    return handle
+  }
+  const running = f.exchange(0)
+  try {
+    await until(f.workEntered, 'The real Foreground tool must remain in flight during the backend barrier')
+    inject = true
+    await assert.rejects(boundary.run(true, () => persistence.flush()), error => error instanceof AggregateError && error.errors.includes(failure))
+  } finally { inject = false; f.releaseWork() }
+  await running
+  await until(async () => (await f.runtime.conversation.page(100)).messages.some(message => message.text === answer(0)), 'The unchanged final answer remains durable after the controlled writer fault ends')
+  assert.deepEqual(f.errors, [])
 })

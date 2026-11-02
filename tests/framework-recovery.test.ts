@@ -1,15 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  createObservation, recordProgress, dueObservation, rebindObservation, completeHealthyObservationCycle,
-  createRecoveryWatch, dueRecoveryWatch, completeHealthyRecoveryCycle, consumeRecoveryWatch,
+  createObservation, recordProgress, dueObservation, rebindObservation,
+  createRecoveryWatch, dueRecoveryWatch, consumeRecoveryWatch,
   canConsumeRecovery, memberRecoveryEligible, scanMemberRecovery, helperRecoveryMembers,
   usesMemberRecovery, invokesHelper, StartupRecoveryBatch,
   type RecoveryRole, type MemberRecoveryInput,
 } from '../src/framework/recovery.js'
 const minute = 60_000
 const identity = (role: RecoveryRole = 'Worker') => ({ workId: 'work', executionId: 'execution', role, taskId: 'T1', member: 'B', workerId: 'W1' })
-const healthy = { continuouslyNormal: true, noNewRecoveryAnomaly: true }
 const member = (taskId: string, bytes = 1): MemberRecoveryInput => ({ taskId, member: 'B', taskPath: `tasks/${taskId}_P.md`,
   inboxPath: `task-runs/${taskId}/B/B_Inbox`, inboxBodyBytes: 10, status: 'running', pendingBusiness: true, needsRecovery: true,
   plannerExecutionId: `${taskId}-P`, plannerMemoryPath: `${taskId}/Memory.md`, plannerExecuting: false,
@@ -17,31 +16,31 @@ const member = (taskId: string, bytes = 1): MemberRecoveryInput => ({ taskId, me
   pendingSignals: [`state/B/${taskId}/Planner_W1`],
 })
 
-test('five business roles inspect at 5 and 10 minutes, then request strategy change at 40 only', () => {
-  for (const role of ['Foreground', 'Organizer', 'Planner', 'Worker', 'Recorder'] as RecoveryRole[]) {
+test('ORPW receive native probe at 5, warning at 10 and restart only after another 30 minutes', () => {
+  for (const role of ['Organizer', 'Planner', 'Worker', 'Recorder'] as RecoveryRole[]) {
     let state = createObservation(identity(role), 0)
     assert.equal(dueObservation(state, 5 * minute - 1).action, undefined)
-    let result = dueObservation(state, 5 * minute); state = result.state
-    assert.equal(result.action?.kind, 'inspect-role')
-    assert.equal(result.action?.stage, 1)
-    result = dueObservation(state, 10 * minute); state = result.state
-    assert.equal(result.action?.kind, 'inspect-role')
-    assert.equal(dueObservation(state, 40 * minute - 1).action, undefined)
-    result = dueObservation(state, 40 * minute)
-    assert.equal(result.action?.kind, 'change-strategy')
-    assert.equal(result.action?.elapsedMs, 40 * minute)
-    assert.equal(dueObservation(result.state, 80 * minute).action, undefined)
+    for (const [at, kind] of [[5, 'probe-role'], [10, 'warn-role'], [40, 'restart-role']] as const) {
+      const result = dueObservation(state, at * minute); state = result.state
+      assert.equal(result.action?.kind, kind)
+      assert.equal(dueObservation(state, at * minute).action, undefined)
+    }
+    assert.equal(dueObservation(state, 80 * minute).action, undefined)
   }
 })
-test('Helper receives probe then warning then overall restoration; no invented failure loop', () => {
+test('Foreground is outside the mechanical inactivity policy', () => {
+  const state = createObservation(identity('Foreground'), 0)
+  for (const at of [5, 10, 40, 400]) assert.equal(dueObservation(state, at * minute).action, undefined)
+})
+test('Helper probes and warns directly, then restarts to overall restoration with a fresh new execution cycle', () => {
   let state = createObservation(identity('Helper'), 0)
   for (const [at, kind] of [[5, 'probe-helper'], [10, 'warn-helper'], [40, 'restore-helper']] as const) {
     const result = dueObservation(state, at * minute); state = result.state
     assert.equal(result.action?.kind, kind)
   }
   state = rebindObservation(state, 'replacement-helper', 41 * minute)
-  assert.equal(state.stage, 3)
-  assert.equal(dueObservation(state, 100 * minute).action, undefined)
+  assert.equal(state.stage, 0)
+  assert.equal(dueObservation(state, 46 * minute).action?.kind, 'probe-helper')
 })
 test('progress resets silence but not stage; heartbeat does neither; work identities remain independent', () => {
   let state = dueObservation(createObservation(identity(), 0), 5 * minute).state
@@ -55,48 +54,34 @@ test('progress resets silence but not stage; heartbeat does neither; work identi
   state = recordProgress(result.state, 'reasoning', 12 * minute)
   state = recordProgress(state, 'tool-progress', 13 * minute)
   assert.equal(dueObservation(state, 42 * minute).action, undefined)
-  assert.equal(dueObservation(state, 43 * minute).action?.kind, 'change-strategy')
+  assert.equal(dueObservation(state, 43 * minute).action?.kind, 'restart-role')
   assert.equal(createObservation({ ...identity(), workId: 'other' }, 13 * minute).stage, 0)
 })
-test('late checks do not collapse three observation phases into one instant; restart does not reset phase', () => {
+test('late checks do not collapse phases; same-execution resumption preserves stage while actual replacement starts fresh', () => {
   let state = dueObservation(createObservation(identity(), 0), 20 * minute).state
   assert.equal(dueObservation(state, 20 * minute).action, undefined)
-  state = rebindObservation(state, 'E2', 22 * minute)
+  state = rebindObservation(state, state.identity.executionId, 22 * minute)
   assert.equal(state.stage, 1)
   assert.equal(dueObservation(state, 26 * minute).action, undefined)
   assert.equal(dueObservation(state, 27 * minute).action?.stage, 2)
+  const replacement = rebindObservation(state, 'E2', 28 * minute)
+  assert.equal(replacement.stage, 0); assert.equal(replacement.lastProgressAt, 28 * minute)
 })
-test('only all three completed phases with healthy evidence reset observation', () => {
-  let state = dueObservation(createObservation(identity(), 0), 5 * minute).state
-  assert.equal(completeHealthyObservationCycle(state, 6 * minute, healthy), state)
-  // Wall time alone cannot replace completion of the three-phase observation.
-  assert.equal(completeHealthyObservationCycle(state, 40 * minute, healthy), state)
-  state = dueObservation(state, 10 * minute).state
-  state = recordProgress(state, 'tool-progress', 20 * minute)
-  assert.equal(completeHealthyObservationCycle(state, 40 * minute, healthy), state)
-  assert.equal(dueObservation(state, 49 * minute).action, undefined)
-  state = dueObservation(state, 50 * minute).state
-  assert.equal(state.stage, 3)
-  assert.equal(completeHealthyObservationCycle(state, 50 * minute, { ...healthy, noNewRecoveryAnomaly: false }), state)
-  assert.equal(completeHealthyObservationCycle(state, 50 * minute, { ...healthy, continuouslyNormal: false }), state)
-  const reset = completeHealthyObservationCycle(state, 50 * minute, healthy)
-  assert.equal(reset.stage, 0)
-  assert.equal(reset.lastProgressAt, state.lastProgressAt)
-  assert.equal(reset.cycleStartedAt, 50 * minute)
-})
-test('recovery marker timer is independent from active AI progress and never requests kill', () => {
+test('unconsumed recovery checks repeat every 30 minutes independently of native progress or normal assessment', () => {
   let marker = createRecoveryWatch({ taskId: 'T1', member: 'B' }, 0)
   let ai = createObservation(identity(), 0)
-  for (const at of [5, 10, 40]) {
+  assert.equal(dueRecoveryWatch(marker, 30 * minute - 1).action, undefined)
+  for (const [ordinal, at] of [30, 60, 90, 120].entries()) {
     ai = recordProgress(ai, 'tool-progress', at * minute)
     assert.equal(dueObservation(ai, at * minute).action, undefined)
     const result = dueRecoveryWatch(marker, at * minute); marker = result.state
-    assert.equal(result.action?.kind, 'recovery-check')
-    assert.equal(completeHealthyRecoveryCycle(marker, at * minute, healthy).stage, at === 40 ? 0 : marker.stage)
+    assert.equal(result.action?.kind, 'recovery-check'); assert.equal(result.action?.stage, ordinal + 1)
+    assert.equal(dueRecoveryWatch(marker, at * minute).action, undefined)
+    assert.equal(marker.cycleStartedAt, 0)
   }
-  assert.equal(dueRecoveryWatch(marker, 45 * minute).action, undefined)
-  marker = completeHealthyRecoveryCycle(marker, 40 * minute, healthy)
-  assert.equal(dueRecoveryWatch(marker, 45 * minute).action?.stage, 1)
+  const late = dueRecoveryWatch(marker, 500 * minute)
+  assert.equal(late.action?.stage, 5)
+  assert.equal(dueRecoveryWatch(late.state, 500 * minute).action, undefined)
 })
 test('only exact member Planner consumes recovery on chain arrival, without quality or all-worker ACK', () => {
   const marker = createRecoveryWatch({ taskId: 'T1', member: 'B' }, 0)
@@ -142,7 +127,8 @@ test('Helper candidate scan spans tasks, excludes complete and empty, and marker
   assert.equal(usesMemberRecovery('Worker'), false)
   assert.equal(usesMemberRecovery('Planner'), false)
   assert.equal(invokesHelper('warning'), false)
-  for (const trigger of ['ai-help', 'host-error', 'no-progress-warning'] as const) assert.equal(invokesHelper(trigger), true)
+  assert.equal(invokesHelper('no-progress-warning'), false)
+  for (const trigger of ['ai-help', 'host-error'] as const) assert.equal(invokesHelper(trigger), true)
 })
 test('startup pauses ordinary wakeups through full scan and arrangement, not until workers finish', async () => {
   const batch = new StartupRecoveryBatch(), queued: string[] = []

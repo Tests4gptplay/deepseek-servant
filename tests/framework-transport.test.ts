@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { installFrameworkTransport } from '../src/framework/transport.js'
 import { FrameworkService } from '../src/framework/service.js'
 import { FrameworkTransactions } from '../src/framework/command-transactions.js'
+import { ExecutionControls } from '../src/framework/execution-control.js'
 import { FrameworkConversation } from '../src/framework/conversation.js'
 import { LocalFiles } from '../src/framework/local-files.js'
 import { withSnapshot, FilesOutcomeUnknownError } from '../src/framework/transactions.js'
@@ -140,4 +141,108 @@ test('four knowledge native RPC routes persist candidate/status and retain backg
   assert.equal((await call('knowledgeRead', { ...scope, storageScope: 'stale-root', path })).ok, false)
   assert.equal((await call('view', { mode: 'local' })).value.connection.participating, false)
   await withSnapshot(files, async snapshot => assert.deepEqual(await files.list(snapshot, 'instances/'), []))
+})
+
+test('cancelled view withdraws only its read after shared access; another reader and commands remain owned', async t => {
+  const { routes, internal, call } = await fixture(t)
+  const access = await internal.accesses.get('local'), gate = Promise.withResolvers<void>()
+  internal.accesses.set('local', gate.promise.then(() => access))
+  let pages = 0
+  const originalPage = access.conversation.page.bind(access.conversation)
+  access.conversation.page = (...args: any[]) => { pages++; return originalPage(...args) }
+  const abort = new AbortController(), reason = new Error('obsolete client view')
+  const body = JSON.stringify({ type: 'client-request', rpcId: 'old-view', method: 'deepseek-servant-framework/view', payload: { mode: 'local' } })
+  const old = routes.get('/api/deepseek-servant-framework/view')!.fetch(new Request('http://host/api/deepseek-servant-framework/view', { method: 'POST', body, signal: abort.signal }))
+  await new Promise(resolve => setImmediate(resolve))
+  abort.abort(reason)
+  const current = call('view', { mode: 'local' })
+  gate.resolve()
+  const [oldResponse, next] = await Promise.all([old, current])
+  assert.equal((await oldResponse.json()).result.ok, false)
+  assert.equal(next.ok, true)
+  assert.equal(pages, 1, 'withdrawn request must not start a page after shared access opens')
+  assert.equal(internal.accesses.has('local'), true, 'shared storage owner remains available')
+})
+
+test('view cancellation after page read prevents observation and preserves original error ownership', async t => {
+  const { service, internal } = await fixture(t), access = await internal.accesses.get('local')
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+  const page = access.conversation.page.bind(access.conversation)
+  access.conversation.page = async (...args: any[]) => { const result = await page(...args); entered.resolve(); await release.promise; return result }
+  internal.running.delete('local')
+  let observed = 0
+  internal.observe = async () => { observed++; return [] }
+  const abort = new AbortController(), reason = new Error('page consumer left')
+  const pending = service.view({ mode: 'local' }, abort.signal)
+  await entered.promise; abort.abort(reason); release.resolve()
+  await assert.rejects(pending, error => error === reason)
+  assert.equal(observed, 0)
+  assert.equal(internal.errors.size, 0)
+  assert.equal((await service.view({ mode: 'local' })).connection.status, 'connected')
+  assert.equal(observed, 1)
+})
+
+test('disconnecting the selectMode response does not cancel its admitted settings write', async t => {
+  const { routes, storage } = await fixture(t), entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+  const set = storage.set.bind(storage)
+  storage.set = async (key, value) => { if (key === 'framework-active-mode') { entered.resolve(); await release.promise }; return set(key, value) }
+  const abort = new AbortController()
+  const body = JSON.stringify({ type: 'client-request', rpcId: 'mode-write', method: 'deepseek-servant-framework/selectMode', payload: { mode: 'local', headerOnly: true } })
+  const pending = routes.get('/api/deepseek-servant-framework/selectMode')!.fetch(new Request('http://host/api/deepseek-servant-framework/selectMode', { method: 'POST', body, signal: abort.signal }))
+  await entered.promise; abort.abort(); release.resolve()
+  assert.equal((await (await pending).json()).result.ok, true)
+  assert.equal(await storage.get('framework-active-mode'), 'local')
+})
+
+test('cancelled view drains an acquired snapshot exactly once without starting task inspection', async t => {
+  const { service, internal, files } = await fixture(t), access = await internal.accesses.get('local')
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+  const page = access.conversation.page.bind(access.conversation), snapshot = files.snapshot.bind(files)
+  let pageDone = false, releases = 0, inspected = 0
+  access.conversation.page = async (...args: any[]) => { const result = await page(...args); pageDone = true; return result }
+  access.taskIndex = { list: async () => { inspected++; return [] } }
+  files.snapshot = async () => {
+    const owned = await snapshot()
+    if (pageDone) {
+      const finish = owned.release.bind(owned)
+      owned.release = async () => { releases++; await finish() }
+      entered.resolve(); await release.promise
+    }
+    return owned
+  }
+  const abort = new AbortController(), reason = new Error('snapshot consumer left')
+  const pending = service.view({ mode: 'local' }, abort.signal)
+  await entered.promise; abort.abort(reason); release.resolve()
+  await assert.rejects(pending, error => error === reason)
+  assert.equal(releases, 1); assert.equal(inspected, 0); assert.equal(internal.errors.size, 0)
+})
+
+
+test('cancellation during last Task control read does not admit legacy index IO', async t => {
+  const { service, internal, files, storage } = await fixture(t)
+  await withSnapshot(files, snapshot => files.commit(snapshot, [{ path: 'tasks/cancel-boundary.json', content: JSON.stringify({ version: 1, taskId: 'cancel-boundary', route: 'P', status: 'running', owner: 'Account-1', members: [], sourcePath: 'task.md' }) }], 'actual Task metadata fixture'))
+  internal.running.get('local').runtime.controls = new ExecutionControls(storage, 'transport-test')
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>(), get = storage.get.bind(storage), read = files.read.bind(files)
+  let legacyReads = 0
+  storage.get = async key => { if (key.startsWith('framework-user-controls/')) { entered.resolve(); await release.promise }; return get(key) }
+  files.read = async (snapshot, path) => { if (path === 'technical/legacy-migrations/index.json') legacyReads++; return read(snapshot, path) }
+  const abort = new AbortController(), reason = new Error('left during final Task control')
+  const pending = service.view({ mode: 'local' }, abort.signal)
+  await entered.promise; abort.abort(reason); release.resolve()
+  await assert.rejects(pending, error => error === reason)
+  assert.equal(legacyReads, 0)
+  assert.equal(internal.errors.size, 0)
+})
+
+test('cancelled history page does not start after a shared access wait', async t => {
+  const { routes, internal } = await fixture(t), access = await internal.accesses.get('local')
+  const release = Promise.withResolvers<void>(); internal.accesses.set('local', release.promise.then(() => access))
+  let pages = 0; const page = access.conversation.page.bind(access.conversation)
+  access.conversation.page = (...args: any[]) => { pages++; return page(...args) }
+  const abort = new AbortController()
+  const body = JSON.stringify({ type: 'client-request', rpcId: 'history-read', method: 'deepseek-servant-framework/history', payload: { mode: 'local', collaborationId: 'shared', limit: 20 } })
+  const pending = routes.get('/api/deepseek-servant-framework/history')!.fetch(new Request('http://host/api/deepseek-servant-framework/history', { method: 'POST', body, signal: abort.signal }))
+  await new Promise(resolve => setImmediate(resolve)); abort.abort(); release.resolve()
+  assert.equal((await (await pending).json()).result.ok, false)
+  assert.equal(pages, 0); assert.equal(internal.accesses.has('local'), true)
 })

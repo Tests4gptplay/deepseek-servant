@@ -102,8 +102,8 @@ export class FrameworkConversation {
     if (entry.id !== indexed.id || (entry.collaborationId !== undefined && entry.collaborationId !== this.scope.collaborationId)) throw new ConversationRecordError(indexed.path, 'identity', 'Message reference belongs to a different conversation.')
     return entry
   }
-  private async readAt(snapshot: FilesSnapshot, indexed: IndexedMessage): Promise<ConversationMessage> {
-    const entry = await this.headerAt(snapshot, indexed)
+  private async readAt(snapshot: FilesSnapshot, indexed: IndexedMessage, checkedHeader?: ConversationEntry): Promise<ConversationMessage> {
+    const entry = checkedHeader ?? await this.headerAt(snapshot, indexed)
     const text = await readText(this.files, snapshot, entry.textPath)
     if (entry.textHash !== undefined && hash(text) !== entry.textHash) throw new ConversationRecordError(entry.textPath, 'integrity', 'Message body hash differs from entry.')
     const { collaborationId: _scope, textPath: _path, textHash: _hash, ...body } = entry
@@ -230,7 +230,7 @@ export class FrameworkConversation {
         if (!humanIndex) continue
         const humanHeader = await this.headerAt(snapshot, humanIndex)
         if (humanHeader.role !== 'user') continue
-        const human = await this.readAt(snapshot, humanIndex)
+        const human = await this.readAt(snapshot, humanIndex, humanHeader)
         const assistant = await this.readAt(snapshot, indexed)
         const exchange = { human, assistant, assistants: [assistant] }
         result.unshift(exchange); selected.set(human.id, exchange)

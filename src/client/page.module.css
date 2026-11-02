@@ -246,3 +246,7 @@
 .recordLocationActions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .nativeLogDirectory { color: var(--dsw-alias-label-secondary); }
 .nativeLogDirectory code { display: block; margin-top: 8px; overflow-wrap: anywhere; }
+
+.processingRow { flex: none; min-width: 0; padding: 0 8px 8px; }
+.processingPill { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; max-width: 100%; padding: 5px 10px; border: 0.5px solid var(--dsw-alias-border-l3); border-radius: 999px; background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-secondary); font: var(--dsw-font-xs-13); overflow-wrap: anywhere; }
+.processingDot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }

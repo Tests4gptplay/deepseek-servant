@@ -1,3 +1,5 @@
+import type { ConnectionStateSource } from '@deepseek-ai/dsh-client-connection/client'
+
 /** SSE performs its own ordinary network reconnection, but a non-200 response
  * or invalid content type permanently closes an EventSource. A new official
  * Connection generation must therefore replace the previous streams as well as
@@ -5,14 +7,22 @@
 export function subscribeEventStreams(
   paths: readonly string[], listener: () => void, subscribeReset: (listener: () => void) => () => void,
   create: (url: URL) => EventSource = url => new EventSource(url),
+  availability?: (available: boolean) => void,
+  connectionState?: ConnectionStateSource,
 ): () => void {
-  let disposed = false, generation = 0
-  let streams: Array<{ source: EventSource; changed: () => void }> = []
+  let disposed = false, generation = 0, carrierAvailable = false
+  const reportAvailability = (value?: boolean) => {
+    if (value !== undefined) carrierAvailable = value
+    availability?.(carrierAvailable && (!connectionState || connectionState.getSnapshot() === 'connected'))
+  }
+  let streams: Array<{ source: EventSource; changed: () => void; opened: () => void; failed: () => void; available: boolean }> = []
   const close = () => {
     generation++
-    for (const { source, changed } of streams) {
+    reportAvailability(false)
+    for (const { source, changed, opened, failed } of streams) {
       source.removeEventListener('changed', changed)
-      source.removeEventListener('open', changed)
+      source.removeEventListener('open', opened)
+      source.removeEventListener('error', failed)
       source.close()
     }
     streams = []
@@ -24,13 +34,18 @@ export function subscribeEventStreams(
       for (const path of paths) {
         const source = create(new URL(path, document.baseURI))
         const changed = () => { if (!disposed && generation === current) listener() }
-        streams.push({ source, changed })
+        const item = { source, changed, opened: () => {}, failed: () => {}, available: false }
+        item.opened = () => { if (disposed || generation !== current) return; item.available = true; reportAvailability(streams.every(value => value.available)); listener() }
+        item.failed = () => { if (disposed || generation !== current) return; item.available = false; reportAvailability(false) }
+        streams.push(item)
         source.addEventListener('changed', changed)
-        source.addEventListener('open', changed)
+        source.addEventListener('open', item.opened)
+        source.addEventListener('error', item.failed)
       }
     } catch (error) { close(); throw error }
   }
   open()
+  const stopState = connectionState?.subscribe(() => { if (!disposed) reportAvailability() })
   const stopReset = subscribeReset(() => {
     if (disposed) return
     open()
@@ -40,6 +55,7 @@ export function subscribeEventStreams(
     if (disposed) return
     disposed = true
     stopReset()
+    stopState?.()
     close()
   }
 }

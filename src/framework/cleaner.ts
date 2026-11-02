@@ -1,9 +1,12 @@
 import { createHash } from 'node:crypto'
+import { prepareRecorderRetention, taskWorkingRoots, taskStateSignal } from './recorder-retention.js'
 import { FrameworkTransactions } from './command-transactions.js'
 import { filePath, withSnapshot, type FileChange, type FileReceipt, type FilesSnapshot, type FilesStore } from './transactions.js'
 import { encodeJson, paths, readJson, taskIdentity, type TaskMetadata } from './task-files.js'
 
 export interface RetentionManifest {
+  relocatedReferences?: Record<string, string>
+  relocatedSources?: Record<string, { sourcePath: string; sourceRevision: string; sha256: string }>
   outputs: string[]
   retainedPaths: string[]
   recorderCommand?: string
@@ -85,9 +88,26 @@ export async function changedCleanupMaterials(files: FilesStore, snapshot: Files
   const inputs = await captureCleanupInputs(files, snapshot, task)
   const changed = [...new Set([...Object.keys(inputs), ...Object.keys(manifest.inputs ?? {})])]
     .filter(path => !manifest.inputs || manifest.inputs[path] !== inputs[path]).sort()
-  const references = [...new Set([...manifest.outputs, ...manifest.retainedPaths].map(filePath))]
-  const actual = await cachedCleanupReferences(files, snapshot, task.taskId, references)
-  for (const path of references) if (!manifest.verifiedReferences?.[path] || actual[path] !== manifest.verifiedReferences[path]) changed.push(path)
+  const references = new Set<string>(), evaluatedDirectoryFiles = new Set<string>()
+  for (const reference of [...new Set([...manifest.outputs, ...manifest.retainedPaths].map(filePath))]) {
+    const directory = reference.slice(0, reference.lastIndexOf('/') + 1)
+    const exact = (await files.listDirectory(snapshot, directory)).some(entry => entry.path === reference)
+    const children = await files.list(snapshot, reference + '/')
+    const selected = [...(exact || !children.length ? [reference] : []), ...children.map(entry => entry.path)]
+    for (const path of selected) {
+      if (path.startsWith('state/')) {
+        const bytes = await files.readBytes(snapshot, path)
+        if (bytes !== undefined && taskStateSignal(task, path, bytes)) continue
+      }
+      references.add(path)
+      // Legacy directory references have no directory blob to hash. Their work
+      // leaves are already fenced by Recorder's exact evaluated input versions.
+      if (path !== reference && inputs[path] && manifest.inputs?.[path] === inputs[path]) evaluatedDirectoryFiles.add(path)
+    }
+  }
+  const actual = await cachedCleanupReferences(files, snapshot, task.taskId, [...references])
+  for (const path of references) if (!actual[path] || (manifest.verifiedReferences?.[path]
+    ? actual[path] !== manifest.verifiedReferences[path] : !evaluatedDirectoryFiles.has(path))) changed.push(path)
   if (!manifest.inputs || !manifest.verifiedReferences || changed.length) return new CleanupMaterialsChangedError(task.taskId, [...new Set(changed)].sort(),
     createHash('sha256').update(JSON.stringify([createHash('sha256').update(raw).digest('hex'), inputs, actual])).digest('hex'))
 }
@@ -124,6 +144,28 @@ export class FrameworkCleaner {
     if (!record) {
       const expectedRetention = await this.files.read(snapshot, paths.archive(task.taskId) + '/retention.json')
       if (expectedRetention === undefined) throw new Error('Recorder retention manifest is missing.')
+      const originalManifest = JSON.parse(expectedRetention) as RetentionManifest
+      const currentTask = await readJson<TaskMetadata>(this.files, snapshot, paths.task(task.taskId))
+      if (!currentTask || currentTask.status !== 'complete' || currentTask.owner !== task.owner) throw new Error('Cleanup requires the principal’s sealed task.')
+      const materialChanged = await changedCleanupMaterials(this.files, snapshot, currentTask, originalManifest, expectedRetention)
+      if (materialChanged) throw materialChanged
+      const archival = await prepareRecorderRetention(this.files, snapshot, currentTask, originalManifest)
+      if (archival.relocated) {
+        await this.transactions.run('cleanup:' + task.taskId + ':archive:' + digest(expectedRetention),
+          { taskId: task.taskId, retentionHash: digest(expectedRetention) }, { snapshot, expectedRevision: snapshot.revision, reevaluate: true },
+          async checked => {
+            const selected = await readJson<TaskMetadata>(this.files, checked, paths.task(task.taskId))
+            const raw = await this.files.read(checked, paths.archive(task.taskId) + '/retention.json')
+            if (!selected || selected.status !== 'complete' || selected.owner !== task.owner || raw !== expectedRetention
+              || await this.files.read(checked, cleaner) === undefined) throw new Error('Recorder retention changed; inspect the current cleanup request.')
+            const changed = await changedCleanupMaterials(this.files, checked, selected, originalManifest, raw)
+            if (changed) throw changed
+            const plan = await prepareRecorderRetention(this.files, checked, selected, originalManifest)
+            return [...plan.changes, { path: paths.archive(task.taskId) + '/retention.json', content: encodeJson(plan.retention) }]
+          })
+        // Fresh snapshot checks all persisted archive hashes before any source deletion.
+        return withSnapshot(this.files, checked => this.clean(archival.task, checked))
+      }
       const retentionHash = digest(expectedRetention)
       await this.transactions.run('cleanup:' + task.taskId + ':files:' + retentionHash, { taskId: task.taskId, owner: task.owner, retentionHash },
         { snapshot, expectedRevision: snapshot.revision, reevaluate: true }, async checked => {
@@ -144,17 +186,15 @@ export class FrameworkCleaner {
             if (await this.files.readBytes(checked, path) === undefined) throw new Error('Retained Recorder reference is missing: ' + path)
           }
           const candidates = new Set<string>()
-          for (const root of [paths.run(task.taskId), 'Recorder Cache/' + task.taskId,
-            ...new Set([current.owner, ...(current.members ?? [])].map(member => paths.state(member, task.taskId)))]) {
+          for (const root of taskWorkingRoots(current)) {
             for (const entry of await this.files.list(checked, root)) candidates.add(entry.path)
           }
           // A later new task may reuse the submission filename; never delete that new input.
           const source = await this.files.read(checked, filePath(current.sourcePath))
           if (/^tasks\/[^/]+_(P|O)\.md$/.test(current.sourcePath) && source !== undefined && taskIdentity(source) === task.taskId) candidates.add(current.sourcePath)
           const retained = (path: string) => [...preserve].some(reference => path === reference || path.startsWith(reference.replace(/\/$/, '') + '/'))
-          // Recovery is consumed by its Planner, not by ordinary notification cleanup.
-          const unconsumedRecovery = [...candidates].filter(path => path.startsWith('state/') && path.split('/').at(-1) === 'recovery')
-          for (const path of unconsumedRecovery) preserve.add(path)
+          // Final sealed-Task cleanup reclaims its state namespace, including recovery.
+          // Ordinary running-role claims retain their separate consumption rules.
           const deletedPaths = [...candidates].filter(path => !retained(path)).sort()
           const cleanup: CleanupRecord = { version: 1, taskId: task.taskId, phase: 'files-cleaned', retentionHash: digest(raw),
             deletedPaths, preservedPaths: [...preserve].sort() }

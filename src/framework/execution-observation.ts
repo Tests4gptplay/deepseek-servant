@@ -1,8 +1,7 @@
 import type { DshProgress } from '../adapters/dsh/progress.js'
 import type { OwnedDshAgent } from '../adapters/dsh/host-types.js'
-import { createObservation, dueObservation, rebindObservation, recordProgress, canConsumeRecovery,
-  completeHealthyObservationCycle, type HealthyCycleEvidence,
-  type ObservationAction, type ObservationState, type WorkIdentity, type MemberIdentity } from './recovery.js'
+import { createObservation, dueObservation, rebindObservation, recordProgress,
+  type ObservationAction, type ObservationState, type WorkIdentity } from './recovery.js'
 
 export interface ScheduledObservation {
   id: string
@@ -16,6 +15,8 @@ export interface StoredExecutionObservation {
   executing: boolean
   consumedRecoveries?: string[]
   completedHealthyCycles?: string[]
+  /** Consumed native probe identities already applied in this execution. */
+  resetInputs?: string[]
   /** Retained until the scheduler durably accepts responsibility for this action. */
   pending?: ScheduledObservation
 }
@@ -50,6 +51,15 @@ export class ExecutionObservations {
   private current(binding: Binding): boolean { return this.bindings.get(binding.identity.workId) === binding }
 
   async bind(identity: WorkIdentity, agent: OwnedDshAgent): Promise<void> {
+    if (identity.role === 'Foreground') {
+      const prior = this.bindings.get(identity.workId)
+      if (prior) await this.unbind(identity.workId, prior.identity.executionId)
+      await this.queue(async () => {
+        const saved = await this.store.get(identity.workId)
+        if (saved?.observation.identity.role === 'Foreground' && saved.executing) await this.store.set(identity.workId, { ...saved, executing: false })
+      })
+      return
+    }
     const old = this.bindings.get(identity.workId)
     old?.unsubscribe()
     const binding: Binding = { identity: { ...identity }, agent, unsubscribe: () => {}, active: false }
@@ -58,13 +68,18 @@ export class ExecutionObservations {
       await this.queue(async () => {
         if (!this.current(binding)) return
         const saved = await this.store.get(identity.workId)
+        if (!this.current(binding)) return
         const previous = saved && old?.progress && saved.observation.identity.executionId === old.identity.executionId
           ? recordProgress(saved.observation, old.progress.kind, old.progress.observedAt) : saved?.observation
         const observation = !previous ? createObservation(identity, this.now())
           : previous.identity.executionId !== identity.executionId || (!saved?.executing && this.active(binding))
             ? rebindObservation(previous, identity.executionId, this.now()) : previous
-        await this.store.set(identity.workId, { observation, executing: this.active(binding), consumedRecoveries: saved?.consumedRecoveries ?? [], completedHealthyCycles: saved?.completedHealthyCycles ?? [],
-          ...(saved?.observation.identity.executionId === identity.executionId && saved.pending ? { pending: saved.pending } : {}) })
+        const next: StoredExecutionObservation = { ...saved, observation, executing: this.active(binding) }
+        if (saved?.observation.identity.executionId !== identity.executionId) {
+          delete next.pending
+          delete next.resetInputs
+        }
+        await this.store.set(identity.workId, next)
       })
       if (!this.current(binding)) return
       binding.active = this.active(binding)
@@ -118,19 +133,20 @@ export class ExecutionObservations {
         try {
           await this.synchronize(binding)
           const saved = await this.store.get(binding.identity.workId)
-          if (!this.current(binding) || !saved?.executing || saved.observation.identity.executionId !== binding.identity.executionId) continue
+          if (binding.identity.role === 'Foreground' || !this.current(binding) || !saved?.executing || saved.observation.identity.executionId !== binding.identity.executionId) continue
           const due = saved.pending ? undefined : dueObservation(saved.observation, this.now())
           const pending = saved.pending ?? (due?.action ? {
-            id: JSON.stringify([binding.identity.workId, binding.identity.executionId, due.state.cycleStartedAt, due.action.stage]), action: due.action,
+            id: JSON.stringify([binding.identity.workId, binding.identity.executionId, due.state.cycleStartedAt, due.action.stage, due.state.lastProgressAt]), action: due.action,
             cycleStartedAt: due.state.cycleStartedAt, checkedAt: due.state.cycleStartedAt + due.action.elapsedMs,
             progressAt: due.state.lastProgressAt,
           } : undefined)
           if (!pending) continue
-          const next = { ...saved, observation: due?.state ?? saved.observation, pending }
+          const next: StoredExecutionObservation = { ...saved, observation: due?.state ?? saved.observation, pending }
           await this.store.set(binding.identity.workId, next)
           if (!this.current(binding) || !this.active(binding)) continue
           await this.scheduler.arrange(pending)
-          await this.store.set(binding.identity.workId, { observation: next.observation, executing: next.executing, consumedRecoveries: next.consumedRecoveries ?? [], completedHealthyCycles: next.completedHealthyCycles ?? [] })
+          delete next.pending
+          await this.store.set(binding.identity.workId, next)
         } catch (error) { errors.push(error) }
       }
       if (errors.length) throw new AggregateError(errors, 'Observation arrangements failed')
@@ -140,7 +156,7 @@ export class ExecutionObservations {
   async mayApply(pending: ScheduledObservation): Promise<boolean> {
     const { action } = pending
     const binding = this.bindings.get(action.identity.workId)
-    if (!binding || binding.identity.executionId !== action.identity.executionId) return false
+    if (action.identity.role === 'Foreground' || !binding || binding.identity.executionId !== action.identity.executionId) return false
     const saved = await this.store.get(action.identity.workId)
     if (!this.current(binding) || !this.active(binding) || !saved
       || saved.observation.identity.executionId !== action.identity.executionId) return false
@@ -148,37 +164,50 @@ export class ExecutionObservations {
     return saved.observation.cycleStartedAt === pending.cycleStartedAt
       && saved.observation.stage === action.stage && progressAt <= pending.progressAt
   }
-  /** Call only after the corresponding Planner's normal-chain consumption committed. */
-  async recoveryConsumed(actor: WorkIdentity, member: MemberIdentity, receiptId?: string): Promise<void> {
-    if (!canConsumeRecovery(actor, member)) throw new Error('Recovery consumption belongs to the corresponding Planner.')
+  /** Only the runtime which proved that this action was not performed may defer it.
+   * New native progress postpones the same phase; it is not an explicit cycle reset. */
+  async deferUnperformed(pending: ScheduledObservation): Promise<void> {
     await this.queue(async () => {
-      const now = this.now()
-      for (const saved of await this.store.list()) {
-        const identity = saved.observation.identity
-        if (identity.taskId !== member.taskId || identity.member !== member.member
-          || (identity.role !== 'Planner' && identity.role !== 'Worker')) continue
-        if (receiptId && saved.consumedRecoveries?.includes(receiptId)) continue
-        await this.store.set(identity.workId, { executing: saved.executing, observation: createObservation(identity, now),
-          consumedRecoveries: receiptId ? [...(saved.consumedRecoveries ?? []), receiptId] : saved.consumedRecoveries ?? [],
-          completedHealthyCycles: saved.completedHealthyCycles ?? [] })
-      }
+      const identity = pending.action.identity
+      const binding = this.bindings.get(identity.workId)
+      const current = () => binding && this.current(binding) && this.active(binding)
+        && (['workId', 'executionId', 'role', 'taskId', 'member', 'workerId'] as const).every(key => binding.identity[key] === identity[key])
+      if (identity.role === 'Foreground' || !current()) return
+      await this.synchronize(binding!)
+      const saved = await this.store.get(identity.workId)
+      if (!current() || !saved || saved.observation.identity.executionId !== identity.executionId
+        || saved.observation.cycleStartedAt !== pending.cycleStartedAt
+        || saved.observation.stage !== pending.action.stage
+        || saved.observation.stageStartedAt !== pending.checkedAt
+        || (saved.pending && saved.pending.id !== pending.id)) return
+      const progress = binding!.progress
+      const observation = progress ? recordProgress(saved.observation, progress.kind, progress.observedAt) : saved.observation
+      if (observation.lastProgressAt <= pending.progressAt) return
+      const next = { ...saved, observation: { ...observation,
+        stage: (pending.action.stage - 1) as 0 | 1 | 2 } }
+      delete next.pending
+      await this.store.set(identity.workId, next)
+      if (binding!.progress === progress) binding!.progress = undefined
     })
   }
-  /** Share the execution metadata writer with bind/progress/tick. The assessment
-   * receipt is saved atomically with the reset, so a late retry cannot reset a
-   * subsequent cycle after the caller lost its separate command acknowledgement. */
-  async healthyCycle(workId: string, evidence: HealthyCycleEvidence, receiptId: string): Promise<void> {
+  /** Runtime proves this native probe was consumed by this exact execution before
+   * calling. Queued delivery is not that proof. Receipt and reset share one write,
+   * so retrying a lost acknowledgement cannot reset a later observation cycle. */
+  async reset(identity: WorkIdentity, probeInputId: string, cycleStartedAt: number): Promise<void> {
     await this.queue(async () => {
-      const binding = this.bindings.get(workId)
-      if (binding) await this.synchronize(binding)
-      const saved = await this.store.get(workId)
-      if (!saved) throw new Error('Execution observation does not exist for this health assessment.')
-      if (saved.completedHealthyCycles?.includes(receiptId)) return
-      const observation = completeHealthyObservationCycle(saved.observation, this.now(), evidence)
-      const next = { ...saved, observation,
-        completedHealthyCycles: [...(saved.completedHealthyCycles ?? []), receiptId] }
-      if (observation !== saved.observation) delete next.pending
-      await this.store.set(workId, next)
+      const binding = this.bindings.get(identity.workId)
+      const current = () => binding && this.current(binding) && this.active(binding)
+        && (['workId', 'executionId', 'role', 'taskId', 'member', 'workerId'] as const).every(key => binding.identity[key] === identity[key])
+      if (identity.role === 'Foreground' || !probeInputId || !current()) throw new Error('Observation reset requires the current active execution.')
+      await this.synchronize(binding!)
+      const saved = await this.store.get(identity.workId)
+      if (!current() || !saved || saved.observation.identity.executionId !== identity.executionId) throw new Error('Observation reset requires the current active execution.')
+      if (saved.resetInputs?.includes(probeInputId)) return
+      if (saved.observation.cycleStartedAt !== cycleStartedAt) throw new Error('Observation reset belongs to an obsolete cycle.')
+      const next = { ...saved, observation: createObservation(identity, this.now()),
+        resetInputs: [...(saved.resetInputs ?? []), probeInputId] }
+      delete next.pending
+      await this.store.set(identity.workId, next)
     })
   }
   async flush(): Promise<void> {

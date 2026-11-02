@@ -8,7 +8,7 @@ export const zh = {
   'tasks.gitExecutionOpen': '执行记录开放',
   'tasks.gitExecutionClosed': '执行记录已关闭',
   'tasks.noGitExecutions': '尚无执行记录',
-  'panel': 'DeepSeek Servant', 'title': 'DeepSeek Servant', 'subtitle': '围绕你的目标，持续做事与积累经验',
+  'panel': 'DeepSeek Servant', 'title': 'DeepSeek Servant', 'subtitle': '围绕您的目标，持续做事与积累经验。',
   'tabs.label': '助理视图', 'tabs.conversation': '对话', 'tabs.tasks': '任务', 'tabs.knowledge': '经验', 'tabs.settings': '设置',
   'runtime.running': '后台已连接', 'runtime.stopping': '后台正在停止', 'runtime.degraded': '后台需要处理',
   'settings.workerSeats': 'Worker 并发席位',

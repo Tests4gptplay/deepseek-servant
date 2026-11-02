@@ -10,12 +10,19 @@ function queue() {
   const rows = new Map<string, any>()
   const runtime = Object.create(FrameworkRoleRuntime.prototype) as any
   runtime.prefix = 'test/'
+  runtime.wakeWrites = new Map()
+  runtime.admissionCancellations = new Map()
+  runtime.targetedPumps = new Map()
+  runtime.native = { get: () => undefined, cancelOpening: async () => ({ status: 'superseded' }) }
   runtime.environment = {}
   runtime.records = { get: async (key: string) => structuredClone(rows.get(key)),
     set: async (key: string, value: unknown) => { rows.set(key, structuredClone(value)) },
     list: async (prefix: string) => [...rows].filter(([key]) => key.startsWith(prefix)).map(([key,value]) => ({key,value:structuredClone(value)})) }
   runtime.controls = new ExecutionControls(runtime.records, 'fixture')
   return { runtime, rows }
+}
+async function settleObservationStops(runtime: any): Promise<void> {
+  await Promise.all([...runtime.stopOperations?.values() ?? []].map((stop: any) => stop.promise))
 }
 const pending: ScheduledObservation = { id: 'execution-stage', cycleStartedAt: 0, checkedAt: 300000, progressAt: 0,
   action: { kind: 'probe-helper', stage: 1, elapsedMs: 300000, silentMs: 300000,
@@ -43,7 +50,7 @@ test('failed queued execution keeps the same scheduled identity for retry', asyn
 })
 test('queued helper probe rechecks actual execution progress before delivering', async () => {
   const { runtime } = queue()
-  runtime.observations = { mayApply: async () => false }
+  runtime.observations = { deferUnperformed: async () => {}, mayApply: async () => false }
   runtime.native = { get: () => { throw new Error('stale action reached native execution') } }
   await runtime.enqueueObservation(pending)
   await runtime.processObservations()
@@ -132,6 +139,7 @@ test('member completion winning before recovery publication prevents a new marke
   await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise))
   await runtime.processRestores()
   assert.equal((await storage.get<any>(runtime.prefix+'restores/command')).complete,true)
+  assert.equal((await storage.get<any>(runtime.prefix+'restores/command')).outcome,'terminal')
   await withSnapshot(files,async snapshot=>assert.equal(await files.read(snapshot,paths.state('A',taskId)+'/recovery'),undefined))
 })
 
@@ -774,7 +782,13 @@ test('runtime Cleaner requeues Recorder for changed original material, does not 
     assert.equal(await files.read(snapshot, originalPath), 'Late exact original result not yet archived')
   })
   await withSnapshot(files, snapshot => files.commit(snapshot, [{ path: 'instances/unrelated-heartbeat.json', content: encodeJson({ sequence: 2 }) }], 'Unrelated heartbeat'))
-  await assert.rejects(clean(), FilesConflictError, 'the saved failed preparation must first observe the intervening HEAD conflict')
+  assert.equal([...rows.values()].some(row => typeof row.id === 'string' && row.id.startsWith('cleanup:' + taskId + ':')), false,
+    'changed material was rejected before any cleanup command was prepared')
+  const beforeReview = await withSnapshot(files, snapshot => Promise.resolve(snapshot.revision))
+  assert.equal(await clean(), false, 'unchanged material still needs Recorder review; no stale prepared command exists')
+  assert.equal(await withSnapshot(files, snapshot => Promise.resolve(snapshot.revision)), beforeReview,
+    'retrying a material review does not bypass CAS or mutate task files')
+  assert.equal([...rows.values()].some(row => typeof row.id === 'string' && row.id.startsWith('cleanup:' + taskId + ':')), false)
   assert.equal(await clean(), false)
   assert.equal(pending().length, 1, 'material signature, not each HEAD, identifies the existing Recorder review')
   await runtime.saveRole({ identity: { workId: recorderKey, executionId: 'review-recorder', role: 'Recorder', taskId }, sessionId: 'recorder-review-session', generation: 2, lastWake: arranged })
@@ -1103,39 +1117,21 @@ test('uncertain native delivery retries its persisted original payload after res
   assert.equal([...rows.values()].find(row => row.request?.id === 'stable-input').delivered, true)
 })
 
-test('healthy assessment uses the observation writer and persists member receipt with its reset', async () => {
-  const { runtime, rows } = queue()
-  runtime.conversation = { foregroundRoot: 'foreground' }
-  runtime.environment = {}
-  const calls: unknown[] = []
-  runtime.observations = { healthyCycle: async (...args: unknown[]) => { calls.push(args) } }
-  const member = { taskId: 'T', member: 'A' }
-  const key = runtime.watchKey('T', 'A')
-  rows.set(key, { watch: { ...member, stage: 3, cycleStartedAt: 0, stageStartedAt: 0 }, consumedReceipts: ['old-consumption'] })
-  const input = { workId: 'worker', member, continuouslyNormal: true, noNewRecoveryAnomaly: true }
-  const originalSet = runtime.records.set
-  let loseAcknowledgement = true
-  runtime.records.set = async (path: string, value: unknown) => {
-    if (path.startsWith('test/healthy/') && loseAcknowledgement) { loseAcknowledgement = false; throw new Error('receipt acknowledgement lost') }
-    await originalSet(path, value)
-  }
-  await assert.rejects(runtime.services().helper.healthyCycle(input, 'healthy-command'), /acknowledgement lost/)
-  assert.deepEqual(calls[0], ['worker', input, 'healthy-command'])
-  const saved = rows.get(key)
-  assert.equal(saved.watch.stage, 0)
-  assert.deepEqual(saved.consumedReceipts, ['old-consumption'])
-  assert.deepEqual(saved.completedHealthyCycles, ['healthy-command'])
-  // A later cycle must survive a retry after the separate acknowledgement failed.
-  rows.set(key, { ...saved, watch: { ...member, stage: 3, cycleStartedAt: 123, stageStartedAt: 456 } })
-  await runtime.services().helper.healthyCycle(input, 'healthy-command')
-  assert.equal(rows.get(key).watch.stage, 3)
-  assert.equal(rows.get(key).watch.cycleStartedAt, 123)
-})
-
-test('member consumption serializes behind the active watch writer and retains healthy receipts', async () => {
+test('obsolete Helper healthy assessment is absent and cannot reset the marker or AI clock', async () => {
   const { runtime, rows } = queue()
   runtime.conversation = { foregroundRoot: 'foreground' }; runtime.environment = {}
-  runtime.observations = { recoveryConsumed: async () => undefined }
+  runtime.observations = { reset: async () => { throw new Error('Helper must not reset another AI') } }
+  const key = runtime.watchKey('T', 'A')
+  const prior = { watch: { taskId: 'T', member: 'A', stage: 3, cycleStartedAt: 0, stageStartedAt: 0 }, completedHealthyCycles: ['legacy'] }
+  rows.set(key, prior)
+  assert.equal(runtime.services().helper.healthyCycle, undefined)
+  assert.deepEqual(rows.get(key), prior, 'obsolete receipts remain readable without authorizing a reset')
+})
+
+test('member consumption serializes behind the active watch writer, preserves legacy receipts and never resets AI', async () => {
+  const { runtime, rows } = queue()
+  runtime.conversation = { foregroundRoot: 'foreground' }; runtime.environment = {}
+  runtime.observations = { recoveryConsumed: async () => { throw new Error('marker consumption must not reset AI observation') }, reset: async () => { throw new Error('independent AI clock') } }
   const member = { taskId: 'T', member: 'A' }, key = runtime.watchKey('T', 'A')
   let release!: () => void, started!: () => void
   const waiting = new Promise<void>(resolve => { release = resolve })
@@ -1173,12 +1169,22 @@ test('marker observation queued behind consumption does not revive an old snapsh
   assert.deepEqual(rows.get(runtime.watchKey(taskId, 'A')), { released: true, completedHealthyCycles: ['old'] })
 })
 
-test('healthy member assessment cannot acknowledge a nonexistent watch', async () => {
-  const { runtime, rows } = queue()
-  runtime.conversation = { foregroundRoot: 'foreground' }; runtime.environment = {}
-  await assert.rejects(runtime.services().helper.healthyCycle({ member: { taskId: 'T', member: 'A' },
-    continuouslyNormal: true, noNewRecoveryAnomaly: true }, 'absent-watch'), /watch does not exist/)
-  assert.equal(rows.size, 0)
+test('repeated recovery checks at30/60/90 preserve the original marker watch across overwrite', async t => {
+  const { runtime, files, rows } = await runtimeFixture(t)
+  const taskId = '99999999-9999-4999-8999-999999999999', marker = paths.state('A', taskId) + '/recovery'
+  runtime.taskMetadata = async () => [{ taskId, status: 'running', owner: 'A', members: ['A'] }]
+  let now = 0; t.mock.method(Date, 'now', () => now)
+  await withSnapshot(files, snapshot => files.commit(snapshot, [{ path: marker, content: '' }], 'marker'))
+  await runtime.observeRecoveryMarkers()
+  for (const minute of [30, 60, 90]) {
+    now = minute * 60_000
+    await withSnapshot(files, snapshot => files.commit(snapshot, [{ path: marker, content: '' }], 'same marker overwritten'))
+    await runtime.observeRecoveryMarkers(); await runtime.observeRecoveryMarkers()
+    assert.equal(rows.get(runtime.watchKey(taskId, 'A')).watch.cycleStartedAt, 0)
+  }
+  const wakes = [...rows.values()].filter(row => row.request?.context?.observation?.kind === 'recovery-check')
+  assert.deepEqual(wakes.map(row => row.request.context.observation.stage), [1, 2, 3])
+  assert.equal(await withSnapshot(files, snapshot => files.read(snapshot, marker)), '')
 })
 
 test('released Task stops participating in sealed stop work across restart while other unresolved work remains', async () => {
@@ -1410,12 +1416,12 @@ test('Helper overall restoration supersedes the previous pending explanation wit
   const record = { identity: { workId: runtime.roleKey('Helper'), executionId: 'old-helper', role: 'Helper' }, sessionId: 'helper-session', generation: 1,
     lastWake: request, delivery: { request, messageId: 'old-R', text: 'previous explanation', confirmed: true } }
   await runtime.saveRole(record); await runtime.wake(request, { targetExecutionId: 'prior-helper' })
-  runtime.observations = { mayApply: async () => true }
-  runtime.native = { stop: async () => ({ status: 'stopped' }) }
+  runtime.observations = { deferUnperformed: async () => {}, mayApply: async () => true }
+  runtime.native = { get: () => undefined, stop: async () => ({ status: 'stopped' }) }
   t.mock.method(DshSessionReader.prototype, 'inputs', async () => new Map([['old-R', { state: 'queued', text: 'previous explanation', source: 'deepseek-servant' }]]))
   t.mock.method(DshSessionReader.prototype, 'inspect', async () => ({ exists: true, lastTurn: { turn: 4, closed: false } }) as any)
-  const pending = { id: 'actual-overall-stage', action: { kind: 'restore-helper', identity: record.identity, elapsedMs: 2400000 } }
-  await runtime.arrangeObservation(pending); await runtime.arrangeObservation(pending)
+  const pending = { id: 'actual-overall-stage', action: { kind: 'restore-helper', stage: 3, identity: record.identity, elapsedMs: 2400000 } }
+  await runtime.arrangeObservation(pending); await settleObservationStops(runtime); await runtime.arrangeObservation(pending)
   const wakes = [...rows.values()].filter(row => row.request?.id === 'overall-restore:actual-overall-stage')
   assert.equal(wakes.length, 1)
   assert.equal(wakes[0].request.context.overallRestoration, true)
@@ -1466,14 +1472,15 @@ test('confirmed Helper stop does not lose overall restoration when native inspec
   const record = { identity: { workId: runtime.roleKey('Helper'), executionId: 'stopped-before-wake', role: 'Helper' }, sessionId: 'helper-session', generation: 1, lastWake: request }
   await runtime.saveRole(record)
   let active = true, stops = 0, inspections = 0
-  runtime.observations = { mayApply: async () => active }
-  runtime.native = { stop: async () => { stops++; active = false; return { status: 'stopped' } } }
+  runtime.observations = { deferUnperformed: async () => {}, mayApply: async () => active }
+  runtime.native = { get: () => active ? {} : undefined, stop: async () => { stops++; active = false; return { status: 'stopped' } } }
   t.mock.method(DshSessionReader.prototype, 'inspect', async () => {
     if (++inspections === 1) throw new Error('native inspection temporarily unavailable after confirmed stop')
     return { exists: true, lastTurn: { turn: 5, closed: true } } as any
   })
-  const pending = { id: 'confirmed-stop-recovery', action: { kind: 'restore-helper', identity: record.identity, elapsedMs: 2400000 } }
+  const pending = { id: 'confirmed-stop-recovery', action: { kind: 'restore-helper', stage: 3, identity: record.identity, elapsedMs: 2400000 } }
   await runtime.enqueueObservation(pending)
+  await runtime.processObservations(); await settleObservationStops(runtime)
   await assert.rejects(runtime.processObservations(), /temporarily unavailable/)
   assert.equal([...rows.values()].find(row => row.pending?.id === pending.id).complete, false)
   await runtime.processObservations()
@@ -1501,17 +1508,17 @@ test('startup resumes an authorized overall stop intent across the crash-before-
   const record = { identity: { workId: runtime.roleKey('Helper'), executionId: 'cold-overall', role: 'Helper' }, sessionId: 'cold-overall-session', generation: 1,
     lastWake: { id: 'deep-dive', role: 'Helper', reason: 'helper', sources: [] } }
   await runtime.saveRole(record)
-  const pending = { id: 'persisted-overall', action: { kind: 'restore-helper', identity: record.identity, elapsedMs: 2400000 } }
+  const pending = { id: 'persisted-overall', action: { kind: 'restore-helper', stage: 3, identity: record.identity, elapsedMs: 2400000 } }
   await runtime.enqueueObservation(pending)
   const stored = [...rows].find(([, row]) => row.pending?.id === pending.id)!
   rows.set(stored[0], { ...stored[1], stopStarted: true })
-  runtime.observations = { mayApply: async () => false }
+  runtime.observations = { deferUnperformed: async () => {}, mayApply: async () => false }
   runtime.native = { stop: async () => ({ status: 'superseded' }), get: () => undefined }
   let histories = 0
   t.mock.method(DshSessionReader.prototype, 'events', async () => { histories++; return [] })
   t.mock.method(DshSessionReader.prototype, 'inspect', async () => ({ exists: true, lifecycleKnown: true, lastTurn: { turn: 6, closed: true, reason: 'aborted', abortCause: 'disposed' }, unresolvedToolCallIds: [], queuedInbox: { nextTurn: [], nextStep: [] } }) as any)
   runtime.pump = async () => {}
-  await runtime.startup()
+  await runtime.startup(); await settleObservationStops(runtime); await runtime.processObservations(true)
   const continuations = [...rows.values()].filter(row => row.recovery)
   assert.equal(continuations.length, 1)
   assert.equal(continuations[0].request.id, 'overall-restore:' + pending.id)
@@ -1522,62 +1529,72 @@ test('overall observation intent must persist before its native stop begins', as
   const { runtime } = await runtimeFixture(t)
   const identity = { workId: runtime.roleKey('Helper'), executionId: 'not-yet-stopped', role: 'Helper' }
   await runtime.saveRole({ identity, sessionId: 'helper-session', generation: 1 })
-  runtime.observations = { mayApply: async () => true }
+  runtime.observations = { deferUnperformed: async () => {}, mayApply: async () => true }
   runtime.native = { stop: async () => { throw new Error('native stop must not run') } }
   const set = runtime.records.set.bind(runtime.records)
   runtime.records.set = async (key: string, value: unknown) => { if (key.includes('/observations/')) throw new Error('intent storage failed'); return set(key, value) }
-  await assert.rejects(runtime.arrangeObservation({ id: 'unpersisted', action: { kind: 'restore-helper', identity, elapsedMs: 2400000 } }), /intent storage failed/)
+  await assert.rejects(runtime.arrangeObservation({ id: 'unpersisted', action: { kind: 'restore-helper', stage: 3, identity, elapsedMs: 2400000 } }), /intent storage failed/)
 })
 
 test('a live Helper whose progress invalidated the queued stop is not forced through cold reconciliation', async t => {
   const { runtime, rows } = await runtimeFixture(t)
   const identity = { workId: runtime.roleKey('Helper'), executionId: 'live-progress', role: 'Helper' }
   await runtime.saveRole({ identity, sessionId: 'live-helper-session', generation: 1 })
-  const pending = { id: 'stale-overall', action: { kind: 'restore-helper', identity, elapsedMs: 2400000 } }
+  const pending = { id: 'stale-overall', action: { kind: 'restore-helper', stage: 3, identity, elapsedMs: 2400000 } }
   await runtime.enqueueObservation(pending)
   const saved = [...rows].find(([, row]) => row.pending?.id === pending.id)!
   rows.set(saved[0], { ...saved[1], stopStarted: true })
-  runtime.observations = { mayApply: async () => false }
-  runtime.native = { stop: async (_work: string, _execution: string, actual: unknown) => { assert.equal(actual, pending); return { status: 'superseded' } }, get: () => ({}) }
+  runtime.observations = { deferUnperformed: async () => {}, mayApply: async () => false }
+  let stops = 0
+  runtime.native = { stop: async () => { stops++; return { status: 'stopped' } }, get: () => ({}) }
   t.mock.method(DshSessionReader.prototype, 'events', async () => { throw new Error('must not replace a current progress check with cold evidence') })
-  await runtime.arrangeObservation(pending)
+  await runtime.arrangeObservation(pending); await settleObservationStops(runtime)
+  assert.equal(stops, 0, 'persisted intent cannot override live native progress invalidating its queued stop')
   assert.ok(![...rows.values()].some(row => row.request?.context?.overallRestoration))
 })
 
 for (const boundary of ['pending-producer', 'exact-user-stop', 'new-generation'] as const) test(`persisted overall restoration respects ${boundary}`, async t => {
-  const { runtime, rows } = await runtimeFixture(t)
+  const { runtime, rows, errors } = await runtimeFixture(t)
   const identity = { workId: runtime.roleKey('Helper'), executionId: 'old-overall', role: 'Helper' }
   const record: any = { identity, sessionId: 'helper-session', generation: 1, lastWake: { id: 'original', role: 'Helper', reason: 'helper', sources: [] },
     ...(boundary === 'pending-producer' ? { stopUnknown: { reason: 'native producer remains unconfirmed', jobs: ['pending-job'] } } : {}) }
   await runtime.saveRole(record)
   if (boundary === 'exact-user-stop') await runtime.controls.requestExecutionStop('stop-selected-helper', { workId: identity.workId, executionId: identity.executionId })
   if (boundary === 'new-generation') await runtime.saveRole({ ...record, identity: { ...identity, executionId: 'replacement' }, generation: 2 })
-  const pending = { id: 'overall-' + boundary, action: { kind: 'restore-helper', identity, elapsedMs: 2400000 } }
+  const pending = { id: 'overall-' + boundary, action: { kind: 'restore-helper', stage: 3, identity, elapsedMs: 2400000 } }
   await runtime.enqueueObservation(pending)
   const saved = [...rows].find(([, row]) => row.pending?.id === pending.id)!
   rows.set(saved[0], { ...saved[1], stopStarted: true })
-  runtime.observations = { mayApply: async () => false }
+  runtime.observations = { deferUnperformed: async () => {}, mayApply: async () => false }
   runtime.native = { stop: async () => { assert.equal(boundary, 'pending-producer'); return { status: 'superseded' } }, get: () => undefined }
   t.mock.method(DshSessionReader.prototype, 'events', async () => [])
-  if (boundary === 'pending-producer') await assert.rejects(runtime.processObservations(), /unconfirmed/)
-  else await runtime.processObservations()
+  await runtime.processObservations(); await settleObservationStops(runtime)
+  if (boundary === 'pending-producer') {
+    await runtime.errorTail
+    assert.ok(runtime.roleRecords.get(identity.workId).stopUnknown, 'unconfirmed producer evidence stays durable')
+    assert.ok(errors.some(error => error instanceof Error && /unconfirmed/.test(error.message)), 'unconfirmed owner is reported without holding the discovery loop')
+  }
   assert.ok(![...rows.values()].some(row => row.request?.context?.overallRestoration))
   assert.equal(runtime.roleRecords.get(identity.workId).stopped, undefined)
   assert.equal([...rows.values()].find(row => row.pending?.id === pending.id).complete, boundary !== 'pending-producer')
 })
 test('one unresolved Helper stop does not starve another execution observation responsibility', async t => {
-  const { runtime, rows } = await runtimeFixture(t)
+  const { runtime, rows, errors } = await runtimeFixture(t)
   const identity = { workId: runtime.roleKey('Helper'), executionId: 'blocked-helper', role: 'Helper' }
   await runtime.saveRole({ identity, sessionId: 'helper-session', generation: 1 })
-  runtime.observations = { mayApply: async () => true }
+  runtime.observations = { deferUnperformed: async () => {}, mayApply: async () => true }
   runtime.native = { stop: async () => ({ status: 'unconfirmed', reason: 'producer did not confirm', jobs: ['job'] }) }
-  const first = { id: 'blocked-stop', action: { kind: 'restore-helper', identity, elapsedMs: 2400000 } }
-  const second = { id: 'other-worker', action: { kind: 'inspect-role', identity: { workId: 'other', executionId: 'other-worker-execution', role: 'Worker', taskId: 'T2', member: 'A' }, elapsedMs: 300000 } }
+  const first = { id: 'blocked-stop', action: { kind: 'restore-helper', stage: 3, identity, elapsedMs: 2400000 } }
+  const second = { id: 'other-worker', action: { kind: 'probe-role', stage: 1, identity: { workId: 'other', executionId: 'other-worker-execution', role: 'Worker', taskId: 'T2', member: 'A' }, elapsedMs: 300000 } }
+  const sent: string[] = []
+  await runtime.saveRole({ identity: second.action.identity, sessionId: 'other-session', generation: 1 })
+  runtime.native.get = (workId: string) => workId === 'other' ? { sessionId: 'other-session', send: async (_text: string, id: string) => { sent.push(id) } } : undefined
   await runtime.enqueueObservation(first); await runtime.enqueueObservation(second)
-  await assert.rejects(runtime.processObservations(), /producer did not confirm/)
+  await runtime.processObservations(); await settleObservationStops(runtime); await runtime.errorTail
   assert.equal([...rows.values()].find(row => row.pending?.id === first.id).complete, false)
   assert.equal([...rows.values()].find(row => row.pending?.id === second.id).complete, true)
-  assert.ok([...rows.values()].some(row => row.request?.context?.observation.identity.executionId === 'other-worker-execution'))
+  assert.ok(errors.some(error => error instanceof Error && /producer did not confirm/.test(error.message)))
+  assert.deepEqual(sent, [second.id], 'healthy other execution receives its actual Host probe despite unconfirmed Helper stop')
 })
 
 test('sealed in-flight stop does not block completion notifications or another task in later polls', async () => {
@@ -1741,7 +1758,8 @@ test('runtime shutdown drains admitted Host and Helper diagnostics before servic
   runtime.error(new Error('accepted Host fault'), { role: 'Worker' })
   runtime.error(new Error('accepted Helper fault'), { role: 'Helper' })
   await entered.promise
-  const service = Object.create(FrameworkService.prototype) as any
+  // Use the actual constructor so all owned operation lanes participate in disposal.
+  const service = new FrameworkService({} as any, runtime.records, {} as any) as any
   Object.assign(service, { closed: false, configuration: Promise.resolve(), configurationOwners: new Set(), accessTransitions: new Map(), opening: new Map(), stopping: new WeakMap(), relocationOwners: new Map(), accessOpening: new Map(), backgroundOpening: new Map(), accesses: new Map(), listeners: new Set(), disposalErrors: [],
     running: new Map([['local', { runtime, connection: { close: async () => { events.push('connection-closed') } } }]]) })
   const shutdown = disposeResources([() => service.dispose(), () => serial(async () => { closed = true; events.push('storage-closed') })])
@@ -1789,7 +1807,7 @@ test('Helper exact restore preserves pending stop responsibility without blockin
   const two={identity:{workId:'two',executionId:'e2',role:'Recorder',taskId:'T2'},sessionId:'s2',generation:1}
   runtime.roleRecords.set('one',one);runtime.roleRecords.set('two',two)
   runtime.stopOwnedRecord=async(record:any)=>{stops.push(record.identity.executionId);if(record.identity.executionId==='e1')await gate.promise;return{status:'stopped'}}
-  runtime.arrangeNativeContinuation=async(record:any,_input:any,_inspection:any,id:string)=>{arranged.push(record.identity.executionId+':'+id)}
+  runtime.arrangeNativeContinuation=async(record:any,_input:any,_inspection:any,id:string)=>{arranged.push(record.identity.executionId+':'+id);return{id,role:record.identity.role,taskId:record.identity.taskId,reason:'startup-recovery',sources:[]}}
   for(const [commandId,record] of [['one',one],['two',two]] as const)await storage.set(runtime.prefix+'restores/'+commandId,{commandId,createdAt:'2026-11-01T00:00:00Z',input:{target:record.identity,facts:'retained facts',hypotheses:'unknown',actionsTaken:'preserved',continuation:'continue'},complete:false})
   let returned=false;const first=runtime.processRestores().then(()=>{returned=true})
   try{
@@ -1806,7 +1824,7 @@ test('Helper exact restore preserves pending stop responsibility without blockin
 test('Helper restore skips busy work without taking its lock or losing the original command',async t=>{
   const {runtime,storage}=await runtimeFixture(t),record={identity:{workId:'w',executionId:'e',role:'Recorder',taskId:'T'},sessionId:'s',generation:1}
   runtime.roleRecords.set('w',record);runtime.workOperations=new Map([['w',new Promise(()=>{})]])
-  let stops=0,arranged=0;runtime.stopOwnedRecord=async()=>{stops++;return{status:'stopped'}};runtime.arrangeNativeContinuation=async()=>{arranged++}
+  let stops=0,arranged=0;runtime.stopOwnedRecord=async()=>{stops++;return{status:'stopped'}};runtime.arrangeNativeContinuation=async()=>{arranged++;return{id:'arranged',role:'Recorder',taskId:'T',reason:'startup-recovery',sources:[]}}
   const key=runtime.prefix+'restores/c';await storage.set(key,{commandId:'c',createdAt:'2026-11-01T00:00:00Z',input:{target:record.identity,facts:'facts'},complete:false})
   await runtime.processRestores();assert.equal(stops,0);assert.equal((await storage.get<any>(key)).complete,false)
   runtime.workOperations.delete('w');await runtime.processRestores();await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise));await runtime.processRestores()
@@ -2266,9 +2284,7 @@ test('native Foreground capture reevaluates a proven append conflict without los
     }
     return commit(snapshot,changes,message);
   };
-  await assert.rejects(runtime.finishForegroundRound(record),FilesConflictError);
-  assert.equal(stops,0);assert.equal(runtime.roleRecords.get(record.identity.workId).completedRound,undefined);
-  await runtime.finishForegroundRound(runtime.roleRecords.get(record.identity.workId));
+  await runtime.finishForegroundRound(record);
   await Promise.all([...runtime.stopOperations.values()].map((stop:any)=>stop.promise));
   const page=await runtime.conversation.page(20), replies=page.messages.filter((message:any)=>message.role==='assistant');
   assert.equal(replies.length,1);assert.equal(replies[0].text,'  actual answer\n原文');assert.equal(replies[0].replyTo,'human');
@@ -2398,3 +2414,154 @@ test('serialWork admitted microtask rechecks closed before starting its target c
  assert.equal(wakes.length,0,'no new continuation may be published by callback first starting after closed');
  assert.equal(saved.complete,false);assert.equal(saved.targets[0].complete,undefined);
 });
+
+test('startup checks member eligibility and actual Worker ownership before accessing notes', async t => {
+  const { runtime, files } = await runtimeFixture(t)
+  const ids = ['completed-member', 'empty-inbox', 'active-worker', 'eligible-member']
+  await withSnapshot(files, snapshot => files.commit(snapshot, ids.flatMap(taskId => [
+    { path: paths.task(taskId), content: encodeJson({ version: 1, taskId, route: 'P', owner: 'A', sourcePath: 'tasks/' + taskId + '_P.md', status: 'running', members: ['A'] }) },
+    { path: paths.inbox(taskId, 'A'), content: taskId === 'empty-inbox' ? '' : 'Original pending work' },
+    { path: paths.memberStatus(taskId, 'A'), content: encodeJson({ state: taskId === 'completed-member' ? 'complete' : 'running', deliveryId: 'original' }) },
+    { path: paths.member(taskId, 'A') + '/workers/saved/notes.md', content: 'Original unfinished work' },
+  ]), 'Recovery eligibility fixture'))
+  // The active Worker has no notes file of its own: native execution, not the
+  // existence of a note, establishes whether this member is already executing.
+  const workId = runtime.roleKey('Worker', 'active-worker', 'actual')
+  runtime.roleRecords.set(workId, { identity: { role: 'Worker', workId, executionId: 'live-worker', taskId: 'active-worker', member: 'A', workerId: 'actual' }, sessionId: 'live-session', generation: 1 })
+  runtime.native.get = (key: string) => key === workId ? { observe: () => ({ state: 'running' }) } : undefined
+  const list = files.list.bind(files), read = files.read.bind(files), notesVisited: string[] = []
+  files.list = async (snapshot, prefix) => { if (prefix.includes('/workers/')) notesVisited.push(prefix); return list(snapshot, prefix) }
+  files.read = async (snapshot, path) => { if (path.endsWith('/notes.md')) notesVisited.push(path); return read(snapshot, path) }
+  const members = await withSnapshot(files, snapshot => runtime.scanMembers(snapshot))
+  assert.deepEqual(notesVisited, [paths.member('eligible-member', 'A') + '/workers/'])
+  const { scanMemberRecovery } = await import('../src/framework/recovery.js')
+  assert.deepEqual(scanMemberRecovery(members).map(target => [target.taskId, target.role, target.workerId]), [['eligible-member', 'Worker', 'saved']])
+})
+
+
+test('real observation writer rearms a progress-cancelled terminal phase and runtime later stops the same silent execution', async t => {
+  const { runtime, rows } = await runtimeFixture(t)
+  const identity = { workId: runtime.roleKey('Helper'), executionId: 'terminal-progress', role: 'Helper' as const }
+  await runtime.saveRole({ identity, sessionId: 'terminal-session', generation: 1,
+    lastWake: { id: 'original-helper', role: 'Helper', reason: 'helper', sources: [] } })
+  let now = 0, listener: ((event: any) => void) | undefined, stops = 0
+  const sent: string[] = []
+  const agent = { sessionId: 'terminal-session', observe: () => ({ state: 'running', jobs: [] }),
+    subscribe: () => () => {}, subscribeProgress: (value: (event: any) => void) => { listener = value; return () => {} },
+    send: async (_text: string, id: string) => { sent.push(id) } }
+  runtime.native = { get: () => agent, stop: async () => { stops++; return { status: 'stopped' } } }
+  const { ExecutionObservations } = await import('../src/framework/execution-observation.js')
+  const saved = new Map<string, any>()
+  runtime.observations = new ExecutionObservations({ get: async key => structuredClone(saved.get(key)),
+    set: async (key, value) => { saved.set(key, structuredClone(value)) }, list: async () => [...saved.values()] },
+  { arrange: (item: ScheduledObservation) => runtime.enqueueObservation(item) }, (error: unknown) => { throw error }, () => now)
+  await runtime.observations.bind(identity, agent as any)
+  for (const minute of [5, 10]) { now = minute * 60_000; await runtime.observations.tick(); await runtime.processObservations(false, 'native') }
+  assert.equal(sent.length, 2)
+  now = 40 * 60_000; await runtime.observations.tick()
+  const first = [...rows.values()].find(row => row.pending?.action.stage === 3)
+  now++; listener!({ kind: 'model-text', source: 'assistant-stream', observedAt: now })
+  await runtime.processObservations(false, 'native')
+  assert.equal(stops, 0); assert.equal(saved.get(identity.workId).observation.stage, 2)
+  now += 30 * 60_000; await runtime.observations.tick()
+  const terminals = [...rows.values()].filter(row => row.pending?.action.stage === 3)
+  assert.equal(terminals.length, 2); assert.notEqual(terminals[0].pending.id, terminals[1].pending.id)
+  assert.equal([...rows.values()].find(row => row.pending?.id === first.pending.id).complete, true)
+  await runtime.processObservations(false, 'native'); await settleObservationStops(runtime)
+  assert.equal(stops, 1)
+  assert.equal(runtime.roleRecords.get(identity.workId).stopped, true)
+})
+
+test('Helper restore without a confirmed continuation or terminal fact remains pending', async t => {
+  const { runtime, storage } = await runtimeFixture(t)
+  const record = { identity: { workId: 'unadmitted', executionId: 'unadmitted-e', role: 'Recorder', taskId: 'T' }, sessionId: 'unadmitted-s', generation: 1, stopped: true }
+  runtime.roleRecords.set(record.identity.workId, record)
+  runtime.arrangeNativeContinuation = async () => undefined
+  const key = runtime.prefix + 'restores/unarranged'
+  await storage.set(key, { commandId: 'unarranged', createdAt: '2026-11-01T00:00:00Z', input: { target: record.identity, facts: 'not admitted' }, complete: false })
+  await runtime.processRestores()
+  assert.equal((await storage.get<any>(key)).complete, false)
+})
+
+for (const role of ['Organizer', 'Recorder']) test(`actual ${role} stage-three restoration publishes owner recovery before continuation`, async t => {
+  const { runtime, files } = await runtimeFixture(t), taskId = 'owner-recovery-' + role
+  await withSnapshot(files, snapshot => files.commit(snapshot, [{ path: paths.task(taskId), content: encodeJson({ version: 1, taskId, owner: 'A', members: ['A'], route: 'O', status: role === 'Recorder' ? 'complete' : 'running', sourcePath: 'tasks/owner_O.md' }) }], 'task'))
+  const request = { id: 'old-' + role, role, taskId, reason: 'notification', sources: [] }
+  const record = { identity: { workId: runtime.roleKey(role, taskId), executionId: 'old-' + role, role, ...(role === 'Recorder' ? { taskId } : {}) }, sessionId: 'session-' + role, generation: 1, lastWake: request, delivery: { request, messageId: 'old-input', confirmed: true } }
+  await runtime.saveRole(record)
+  runtime.observations = { mayApply: async () => true, deferUnperformed: async () => {} }
+  runtime.native = { get: () => undefined, stop: async () => ({ status: 'stopped' }) }
+  t.mock.method(DshSessionReader.prototype, 'inspect', async () => ({ exists: true, lastTurn: { turn: 1, closed: true } }) as any)
+  let continued = 0
+  runtime.arrangeNativeContinuation = async () => {
+    assert.equal(await withSnapshot(files, snapshot => files.read(snapshot, paths.state('A', taskId) + '/recovery')), '')
+    continued++; return request
+  }
+  const pending = { id: 'owner-stage3-' + role, action: { kind: 'restart-role', stage: 3, identity: record.identity, elapsedMs: 2400000 } }
+  await runtime.arrangeObservation(pending); await settleObservationStops(runtime); await runtime.arrangeObservation(pending)
+  assert.equal(continued, 1)
+})
+
+for (const role of ['Organizer', 'Recorder']) test(`overall restoration retains ${role} owner recovery even when its Task business is complete`, async t => {
+  const { runtime, files, storage } = await runtimeFixture(t), taskId = 'overall-owner-' + role
+  await withSnapshot(files, snapshot => files.commit(snapshot, [{ path: paths.task(taskId), content: encodeJson({ version: 1, taskId, owner: 'A', members: ['A'], route: 'O', status: 'complete', sourcePath: 'tasks/owner_O.md' }) }], 'sealed business'))
+  const request = { id: 'old-' + role, role, taskId, reason: 'notification', sources: [] }
+  const record = { identity: { workId: runtime.roleKey(role, taskId), executionId: 'overall-' + role, role, ...(role === 'Recorder' ? { taskId } : {}) }, sessionId: 'session-' + role, generation: 1, stopped: true, lastWake: request }
+  await runtime.saveRole(record)
+  const key = runtime.prefix + 'host-restores/exact-owner'
+  await storage.set(key, { commandId: 'exact-owner-' + role, createdAt: '2026-11-01T00:00:00Z', input: { facts: 'restored', hypotheses: 'unknown', actionsTaken: 'preserved', continuation: 'continue' }, complete: false, targets: [{ identity: record.identity, sessionId: record.sessionId }] })
+  runtime.arrangeNativeContinuation = async () => request
+  await runtime.processHostRestores()
+  assert.equal(await withSnapshot(files, snapshot => files.read(snapshot, paths.state('A', taskId) + '/recovery')), '')
+  assert.equal((await storage.get<any>(key)).complete, true)
+})
+
+test('completed but not cleaned owner recovery keeps its existing thirty-minute watch until namespace cleanup', async t => {
+  const { runtime, files, rows } = await runtimeFixture(t), taskId = 'completed-recorder-watch'
+  let now = 0; t.mock.method(Date, 'now', () => now)
+  const marker = paths.state('A', taskId) + '/recovery'
+  await withSnapshot(files, snapshot => files.commit(snapshot, [{ path: paths.task(taskId), content: encodeJson({ version: 1, taskId, owner: 'A', members: ['A'], route: 'O', status: 'complete', sourcePath: 'tasks/owner_O.md' }) }, { path: marker, content: '' }], 'Recorder recovery'))
+  await runtime.observeRecoveryMarkers(); now = 30 * 60_000; await runtime.observeRecoveryMarkers()
+  assert.equal([...rows.values()].filter(row => row.request?.context?.observation?.kind === 'recovery-check').length, 1)
+  await withSnapshot(files, snapshot => files.commit(snapshot, [{ path: 'technical/cleanup/' + taskId + '.json', content: encodeJson({ version: 1, taskId, phase: 'files-cleaned', retentionHash: 'verified', deletedPaths: [marker], preservedPaths: [] }) }, { path: marker, content: null }], 'namespace reclaimed'))
+  now = 60 * 60_000; await runtime.observeRecoveryMarkers()
+  assert.equal([...rows.values()].filter(row => row.request?.context?.observation?.kind === 'recovery-check').length, 1)
+})
+
+test('unchanged recovery marker watch writes only initialization and due stages, including after cold reconstruction', async t => {
+  const { runtime, files, storage, rows } = await runtimeFixture(t)
+  const taskId = '88888888-7777-4666-8555-444444444444', marker = paths.state('A', taskId) + '/recovery'
+  const taskMetadata = async () => [{ taskId, status: 'running', owner: 'A', members: ['A'] }]
+  runtime.taskMetadata = taskMetadata
+  let now = 0, writes = 0; t.mock.method(Date, 'now', () => now)
+  const key = runtime.watchKey(taskId, 'A'), set = storage.set.bind(storage)
+  storage.set = async (path, value) => { if (path === key) writes++; await set(path, value) }
+  await withSnapshot(files, snapshot => files.commit(snapshot, [{ path: marker, content: '' }], 'actual recovery marker'))
+  await runtime.observeRecoveryMarkers(); assert.equal(writes, 1)
+  for (let tick = 1; tick <= 20; tick++) { now = tick * 1000; await runtime.observeRecoveryMarkers() }
+  assert.equal(writes, 1, 'unchanged marker watch must not rewrite identical technical state')
+  now = 30 * 60_000; await runtime.observeRecoveryMarkers(); await runtime.observeRecoveryMarkers()
+  assert.equal(writes, 2); assert.equal(rows.get(key).watch.stage, 1)
+  const cold = new FrameworkRoleRuntime(runtime.ctx, files, storage, runtime.config, runtime.environment) as any
+  cold.taskMetadata = taskMetadata
+  now = 59 * 60_000; await cold.observeRecoveryMarkers(); assert.equal(writes, 2)
+  now = 60 * 60_000; await cold.observeRecoveryMarkers(); await cold.observeRecoveryMarkers()
+  assert.equal(writes, 3); assert.equal(rows.get(key).watch.stage, 2)
+  assert.deepEqual([...rows.values()].filter(row => row.request?.context?.observation?.kind === 'recovery-check').map(row => row.request.context.observation.stage), [1, 2])
+})
+
+test('shutdown preserves one owner failure while stopping remaining owners and observations', async () => {
+  const { runtime } = queue(), failure = new Error('first owner failed'), stopped: string[] = []
+  const records = ['one', 'two'].map(workId => ({ identity: { workId, executionId: workId + '-exec', role: 'Helper' } }))
+  runtime.roleRecords = new Map(records.map(record => [record.identity.workId, record]))
+  runtime.native = { cancelOpening: async () => ({ status: 'superseded' }) }
+  runtime.loop = { stop: async () => {} }
+  runtime.stopOwnedRecord = async (record: any) => {
+    stopped.push(record.identity.workId)
+    if (record.identity.workId === 'one') throw failure
+    return { status: 'stopped' }
+  }
+  runtime.observations = { dispose: async () => { stopped.push('observations') } }
+  await assert.rejects(runtime.dispose(), (error: unknown) => error === failure)
+  assert.deepEqual(stopped, ['one', 'two', 'observations'])
+})

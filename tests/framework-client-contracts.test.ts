@@ -9,7 +9,7 @@ const draft: FrameworkSendInput = { mode: 'git', collaborationId: 'git-team', st
 const deferred = <T>() => { let resolve!: (value: T) => void, reject!: (error: unknown) => void; const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej }); return { promise, resolve, reject } }
 
 test('late Local refresh cannot replace a subsequently selected Git conversation', async () => {
-  const local = deferred<FrameworkClientView>(), controller = new FrameworkClientController(api({ view: () => local.promise }))
+  const local = deferred<FrameworkClientView>(), controller = new FrameworkClientController(api({ view: input => input.mode === 'git' ? Promise.resolve(view('git')) : local.promise }))
   const first = controller.refresh()
   await controller.selectMode('git')
   local.resolve(view('local')); await first
@@ -248,7 +248,7 @@ test('actual React page routes offline send, original-message retry, resources a
     await React.act(async () => { closedRead.resolve({ path: 'doc.md', text: 'Closed late document', revision: 'closed' }); await tick() })
     assert.doesNotMatch(document.body.textContent!, /Reading document|Closed late document|Current Git document/)
     for (const language of ['zh', 'en'] as const) {
-      const unnamedApi = api({ view: async () => ({ ...view('git'), settings: { ...view('git').settings, name: '' } }) })
+      const unnamedApi = api({ view: async input => ({ ...view(input.mode ?? 'git'), settings: { ...view(input.mode ?? 'git').settings, name: '' } }) })
       await React.act(async () => { root.render(React.createElement(FrameworkPage, { key: 'unnamed-' + language, api: unnamedApi, language })); await tick() })
       assert.equal(document.querySelector('h1')?.textContent, 'DeepSeek Servant')
       assert.ok([...document.querySelectorAll('button')].some(button => button.textContent === 'DSS-cah'))
@@ -267,12 +267,12 @@ test('actual React page routes offline send, original-message retry, resources a
 
 test('refresh during a pending mode selection requests that selected mode, not the stale visible mode', async () => {
   const selected = deferred<FrameworkClientView>(), requested: unknown[] = []
-  const controller = new FrameworkClientController(api({ selectMode: () => selected.promise, view: async input => { requested.push(input.mode); return view(input.mode ?? 'local') } }))
+  const controller = new FrameworkClientController(api({ selectMode: () => selected.promise, view: async input => { if (!input.headerOnly) requested.push(input.mode); return view(input.mode ?? 'local') } }))
   await controller.refresh()
   const switching = controller.selectMode('git')
   await controller.refresh()
   selected.resolve(view('git')); await switching
-  assert.deepEqual(requested, [undefined, 'git'])
+  assert.deepEqual(requested, ['local', 'git']) // read starts only after the saved target header owns that mode
   assert.equal(controller.snapshot().value?.activeMode, 'git')
 })
 
@@ -290,7 +290,7 @@ test('refresh after loading older history retains that visible history and appen
 test('archive discovery is explicitly requested and ordinary refresh keeps the loaded list', async () => {
   const requests: Array<boolean | undefined> = []
   const archive = { path: 'archives/T/records.md', title: 'T' }
-  const controller = new FrameworkClientController(api({ view: async input => { requests.push(input.includeArchives); return { ...view('local'), archives: input.includeArchives ? [archive] : [] } } }))
+  const controller = new FrameworkClientController(api({ view: async input => { if (!input.headerOnly) requests.push(input.includeArchives); return { ...view('local'), archives: input.includeArchives ? [archive] : [] } } }))
   await controller.refresh(); await controller.refresh(true); await controller.refresh()
   assert.deepEqual(requests, [false, true, false])
   assert.deepEqual(controller.snapshot().value?.archives, [archive])
@@ -337,7 +337,7 @@ test('date/newer history windows remain separate from live refresh and latest re
 
 test('shared controller retains one changed subscription until final plugin/page reference releases', async () => {
   let subscriptions = 0, unsubscriptions = 0, refreshes = 0, changed: (() => void) | undefined
-  const sharedApi = api({ view: async () => { refreshes++; return view('local') }, subscribeChanged: listener => { subscriptions++; changed = listener; return () => { unsubscriptions++; changed = undefined } } })
+  const sharedApi = api({ view: async input => { if (!input.headerOnly) refreshes++; return view('local') }, subscribeChanged: listener => { subscriptions++; changed = listener; return () => { unsubscriptions++; changed = undefined } } })
   const plugin = getFrameworkClientController(sharedApi), page = getFrameworkClientController(sharedApi)
   assert.equal(plugin, page)
   const releasePlugin = plugin.retainConnection(), releasePage = page.retainConnection()
@@ -385,7 +385,7 @@ test('quick mode return invalidates the earlier navigation and its late errors',
 test('repository settings navigation survives old-scope history and refresh and retains drafts', async () => {
   const saved = deferred<FrameworkClientView>(), refreshed = deferred<FrameworkClientView>()
   let views = 0
-  const controller = new FrameworkClientController(api({ view: async () => ++views === 1 ? view('git') : refreshed.promise, configure: () => saved.promise, history: async () => ({ messages: [], revision: 'H' }) }))
+  const controller = new FrameworkClientController(api({ view: async input => input.headerOnly || ++views === 1 ? view('git') : refreshed.promise, configure: () => saved.promise, history: async () => ({ messages: [], revision: 'H' }) }))
   await controller.refresh(); controller.retain(draft)
   const saving = controller.configure({ mode: 'git', commandId: 'change-repo', expectedRevision: 'git-1', settings: { ...view('git').settings, ownerRepo: 'owner/other' } })
   await controller.navigateHistory({ date: '2026-10-31', limit: 50 })
@@ -499,4 +499,109 @@ test('a live invalidation does not discard the selected date while its history r
   page.resolve({ revision: 'H', messages: [{ id: 'dated', participantId: 'qa', createdAt: '', role: 'user', text: 'dated' }] }); await date
   assert.equal(controller.snapshot().value?.historyDate, '2026-10-01')
   assert.deepEqual(controller.snapshot().value?.messages.map(x => x.id), ['dated'])
+})
+
+test('export success stays outside conversation layout and long original path remains readable before sending', async () => {
+  const { build } = await import('esbuild'), { JSDOM } = await import('jsdom')
+  const { pathToFileURL } = await import('node:url'), { resolve } = await import('node:path')
+  await build({ entryPoints: ['src/framework/client-page.tsx'], outfile: '.validation/framework-client-view.mjs', bundle: true, platform: 'node', format: 'esm',
+    external: ['react', 'react/*', 'react-dom', 'react-dom/*'], loader: { '.css': 'empty' },
+    define: Object.fromEntries(['ICON', 'WELCOME_CHARACTER', 'TASK_EMPTY_CHARACTER'].map(key => ['__SERVANT_' + key + '_DATA_URI__', '""'])) })
+  const dom = new JSDOM('<!doctype html><div id="root"></div>', { url: 'http://localhost/', pretendToBeVisual: true })
+  const savedGlobals = new Map<string, PropertyDescriptor | undefined>()
+  const put = (key: string, value: unknown) => { savedGlobals.set(key, Object.getOwnPropertyDescriptor(globalThis, key)); Object.defineProperty(globalThis, key, { value, configurable: true, writable: true }) }
+  for (const key of ['window', 'document', 'Element', 'HTMLElement', 'HTMLTextAreaElement', 'HTMLInputElement', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'MutationObserver']) put(key, key === 'window' ? dom.window : (dom.window as any)[key])
+  put('getComputedStyle', dom.window.getComputedStyle.bind(dom.window)); put('requestAnimationFrame', dom.window.requestAnimationFrame.bind(dom.window)); put('cancelAnimationFrame', dom.window.cancelAnimationFrame.bind(dom.window))
+  put('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} }); put('IS_REACT_ACT_ENVIRONMENT', true)
+  dom.window.matchMedia = (() => ({ matches: false, addEventListener() {}, removeEventListener() {} })) as any
+  const React = await import('react'), { createRoot } = await import('react-dom/client')
+  const { FrameworkPage } = await import(pathToFileURL(resolve('.validation/framework-client-view.mjs')).href)
+  const root = createRoot(document.getElementById('root')!)
+  const exportedPath = '/workspace/' + 'long-project-name-'.repeat(32) + '/records.md'
+  let sent = 0
+  const seam = api({ view: async () => ({ ...view('local'), archives: [{ taskId: 'T', path: 'archives/T/records.md', title: 'Task T' }] }), exportRecords: async () => ({ path: exportedPath, bytes: 42, sha256: 'test-hash' }), send: async () => { sent++; return { revision: 'sent' } } })
+  const tick = () => new Promise(resolve => setImmediate(resolve))
+  const click = async (text: string) => { const button = [...document.querySelectorAll('button')].find(button => button.textContent === text)!; assert.ok(button, text); await React.act(async () => { button.click(); await tick() }) }
+  try {
+    await React.act(async () => { root.render(React.createElement(FrameworkPage, { api: seam, language: 'en' })); await tick() })
+    await click('Archives'); await click('Export complete records'); await click('Conversation')
+    const status = [...document.querySelectorAll('[role="status"]')].find(element => element.textContent?.includes(exportedPath))!
+    const page = document.querySelector('section[aria-label="DeepSeek Servant"]')!
+    assert.ok(status, 'successful export is still readable without an expiry timer')
+    assert.equal(status.parentElement === page, true, 'export notice must be in page column, not beside the conversation in its horizontal content row')
+    assert.equal(status.textContent, 'Records exported to: ' + exportedPath)
+    assert.equal((status as HTMLElement).style.overflowWrap, 'anywhere', 'unbroken export paths wrap without truncation')
+    assert.equal((status as HTMLElement).style.flexShrink, '0', 'the notice retains its own height above the content')
+    await React.act(() => { const input = document.querySelector('textarea')!; Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, 'value')!.set!.call(input, 'Send after export'); input.dispatchEvent(new dom.window.Event('input', { bubbles: true })) })
+    await click('Send'); assert.equal(sent, 1)
+    assert.ok(status.isConnected, 'sending does not hide the exported path')
+  } finally { await React.act(() => root.unmount()); dom.window.close(); for (const [key, descriptor] of savedGlobals) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key) } }
+})
+
+test('legacy archives expose archived attachments without records and keep pending external references read-only', async () => {
+  const { build } = await import('esbuild'), { JSDOM } = await import('jsdom')
+  const { pathToFileURL } = await import('node:url'), { resolve } = await import('node:path')
+  await build({ entryPoints: ['src/framework/client-page.tsx'], outfile: '.validation/framework-client-view.mjs', bundle: true, platform: 'node', format: 'esm',
+    external: ['react', 'react/*', 'react-dom', 'react-dom/*'], loader: { '.css': 'empty' },
+    define: Object.fromEntries(['ICON', 'WELCOME_CHARACTER', 'TASK_EMPTY_CHARACTER'].map(key => ['__SERVANT_' + key + '_DATA_URI__', '""'])) })
+  const dom = new JSDOM('<!doctype html><div id="root"></div>', { url: 'http://localhost/', pretendToBeVisual: true })
+  const savedGlobals = new Map<string, PropertyDescriptor | undefined>()
+  const put = (key: string, value: unknown) => { savedGlobals.set(key, Object.getOwnPropertyDescriptor(globalThis, key)); Object.defineProperty(globalThis, key, { value, configurable: true, writable: true }) }
+  for (const key of ['window', 'document', 'Element', 'HTMLElement', 'HTMLTextAreaElement', 'HTMLInputElement', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'MutationObserver']) put(key, key === 'window' ? dom.window : (dom.window as any)[key])
+  put('getComputedStyle', dom.window.getComputedStyle.bind(dom.window)); put('requestAnimationFrame', dom.window.requestAnimationFrame.bind(dom.window)); put('cancelAnimationFrame', dom.window.cancelAnimationFrame.bind(dom.window))
+  put('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} }); put('IS_REACT_ACT_ENVIRONMENT', true)
+  dom.window.matchMedia = (() => ({ matches: false, addEventListener() {}, removeEventListener() {} })) as any
+  const React = await import('react'), { createRoot } = await import('react-dom/client')
+  const { FrameworkPage } = await import(pathToFileURL(resolve('.validation/framework-client-view.mjs')).href)
+  const root = createRoot(document.getElementById('root')!)
+  const archivedPath = 'archives/migrated/attachments/original.bin', externalPath = 'file:///outside-authorized-workspace/' + 'long-original-directory-'.repeat(24) + '/original.bin'
+  const hash = 'f'.repeat(64), downloadUrl = '/api/deepseek-servant-framework/download?mode=local&storageScope=local-storage&path=' + encodeURIComponent(archivedPath)
+  const reads: Array<Parameters<FrameworkClientApi['readFile']>[0]> = []
+  const seam = api({ view: async () => ({ ...view('local'), archives: [], legacyTasks: [{ migrationId: 'migration', oldTaskId: 'old-task', taskId: 'T', continuation: 'complete', recordsAvailable: false,
+    artifacts: [{ id: 'archived-binary', sourcePath: '/old-workspace/result.bin', archivedPath, sha256: hash, status: 'archived' }, { id: 'external-pending', sourcePath: externalPath, sha256: hash, status: 'pending', detail: 'Original path is outside the authorized workspace.' }] }] }),
+    readFile: async input => { reads.push(input); assert.equal(input.path, archivedPath); return { path: input.path, revision: 'H', binary: { bytes: 42, sha256: hash, downloadUrl } } } })
+  const tick = () => new Promise(resolve => setImmediate(resolve))
+  const click = async (text: string) => { const button = [...document.querySelectorAll('button')].find(button => button.textContent === text || button.getAttribute('aria-label') === text)!; assert.ok(button, text); await React.act(async () => { button.click(); await tick() }) }
+  try {
+    await React.act(async () => { root.render(React.createElement(FrameworkPage, { api: seam, language: 'en' })); await tick() })
+    await click('Archives')
+    assert.equal(reads.length, 0, 'listing attachments does not read original files automatically')
+    assert.match(document.body.textContent!, /Original attachment: archived-binary/)
+    assert.match(document.body.textContent!, /Original attachment reference \(not imported\): external-pending/)
+    const originalPath = [...document.querySelectorAll('code')].find(element => element.textContent === externalPath)!
+    assert.ok(originalPath, 'full external path remains visible as plain text')
+    assert.equal(originalPath.style.overflowWrap, 'anywhere')
+    assert.match(document.body.textContent!, /Original path is outside the authorized workspace/)
+    assert.ok(document.body.textContent!.includes(hash))
+    assert.equal([...document.querySelectorAll('a[href]')].some(anchor => anchor.getAttribute('href')?.includes('outside-authorized-workspace')), false)
+    assert.equal([...document.querySelectorAll('button')].some(button => button.textContent === 'Complete original records'), false)
+    await click('Original attachment: archived-binary')
+    assert.deepEqual(reads, [{ mode: 'local', storageScope: 'local-storage', path: archivedPath }])
+    const download = [...document.querySelectorAll('a')].find(anchor => anchor.textContent === 'Download attachment')!
+    assert.ok(download); assert.equal(download.getAttribute('href'), downloadUrl); assert.ok(download.hasAttribute('download'))
+    assert.match(document.body.textContent!, /42 bytes/)
+    await click('Close'); await click('Conversation'); await click('Archives')
+    assert.equal(reads.length, 1, 'reopening the list does not dereference the pending external path')
+  } finally { await React.act(() => root.unmount()); dom.window.close(); for (const [key, descriptor] of savedGlobals) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key) } }
+})
+
+test('display availability fences offline navigation responses without discarding messages, drafts or accepted operations', async () => {
+  let availability!: (value: boolean) => void, calls = 0
+  const selected = deferred<FrameworkClientView>(), processing = { executionId: 'native-e', turnId: 'native-turn', startedAt: 1 }
+  const current = { ...view('local'), foregroundProcessing: processing, messages: [{ id: 'kept', role: 'user', text: 'Kept original', participantId: 'user', createdAt: '2026-11-01T00:00:00Z' }] as any }
+  const controller = new FrameworkClientController(api({ view: async () => { calls++; return current }, selectMode: () => selected.promise,
+    subscribeChanged: (_listener, state) => { availability = state!; return () => {} } }))
+  const release = controller.retainConnection()
+  await controller.refresh(); controller.retain(draft)
+  const count = calls
+  availability(false)
+  assert.equal(controller.snapshot().value?.foregroundProcessing, undefined)
+  assert.equal(controller.snapshot().value?.messages[0].text, 'Kept original')
+  assert.equal(controller.snapshot().drafts[0].input.text, draft.text)
+  assert.equal(calls, count)
+  const selecting = controller.selectMode('local')
+  availability(true); selected.resolve(current); await selecting
+  assert.equal(controller.snapshot().value?.foregroundProcessing, undefined, 'a request begun offline cannot revive processing after reconnect')
+  await controller.refresh(); assert.deepEqual(controller.snapshot().value?.foregroundProcessing, processing)
+  release()
 })

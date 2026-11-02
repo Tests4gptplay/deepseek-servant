@@ -17,6 +17,8 @@ export type DshAgentRole = Role | 'organizer' | 'recorder' | 'helper'
 
 export interface DshAgentRequest {
   sessionId: string
+  /** Cancels only this owned creation/admission; not the running Agent after return. */
+  signal?: AbortSignal
   cwd: string
   role: DshAgentRole
   model?: DshModelRoute
@@ -47,3 +49,11 @@ export interface OwnedDshAgent {
 
 export type ExecutionPermission = (agent: Agent, toolName: string) => boolean | Promise<boolean>
 export type AgentScopeSetup = (ctx: Context, agent: Agent) => void | Promise<void>
+
+/** Explicit admission cancellation, with independently known cleanup evidence. */
+export class DshAgentCreationCancelled extends Error {
+  constructor(readonly executionStopped: boolean, readonly reason: unknown, readonly cleanupDetail?: string) {
+    super(cleanupDetail ?? 'Native creation was cancelled.', { cause: reason })
+    this.name = 'DshAgentCreationCancelled'
+  }
+}

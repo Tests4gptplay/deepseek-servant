@@ -1135,3 +1135,130 @@ test('Local cancel, settled execution, manual clear and cold ownership retain ar
   await assert.rejects(cold.resumeTask(taskId,'cold-resume'),/explicitly cleared/);
   await withSnapshot(local,async snapshot=>assert.equal(JSON.parse((await local.read(snapshot,paths.task(taskId)))!).status,'running'));
 });
+
+test('migrated report attachments are discoverable without a new records.md, while external references remain text only', async t => {
+  const old = await legacyFixture('Preserve the original report attachments'), planner = await old.bind('plan')
+  assert.equal((await old.execute({ type: 'planning.commit', expectedGoalRevision: 1, expectedPlanRevision: 0, strategy: 'Save original output', children: [childSpec()] }, planner.source)).status, 'applied')
+  const worker = await old.bind('dispatch'), bytes = Uint8Array.from([0, 255, 4, 128]), sha256 = createHash('sha256').update(bytes).digest('hex')
+  const artifacts = [{ id: 'inside', path: 'original.bin', description: 'Original bytes', sha256 }, { id: 'outside', path: '/outside/declared-but-not-authorized.bin', description: 'Original external reference', sha256 }]
+  assert.equal((await old.execute({ type: 'execution.report', report: { resultId: 'original-result', assignmentVersion: 1, outcome: 'complete', summary: 'Original report', artifacts, evidence: ['Existing saved files'], frontier: 'Awaiting review' } }, worker.source)).status, 'applied')
+  const { service, local, storage } = await fixture(t), capture = await captureLocalLegacy(old.storage)
+  // This test owns view/read/download, not filesystem authorization. The native
+  // capture adapter's separate real-filesystem tests supply this byte boundary.
+  const plan = await withSnapshot(local, snapshot => prepareLegacyMigration(capture, local, snapshot, { id: 'artifact-view', owner: 'User-1', members: { assistant: 'User-1' }, artifacts: [{ taskId: 'one', sourcePath: 'original.bin', bytes }] }))
+  await applyLegacyMigration(local, new FrameworkTransactions(local, storage, 'artifact-view'), plan)
+  const page = await service.view({ mode: 'local', includeArchives: true }), task = page.legacyTasks.find(row => row.oldTaskId === 'one')!
+  assert.ok(task)
+  assert.equal(await withSnapshot(local, snapshot => local.read(snapshot, `archives/${task.taskId}/records.md`)), undefined)
+  const inside = task.artifacts?.find(row => row.id === 'inside'), outside = task.artifacts?.find(row => row.id === 'outside')
+  assert.equal(inside?.status, 'archived'); assert.ok(inside?.archivedPath)
+  assert.equal((await service.readFile({ mode: 'local', storageScope: 'local', path: inside.archivedPath })).binary?.sha256, sha256)
+  assert.deepEqual(await service.download('local', inside.archivedPath, 'local'), bytes)
+  assert.equal(outside?.status, 'pending'); assert.equal(outside?.sourcePath, artifacts[1]!.path); assert.equal(outside?.sha256, sha256); assert.equal(outside?.archivedPath, undefined)
+  const originalRead = local.read.bind(local); let sourceReads = 0
+  local.read = async (snapshot, path) => { if (path.includes('/source/')) sourceReads++; return originalRead(snapshot, path) }
+  const ordinary = await service.view({ mode: 'local' })
+  assert.deepEqual(ordinary.legacyTasks.find(row => row.oldTaskId === 'one')?.artifacts, task.artifacts)
+  assert.equal(sourceReads, 0, 'ordinary view does not rescan the legacy source bodies')
+})
+
+for (const alreadyMigrated of [false, true, 'offline', 'slow', 'closing', 'send', 'fresh-slow'] as const) test(`actual service opening imports declared legacy bytes (${alreadyMigrated === 'fresh-slow' ? 'first cutover with held file' : typeof alreadyMigrated === 'string' ? 'verified cutover without participation: ' + alreadyMigrated : alreadyMigrated ? 'verified old cutover' : 'first cutover'})`, async t => {
+  const fs = await import('node:fs/promises'), path = await import('node:path')
+  const root = await fs.mkdtemp(join(tmpdir(), 'dss-artifact-service-open-')), workspace = join(root, 'workspace'), directory = join(root, 'records')
+  await fs.mkdir(workspace)
+  const bytes = Uint8Array.from([0, 255, ...Buffer.from('original legacy result 😀')]), digest = createHash('sha256').update(bytes).digest('hex')
+  await fs.writeFile(join(workspace, 'result.bin'), bytes)
+  await fs.writeFile(join(root, 'outside.bin'), bytes)
+  const { readBaselineSource } = await import('./legacy-baseline.js')
+  const source = readBaselineSource('tests/task-fixture.ts').replace('fixture(request?: string)', 'fixture(workspace: string)').replace('if (request) input.goal.request = request', 'input.workspace.directory = workspace')
+  const { fixture: oldFixture } = await loadBaselineModule<{ fixture(workspace: string): Promise<Awaited<ReturnType<typeof legacyFixture>>> }>('tests/task-fixture.ts', source)
+  const old = await oldFixture(workspace), planner = await old.bind('plan')
+  await old.execute({ type: 'planning.commit', expectedGoalRevision: 1, expectedPlanRevision: 0, strategy: 'Store result', children: [childSpec()] }, planner.source)
+  const worker = await old.bind('dispatch')
+  assert.equal((await old.execute({ type: 'execution.report', report: { resultId: 'native-file', assignmentVersion: 1, outcome: 'complete', summary: 'Original output', artifacts: [{ id: 'output', path: 'result.bin', description: 'Declared result', sha256: digest }, { id: 'external-output', path: join(root, 'outside.bin'), description: 'External original reference', sha256: digest }], evidence: ['Original file exists'], frontier: 'Ready' } }, worker.source)).status, 'applied')
+  for (const execution of Object.values((await old.get()).executions)) await old.execute({ type: 'execution.observed', executionId: execution.executionId, physicalState: 'stopped', ownedJobIds: [] })
+  if (alreadyMigrated && alreadyMigrated !== 'fresh-slow') {
+    const { migrateFrameworkStorage } = await import('../src/framework/migration-lifecycle.js'), files = await LocalFiles.open(directory)
+    const scope = JSON.stringify(['local', await fs.realpath(directory)])
+    try { await migrateFrameworkStorage({ mode: 'local', scope, files, transactions: new FrameworkTransactions(files, old.storage, scope), records: old.storage,
+      options: (_capture, id) => ({ id, owner: 'User', members: { assistant: 'User' } }) }) } finally { await files.close() }
+  }
+  let contentReads = 0; const readPaths: string[] = []
+  let entered!: () => void, release!: () => void
+  const atRead = new Promise<void>(resolve => { entered = resolve }), held = new Promise<void>(resolve => { release = resolve })
+  const slow = alreadyMigrated === 'slow' || alreadyMigrated === 'closing' || alreadyMigrated === 'send' || alreadyMigrated === 'fresh-slow'
+
+  const ctx = { workspaceRegistry: { create: async (value: string) => ({ id: 'artifact-workspace', path: value }) }, agents: { get: () => undefined }, jobs: { list: () => [] }, fs: {
+    resolve: async (value: string, options?: { cwd?: string }) => ({ path: await fs.realpath(path.resolve(options?.cwd ?? workspace, value)) }),
+    contains: (parent: { path: string }, child: { path: string }) => { const r = path.relative(parent.path, child.path); return r !== '..' && !r.startsWith('..' + path.sep) && !path.isAbsolute(r) },
+    stat: async (value: { path: string }) => { const s = await fs.stat(value.path, { bigint: true }); return { type: s.isFile() ? 'file' : 'directory', size: Number(s.size), version: [s.dev, s.ino, s.size, s.mtimeNs, s.ctimeNs].join(':') } },
+    readByteRange: async (value: { path: string }, range: { offset: number; length: number }) => { contentReads++; readPaths.push(value.path); if (slow) { entered(); await held; } const handle = await fs.open(value.path, 'r'); try { const buffer = Buffer.alloc(range.length), result = await handle.read(buffer, 0, range.length, range.offset); return buffer.subarray(0, result.bytesRead) } finally { await handle.close() } },
+  } }
+  const chosen = { ...settings, workspace, localDirectory: directory }, service = new FrameworkService(ctx as any, old.storage, chosen), internal = service as any
+  internal.saved.set('local', { revision: 'loaded', settings: chosen })
+  // Only native model scheduling is suppressed. Service.open, original capture,
+  // Local registration, cutover/reconciliation and FilesStore are actual classes.
+  t.mock.method(FrameworkRoleRuntime.prototype, 'start', async () => {})
+  try {
+    if (alreadyMigrated === 'fresh-slow') {
+      let ready = false
+      const opening = internal.connect('local').then(() => { ready = true; return service.view({ mode: 'local' }) })
+      await atRead
+      await new Promise(resolve => setImmediate(resolve))
+      assert.equal(ready, true, 'original-file bytes are not a prerequisite for the authoritative first metadata cutover')
+      await opening
+    } else if (typeof alreadyMigrated === 'string') {
+      await old.storage.set('framework-settings/local', { revision: 'loaded-local', settings: chosen }); await old.storage.set('framework-settings/git', { revision: 'loaded-git', settings: chosen });
+      await old.storage.set('framework-participation/local', false); await old.storage.set('framework-participation/git', false);
+      await service.start(); assert.equal(internal.running.size, 0, 'attachment repair does not enable background participation')
+    } else await internal.connect('local')
+    if (slow) {
+      await atRead
+      const readable = await service.view({ mode: 'local' })
+      assert.ok(readable.legacyTasks.some(row => row.oldTaskId === 'one'), 'verified old records remain readable during held original-file IO')
+      await service.history({ mode: 'local', collaborationId: chosen.collaborationId, storageScope: readable.storageScope, limit: 20 })
+      if (alreadyMigrated === 'send') {
+        await service.send({ mode: 'local', collaborationId: chosen.collaborationId, storageScope: readable.storageScope, id: 'during-original-file-read', createdAt: '2026-11-01T08:30:00.000Z', text: 'New input remains writable', recipient: 'human', device: 'owned-repair-test' })
+        release()
+        await (await internal.access('local')).artifactRepair?.done
+        const history = await service.history({ mode: 'local', collaborationId: chosen.collaborationId, storageScope: readable.storageScope, limit: 20 })
+        assert.ok(JSON.stringify(history).includes('New input remains writable'))
+        assert.equal(internal.running.size, 0)
+        return
+      }
+      if (alreadyMigrated === 'closing') {
+        let settled = false
+        const closing = service.dispose().then(() => { settled = true })
+        await new Promise(resolve => setImmediate(resolve))
+        assert.equal(settled, false, 'dispose owns the actual in-flight repair until it settles')
+        release(); await closing
+        assert.equal(internal.accesses.size, 0)
+        return
+      }
+      release()
+    }
+    await (await internal.access('local')).artifactRepair?.done
+    const ordinaryAfterRepair = await service.view({ mode: 'local' })
+    assert.equal(ordinaryAfterRepair.legacyTasks.find(row => row.oldTaskId === 'one')?.artifacts?.find(row => row.id === 'output')?.status, 'archived', 'completion notification retains the ready reference without requiring another Archives click')
+    const page = await service.view({ mode: 'local', includeArchives: true }), imported = page.legacyTasks.find(row => row.oldTaskId === 'one')?.artifacts?.find(row => row.id === 'output')
+    assert.equal(imported?.status, 'archived'); assert.ok(imported?.archivedPath)
+    assert.deepEqual(await service.download('local', imported.archivedPath, page.storageScope), bytes)
+    assert.ok(contentReads > 0, 'production service actually called the filesystem capability, not supplied MigrationOptions bytes')
+    assert.deepEqual([...new Set(readPaths)], [join(workspace, 'result.bin')], 'outside reference never grants content-read authority')
+    assert.match(page.connection.detail ?? '', /outside|workspace/i, 'successful runtime startup must not erase an unresolved migration issue')
+    assert.equal(page.legacyTasks.find(row => row.oldTaskId === 'one')?.artifacts?.find(row => row.id === 'external-output')?.archivedPath, undefined)
+    assert.deepEqual(new Uint8Array(await fs.readFile(join(workspace, 'result.bin'))), bytes)
+    const count = contentReads; await service.view({ mode: 'local' }); assert.equal(contentReads, count)
+  } finally { release(); await service.dispose(); await fs.rm(root, { recursive: true, force: true }) }
+})
+
+test('optional processing read failure preserves actual saved conversation in service view', async t => {
+  const {service}=await fixture(t), internal=service as any
+  await service.send(input('local','retained'))
+  const active=internal.running.get('local'); active.connection.scope='local'
+  active.runtime.foregroundProcessing=async()=>{throw new Error('ACK read unavailable')}
+  const result=await service.view({mode:'local'})
+  assert.equal(result.messages[0].id,'retained')
+  assert.equal(result.foregroundProcessing,undefined)
+  assert.match(result.connection.detail!,/ACK read unavailable/)
+})

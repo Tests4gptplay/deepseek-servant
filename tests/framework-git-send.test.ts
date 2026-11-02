@@ -308,9 +308,10 @@ test('Git send: late old read and old send ACK cannot replace newer same-scope a
   const staleRead = controller.refresh(); await oldReadEntered.promise
   const original = f.input('old-ack'), sending = controller.send(original); await ackEntered.promise
   await f.service.send(f.input('new-head'))
-  await controller.refresh()
-  assert.deepEqual(controller.snapshot().value?.messages.map(message => message.id), ['old-ack', 'new-head'])
-  oldReadRelease.resolve(); await staleRead
+  // A changed read joins the owned flight and requests one fresh follow-up.
+  // Release that first read before awaiting the follow-up; the send ACK stays held.
+  const freshRead = controller.refresh()
+  oldReadRelease.resolve(); await Promise.all([staleRead, freshRead])
   assert.deepEqual(controller.snapshot().value?.messages.map(message => message.id), ['old-ack', 'new-head'])
   ackRelease.resolve(); await sending
   assert.deepEqual(controller.snapshot().value?.messages.map(message => message.id), ['old-ack', 'new-head'])

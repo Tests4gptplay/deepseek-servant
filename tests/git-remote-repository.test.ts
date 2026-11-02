@@ -1,3 +1,8 @@
+import { FrameworkConversation } from '../src/framework/conversation.js'
+import { FrameworkTransactions } from '../src/framework/command-transactions.js'
+import { GitFiles, FilesOutcomeUnknownError, withSnapshot } from '../src/framework/transactions.js'
+import { captureGitLegacy, prepareLegacyMigration, applyLegacyMigration } from '../src/framework/legacy-migration.js'
+import { MemoryStorage } from './support.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
@@ -110,7 +115,8 @@ class Remote {
       }
       if (this.mutationMode === 'lost-after-commit') throw new Error('Synthetic transport lost after application')
       if (this.mutationMode === 'partial-after-commit') return Response.json({ errors: [{ message: 'Response field unavailable' }] })
-      return Response.json({ data: { createCommitOnBranch: { commit: { oid } } } })
+      const requestedTree = /commit\s*\{[^}]*tree\s*\{/.test(body.query ?? '')
+      return Response.json({ data: { createCommitOnBranch: { commit: { oid, ...(requestedTree ? { tree: { oid: this.commits.get(oid)!.tree.sha } } : {}) } } } })
     }
     throw new Error('Unexpected HTTP route ' + method + ' ' + path)
   }
@@ -150,7 +156,7 @@ test('remote: binary unknown followed by another commit confirms original byte p
   const result = await repo.commitPrepared(base, input, 'Archive', operation)
   assert.notEqual(result.commit, remote.head)
   const fresh = fixture(remote).repo
-  assert.deepEqual(await fresh.resolveCommit(JSON.parse(JSON.stringify(operation))), { status: 'confirmed', commit: result.commit, head: remote.head })
+  assert.partialDeepStrictEqual(await fresh.resolveCommit(JSON.parse(JSON.stringify(operation))), { status: 'confirmed', commit: result.commit, head: remote.head })
   await assert.rejects(repo.commitPrepared(base, [{ path: input[0]!.path, bytes: new Uint8Array([1]) }], 'Archive', operation), /different input/)
 })
 
@@ -250,7 +256,7 @@ for (const mode of ['lost-after-commit', 'lost-after-later-commit', 'partial-aft
   assert.ok(remote.commits.get(committed)!.message.includes(operation.id))
   if (mode === 'lost-after-later-commit') assert.notEqual(committed, remote.head)
   const restarted = fixture(remote).repo
-  assert.deepEqual(await restarted.resolveCommit(JSON.parse(JSON.stringify(operation))), { status: 'confirmed', commit: committed, head: remote.head })
+  assert.partialDeepStrictEqual(await restarted.resolveCommit(JSON.parse(JSON.stringify(operation))), { status: 'confirmed', commit: committed, head: remote.head })
   const replay = await restarted.commitPrepared(await restarted.at(base.head), changes, 'Publish', operation)
   assert.equal(replay.replay, true)
   assert.equal(replay.commit, committed)
@@ -293,7 +299,7 @@ test('remote: real rejection is preserved; response errors do not cause automati
 
 test('remote: changed prepared input is rejected before HTTP mutation', async () => {
   const { repo, remote } = fixture(), base = await repo.snapshot(), operation = repo.prepareCommit(base, changes, 'Publish')
-  await assert.rejects(repo.commitPrepared(base, [{ ...changes[0]!, content: 'different' }], 'Publish', operation), /different input/)
+  await assert.rejects(repo.commitPrepared(base, [{ path: changes[0]!.path, content: 'different' }], 'Publish', operation), /different input/)
   await assert.rejects(repo.commitPrepared(base, changes, 'different message', operation), /different input/)
   assert.equal(remote.count('/graphql'), 0)
 })
@@ -548,7 +554,7 @@ test('remote: empty technical commit retains a recoverable operation after an un
   })
   remote.failReads = false
   const restarted = fixture(remote).repo
-  assert.deepEqual(await restarted.resolveCommit(persisted), { status: 'confirmed', commit: remote.head, head: remote.head })
+  assert.partialDeepStrictEqual(await restarted.resolveCommit(persisted), { status: 'confirmed', commit: remote.head, head: remote.head })
   assert.deepEqual(remote.commits.get(remote.head)!.files, before)
   assert.equal(remote.count('/graphql'), 1)
 })
@@ -1102,8 +1108,422 @@ test('remote: cancellation after accepted mutation stays unknown and resolves th
   const committed = remote.head
   assert.notEqual(committed, base.head)
   repo.cancel(reason); await rejection
-  assert.deepEqual(await repo.resolveCommit(retained), { status: 'confirmed', commit: committed, head: committed })
+  assert.partialDeepStrictEqual(await repo.resolveCommit(retained), { status: 'confirmed', commit: committed, head: committed })
   const retry = await repo.commitPrepared(await repo.at(base.head), changes, 'Cancelled response', retained)
-  assert.deepEqual(retry, { commit: committed, replay: true })
+  assert.partialDeepStrictEqual(retry, { commit: committed, replay: true })
   assert.equal(remote.count('/graphql'), 1, 'no automatic resend, new operation or duplicate mutation after cancellation')
+})
+
+// Mutation metadata is optional; authority and original byte verification remain mandatory.
+const treeHintPath='dss-coop/instances/self.json', body=JSON.stringify({sequence:2,updatedAt:'2026-11-01T09:00:30Z',status:'running'})
+async function prepareTreeHint(mode='normal') {
+ const remote=new Remote({'README.md':'synthetic','Workspace/instances/self.json':JSON.stringify({sequence:1,updatedAt:'2026-11-01T09:00:00Z',status:'running'})})
+ const {repo}=fixture(remote),base=await repo.snapshot()
+ await repo.read(base,treeHintPath)
+ const fetch=remote.fetch.bind(remote)
+ remote.fetch=async(url,init)=>{
+  const response=await fetch(url,init)
+  if(init?.method!=='POST'||new URL(url).pathname!=='/graphql')return response
+  const data=await response.json(),commit=data.data?.createCommitOnBranch?.commit
+  if(commit){
+   if(mode==='missing')delete commit.tree
+   if(mode==='null')commit.tree=null
+   if(mode==='invalid')commit.tree={oid:'not-a-tree-sha'}
+   if(mode==='invalid-length')commit.tree={oid:'a'.repeat(41)}
+   if(mode==='partial')data.errors=[{message:'synthetic optional field error'}]
+   if(mode==='later')remote.change({'Workspace/instances/peer.json':'synthetic peer'})
+  }
+  return Response.json(data)
+ }
+ const changes=[{path: treeHintPath,content:body}],operation=repo.prepareCommit(base,changes,'synthetic heartbeat')
+ remote.requests.length=0
+ return{remote,repo,base,changes,operation}
+}
+for(const mode of ['normal','missing','null','invalid','invalid-length','partial','later']) test('mutation tree metadata '+mode+' retains fresh HEAD and verified body',async()=>{
+ const{remote,repo,base,changes,operation}=await prepareTreeHint(mode)
+ const receipt=await repo.commitPrepared(base,changes,'synthetic heartbeat',operation)
+ const afterMutation=remote.requests.length,fresh=await repo.snapshot(),text=await repo.read(fresh,treeHintPath)
+ assert.equal(text,body);assert.equal(fresh.head,remote.head)
+ const reads=remote.requests.slice(afterMutation)as any[]
+ assert.equal(reads.filter(r=>r.path.includes('/commits/heads/')).length,1,'fresh authority must not be replaced by mutation receipt')
+ assert.equal(reads.filter(r=>r.path.includes('/git/blobs/')).length,1,'actual body readback remains')
+ const commitGETs=reads.filter(r=>r.path.includes('/git/commits/'))
+ assert.equal(commitGETs.length,mode==='normal'?0:1)
+ if(mode==='later'){assert.notEqual(fresh.head,receipt.commit);assert.equal(commitGETs[0]!.path.split('/').at(-1),fresh.head)}
+ assert.equal(reads.filter(r=>r.path.includes('/git/trees/')).length,3,'all independently authoritative tree mapping remains')
+})
+test('revocation after accepted mutation is not hidden by returned tree',async()=>{
+ const{remote,repo,base,changes,operation}=await prepareTreeHint()
+ await repo.commitPrepared(base,changes,'synthetic heartbeat',operation);remote.forbidden=true
+ await assert.rejects(repo.snapshot(),(e:any)=>e instanceof GitHubError&&e.status===403)
+})
+test('lost accepted mutation resolves the original operation, with no invented hint',async()=>{
+ const{remote,repo,base,changes,operation}=await prepareTreeHint();remote.mutationMode='lost-after-commit'
+ const receipt=await repo.commitPrepared(base,changes,'synthetic heartbeat',operation)
+ assert.equal(receipt.commit,remote.head)
+ assert.equal(remote.requests.filter(r=>r.path==='/graphql').length,1)
+ assert.ok(remote.commits.get(receipt.commit)!.message.includes('DSS-Operation: '+operation.id))
+ assert.ok(remote.requests.some(r=>r.path.includes('/git/commits/')),'uncertain result still resolves real ancestry')
+ assert.equal(await repo.read(await repo.snapshot(),treeHintPath),body)
+})
+test('lost before application remains UNKNOWN and keeps original operation identity',async()=>{
+ const{remote,repo,base,changes,operation}=await prepareTreeHint();remote.mutationMode='lost-before-commit'
+ await assert.rejects(repo.commitPrepared(base,changes,'synthetic heartbeat',operation),(e:any)=>e instanceof GitCommitOutcomeUnknownError&&e.operation.id===operation.id)
+ assert.equal(remote.head,base.head)
+ assert.equal(remote.requests.filter(r=>r.path==='/graphql').length,1)
+})
+
+test('releaseCache clears mutation hint before new authority session',async()=>{
+ const{remote,repo,base,changes,operation}=await prepareTreeHint()
+ await repo.commitPrepared(base,changes,'synthetic heartbeat',operation)
+ await repo.releaseCache();const start=remote.requests.length
+ assert.equal(await repo.read(await repo.snapshot(),treeHintPath),body)
+ assert.equal(remote.requests.slice(start).filter(r=>r.path.includes('/git/commits/')).length,1)
+})
+
+test('resolved complete bytes expose a same-scope same-commit verification result, including deletions', async () => {
+  const remote = new Remote({ 'Workspace/state/a': 'old', 'Workspace/state/deleted': 'remove' }), { repo } = fixture(remote)
+  const base = await repo.snapshot(), changes: GitChange[] = [{ path: 'dss-coop/state/a', content: 'new' }, { path: 'dss-coop/state/deleted', content: null }]
+  const op = repo.prepareCommit(base, changes, 'Verification handoff')
+  await repo.commitPrepared(base, changes, 'Verification handoff', op)
+  const resolved = await repo.resolveCommit(op)
+  assert.equal(resolved.status, 'confirmed')
+  if (resolved.status !== 'confirmed') throw new Error('Expected confirmed resolution')
+  assert.ok(resolved.verifiedWrites, 'only completed real byte validation supplies its actual snapshot')
+  const fresh = await repo.snapshot(), before = remote.requests.length
+  assert.equal(repo.matchesVerifiedWrites(fresh, resolved.verifiedWrites, op.writes), true)
+  assert.equal(remote.requests.length, before, 'comparison reuses an already fresh authority, not another body fetch')
+  assert.equal(repo.matchesVerifiedWrites(fresh, resolved.verifiedWrites, op.writes.slice(0, 1)), false)
+  assert.equal(repo.matchesVerifiedWrites(fresh, resolved.verifiedWrites, [...op.writes, { path: 'dss-coop/extra', sha256: null }]), false)
+})
+
+for (const boundary of ['later-head', 'cancel', 'release-cache', 'scope', 'account', 'foreign-snapshot'] as const) test(`verified byte result cannot cross ${boundary}`, async () => {
+  const remote = new Remote(), { repo, binding } = fixture(remote), base = await repo.snapshot()
+  const op = repo.prepareCommit(base, changes, 'Verification boundary')
+  await repo.commitPrepared(base, changes, 'Verification boundary', op)
+  const resolved = await repo.resolveCommit(op)
+  assert.equal(resolved.status, 'confirmed')
+  if (resolved.status !== 'confirmed') throw new Error('Expected successful byte verification')
+  assert.ok(resolved.verifiedWrites)
+  if (boundary === 'later-head') remote.change({ 'unrelated.txt': 'later authority' })
+  if (boundary === 'cancel') repo.cancel()
+  if (boundary === 'release-cache') await repo.releaseCache()
+  if (boundary === 'scope') binding.repositoryDirectory = 'different-root'
+  if (boundary === 'account') { remote.identity = { id: 2, login: 'other' }; await repo.connect() }
+  const fresh = boundary === 'foreign-snapshot' ? await fixture(remote).repo.snapshot() : await repo.snapshot()
+  assert.equal(repo.matchesVerifiedWrites(fresh, resolved.verifiedWrites, op.writes), false)
+})
+
+test('failed partial byte verification never exposes a reusable verified result', async () => {
+  const remote = new Remote(), { repo } = fixture(remote), base = await repo.snapshot()
+  const payload = [{ path: 'dss-coop/state/first', content: 'first' }, { path: 'dss-coop/state/second', content: 'second' }]
+  const op = repo.prepareCommit(base, payload, 'Partial verification')
+  await repo.commitPrepared(base, payload, 'Partial verification', op)
+  const fetch = remote.fetch.bind(remote); let reads = 0
+  remote.fetch = async (url, init) => {
+    if (url.includes('/git/blobs/') && ++reads === 2) throw new Error('Synthetic second body unavailable')
+    return fetch(url, init)
+  }
+  const resolved = await repo.resolveCommit(op)
+  assert.equal(reads, 2); assert.equal(resolved.status, 'unknown'); assert.equal('verifiedWrites' in resolved, false)
+})
+
+for (const boundary of ['same-head', 'advanced-head', 'old-receipt', 'commit-race'] as const) test(`migration readback handoff ${boundary} preserves authority and keeps live verification out of durable receipts`, async () => {
+  const remote = new Remote({ 'Workspace/inbox/synthetic.md': 'Synthetic original legacy input' }), { repo } = fixture(remote)
+  const records = new MemoryStorage(), operations = new Map<string, any>(), savedReceiptInputs: any[] = []
+  const saveRecord = records.set.bind(records)
+  records.set = async (key, value) => { if ((value as any)?.receipt) savedReceiptInputs.push((value as any).receipt); await saveRecord(key, value) }
+  const files = new GitFiles(repo, { save: async record => { operations.set(record.operation.id, structuredClone(record)) }, get: async id => operations.get(id), list: async () => [...operations.values()] })
+  const transactions = new FrameworkTransactions(files, records, 'migration-verification')
+  const original = await files.snapshot()
+  const source = await captureGitLegacy(files, original)
+  const plan = await prepareLegacyMigration(source, files, original, { id: 'verified-cutover', owner: 'alice', members: {} }, transactions)
+  await original.release()
+  const dispatch = repo.commitPrepared.bind(repo)
+  let pendingArgs: Parameters<typeof dispatch> | undefined
+  repo.commitPrepared = async (...args) => {
+    pendingArgs = args
+    if (boundary !== 'commit-race') await dispatch(...args)
+    throw new GitCommitOutcomeUnknownError(args[3], { cause: new Error('Synthetic interruption before local acknowledgement') })
+  }
+  await assert.rejects(applyLegacyMigration(files, transactions, plan), FilesOutcomeUnknownError)
+  assert.equal(remote.count('/graphql'), boundary === 'commit-race' ? 0 : 1)
+  repo.commitPrepared = dispatch
+  const resolve = repo.resolveCommit.bind(repo); let afterResolution = 0
+  repo.resolveCommit = async operation => {
+    const result = await resolve(operation)
+    assert.equal(result.status, boundary === 'commit-race' ? 'pending' : 'confirmed')
+    if (boundary === 'commit-race') await dispatch(...pendingArgs!)
+    afterResolution = remote.requests.length
+    if (boundary === 'advanced-head') remote.change({ 'unrelated.txt': 'New unrelated authority' })
+    return result
+  }
+  const run = transactions.run.bind(transactions)
+  let beforeApplyReadback = 0
+  transactions.run = async (...args) => {
+    const result = await run(...args)
+    if (result.verifiedWrites) {
+      assert.equal(Object.prototype.propertyIsEnumerable.call(result, 'verifiedWrites'), false, 'live verification is not a model/client field')
+      assert.equal('verifiedWrites' in JSON.parse(JSON.stringify({ archive: result })).archive, false)
+      assert.equal('verifiedWrites' in structuredClone(result), false)
+      assert.equal('verifiedWrites' in { ...result }, false)
+    }
+    beforeApplyReadback = remote.requests.length
+    return result
+  }
+  assert.equal((await applyLegacyMigration(files, transactions, plan)).verified, true)
+  if (boundary === 'commit-race') afterResolution = beforeApplyReadback
+  let reads = remote.requests.slice(afterResolution)
+  assert.equal(reads.filter(row => row.path.includes('/commits/heads/')).length, 1, 'fresh authority after complete verification is mandatory')
+  assert.equal(reads.filter(row => row.path.includes('/git/blobs/')).length, boundary === 'advanced-head' ? plan.changes.length : 0)
+  for (const receipt of savedReceiptInputs) assert.equal('verifiedWrites' in receipt, false, 'attaching live result cannot mutate an object already handed to storage')
+  for (const value of operations.values()) assert.equal('verifiedWrites' in value.resolution, false, 'native snapshot never enters saved operation resolution')
+  for (const { value } of await records.list<any>('framework-commands/')) if (value.receipt) assert.equal('verifiedWrites' in value.receipt, false, 'command receipt is metadata only')
+  if (boundary === 'old-receipt') {
+    const before = remote.requests.length
+    assert.equal((await applyLegacyMigration(files, transactions, plan)).verified, true)
+    reads = remote.requests.slice(before)
+    assert.equal(reads.filter(row => row.path.includes('/git/blobs/')).length, plan.changes.length, 'durable receipt alone cannot reuse a previous in-memory verification')
+  }
+  assert.equal(remote.count('/graphql'), 1, 'confirmation never resends the accepted operation')
+})
+
+test('ordinary mutation acceptance without byte verification still performs every migration readback', async () => {
+  const remote = new Remote({ 'Workspace/inbox/new.md': 'Synthetic input' }), { repo } = fixture(remote)
+  const operations = new Map<string, any>(), records = new MemoryStorage()
+  const files = new GitFiles(repo, { save: async value => { operations.set(value.operation.id, structuredClone(value)) }, get: async id => operations.get(id), list: async () => [...operations.values()] })
+  const transactions = new FrameworkTransactions(files, records, 'ordinary-migration')
+  const snapshot = await files.snapshot(), source = await captureGitLegacy(files, snapshot)
+  const plan = await prepareLegacyMigration(source, files, snapshot, { id: 'ordinary-cutover', owner: 'alice', members: {} }, transactions)
+  await snapshot.release()
+  const run = transactions.run.bind(transactions); let beforeReadback = 0
+  transactions.run = async (...args) => { const receipt = await run(...args); assert.equal(receipt.verifiedWrites, undefined); beforeReadback = remote.requests.length; return receipt }
+  assert.equal((await applyLegacyMigration(files, transactions, plan)).verified, true)
+  assert.equal(remote.requests.slice(beforeReadback).filter(row => row.path.includes('/git/blobs/')).length, plan.changes.length)
+})
+
+test('owned read operation shares one actual credential resolution across snapshot and body/metadata reads', async () => {
+  const remote = new Remote({ 'Workspace/a.txt': 'A', 'Workspace/b.txt': 'B' }); let resolutions = 0
+  const binding: RepoBinding = { ownerRepo: 'example/private', repositoryDirectory: 'Workspace', participantId: 1 }
+  const repo = new GitHubRepository(new GitHubClient(async () => { resolutions++; return { value: 'synthetic-owned-read', source: 'fixture' } }, (url, init) => remote.fetch(url, init)), () => binding)
+  const operation = async () => {
+    const snapshot = await repo.snapshot()
+    assert.equal(await repo.read(snapshot, 'dss-coop/a.txt'), 'A')
+    assert.equal(await repo.read(snapshot, 'dss-coop/b.txt'), 'B')
+    await repo.listDirectory(snapshot, 'dss-coop/')
+  }
+  const scoped = repo as GitHubRepository & { withReadOperation?: <T>(operation: () => Promise<T>) => Promise<T> }
+  await (scoped.withReadOperation ? scoped.withReadOperation(operation) : operation())
+  assert.equal(resolutions, 1)
+  assert.equal(remote.count('/git/blobs/'), 2, 'original bytes are still really fetched')
+})
+
+function ownedReadsFixture() {
+  const remote = new Remote({ 'Workspace/a.txt': 'A', 'Workspace/b.txt': 'B' })
+  let resolutions = 0, credential = 'synthetic-owned-first'
+  const binding: RepoBinding = { ownerRepo: 'example/private', repositoryDirectory: 'Workspace', participantId: 1 }
+  const repo = new GitHubRepository(new GitHubClient(async () => { resolutions++; return { value: credential, source: 'fixture' } }, (url, init) => remote.fetch(url, init)), () => binding)
+  return { repo, remote, binding, count: () => resolutions, credential: (value: string) => { credential = value } }
+}
+test('owned reads: common GitFiles withSnapshot supports all callers; next operation and release remain real boundaries', async () => {
+  const f = ownedReadsFixture(), operations = new Map<string, any>()
+  const files = new GitFiles(f.repo, { save: async record => { operations.set(record.operation.id, record) }, get: async id => operations.get(id), list: async () => [...operations.values()] })
+  let held: any
+  await withSnapshot(files, async snapshot => {
+    held = snapshot
+    assert.equal(await files.read(snapshot, 'a.txt'), 'A')
+    await files.withReadOperation(async () => assert.equal(await files.read(snapshot, 'b.txt'), 'B'))
+  })
+  assert.equal(f.count(), 1)
+  assert.throws(() => files.read(held, 'a.txt'), /released/)
+  await withSnapshot(files, async snapshot => assert.equal(await files.read(snapshot, 'a.txt'), 'A'))
+  assert.equal(f.count(), 2)
+  assert.equal(f.remote.count('/commits/heads/'), 2, 'new operation still obtains actual HEAD')
+  assert.equal(f.remote.count('/git/blobs/'), 3, 'no cross-operation body cache was introduced')
+})
+test('owned reads: writes and their later readback never borrow the pre-write session', async () => {
+  const f = ownedReadsFixture()
+  await f.repo.withReadOperation(async () => {
+    const base = await f.repo.snapshot()
+    await f.repo.read(base, 'dss-coop/a.txt')
+    assert.equal(f.count(), 1)
+    await f.repo.commit(base, [{ path: 'dss-coop/a.txt', content: 'changed' }], 'actual CAS')
+    assert.equal(f.count(), 2, 'publication resolves actual current credentials')
+    await f.repo.withReadOperation(async () => {
+      const checked = await f.repo.snapshot()
+      assert.equal(await f.repo.read(checked, 'dss-coop/a.txt'), 'changed')
+    })
+    assert.equal(f.count(), 3, 'post-write operation uses new authorization session')
+  })
+  assert.equal(f.remote.count('/graphql'), 1)
+})
+test('owned reads: asynchronous escape cannot use the completed owner session', async () => {
+  const f = ownedReadsFixture(), gate = Promise.withResolvers<void>(); let escaped!: Promise<unknown>
+  await f.repo.withReadOperation(async () => {
+    const snapshot = await f.repo.snapshot()
+    escaped = gate.promise.then(() => f.repo.read(snapshot, 'dss-coop/a.txt'))
+  })
+  gate.resolve()
+  await assert.rejects(escaped, /ownership has ended/)
+  assert.equal(f.count(), 1)
+  assert.equal(f.remote.count('/git/blobs/'), 0)
+})
+test('owned reads: changed root and credentials cannot reuse another authority snapshot', async () => {
+  const f = ownedReadsFixture()
+  await assert.rejects(f.repo.withReadOperation(async () => {
+    const snapshot = await f.repo.snapshot(); f.binding.repositoryDirectory = 'Elsewhere'
+    await f.repo.read(snapshot, 'dss-coop/a.txt')
+  }), /authority changed/)
+  f.binding.repositoryDirectory = 'Workspace'
+  const previous = await f.repo.withReadOperation(() => f.repo.snapshot())
+  f.credential('synthetic-owned-new')
+  await assert.rejects(f.repo.withReadOperation(() => f.repo.read(previous, 'dss-coop/a.txt')), /authorization changed/)
+  await f.repo.withReadOperation(async () => assert.equal(await f.repo.read(await f.repo.snapshot(), 'dss-coop/a.txt'), 'A'))
+})
+test('owned reads: a remote permission failure is not masked and next operation rechecks permission', async () => {
+  const f = ownedReadsFixture()
+  await assert.rejects(f.repo.withReadOperation(async () => {
+    const snapshot = await f.repo.snapshot(); f.remote.forbidden = true
+    await f.repo.read(snapshot, 'dss-coop/a.txt')
+  }), /Access revoked/)
+  const count = f.count()
+  await assert.rejects(f.repo.withReadOperation(() => f.repo.snapshot()), /Access revoked/)
+  assert.equal(f.count(), count + 1)
+  f.remote.forbidden = false
+  await f.repo.withReadOperation(async () => assert.equal(await f.repo.read(await f.repo.snapshot(), 'dss-coop/a.txt'), 'A'))
+})
+test('owned reads: cancellation drains actual in-flight body requests and reports the same cause', async () => {
+  const remote = new Remote({ 'Workspace/a.txt': 'A' }), entered = Promise.withResolvers<void>(), cause = new Error('owned cancel')
+  let aborted = false
+  const binding: RepoBinding = { ownerRepo: 'example/private', repositoryDirectory: 'Workspace', participantId: 1 }
+  const repo = new GitHubRepository(new GitHubClient(async () => ({ value: 'synthetic-cancel', source: 'fixture' }), async (url, init) => {
+    if (url.includes('/git/blobs/')) {
+      entered.resolve()
+      await new Promise((_resolve, reject) => {
+        const abort = () => { aborted = true; reject(init!.signal!.reason) }
+        if (init?.signal?.aborted) abort(); else init!.signal!.addEventListener('abort', abort, { once: true })
+      })
+    }
+    return remote.fetch(url, init)
+  }), () => binding)
+  let body!: Promise<unknown>
+  const owned = repo.withReadOperation(async () => {
+    const snapshot = await repo.snapshot()
+    body = repo.read(snapshot, 'dss-coop/a.txt'); void body.catch(() => {})
+    await entered.promise
+  })
+  await entered.promise; repo.cancel(cause)
+  await assert.rejects(owned, error => error === cause)
+  await assert.rejects(body, error => error === cause)
+  assert.equal(aborted, true)
+})
+
+test('owned reads: a callback failure cancels only its owned outstanding transport and drains it', async () => {
+  const remote = new Remote({ 'Workspace/held.txt': 'held', 'Workspace/live.txt': 'live' })
+  const entered = Promise.withResolvers<void>(), failure = new Error('callback failed'), cancelled = Promise.withResolvers<void>()
+  const heldSha = blobHash('held')
+  const binding: RepoBinding = { ownerRepo: 'example/private', repositoryDirectory: 'Workspace', participantId: 1 }
+  const repo = new GitHubRepository(new GitHubClient(async () => ({ value: 'synthetic-own-cancellation', source: 'fixture' }), async (url, init) => {
+    if (url.endsWith('/git/blobs/' + heldSha)) {
+      entered.resolve()
+      await new Promise((_resolve, reject) => {
+        const abort = () => { cancelled.resolve(); reject(init!.signal!.reason) }
+        if (init?.signal?.aborted) abort(); else init!.signal!.addEventListener('abort', abort, { once: true })
+      })
+    }
+    return remote.fetch(url, init)
+  }), () => binding)
+  let body!: Promise<unknown>
+  const failed = repo.withReadOperation(async () => {
+    body = repo.read(await repo.snapshot(), 'dss-coop/held.txt'); void body.catch(() => {})
+    await entered.promise; throw failure
+  })
+  await entered.promise
+  const independent = repo.withReadOperation(async () => repo.read(await repo.snapshot(), 'dss-coop/live.txt'))
+  await assert.rejects(failed, error => error === failure)
+  await cancelled.promise
+  await assert.rejects(body, error => error === failure)
+  assert.equal(await independent, 'live', 'another owned session is not aborted')
+})
+test('owned reads: a delayed explicit new operation obtains fresh authority rather than borrowing a dead owner', async () => {
+  const f = ownedReadsFixture(), gate = Promise.withResolvers<void>(); let later!: Promise<unknown>
+  await f.repo.withReadOperation(async () => {
+    await f.repo.snapshot()
+    later = gate.promise.then(() => f.repo.withReadOperation(async () => f.repo.read(await f.repo.snapshot(), 'dss-coop/a.txt')))
+  })
+  gate.resolve()
+  assert.equal(await later, 'A'); assert.equal(f.count(), 2)
+})
+test('owned reads: failed callbacks preserve even an undefined thrown reason', async () => {
+  const f = ownedReadsFixture(); let caught = false
+  try { await f.repo.withReadOperation(async () => { throw undefined }) } catch (error) { caught = true; assert.equal(error, undefined) }
+  assert.equal(caught, true)
+})
+
+test('owned reads: real Git conversation page and recent keep full bytes while each resolves credentials once', async () => {
+  const f = ownedReadsFixture(), operations = new Map<string, any>(), records = new Map<string, unknown>()
+  const files = new GitFiles(f.repo, { save: async record => { operations.set(record.operation.id, structuredClone(record)) }, get: async id => operations.get(id), list: async () => [...operations.values()] })
+  const storage = { async get<T>(key: string) { return records.get(key) as T | undefined }, async set(key: string, value: unknown) { records.set(key, value) }, async list<T>(prefix: string) { return [...records].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value: value as T })) } }
+  const conversation = new FrameworkConversation(files, new FrameworkTransactions(files, storage, 'actual-HTTP-conversation'), { mode: 'git', collaborationId: 'shared' })
+  for (let i = 0; i < 3; i++) for (const role of ['user', 'assistant'] as const) await conversation.send(role + i, {
+    id: role + i, role, participantId: 'A', createdAt: '2026-11-01T00:00:00.000Z', text: 'Full unchanged 😀 original ' + role + i,
+    ...(role === 'user' ? { recipient: 'ai' as const } : { replyTo: 'user' + i }),
+  })
+  let before = f.count(), blobs = f.remote.count('/git/blobs/')
+  const page = await conversation.page(20)
+  assert.equal(f.count() - before, 1)
+  assert.equal(f.remote.count('/git/blobs/') - blobs, 19)
+  assert.equal(page.messages.length, 6)
+  before = f.count(); blobs = f.remote.count('/git/blobs/')
+  const recent = await conversation.recentExchanges()
+  assert.equal(f.count() - before, 1)
+  assert.equal(f.remote.count('/git/blobs/') - blobs, 19)
+  assert.deepEqual(recent.map(item => item.human.text), [0,1,2].map(i => 'Full unchanged 😀 original user' + i))
+})
+
+test('owned reads: a caller-handled item failure does not turn an otherwise completed scoped read into global failure', async () => {
+  const remote = new Remote({ 'Workspace/bad.txt': 'bad', 'Workspace/good.txt': 'good' }), badSha = blobHash('bad')
+  const failure = new Error('isolated item read failed'), reported: unknown[] = []
+  const binding: RepoBinding = { ownerRepo: 'example/private', repositoryDirectory: 'Workspace', participantId: 1 }
+  const repo = new GitHubRepository(new GitHubClient(async () => ({ value: 'synthetic-item-isolation', source: 'fixture' }), (url, init) => {
+    if (url.endsWith('/git/blobs/' + badSha)) throw failure
+    return remote.fetch(url, init)
+  }), () => binding)
+  const result = await repo.withReadOperation(async () => {
+    const snapshot = await repo.snapshot()
+    try { await repo.read(snapshot, 'dss-coop/bad.txt') } catch (error) { reported.push(error) }
+    return repo.read(snapshot, 'dss-coop/good.txt')
+  })
+  assert.equal(result, 'good'); assert.equal(reported.length, 1)
+  assert.ok(reported[0] instanceof GitHubError); assert.equal(reported[0].status, 0); assert.equal(reported[0].message, failure.message)
+})
+
+test('owned reads: cancelling one owner does not cancel another reading the same unexpanded tree', async () => {
+  const remote = new Remote({ 'Workspace/nested/a.txt': 'A' })
+  const binding: RepoBinding = { ownerRepo: 'example/private', repositoryDirectory: 'Workspace', participantId: 1 }
+  const entered = Promise.withResolvers<void>(), fail = Promise.withResolvers<void>(), cause = new Error('owner A only')
+  let hold = false
+  const subtree = [...remote.trees].find(([, entries]) => entries.some(entry => entry.path === 'a.txt'))![0]
+  const repo = new GitHubRepository(new GitHubClient(async () => ({ value: 'synthetic-shared-tree', source: 'fixture' }), async (url, init) => {
+    if (hold && url.endsWith('/git/trees/' + subtree)) {
+      hold = false; entered.resolve()
+      await new Promise<void>((_resolve, reject) => {
+        if (init!.signal!.aborted) reject(init!.signal!.reason)
+        else init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason), { once: true })
+      })
+    }
+    return remote.fetch(url, init)
+  }), () => binding)
+  await repo.withReadOperation(async () => repo.listDirectory(await repo.snapshot(), 'dss-coop/'))
+  hold = true
+  let body!: Promise<string | undefined>
+  const a = repo.withReadOperation(async () => {
+    body = repo.read(await repo.snapshot(), 'dss-coop/nested/a.txt'); void body.catch(() => {})
+    await entered.promise; await fail.promise; throw cause
+  }); void a.catch(() => {})
+  await entered.promise
+  const b = repo.withReadOperation(async () => repo.read(await repo.snapshot(), 'dss-coop/nested/a.txt')); void b.catch(() => {})
+  await new Promise(resolve => setImmediate(resolve)); fail.resolve()
+  await assert.rejects(a); await assert.rejects(body)
+  assert.equal(await b, 'A')
 })

@@ -1,7 +1,8 @@
 import { Toast, StateDot } from '@deepseek-ai/dsh-client-ui-primitives';
 import { createFrameworkClientNotices } from './framework/client-notices.js';
 import { getFrameworkClientController } from './framework/client-contracts.js';
-import { useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { createForegroundModelPublication, selectedForegroundModel } from './client/foreground-model-publication.js';
 import type { Context } from '@deepseek-ai/cordis';
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client';
 import type {} from '@deepseek-ai/dsh-client-locale/client';
@@ -29,14 +30,14 @@ export function apply(ctx: Context): void {
     ctx.effect(() => { const style = document.createElement('style'); style.dataset.deepseekServant = 'client'; style.textContent = typeof __SERVANT_CLIENT_CSS__ === 'undefined' ? '' : __SERVANT_CLIENT_CSS__; document.head.append(style); return () => style.remove(); }, 'dss.styles');
     const connection = ctx.get('connection', true) as unknown as ConnectionHandle, requests = createRequestLifecycle(), t = ctx.locale.bind(NS);
     ctx.effect(() => { const off = ctx.on('connection/reset', requests.reset); return () => { off(); requests.dispose(); }; }, 'dss.requests');
-    const call = async (method: string, input: unknown): Promise<any> => {
-        const response = await requests.request(undefined, signal => connection.rpc.call('/api', 'deepseek-servant-framework/' + method, input as any, signal));
+    const call = async (method: string, input: unknown, signal?: AbortSignal): Promise<any> => {
+        const response = await requests.request(signal, signal => connection.rpc.call('/api', 'deepseek-servant-framework/' + method, input as any, signal));
         if (!response.ok)
             throw Object.assign(new Error(response.error.message), { code: response.error.code, details: response.error.details });
         return response.value;
     };
-    const api: FrameworkClientApi = { maintenanceView: input => call('maintenanceView', input), openMaintenancePath: input => call('openMaintenancePath', input), exportRecords: input => call('exportRecords', input), cleanupPreview: input => call('cleanupPreview', input), cleanupRecords: input => call('cleanupRecords', input), knowledgeList: input => call('knowledgeList', input), knowledgeRead: input => call('knowledgeRead', input), knowledgeEdit: input => call('knowledgeEdit', input), knowledgeStatus: input => call('knowledgeStatus', input), view: input => call('view', input), history: input => call('history', input), send: input => call('send', input), configure: input => call('configure', input), taskControl: input => call('taskControl', input), stopExecution: input => call('stopExecution', input), gitMembers: input => call('gitMembers', input), gitMemberAction: input => call('gitMemberAction', input), invite: input => call('invite', input), moveRecords: input => call('moveRecords', input), legacyRecords: input => call('legacyRecords', input), legacyControl: input => call('legacyControl', input), participation: input => call('participation', input), selectMode: input => call('selectMode', input), readFile: input => call('readFile', input),
-        subscribeChanged: listener => subscribeEventStreams(['api/deepseek-servant-framework/events'], listener, requests.subscribeReset) };
+    const api: FrameworkClientApi = { maintenanceView: input => call('maintenanceView', input), openMaintenancePath: input => call('openMaintenancePath', input), exportRecords: input => call('exportRecords', input), cleanupPreview: input => call('cleanupPreview', input), cleanupRecords: input => call('cleanupRecords', input), knowledgeList: input => call('knowledgeList', input), knowledgeRead: input => call('knowledgeRead', input), knowledgeEdit: input => call('knowledgeEdit', input), knowledgeStatus: input => call('knowledgeStatus', input), view: (input, signal) => call('view', input, signal), history: (input, signal) => call('history', input, signal), send: input => call('send', input), configure: input => call('configure', input), foregroundModel: input => call('foregroundModel', input), taskControl: input => call('taskControl', input), stopExecution: input => call('stopExecution', input), gitMembers: input => call('gitMembers', input), gitMemberAction: input => call('gitMemberAction', input), invite: input => call('invite', input), moveRecords: input => call('moveRecords', input), legacyRecords: input => call('legacyRecords', input), legacyControl: input => call('legacyControl', input), participation: input => call('participation', input), selectMode: input => call('selectMode', input), readFile: input => call('readFile', input),
+        subscribeChanged: (listener, availability) => subscribeEventStreams(['api/deepseek-servant-framework/events'], listener, requests.subscribeReset, undefined, availability, connection.state) };
     const controller = getFrameworkClientController(api), notices = createFrameworkClientNotices();
     ctx.effect(() => {
         const observe = () => { const view = controller.snapshot().value; if (view) notices.observe(view); };
@@ -55,7 +56,7 @@ export function apply(ctx: Context): void {
     }
     ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'deepseek-servant.notice', locale: NS, inject: () => ({}) }, Notice));
     const models = createServantModels(ctx.get('sessions', true) as unknown as NativeModelSessions, ctx.get('modelDirectories', true) as unknown as NativeModelDirectories, async () => {
-        const response = await requests.request(undefined, signal => connection.rpc.call('/api', 'session/modelCatalog', {}, signal));
+        const response = await requests.request(undefined, signal => connection.rpc.call('/api', 'session/modelCatalog', { args: {} }, signal));
         if (!response.ok)
             throw Object.assign(new Error(response.error.message), { code: response.error.code, details: response.error.details });
         return response.value as ModelCatalog;
@@ -77,13 +78,40 @@ export function apply(ctx: Context): void {
         throw new Error(response.error.message); const text = ctx.locale.bind('settings.agentPreset'); return response.value.presets.map(row => ({ ...row, ...presetDisplayText(row, text) })); };
     const subscribeLocale = (listener: () => void) => ctx.locale.subscribe(listener);
     const localeSnapshot = () => ctx.locale.getSnapshot();
-    function Page() {
+    const connectionState = connection.state;
+    const subscribeConnection = (listener: () => void) => connectionState?.subscribe(listener) ?? (() => {});
+    const connectionSnapshot = () => connectionState?.getSnapshot();
+    function Page({ onConversationVisible }: { onConversationVisible?: (visible: boolean) => void }) {
+        const transportState = useSyncExternalStore(subscribeConnection, connectionSnapshot);
         const locale = useSyncExternalStore(subscribeLocale, localeSnapshot);
         const modelView = useSyncExternalStore(models.source.subscribe, models.source.getSnapshot);
         const picker = (globalThis as typeof globalThis & { __DSH_DIRECTORY_PICKER__?: { pick(): Promise<string | null> } }).__DSH_DIRECTORY_PICKER__;
-        return <FrameworkPage api={api} language={locale.active.toLowerCase().startsWith('zh') ? 'zh' : 'en'} onViewed={view => notices.ackLocal({ mode: view.activeMode, collaborationId: view.collaborationId, storageScope: view.storageScope })} onPickDirectory={picker ? () => picker.pick() : undefined} modelControl={(value, onChange, label) => <ModelPicker value={value ?? {}} models={modelView} onRefresh={models.refresh} label={label} t={t} onChange={route => onChange(route.provider && route.model ? route as FrameworkClientModel : undefined)}/>} presetControl={(value, onChange) => <PresetPicker value={value ?? 'standard'} onLoad={onLoadPresets} onChange={onChange} t={t}/>}/>;
+        return <FrameworkPage api={api} onConversationVisible={onConversationVisible} transportConnected={connectionState ? transportState === 'connected' : undefined} language={locale.active.toLowerCase().startsWith('zh') ? 'zh' : 'en'} onViewed={view => notices.ackLocal({ mode: view.activeMode, collaborationId: view.collaborationId, storageScope: view.storageScope })} onPickDirectory={picker ? () => picker.pick() : undefined} modelControl={(value, onChange, label, options) => <ModelPicker {...options} value={value ?? {}} models={modelView} onRefresh={models.refresh} label={label} t={t} onChange={route => onChange(route.provider && route.model ? route as FrameworkClientModel : undefined)}/>} presetControl={(value, onChange) => <PresetPicker value={value ?? 'standard'} onLoad={onLoadPresets} onChange={onChange} t={t}/>}/>;
     }
-    ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID, locale: NS, inject: () => ({}) }, Page));
+    function MainPage() {
+        const [conversationVisible, setConversationVisible] = useState(false);
+        const [documentVisible, setDocumentVisible] = useState(document.visibilityState === 'visible');
+        const state = useSyncExternalStore(controller.subscribe, controller.snapshot);
+        const modelView = useSyncExternalStore(models.source.subscribe, models.source.getSnapshot);
+        const layout = ctx.get('layout');
+        const panel = useSyncExternalStore(layout?.panelInfo.subscribe ?? (() => () => {}), layout?.panelInfo.getSnapshot ?? (() => undefined));
+        const publication = useRef<ReturnType<typeof createForegroundModelPublication>>();
+        useEffect(() => {
+            const owned = createForegroundModelPublication(ctx); publication.current = owned;
+            return () => { owned.dispose(); publication.current = undefined; };
+        }, []);
+        useEffect(() => {
+            const changed = () => setDocumentVisible(document.visibilityState === 'visible');
+            document.addEventListener('visibilitychange', changed);
+            return () => document.removeEventListener('visibilitychange', changed);
+        }, []);
+        const selection = selectedForegroundModel(state.value?.settings.foreground, modelView);
+        useEffect(() => {
+            publication.current?.update(conversationVisible && documentVisible && panel?.activePanelId === PANEL_ID, selection);
+        }, [conversationVisible, documentVisible, panel?.activePanelId, selection?.provider, selection?.model, selection?.reasoningEffort]);
+        return <Page onConversationVisible={setConversationVisible}/>;
+    }
+    ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID, locale: NS, inject: () => ({}) }, MainPage));
     const settings = ctx.slots as unknown as {
         inject(name: 'settings.section', register: () => unknown): void;
         register(options: any, component: typeof Page): unknown;

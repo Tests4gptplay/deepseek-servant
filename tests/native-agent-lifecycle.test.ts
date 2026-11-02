@@ -5,6 +5,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { DshAgentGateway } from '../src/adapters/dsh/agents.js'
 
 async function fixture() {
+  let initiatorClosed = false
   let closed = false, cancellations = 0, disposals = 0, sends = 0, flushes = 0
   let flush: () => Promise<void> = async () => {}
   let dispose: () => Promise<void> = async () => {}
@@ -13,12 +14,12 @@ async function fixture() {
     cancel: () => { cancellations++ }, followup: () => { sends++ },
     whenIdle: () => new Promise<void>(() => {}), // Durability disposal must not await model completion here.
   }
-  const ctx = { get: () => undefined, agents: { get: () => undefined, create: async () => ({ agent,
+  const ctx = { get: () => undefined, agents: { withInitiator: (_agent: unknown, operation: () => unknown) => { if (initiatorClosed) throw new Error('agent initiator scope is disposed'); return operation() }, get: () => undefined, create: async () => ({ agent,
     dispose: async () => { disposals++; await dispose(); closed = true },
   }) }, sessions: { flush: async () => { flushes++; await flush(); if (closed) throw new Error('flush on closed handle') } } }
   const gateway = new DshAgentGateway(ctx as unknown as Context)
   const handle = await gateway.create({ sessionId: agent.id, role: 'worker', cwd: '/synthetic' })
-  return { gateway, handle, setFlush: (fn: typeof flush) => { flush = fn }, setDispose: (fn: typeof dispose) => { dispose = fn },
+  return { gateway, handle, closeHost: () => { initiatorClosed = true }, setFlush: (fn: typeof flush) => { flush = fn }, setDispose: (fn: typeof dispose) => { dispose = fn },
     counts: () => ({ cancellations, disposals, sends, flushes, closed }) }
 }
 
@@ -100,7 +101,7 @@ async function recoveryFixture() {
       agent.inbox.nextTurn.push(input); agent.status = 'running'; sends++
     },
   }
-  const ctx: any = { get: () => undefined, agents: { get: () => undefined, create: async () => ({ agent, dispose: async () => {} }) }, sessions: { flush: async () => flush() } }
+  const ctx: any = { get: () => undefined, agents: { withInitiator: (_agent: unknown, operation: () => unknown) => operation(), get: () => undefined, create: async () => ({ agent, dispose: async () => {} }) }, sessions: { flush: async () => flush() } }
   const handle = await new DshAgentGateway(ctx).create({ sessionId: agent.id, cwd: '/synthetic', role: 'helper' })
   return { handle, agent, events, business, recovery, counts: () => ({ sends, removals }), setFlush: (fn: typeof flush) => { flush = fn } }
 }
@@ -156,4 +157,14 @@ test('recovery delivery rejects non-waking inject and human source', async () =>
   await assert.rejects(f.handle.send('recovery', 'new-R', 'inject', 'deepseek-servant', {}), /Recovery delivery/)
   await assert.rejects(f.handle.send('recovery', 'new-R', 'steer', 'user', {}), /Recovery delivery/)
   assert.deepEqual(f.counts(), { sends: 0, removals: 0 })
+})
+
+test('closed official initiator boundary rejects before mutating native input or driver state', async () => {
+  const f = await fixture()
+  f.closeHost()
+  await assert.rejects(f.handle.send('late root shutdown input', 'late-root'), /initiator scope is disposed/)
+  assert.equal(f.counts().sends, 0)
+  assert.equal(f.counts().flushes, 0)
+  await f.handle.dispose()
+  assert.equal(f.counts().disposals, 1)
 })

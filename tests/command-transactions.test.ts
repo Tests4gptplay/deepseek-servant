@@ -57,3 +57,39 @@ test('a proven Local CAS conflict permits explicit fresh business evaluation, ne
   await service.run('tool-conflict', {}, {reevaluate:true}, build)
   assert.equal(builds, 2, 'business builder runs again against the newly checked snapshot')
 }))
+
+test('confirmed reads only an existing acknowledgement without opening Files snapshots or changing records', () => fixture(async (files, records) => {
+  const transactions = new FrameworkTransactions(files, records, 'ack-view')
+  assert.equal(await transactions.confirmed('command', { value: 1 }), undefined)
+  const receipt = await transactions.run('command', { value: 1 }, {}, async () => [{ path: 'saved/result.txt', content: 'Original bytes' }])
+  const before = await records.list(''), snapshot = files.snapshot.bind(files)
+  files.snapshot = async () => { throw new Error('A readonly acknowledgement must not access file snapshots.') }
+  try {
+    const known = await transactions.confirmed('command', { value: 1 }); assert.deepEqual(known, receipt)
+    known!.revision = 'caller-local-change'
+    assert.deepEqual(await transactions.confirmed('command', { value: 1 }), receipt)
+    await assert.rejects(transactions.confirmed('command', { value: 2 }), /different arguments/)
+    assert.deepEqual(await records.list(''), before)
+  } finally { files.snapshot = snapshot }
+}))
+
+test('an authoritative commit without a persisted command acknowledgement remains unconfirmed until normal reconciliation', () => fixture(async (files, records) => {
+  const failure = new Error('command acknowledgement lost'), originalSet = records.set.bind(records)
+  let fail = true, builds = 0
+  records.set = async (key, value) => { if (fail && (value as any).receipt) throw failure; return originalSet(key, value) }
+  const transactions = new FrameworkTransactions(files, records, 'unknown-ack')
+  await assert.rejects(transactions.run('original', {}, {}, async () => { builds++; return [{ path: 'saved/result.txt', content: 'Original bytes' }] }), error => error === failure)
+  assert.equal(await transactions.confirmed('original', {}), undefined, 'the content-side receipt is not promoted by this readonly query')
+  fail = false
+  const recovered = await transactions.run('original', {}, {}, async () => { throw new Error('Must use original authoritative transaction receipt.') })
+  assert.equal(recovered.replay, true); assert.equal(builds, 1)
+  assert.deepEqual(await transactions.confirmed('original', {}), recovered)
+}))
+
+test('confirmed respects an in-flight command argument identity without waiting or acknowledging it', () => fixture(async (files, records) => {
+  const entered = Promise.withResolvers<void>(), released = Promise.withResolvers<void>(), transactions = new FrameworkTransactions(files, records, 'pending-ack')
+  const running = transactions.run('inflight', { target: 'A' }, {}, async () => { entered.resolve(); await released.promise; return [] })
+  await entered.promise
+  try { assert.equal(await transactions.confirmed('inflight', { target: 'A' }), undefined); await assert.rejects(transactions.confirmed('inflight', { target: 'B' }), /different arguments/) }
+  finally { released.resolve(); await running }
+}))
