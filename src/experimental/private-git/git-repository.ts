@@ -240,11 +240,13 @@ export class GitHubRepository implements GitRepository {
     return snapshot
   }
   snapshot(_afterWrite = false, plan?: GitReadPlan): Promise<GitSnapshot> {
+    plan?.signal?.throwIfAborted()
     // Each invocation reads the remote branch; no pre-write request is reused by
     // read-back. Only immutable tree responses may be shared across snapshots.
     return this.readSession(async session => {
       const scope = await this.scope(session)
       if (plan) {
+        plan.signal?.throwIfAborted()
         const demands = this.demands(scope, plan)
         const first = demands.slice(0, 64)
         let result: Awaited<ReturnType<typeof readPlan>>
@@ -253,15 +255,17 @@ export class GitHubRepository implements GitRepository {
           // A genuinely unresolved ref still follows the established empty-repo
           // check. Permission, partial and transport failures never switch APIs.
           if (!(error instanceof GitRefNotResolvedError)) throw error
+          plan.signal?.throwIfAborted()
           const snapshot = await this.makeSnapshot(session, scope, await this.head(session, scope))
-          if (snapshot.head) await this.prefetchDemands(session, snapshot, demands)
+          if (snapshot.head) await this.prefetchDemands(session, snapshot, demands, plan.signal)
           return snapshot
         }
+        plan.signal?.throwIfAborted()
         this.check(scope)
         const snapshot = await this.makeSnapshot(session, scope, result.head, result.tree)
         this.acceptPlan(snapshot, first, result.entries)
         scope.metadata.head = result.head; scope.metadata.latestTree = { head: result.head, tree: result.tree }
-        await this.prefetchDemands(session, snapshot, demands.slice(first.length))
+        await this.prefetchDemands(session, snapshot, demands.slice(first.length), plan.signal)
         return snapshot
       }
       return this.makeSnapshot(session, scope, await this.head(session, scope))
@@ -278,22 +282,25 @@ export class GitHubRepository implements GitRepository {
     return [...requested].map(([path, body]) => ({ path, body }))
   }
   async prefetch(snapshot: GitSnapshot, plan: GitReadPlan): Promise<void> {
+    plan.signal?.throwIfAborted()
     const state = this.state(snapshot)
     const demands = this.demands(state.scope, plan).filter(demand => {
       const entry = state.planned.get(demand.path)
       return !state.planned.has(demand.path) || !!entry && (demand.body ? entry.type === 'blob' && !state.bodies.has(entry.sha) : entry.type === 'tree' && !entry.node?.entries)
     })
     if (!demands.length || !snapshot.head) return
-    await this.readSession(session => this.prefetchDemands(session, snapshot, demands))
+    await this.readSession(session => this.prefetchDemands(session, snapshot, demands, plan.signal))
   }
-  private async prefetchDemands(session: GitHubSession, snapshot: GitSnapshot, demands: readonly PathDemand[]): Promise<void> {
+  private async prefetchDemands(session: GitHubSession, snapshot: GitSnapshot, demands: readonly PathDemand[], signal?: AbortSignal): Promise<void> {
     const state = this.state(snapshot)
     if (session.authorizationScope !== state.scope.metadata.authorizationScope) throw new GitHubError(409, 'The GitHub authorization changed. Read a new snapshot before continuing.')
     // Bound a transport batch, not history or message length. Later batches use
     // the same immutable commit; no extra main/ref resolution is performed.
     for (let start = 0; start < demands.length; start += 64) {
+      signal?.throwIfAborted()
       const batch = demands.slice(start, start + 64)
       const result = await readPlan(session, state.scope.connection.repository.fullName, state.scope.connection.repository.branch, snapshot.head, batch)
+      signal?.throwIfAborted()
       this.check(state.scope)
       this.acceptPlan(snapshot, batch, result.entries)
     }
@@ -314,10 +321,11 @@ export class GitHubRepository implements GitRepository {
         entry.size = object.byteSize
         if (object.isBinary === false && !object.isTruncated && typeof object.text === 'string') {
           const bytes = Buffer.from(object.text, 'utf8')
-          if (bytes.length !== object.byteSize) throw new GitHubError(502, 'GitHub returned incomplete blob text.')
-          updates.push(() => state.bodies.set(value.oid, bytes))
+          // A text projection may omit bytes (for example a BOM). Retain the
+          // exact metadata, then let the existing byte reader verify originals.
+          if (bytes.length === object.byteSize) updates.push(() => state.bodies.set(value.oid, bytes))
         }
-        // Binary, truncated or unavailable text uses the existing byte reader;
+        // Binary, truncated, unavailable or lossy text uses the existing byte reader;
         // GraphQL errors never trigger that fallback.
       } else if (!demand.body && value.type === 'tree') {
         if (!object || object.oid !== value.oid || !Array.isArray(object.entries)) throw new GitHubError(502, 'GitHub returned an incomplete directory.')

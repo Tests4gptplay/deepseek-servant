@@ -143,11 +143,11 @@ export class InstanceRegistration {
     return { member, instanceUUID, workerSeats, path: `instances/${member}_Workers${workerSeats}_${instanceUUID}.json`,
       primary: login.toLowerCase() === repositoryOwner.toLowerCase() && member.toLowerCase() === login.toLowerCase() }
   }
-  private async rows(snapshot: FilesSnapshot): Promise<Array<{ registration: Omit<RegisteredInstance, 'primary'>; heartbeat?: Heartbeat; error?: string }>> {
+  private async rows(snapshot: FilesSnapshot, signal?: AbortSignal): Promise<Array<{ registration: Omit<RegisteredInstance, 'primary'>; heartbeat?: Heartbeat; error?: string }>> {
     const rows = []
     const current = new Map<string, HeartbeatObservation>()
     const entries = await this.files.listDirectory(snapshot, 'instances/')
-    await this.files.prefetch?.(snapshot, { files: entries.filter(entry => parseInstancePath(entry.path) && this.heartbeatObservations.get(entry.path)?.version !== entry.version).map(entry => entry.path) })
+    await this.files.prefetch?.(snapshot, { signal, files: entries.filter(entry => parseInstancePath(entry.path) && this.heartbeatObservations.get(entry.path)?.version !== entry.version).map(entry => entry.path) })
     for (const entry of entries) {
       const registration = parseInstancePath(entry.path)
       if (!registration) continue
@@ -337,10 +337,10 @@ export class InstanceRegistration {
   }
   /** Losing observation continuity discards time-based claims, not remote records. */
   observationInterrupted(): void { this.interrupted = true }
-  async observe(borrowed?: FilesSnapshot): Promise<ObservedInstance[]> {
+  async observe(borrowed?: FilesSnapshot, signal?: AbortSignal): Promise<ObservedInstance[]> {
     try {
       const inspect = async (snapshot: FilesSnapshot) => {
-        const rows = await this.rows(snapshot), now = this.now()
+        const rows = await this.rows(snapshot, signal), now = this.now()
         if (this.interrupted) {
           // Reset elapsed continuity, not the highest sequence already established.
           for (const [id, observed] of this.observations) this.observations.set(id, { ...observed, advancedAt: now, confirmed: false })

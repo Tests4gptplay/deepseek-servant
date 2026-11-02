@@ -38,7 +38,7 @@ export async function readPlanResponse(remote: Remote, body: { query: string; va
     const bytes = remote.blobs.get(sha)
     if (bytes !== undefined) {
       let text: string | null = null
-      try { text = typeof bytes === 'string' ? bytes : new TextDecoder('utf-8', { fatal: true }).decode(bytes); if (text.includes('\0')) text = null } catch {}
+      try { text = typeof bytes === 'string' ? bytes : new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); if (text.includes('\0')) text = null } catch {}
       return { __typename: 'Blob', oid: sha, byteSize: Buffer.byteLength(bytes), isBinary: text === null, isTruncated: false, text }
     }
     return null

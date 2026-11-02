@@ -1,7 +1,7 @@
 import { GitHubError, type GitHubSession } from './github.js'
 
 /** Explicit, operation-local demand. Directories never imply recursive bodies. */
-export interface GitReadPlan { files?: readonly string[]; directories?: readonly string[] }
+export interface GitReadPlan { files?: readonly string[]; directories?: readonly string[]; signal?: AbortSignal }
 export interface PlannedEntry { oid: string; type: 'blob' | 'tree' | 'commit'; object?: {
   oid: string; byteSize?: number; isBinary?: boolean | null; isTruncated?: boolean; text?: string | null;
   entries?: Array<{ name: string; type: 'blob' | 'tree' | 'commit'; oid: string; object?: { byteSize?: number } | null }>;

@@ -206,15 +206,15 @@ export class FrameworkConversation {
       let messages: ConversationMessage[]
       if (this.files.prefetch && selected.length) {
         signal?.throwIfAborted()
-        await this.files.prefetch(snapshot, { files: selected.map(entry => entry.path) })
+        await this.files.prefetch(snapshot, { signal, files: selected.map(entry => entry.path) })
         signal?.throwIfAborted()
         const headers = await Promise.all(selected.map(entry => this.headerAt(snapshot, entry)))
         signal?.throwIfAborted()
-        await this.files.prefetch(snapshot, { files: headers.map(entry => logicalReference(entry.textPath) + '/manifest.json') })
+        await this.files.prefetch(snapshot, { signal, files: headers.map(entry => logicalReference(entry.textPath) + '/manifest.json') })
         signal?.throwIfAborted()
         const manifests = await Promise.all(headers.map(entry => readManifest(this.files, snapshot, entry.textPath)))
         signal?.throwIfAborted()
-        await this.files.prefetch(snapshot, { files: manifests.flatMap(manifest => manifest.chunks) })
+        await this.files.prefetch(snapshot, { signal, files: manifests.flatMap(manifest => manifest.chunks) })
         signal?.throwIfAborted()
         messages = await Promise.all(selected.map(async (entry, i) => this.readAt(snapshot, entry, headers[i],
           await readText(this.files, snapshot, headers[i]!.textPath, manifests[i]))))

@@ -81,19 +81,13 @@ export class GitHubClient {
         if (sha?.knownHead) { if (authorization.secondaryFailure?.request === requestKey) authorization.secondaryFailure = undefined; return sha.knownHead as R }
         throw new GitHubError(304, 'GitHub returned 304 without a previously observed HEAD.')
       }
-      if (!response.ok) {
-        const data = await response.json().catch(error => {
-          // Only invalid JSON falls back to the HTTP status. Body transport
-          // failures retain their actual cause, even if the owner aborts later.
-          if (error instanceof SyntaxError) return {}
-          throw error
-        }) as { message?: string }
-        signal.throwIfAborted()
-        const message = String(data.message ?? response.statusText).split(token.value).join('[redacted]')
+      const rejection = (status: number, message: string, primary?: { remaining?: number; resetAt?: string }): GitHubError => {
         const now = Date.now(), retry = response.headers.get('retry-after'), reset = response.headers.get('x-ratelimit-reset')
         let retryTime = retry === null ? NaN : /^\d+(?:\.\d+)?$/.test(retry.trim()) ? now + Number(retry) * 1000 : Date.parse(retry)
-        const resetTime = response.headers.get('x-ratelimit-remaining') === '0' && reset !== null ? Number(reset) * 1000 : NaN
-        if ([403, 429].includes(response.status) && /\bsecondary rate limit\b/i.test(message)
+        const headerReset = response.headers.get('x-ratelimit-remaining') === '0' && reset !== null ? Number(reset) * 1000 : NaN
+        const bodyReset = primary?.remaining === 0 && primary.resetAt ? Date.parse(primary.resetAt) : NaN
+        const resetTime = Math.max(Number.isFinite(headerReset) ? headerReset : 0, Number.isFinite(bodyReset) ? bodyReset : 0)
+        if ([403, 429].includes(status) && /\bsecondary rate limit\b/i.test(message)
           && !(retryTime > now) && !(resetTime > now)) {
           // GitHub prescribes at least one minute, then exponential increases.
           // Doubling is this client's engineering choice, not a quoted GitHub factor.
@@ -103,9 +97,9 @@ export class GitHubClient {
           retryTime = now + delay
         }
         const until = Math.max(Number.isFinite(retryTime) ? retryTime : 0, Number.isFinite(resetTime) ? resetTime : 0)
-        const retryAt = [403, 429].includes(response.status) && until > now ? until : undefined
-        const hint = token.source === 'GitHub CLI' && [401, 403, 404].includes(response.status) && retryAt === undefined ? GITHUB_CLI_ACCESS_REQUIRED + ' ' : ''
-        const error = new GitHubError(response.status, hint + 'GitHub ' + response.status + ': ' + message + ' (' + method + ' ' + path + '; authorization: ' + token.source + ')', retryAt === undefined ? undefined : (retryAt - now) / 1000, retryAt, retryAt === undefined ? undefined : {})
+        const retryAt = [403, 429].includes(status) && until > now ? until : undefined
+        const hint = token.source === 'GitHub CLI' && [401, 403, 404].includes(status) && retryAt === undefined ? GITHUB_CLI_ACCESS_REQUIRED + ' ' : ''
+        const error = new GitHubError(status, hint + 'GitHub ' + status + ': ' + message + ' (' + method + ' ' + path + '; authorization: ' + token.source + ')', retryAt === undefined ? undefined : (retryAt - now) / 1000, retryAt, retryAt === undefined ? undefined : {})
         if (retryAt !== undefined) {
           // https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api
           const retain = (key: string, deadline: number) => {
@@ -118,22 +112,30 @@ export class GitHubClient {
           retain('*', retryTime)
           retain(response.headers.get('x-ratelimit-resource') || resource, resetTime)
         }
-        throw error
+        return error
       }
-      // An unrelated successful observation (for example HEAD304) is not proof
-      // that a still-failing mutation recovered. Keep only the current failure,
-      // not an accumulating per-URL history.
-      if (authorization.secondaryFailure?.request === requestKey) authorization.secondaryFailure = undefined
+      if (!response.ok) {
+        const data = await response.json().catch(error => {
+          // Only invalid JSON falls back to the HTTP status. Body transport
+          // failures retain their actual cause, even if the owner aborts later.
+          if (error instanceof SyntaxError) return {}
+          throw error
+        }) as { message?: string }
+        signal.throwIfAborted()
+        const message = String(data.message ?? response.statusText).split(token.value).join('[redacted]')
+        throw rejection(response.status, message)
+      }
       const result = response.status === 204 ? undefined : sha ? (await response.text()).trim() : await response.json()
+      signal.throwIfAborted()
       if (path === '/graphql' && result?.errors?.some((error: { type?: string }) => error.type === 'RATE_LIMITED')) {
-        const now = Date.now(), reset = response.headers.get('x-ratelimit-reset')
-        const deadline = result.data?.rateLimit?.resetAt ? Date.parse(result.data.rateLimit.resetAt) : reset ? Number(reset) * 1000 : NaN
-        const retryAt = Number.isFinite(deadline) && deadline > now ? deadline : undefined
         const message = result.errors.map((error: { message?: string }) => String(error.message ?? 'GraphQL rate limit')).join('; ').split(token.value).join('[redacted]')
-        const error = new GitHubError(429, message, retryAt === undefined ? undefined : (retryAt - now) / 1000, retryAt, {})
-        if (retryAt !== undefined) authorization.limits.set('graphql', error)
-        throw error
+        // HTTP200 GraphQL failures use the same actual secondary/primary
+        // deadlines and scopes as HTTP errors. resetAt alone is not exhaustion.
+        throw rejection(429, message, result.data?.rateLimit)
       }
+      // A successful response clears only the same previously failing request;
+      // HTTP200 RATE_LIMITED must not reset secondary backoff before it is read.
+      if (authorization.secondaryFailure?.request === requestKey) authorization.secondaryFailure = undefined
       if (sha && (typeof result !== 'string' || !/^[0-9a-f]{40}$/.test(result))) throw new GitHubError(502, 'GitHub returned an invalid commit SHA.')
       signal.throwIfAborted()
       return result as R

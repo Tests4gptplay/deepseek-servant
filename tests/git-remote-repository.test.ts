@@ -253,6 +253,109 @@ test('batch page stops before opening another batch after its UI read is cancell
   files.prefetch = prefetch
   assert.equal((await conversation.page(20)).messages[0].text, 'Complete original')
 })
+
+for (const retry of ['30', new Date(1800000030000).toUTCString()]) test('batch read: HTTP200 secondary uses Retry-After across resources, not unexhausted primary reset '+retry, async t => {
+  const now = 1800000000000; t.mock.timers.enable({ apis: ['Date'], now }); let calls = 0
+  const client = new GitHubClient(async () => ({ value: 'synthetic-secondary', source: 'fixture' }), async () => {
+    calls++; return calls === 1 ? Response.json({ data: { rateLimit: { remaining: 4990, resetAt: new Date(now + 3600000).toISOString() } }, errors: [{ type: 'RATE_LIMITED', message: 'You have exceeded a secondary rate limit.' }] }, { headers: { 'retry-after': retry } }) : Response.json({ ok: true })
+  })
+  for (const path of ['/graphql', '/user']) await assert.rejects(client.session(session => session.request(path === '/graphql' ? 'POST' : 'GET', path, {})), error => {
+    assert.ok(error instanceof GitHubError); assert.equal(error.retryAt, now + 30000); return true
+  })
+  assert.equal(calls, 1); t.mock.timers.tick(30000)
+  await client.session(session => session.request('POST', '/graphql', {})); assert.equal(calls, 2)
+})
+
+test('batch read: HTTP200 primary applies only the exhausted GraphQL bucket', async t => {
+  const now = 1800000000000; t.mock.timers.enable({ apis: ['Date'], now }); let calls = 0
+  const client = new GitHubClient(async () => ({ value: 'synthetic-primary', source: 'fixture' }), async url => {
+    calls++; return url.endsWith('/graphql') ? Response.json({ data: { rateLimit: { remaining: 0, resetAt: new Date(now + 120000).toISOString() } }, errors: [{ type: 'RATE_LIMITED', message: 'API rate limit exceeded' }] }) : Response.json({ ok: true })
+  })
+  await assert.rejects(client.session(session => session.request('POST', '/graphql', {})), error => error instanceof GitHubError && error.retryAt === now + 120000)
+  await client.session(session => session.request('GET', '/user')); assert.equal(calls, 2)
+  await assert.rejects(client.session(session => session.request('POST', '/graphql', {})), error => error instanceof GitHubError && error.retryAt === now + 120000); assert.equal(calls, 2)
+})
+
+test('batch read: HTTP200 secondary without a deadline preserves existing exponential guidance and no automatic retries', async t => {
+  const now = 1800000000000; t.mock.timers.enable({ apis: ['Date'], now }); let calls = 0
+  const client = new GitHubClient(async () => ({ value: 'synthetic-secondary-no-header', source: 'fixture' }), async () => {
+    calls++; return Response.json({ data: { rateLimit: { remaining: 4990, resetAt: new Date(now + 3600000).toISOString() } }, errors: [{ type: 'RATE_LIMITED', message: 'You have exceeded a secondary rate limit.' }] })
+  })
+  await assert.rejects(client.session(session => session.request('POST', '/graphql', {})), error => error instanceof GitHubError && error.retryAfter === 60)
+  await assert.rejects(client.session(session => session.request('GET', '/user'))); assert.equal(calls, 1)
+  t.mock.timers.tick(60000)
+  await assert.rejects(client.session(session => session.request('POST', '/graphql', {})), error => error instanceof GitHubError && error.retryAfter === 120); assert.equal(calls, 2)
+})
+
+for (const entry of ['snapshot', 'prefetch'] as const) test('batch read: owner cancellation during first of 130 paths stops later internal batches via '+entry, async () => {
+  const { repo, remote } = fixture(new Remote(Object.fromEntries(Array.from({ length: 130 }, (_, i) => ['Workspace/f' + i, 'body ' + i]))))
+  const snapshot = entry === 'prefetch' ? await repo.snapshot() : undefined
+  const abort = new AbortController(), reason = new Error('this read owner stopped'), original = remote.fetch.bind(remote)
+  remote.fetch = async (url, init) => { const response = await original(url, init); if (url.endsWith('/graphql')) abort.abort(reason); return response }
+  const plan = { files: Array.from({ length: 130 }, (_, i) => 'dss-coop/f' + i), signal: abort.signal }
+  await assert.rejects(entry === 'snapshot' ? repo.snapshot(false, plan) : repo.prefetch(snapshot!, plan), error => error === reason)
+  assert.equal(remote.count('/graphql'), 1)
+  remote.fetch = original
+  assert.equal(await repo.read(await repo.snapshot(), 'dss-coop/f129'), 'body 129', 'read cancellation never cancels shared repository/background owner')
+})
+
+for (const responseKind of ['lossless', 'BOM-omitted', 'CRLF-normalized'] as const) test('batch read: original BOM/CRLF bytes retained for '+responseKind, async () => {
+  const bytes = Buffer.from('\uFEFF原文 😀\r\nsecond line\r\n', 'utf8'), remote = new Remote()
+  remote.append(new Map([['Workspace/original.txt', bytes]]), 'Original UTF-8 bytes')
+  const { repo } = fixture(remote), original = remote.fetch.bind(remote)
+  remote.fetch = async (url, init) => {
+    const response = await original(url, init); if (!url.endsWith('/graphql') || responseKind === 'lossless') return response
+    const value = await response.json(), blob = value.data.repository.ref.target.p0.object
+    blob.text = bytes.toString('utf8'); if (responseKind === 'BOM-omitted') blob.text = blob.text.slice(1); else blob.text = blob.text.replaceAll('\r\n', '\n')
+    return Response.json(value)
+  }
+  const snapshot = await repo.snapshot(false, { files: ['dss-coop/original.txt'] })
+  assert.deepEqual(await repo.readBytes(snapshot, 'dss-coop/original.txt'), bytes)
+  assert.equal(remote.count('/git/blobs/'), responseKind === 'lossless' ? 0 : 1)
+})
+
+
+for (const [retrySeconds, resetSeconds] of [[30, 120], [120, 30]] as const) test(`batch read: HTTP200 combined limits retain Retry-After ${retrySeconds} independently from GraphQL reset ${resetSeconds}`, async t => {
+  const now = 1800000000000; t.mock.timers.enable({ apis: ['Date'], now }); let calls = 0
+  const client = new GitHubClient(async () => ({ value: 'synthetic-mixed-200', source: 'fixture' }), async () => {
+    calls++; return calls === 1 ? Response.json({ data: { rateLimit: { remaining: 0, resetAt: new Date(now + resetSeconds * 1000).toISOString() } }, errors: [{ type: 'RATE_LIMITED', message: 'Rate limit exceeded' }] }, { headers: { 'retry-after': String(retrySeconds) } }) : Response.json({ ok: true })
+  })
+  await assert.rejects(client.session(session => session.request('POST', '/graphql', {})), error => error instanceof GitHubError && error.retryAfter === Math.max(retrySeconds, resetSeconds))
+  await assert.rejects(client.session(session => session.request('GET', '/user')), error => error instanceof GitHubError && error.retryAfter === retrySeconds); assert.equal(calls, 1)
+  t.mock.timers.tick(retrySeconds * 1000); await client.session(session => session.request('GET', '/user')); assert.equal(calls, 2)
+  if (resetSeconds > retrySeconds) {
+    await assert.rejects(client.session(session => session.request('POST', '/graphql', {})), error => error instanceof GitHubError && error.retryAfter === resetSeconds - retrySeconds)
+    assert.equal(calls, 2); t.mock.timers.tick((resetSeconds - retrySeconds) * 1000)
+  }
+  await client.session(session => session.request('POST', '/graphql', {})); assert.equal(calls, 3)
+})
+
+test('batch page carries its UI owner signal through a 130-header transport batch and leaves the shared connection available', async () => {
+  const { repo, remote } = fixture(new Remote()), operations = new Map<string, any>(), records = new MemoryStorage()
+  const files = new GitFiles(repo, { save: async value => { operations.set(value.operation.id, value) }, get: async id => operations.get(id), list: async () => [...operations.values()] })
+  const conversation = new FrameworkConversation(files, new FrameworkTransactions(files, records, 'cancel-internal-page-batches'), { mode: 'git', collaborationId: 'test' })
+  const entries = Array.from({ length: 130 }, (_, i) => ({ id: 'm'+i, path: 'conversations/headers/m'+i+'.json', createdAt:'2026-11-02T00:00:00Z' }))
+  remote.change({ ['Workspace/'+conversation.indexPath]: JSON.stringify({version:1,messages:entries}), ...Object.fromEntries(entries.map(e=>['Workspace/'+e.path,JSON.stringify({id:e.id,collaborationId:'test'})])) })
+  const abort = new AbortController(), reason = new Error('UI page no longer owned'), original = remote.fetch.bind(remote)
+  remote.fetch = async (url, init) => { const response = await original(url, init); if (url.endsWith('/graphql')) abort.abort(reason); return response }
+  let releases = 0; const snapshot = files.snapshot.bind(files)
+  files.snapshot = async (...args) => { const s=await snapshot(...args), release=s.release.bind(s);s.release=async()=>{releases++;await release()};return s }
+  await assert.rejects(conversation.page(130, undefined, {}, undefined, abort.signal), error => error === reason)
+  assert.equal(remote.count('/graphql'), 1); assert.equal(releases, 1)
+  remote.fetch = original
+  assert.ok(await repo.read(await repo.snapshot(), 'dss-coop/'+conversation.indexPath))
+})
+
+
+test('batch read: an independent GraphQL failure stays visible if UI cancellation arrives with it', async () => {
+  const remote = new Remote(), abort = new AbortController(), reason = new Error('late UI cancellation')
+  const repo = new GitHubRepository(new GitHubClient(async()=>({value:'synthetic-independent-error',source:'fixture'}), async(url,init)=>{
+    if (!url.endsWith('/graphql')) return remote.fetch(url,init)
+    abort.abort(reason); return Response.json({errors:[{type:'INTERNAL',message:'Independent failed read'}]})
+  }), ()=>({ownerRepo:'example/private',repositoryDirectory:'Workspace',participantId:1}))
+  await assert.rejects(repo.snapshot(false,{files:['dss-coop/a.txt'],signal:abort.signal}), error=>error instanceof GitHubError && error.message.includes('Independent failed read'))
+})
+
 const changes: GitChange[] = [{ path: 'dss-coop/tasks/普通任务_P.md', content: 'Worker details 🚀\n' }, { path: 'dss-coop/state/seed', content: null }]
 
 test('remote: binary FileAddition preserves exact bytes and hashes without text conversion', async () => {

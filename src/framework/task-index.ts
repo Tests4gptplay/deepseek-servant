@@ -33,7 +33,7 @@ export class FrameworkTaskIndex {
   constructor(private readonly files: FilesStore, private readonly error: (error: Error) => void,
     private readonly changed?: () => void) {}
 
-  async list(snapshot: FilesSnapshot, entries?: readonly FileEntry[]): Promise<TaskMetadata[]> {
+  async list(snapshot: FilesSnapshot, entries?: readonly FileEntry[], signal?: AbortSignal): Promise<TaskMetadata[]> {
     // Enumeration errors remain an actual storage error; never mistake them for
     // deletion of every Task. Only a successfully listed snapshot evicts entries.
     const listed = entries ?? await this.files.listDirectory(snapshot, 'tasks/')
@@ -41,7 +41,7 @@ export class FrameworkTaskIndex {
     const present = new Set(direct.map(entry => entry.path))
     for (const path of this.cache.keys()) if (!present.has(path)) this.cache.delete(path)
     const result: TaskMetadata[] = [], visible: Array<[string, string]> = []
-    await this.files.prefetch?.(snapshot, { files: direct.filter(entry => this.cache.get(entry.path)?.version !== entry.version).map(entry => entry.path) })
+    await this.files.prefetch?.(snapshot, { signal, files: direct.filter(entry => this.cache.get(entry.path)?.version !== entry.version).map(entry => entry.path) })
     for (const entry of direct) {
       let cached = this.cache.get(entry.path)
       if (cached?.version !== entry.version) {

@@ -481,7 +481,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             base.messages = page.messages;
             base.pageBefore = page.moreBefore;
             let observed = active?.resources ?? [];
-            try { observed = active?.resources ?? await this.observe(access, mode, snapshot); } catch (error) { report(error); }
+            try { observed = active?.resources ?? await this.observe(access, mode, snapshot, signal); } catch (error) { report(error); }
             signal?.throwIfAborted();
             const localMember = active?.connection.registration.member ?? observed.find(row => row.instanceUUID === access.connection.identity.instanceUUID)?.member;
             base.hasOtherInstanceRecords = mode === 'git' && observed.some(row => row.instanceUUID !== access.connection.identity.instanceUUID);
@@ -490,11 +490,11 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             signal?.throwIfAborted();
             try {
             access.taskIndex ??= new FrameworkTaskIndex(access.connection.files, error => this.report(mode, error));
-            const tasks = await access.taskIndex.list(snapshot);
+            const tasks = await access.taskIndex.list(snapshot, undefined, signal);
             signal?.throwIfAborted();
             const controls = tasks.length ? await this.controls(access, active).taskStates(tasks.map(task => task.taskId)) : undefined;
             signal?.throwIfAborted();
-            await access.connection.files.prefetch?.(snapshot, { files: tasks.filter(task => task.status !== 'complete')
+            await access.connection.files.prefetch?.(snapshot, { signal, files: tasks.filter(task => task.status !== 'complete')
                 .flatMap(task => (task.members ?? [task.owner]).map(name => paths.memberStatus(task.taskId, name))) });
             signal?.throwIfAborted();
             for (const task of tasks) {
@@ -518,7 +518,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             try {
             const migrations = await readJson<{ migrations: Array<{ id: string; manifestPath: string }> }>(access.connection.files, snapshot, 'technical/legacy-migrations/index.json');
             signal?.throwIfAborted();
-            await access.connection.files.prefetch?.(snapshot, { files: (migrations?.migrations ?? []).map(migration => migration.manifestPath) });
+            await access.connection.files.prefetch?.(snapshot, { signal, files: (migrations?.migrations ?? []).map(migration => migration.manifestPath) });
             signal?.throwIfAborted();
             for (const migration of migrations?.migrations ?? []) {
                 signal?.throwIfAborted();
@@ -570,7 +570,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 }));
             }
             } catch (error) { report(error); }
-        }, { files: [access.conversation.indexPath, 'technical/legacy-migrations/index.json'],
+        }, { signal, files: [access.conversation.indexPath, 'technical/legacy-migrations/index.json'],
             directories: ['tasks', ...(!active ? ['instances'] : [])] });
         signal?.throwIfAborted();
         if (active && this.running.get(mode) === active && active.connection.scope === access.connection.scope) {
@@ -867,10 +867,10 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         await active.runtime.requestExecutionStop(input.commandId, input.workId, input.executionId);
         return this.view({ mode: input.mode });
     }
-    private observe(access: Access, mode: FrameworkMode, snapshot?: FilesSnapshot): Promise<ObservedInstance[]> {
+    private observe(access: Access, mode: FrameworkMode, snapshot?: FilesSnapshot, signal?: AbortSignal): Promise<ObservedInstance[]> {
         const c = access.connection;
         access.observer ??= new InstanceRegistration(c.files, c.transactions, this.storage, { repositoryId: c.identity.repositoryId, repositoryOwner: c.identity.owner, login: c.identity.login, instanceUUID: c.identity.instanceUUID, workerSeats: 0 });
-        return access.observer.observe(snapshot).then(rows => mode === 'local' ? rows.map(row => ({ ...row, primary: row.instanceUUID === c.identity.instanceUUID })) : rows);
+        return access.observer.observe(snapshot, signal).then(rows => mode === 'local' ? rows.map(row => ({ ...row, primary: row.instanceUUID === c.identity.instanceUUID })) : rows);
     }
     private checkScope(access: Access, expected?: string): void {
         if (expected !== undefined && expected !== access.connection.scope) throw new Error('Storage destination changed; retained input belongs to its original scope.');

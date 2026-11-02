@@ -6,7 +6,7 @@ import { GitHubRepository, GitCommitOutcomeUnknownError, type GitCommitOperation
 export type FileChange = { path: string; content: string | null; bytes?: never } | { path: string; bytes: Uint8Array; content?: never }
 export interface FileEntry { path: string; version: string; bytes?: number; empty?: boolean }
 export interface FilesSnapshot { readonly revision: string; release(): Promise<void> }
-export interface FileReadPlan { files?: readonly string[]; directories?: readonly string[] }
+export interface FileReadPlan { files?: readonly string[]; directories?: readonly string[]; signal?: AbortSignal }
 export interface FileReceipt { revision: string; replay: boolean; operationId?: string; /** Live metadata-only verification; never persist this snapshot. */ verifiedWrites?: GitSnapshot }
 export interface FilesStore {
   /** One owned callback; no credential/session survives its completion. */
@@ -82,7 +82,7 @@ export class GitFiles implements FilesStore {
     return snapshot
   }
   private plan(plan: FileReadPlan) {
-    return { files: plan.files?.map(path => 'dss-coop/' + filePath(path)),
+    return { signal: plan.signal, files: plan.files?.map(path => 'dss-coop/' + filePath(path)),
       directories: plan.directories?.map(path => 'dss-coop/' + directoryPrefix(path).replace(/\/$/, '')) }
   }
   async snapshot(plan?: FileReadPlan): Promise<FilesSnapshot> { return this.wrap(await this.repository.snapshot(false, plan && this.plan(plan))) }
