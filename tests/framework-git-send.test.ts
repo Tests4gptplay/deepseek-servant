@@ -407,3 +407,84 @@ test('Git send: late old read and old send ACK cannot replace newer same-scope a
   assert.deepEqual(controller.snapshot().value?.messages.map(message => message.id), ['old-ack', 'new-head'])
   assert.equal(controller.snapshot().drafts[0].state, 'confirmed')
 })
+
+test('Git send readback fetches only the saved message in one Commit query while optional panels remain held', async t => {
+  const f = await serviceFixture(t), input = f.input('authoritative-readback')
+  await f.service.send(input)
+  const entered = deferred<void>(), release = deferred<void>()
+  const observe = (f.service as any).observe.bind(f.service)
+  ;(f.service as any).observe = async (...args: unknown[]) => { entered.resolve(); await release.promise; return observe(...args) }
+  const reading = f.service.view({ mode: 'git' })
+  await entered.promise
+  f.remote.requests.length = 0
+  try {
+    const result = await f.service.sentMessage(input)
+    assert.equal(result.message?.text, input.text); assert.equal(result.message?.participantId, '1')
+    assert.deepEqual(result.order, [input.id]); assert.equal(result.revision, f.remote.head)
+    assert.equal(f.remote.requests.length, 1)
+    assert.match(f.remote.requests[0].body.query, /^query DSSReadPlan/)
+    assert.ok(Object.values(f.remote.requests[0].body.variables).every(value => typeof value !== 'string' || !/\/(tasks|instances|archives)(\/|$)/.test(value)))
+  } finally { release.resolve(); await reading }
+})
+
+test('Git readback never substitutes submitted text for corrupted remote bytes and does not retry denied fields', async t => {
+  const f = await serviceFixture(t), input = f.input('corrupt-readback')
+  await f.service.send(input)
+  const path = [...f.remote.commits.get(f.remote.head)!.files.keys()].find(path => path.endsWith('/parts/000000.txt'))!
+  f.remote.change({ [path]: 'Different remote body' })
+  await assert.rejects(f.service.sentMessage(input), /integrity|hash/)
+  f.remote.forbidden = true; f.remote.requests.length = 0
+  await assert.rejects(f.service.sentMessage(input), /Access revoked/)
+  assert.equal(f.remote.requests.length, 1)
+})
+
+test('Git readback respects a newer cleared index and original storage scope', async t => {
+  const f = await serviceFixture(t), input = f.input('cleared-readback')
+  await f.service.send(input)
+  f.remote.change({ ['Workspace/' + f.conversation.indexPath]: JSON.stringify({ version: 1, messages: [] }) })
+  const result = await f.service.sentMessage(input)
+  assert.equal(result.message, undefined); assert.deepEqual(result.order, [])
+  await assert.rejects(f.service.sentMessage({ ...input, storageScope: 'another-scope' }), /scope|storage|destination/i)
+})
+
+for (const failure of ['member-status', 'task-metadata', 'tasks-directory', 'instances-directory'] as const) test('Git view: a failed batch '+failure+' retains its original consumer error boundary', async t => {
+  const f = await serviceFixture(t)
+  await f.service.send(f.input('retained-conversation'))
+  const task = (id:string) => JSON.stringify({version:1,taskId:id,route:'P',owner:'alice',status:'running',sourcePath:'tasks/'+id+'_P.md',members:['alice','bob']})
+  f.remote.change({
+    'Workspace/tasks/healthy.json':task('healthy'),'Workspace/tasks/failing.json':task('failing'),
+    'Workspace/task-runs/healthy/alice/alice_Inbox/status.json':JSON.stringify({state:'running',deliveryId:'healthy-alice'}),
+    'Workspace/task-runs/healthy/bob/bob_Inbox/status.json':JSON.stringify({state:'complete',deliveryId:'healthy-bob'}),
+    'Workspace/task-runs/failing/alice/alice_Inbox/status.json':JSON.stringify({state:'running',deliveryId:'failing-alice'}),
+    'Workspace/task-runs/failing/bob/bob_Inbox/status.json':JSON.stringify({state:'complete',deliveryId:'failing-bob'}),
+    'Workspace/archives/retained/records.md':'Complete retained archive',
+  })
+  const path = failure==='member-status' ? 'Workspace/task-runs/failing/alice/alice_Inbox/status.json' : failure==='task-metadata' ? 'Workspace/tasks/failing.json' : failure==='tasks-directory' ? 'Workspace/tasks' : 'Workspace/instances'
+  const original=f.remote.fetch.bind(f.remote);let fails=true
+  f.remote.fetch=async(url,init)=>{
+    const response=await original(url,init),request=init?.body?JSON.parse(String(init.body)):undefined
+    if(!fails||!request?.query?.startsWith('query DSSReadPlan'))return response
+    const alias=Object.keys(request.variables).find(key=>key.startsWith('p')&&request.variables[key]===path)
+    if(!alias)return response
+    const body=await response.json(),node=body.data.repository.ref?.target??body.data.repository.object
+    node[alias]=null
+    body.errors=[...(body.errors??[]),{type:'INTERNAL',message:'Synthetic isolated '+failure,path:['repository',...(body.data.repository.ref?['ref','target']:['object']),alias]}]
+    return Response.json(body)
+  }
+  const files=f.connection.files,snapshot=files.snapshot.bind(files);let releases=0
+  files.snapshot=async(...args)=>{const s=await snapshot(...args),close=s.release.bind(s);s.release=async()=>{releases++;await close()};return s}
+  const v=await f.service.view({mode:'git',includeArchives:true})
+  assert.equal(v.messages[0].text,f.input('retained-conversation').text)
+  assert.equal(v.archives[0].taskId,'retained');assert.equal(releases,1)
+  assert.ok(v.connection.detail, 'the original read failure stays visible')
+  if(failure==='tasks-directory')assert.deepEqual(v.tasks,[])
+  else {
+    assert.ok(v.tasks.some(task=>task.taskId==='healthy'))
+    if(failure==='task-metadata')assert.ok(!v.tasks.some(task=>task.taskId==='failing'))
+    else {assert.equal(v.tasks.length,2);if(failure==='member-status')assert.deepEqual(v.tasks.find(task=>task.taskId==='failing')!.members.map(m=>[m.name,m.status]),[['alice','unknown'],['bob','complete']])}
+  }
+  assert.equal(f.remote.requests.filter(r=>r.path.includes('/git/blobs/')&&r.path.endsWith(blobHash(f.remote.commits.get(f.remote.head)!.files.get(path)??''))).length,0,'failed planned fields never retry through REST')
+  fails=false
+  const next=await f.service.view({mode:'git'});assert.equal(next.tasks.length,2);assert.equal(releases,2)
+  assert.equal(next.tasks.find(task=>task.taskId==='failing')!.members[0].status,'running','next owned view can read recovered data')
+})

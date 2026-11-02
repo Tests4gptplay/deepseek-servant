@@ -141,6 +141,34 @@ export class FrameworkConversation {
       return entry ? this.readAt(snapshot, entry) : undefined
     })
   }
+  /** Read only one authoritative message. The known send layout is a demand
+   * hint, never the result: index, entry, manifest and original bytes are checked.
+   * A fresh snapshot also respects a conversation cleared after a send/replay. */
+  readback(messageId: string, hint?: ConversationSend, signal?: AbortSignal): Promise<{ message?: ConversationMessage; revision: string; order: string[] }> {
+    let hinted: string[] = []
+    if (hint) {
+      const date = new Date(hint.createdAt)
+      if (!Number.isFinite(date.getTime())) throw new Error('Message createdAt must be a valid timestamp.')
+      const root = 'conversations/' + (this.scope.mode === 'local' ? 'local/' : '') + segment(hint.participantId) + '/' + date.toISOString().slice(0, 10) + '/' + hint.createdAt.replace(/\D/g, '') + '-' + segment(messageId)
+      hinted = [root + '/entry.json', ...textChanges(root + '/text', hint.text, this.scope.mode === 'git').map(change => change.path)]
+    }
+    return withSnapshot(this.files, async snapshot => {
+      signal?.throwIfAborted()
+      const index = await this.index(snapshot), entry = index.messages.find(value => value.id === messageId)
+      signal?.throwIfAborted()
+      const result = { revision: snapshot.revision, order: index.messages.map(value => value.id) }
+      if (!entry) return result
+      // A replay or migrated record can use an older layout; follow the index.
+      if (this.files.prefetch) await this.files.prefetch(snapshot, { signal, files: [entry.path] })
+      signal?.throwIfAborted()
+      const header = await this.headerAt(snapshot, entry)
+      if (this.files.prefetch) await this.files.prefetch(snapshot, { signal, files: [logicalReference(header.textPath) + '/manifest.json'] })
+      const manifest = await readManifest(this.files, snapshot, header.textPath)
+      if (this.files.prefetch) await this.files.prefetch(snapshot, { signal, files: manifest.chunks })
+      signal?.throwIfAborted()
+      return { ...result, message: await this.readAt(snapshot, entry, header, await readText(this.files, snapshot, header.textPath, manifest)) }
+    }, { signal, files: [this.indexPath, ...hinted] })
+  }
   /** Explicit search over full originals; excerpts and page sizes do not truncate storage. */
   search(query: string, cursor = 0, limit = 10) {
     if (!query.trim() || !Number.isSafeInteger(cursor) || cursor < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 50)

@@ -9,6 +9,72 @@ const draft: FrameworkSendInput = { mode: 'git', collaborationId: 'git-team', st
 const deferred = <T>() => { let resolve!: (value: T) => void, reject!: (error: unknown) => void; const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej }); return { promise, resolve, reject } }
 
 const savedDraftView = (): FrameworkClientView => ({ ...view('git'), messages: [{ id: draft.id, participantId: 'A', createdAt: draft.createdAt, role: 'user', text: draft.text }] })
+
+test('authoritative message readback displays before held panels; older view cannot erase it and dirty still advances', async () => {
+  const held = deferred<FrameworkClientView>(), entered = deferred<void>()
+  let armed = false, reads = 0
+  const controller = new FrameworkClientController(api({
+    sentMessage: async () => ({ message: savedDraftView().messages[0], order: [draft.id], revision: 'opaque-commit' }),
+    view: async input => {
+      if (!armed || input.headerOnly) return view('git')
+      if (++reads === 1) { entered.resolve(); return held.promise }
+      return { ...savedDraftView(), resources: [{ name: 'fresh peer', status: 'online' }] }
+    },
+  }))
+  await controller.selectMode('git'); armed = true
+  const old = controller.refresh(); await entered.promise
+  await controller.send(draft)
+  assert.deepEqual(controller.snapshot().value?.messages.map(message => message.id), [draft.id])
+  const dirty = controller.refresh()
+  held.resolve(view('git')); await Promise.all([old, dirty])
+  assert.equal(reads, 2); assert.equal(controller.snapshot().value?.messages[0].text, draft.text)
+  assert.equal(controller.snapshot().value?.resources[0].name, 'fresh peer')
+  assert.equal(controller.snapshot().value?.revision, 'git-1', 'settings revision is never a commit clock')
+})
+
+test('an old view may finish after readback without erasure; a later authoritative cleanup can remove it', async () => {
+  const held = deferred<FrameworkClientView>(), entered = deferred<void>(); let armed = false, reads = 0
+  const controller = new FrameworkClientController(api({ sentMessage: async () => ({ message: savedDraftView().messages[0], order: [draft.id], revision: 'H' }),
+    view: async input => { if (!armed || input.headerOnly) return view('git'); if (++reads === 1) { entered.resolve(); return held.promise } return view('git') },
+  }))
+  await controller.selectMode('git'); armed = true
+  const old = controller.refresh(); await entered.promise; await controller.send(draft)
+  held.resolve(view('git')); await old
+  assert.equal(controller.snapshot().value?.messages[0].id, draft.id)
+  await controller.refresh(); assert.deepEqual(controller.snapshot().value?.messages, [])
+})
+
+for (const later of ['fresh-view', 'mode-change', 'history-navigation'] as const) test('late single-message readback cannot replace newer ' + later, async () => {
+  const response = deferred<Awaited<ReturnType<NonNullable<FrameworkClientApi['sentMessage']>>>>(), entered = deferred<void>()
+  const controller = new FrameworkClientController(api({ sentMessage: () => { entered.resolve(); return response.promise } }))
+  await controller.selectMode('git')
+  const sending = controller.send(draft); await entered.promise
+  if (later === 'fresh-view') await controller.refresh()
+  else if (later === 'mode-change') await controller.selectMode('local')
+  else await controller.navigateHistory({ date: '2026-10-30', limit: 20 })
+  response.resolve({ message: savedDraftView().messages[0], order: [draft.id], revision: 'old' }); await sending
+  assert.deepEqual(controller.snapshot().value?.messages, [])
+  assert.equal(controller.snapshot().drafts[0].state, 'confirmed')
+})
+
+test('readback failure preserves confirmed receipt, exposes error, and does not manufacture draft text', async () => {
+  let writes = 0
+  const controller = new FrameworkClientController(api({ send: async () => { writes++; return { revision: 'H' } }, sentMessage: async () => { throw new Error('permission denied on read') } }))
+  await controller.selectMode('git'); await assert.rejects(controller.send(draft), /permission/)
+  assert.equal(controller.snapshot().drafts[0].state, 'confirmed'); assert.match(controller.snapshot().error!, /permission/)
+  assert.deepEqual(controller.snapshot().value?.messages, []); await controller.send(draft); assert.equal(writes, 1)
+})
+
+test('out-of-order readback inserts by committed index and preserves newer messages without duplication', async () => {
+  const second = { ...draft, id: 'second', text: 'second' }, late = deferred<Awaited<ReturnType<NonNullable<FrameworkClientApi['sentMessage']>>>>(), entered = deferred<void>()
+  const controller = new FrameworkClientController(api({ sentMessage: async input => {
+    if (input.id === draft.id) { entered.resolve(); return late.promise }
+    return { message: { ...savedDraftView().messages[0], id: second.id, text: second.text }, order: [draft.id, second.id], revision: 'H2' }
+  } }))
+  await controller.selectMode('git'); const first = controller.send(draft); await entered.promise; await controller.send(second)
+  late.resolve({ message: savedDraftView().messages[0], order: [draft.id, second.id], revision: 'H2' }); await first
+  assert.deepEqual(controller.snapshot().value?.messages.map(message => message.id), [draft.id, second.id])
+})
 test('confirmed send does not refresh a view which already contains the exact saved original', async () => {
   let reads = 0
   const controller = new FrameworkClientController(api({ view: async () => { reads++; return savedDraftView() } }))

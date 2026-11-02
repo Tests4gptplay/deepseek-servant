@@ -48,6 +48,8 @@ test('production native-envelope route sends through actual service and reads du
   const { call, files } = await fixture(t)
   const sent = await call('send', { mode: 'local', collaborationId: 'shared', storageScope: 'transport-test', id: 'message', createdAt: '2026-10-31T00:00:00.000Z', text: 'Via native RPC envelope', recipient: 'ai', device: 'web', timezoneOffsetMinutes: 540 })
   assert.equal(sent.ok, true)
+  const readback = await call('sentMessage', { mode: 'local', collaborationId: 'shared', storageScope: 'transport-test', id: 'message', createdAt: '2026-10-31T00:00:00.000Z', text: 'Via native RPC envelope' })
+  assert.equal(readback.ok, true); assert.equal(readback.value.message.text, 'Via native RPC envelope'); assert.deepEqual(readback.value.order, ['message'])
   const history = await call('history', { mode: 'local', collaborationId: 'shared', limit: 50 })
   assert.equal(history.value.messages[0].text, 'Via native RPC envelope')
   await withSnapshot(files, async snapshot => assert.equal((await files.listDirectory(snapshot, 'state/')).length, 1))

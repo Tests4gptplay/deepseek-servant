@@ -80,6 +80,7 @@ export interface FrameworkClientApi {
   view(input: { mode?: FrameworkMode; includeArchives?: boolean; headerOnly?: boolean }, signal?: AbortSignal): Promise<FrameworkClientView>
   history(input: { mode: FrameworkMode; collaborationId: string; storageScope?: string; beforeId?: string; afterId?: string; date?: string; limit: number }, signal?: AbortSignal): Promise<{ messages: FrameworkClientMessage[]; moreBefore?: string; moreAfter?: string; revision: string }>
   send(input: FrameworkSendInput): Promise<{ revision: string; replay?: boolean }>
+  sentMessage?(input: FrameworkSendInput, signal?: AbortSignal): Promise<{ message?: FrameworkClientMessage; revision: string; order: string[] }>
   configure(input: { mode: FrameworkMode; commandId: string; expectedRevision?: string; settings: FrameworkClientSettings }): Promise<FrameworkClientView>
   foregroundModel(input: { mode: FrameworkMode; storageScope?: string; commandId: string; expectedRevision: string; model?: FrameworkClientModel }): Promise<FrameworkClientView>
   moveRecords(input: { mode: 'local'; storageScope: string; expectedRevision: string; commandId: string; directory: string }): Promise<FrameworkClientView>
@@ -124,6 +125,9 @@ export class FrameworkClientController {
   private disconnect?: () => void
   private processingAvailable = true
   private processingEpoch = 0
+  private messageReadEpoch = 0
+  private readonly messageReads = new Map<string, number>()
+  private readonly confirmedMessages = new Map<string, Map<string, { message: FrameworkClientMessage; order: string[]; epoch: number }>>()
   private readonly sends = new Map<string, Promise<void>>()
   constructor(readonly api: FrameworkClientApi) {}
   retainConnection(): () => void {
@@ -170,7 +174,7 @@ export class FrameworkClientController {
   }
   private async navigate(operation: () => Promise<FrameworkClientView>, mode: FrameworkMode, hydrate = false): Promise<void> {
     if (this.requestedMode && mode !== this.requestedMode) { await operation(); return }
-    this.historyGeneration++; this.navigationGeneration++; this.cancelReads()
+    this.historyGeneration++; this.navigationGeneration++; this.cancelReads(); this.confirmedMessages.clear()
     const navigation = this.navigation = Symbol(), processingEpoch = this.processingAvailable ? this.processingEpoch : -1
     ++this.generation
     this.publish({ loading: true, error: undefined })
@@ -241,13 +245,15 @@ export class FrameworkClientController {
         try {
           while (eligible()) {
             owned.dirty = false
+            const messageRead = ++this.messageReadEpoch
             result = await this.api.view({ mode: targetMode, includeArchives: owned.includeArchives }, owned.controller.signal)
             if (!eligible()) return result
             // The still-owned response may contain a newer authoritative
             // settings projection. Advance before publishing so synchronous
             // invalidations join this same responsibility, not a stale header.
             owned.revision = result.revision; owned.collaborationId = result.collaborationId
-            owned.publish(this.refreshView(result, owned.includeArchives, published)); published = true
+            result = this.refreshView(result, owned.includeArchives, published, messageRead)
+            owned.publish(result); published = true
             if (!owned.dirty) return result
           }
           return result
@@ -257,15 +263,33 @@ export class FrameworkClientController {
     }
     return this.refreshView(await request, includeArchives || !!hydration?.includeArchives)
   })
-  private refreshView(value: FrameworkClientView, includeArchives: boolean, previousLoaded = true): FrameworkClientView {
+  private refreshView(value: FrameworkClientView, includeArchives: boolean, previousLoaded = true, messageRead?: number): FrameworkClientView {
     const fresh = { ...value }
     const current = this.current.value, key = frameworkScopeKey(fresh.activeMode, fresh.collaborationId, fresh.storageScope)
     if (previousLoaded && !includeArchives && current && frameworkScopeKey(current.activeMode, current.collaborationId, current.storageScope) === key) fresh.archives = current.archives
     if (current?.historyWindow && frameworkScopeKey(current.activeMode, current.collaborationId, current.storageScope) === key) return { ...fresh, messages: current.messages, pageBefore: current.pageBefore, pageAfter: current.pageAfter, historyDate: current.historyDate, historyWindow: true }
+    const pending = this.confirmedMessages.get(key)
+    if (messageRead !== undefined) this.messageReads.set(key, Math.max(this.messageReads.get(key) ?? 0, messageRead))
+    for (const [id, confirmed] of pending ?? []) {
+      if (messageRead !== undefined && messageRead >= confirmed.epoch) pending!.delete(id)
+      else fresh.messages = this.mergeConfirmed(fresh.messages, confirmed.message, confirmed.order)
+    }
     if (!current || frameworkScopeKey(current.activeMode, current.collaborationId, current.storageScope) !== key || !this.expandedHistory.has(key)) return fresh
     const messages = new Map(current.messages.map(message => [message.id, message]))
     for (const message of fresh.messages) messages.set(message.id, message)
     return { ...fresh, messages: [...messages.values()], pageBefore: current.pageBefore }
+  }
+  private mergeConfirmed(messages: FrameworkClientMessage[], message: FrameworkClientMessage, order: string[]): FrameworkClientMessage[] {
+    if (messages.some(row => row.id === message.id)) return messages
+    const position = order.indexOf(message.id), result = [...messages]
+    // Commit-index order, never client wall-clock order.
+    for (let i = position - 1; i >= 0; i--) {
+      const previous = result.findIndex(row => row.id === order[i])
+      if (previous >= 0) { result.splice(previous + 1, 0, message); return result }
+    }
+    const next = result.findIndex(row => order.indexOf(row.id) > position)
+    result.splice(next < 0 ? result.length : next, 0, message)
+    return result
   }
   selectMode = (mode: FrameworkMode): Promise<void> => { this.requestedMode = mode; return this.navigate(() => this.api.selectMode({ mode, headerOnly: true }), mode, true) }
   taskControl = (input: Parameters<FrameworkClientApi['taskControl']>[0]): Promise<void> => this.load(() => this.api.taskControl(input), input.mode)
@@ -361,6 +385,26 @@ export class FrameworkClientController {
       const currentScope = () => { const view = this.current.value; return !!view && frameworkScopeKey(view.activeMode, view.collaborationId, view.storageScope) === scope }
       const delivered = () => this.current.value?.messages.some(message => message.id === input.id && message.role === 'user' && message.text === input.text)
       if (!currentScope() || delivered()) return
+      if (this.api.sentMessage) {
+        const epoch = ++this.messageReadEpoch, navigation = this.navigationGeneration, history = this.historyGeneration
+        try {
+          const result = await this.api.sentMessage(retained.input, this.historyReads.signal)
+          if (!currentScope() || navigation !== this.navigationGeneration || history !== this.historyGeneration || this.navigation
+            || (this.messageReads.get(scope) ?? 0) > epoch || this.current.value?.historyWindow) return
+          const message = result.message
+          if (!message) return // A later authoritative cleanup may have removed it.
+          if (message.id !== input.id || message.role !== 'user' || message.text !== input.text || !result.order.includes(message.id)) throw new Error('Saved message readback differs from the original input.')
+          const pending = this.confirmedMessages.get(scope) ?? new Map()
+          pending.set(message.id, { message, order: result.order, epoch }); this.confirmedMessages.set(scope, pending)
+          this.publish({ value: { ...this.current.value!, messages: this.mergeConfirmed(this.current.value!.messages, message, result.order) } })
+        } catch (error) {
+          // The commit is confirmed; a failed read must not relabel it UNKNOWN
+          // or manufacture a message from the draft. Independent dirty work lives on.
+          if (currentScope() && navigation === this.navigationGeneration && history === this.historyGeneration && (this.messageReads.get(scope) ?? 0) <= epoch) this.publish({ error: error instanceof Error ? error.message : String(error) })
+          throw error
+        }
+        return
+      }
       // The changed event often already owns the post-commit read. Join that
       // read without creating another dirty invalidation for the same send.
       // Independent changed events keep their existing dirty responsibility.

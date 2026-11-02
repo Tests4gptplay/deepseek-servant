@@ -1756,3 +1756,34 @@ test('owned reads: cancelling one owner does not cancel another reading the same
   await assert.rejects(a); await assert.rejects(body)
   assert.equal(await b, 'A')
 })
+
+for (const failure of ['field-error', 'incomplete-blob', 'incomplete-directory'] as const) test('batch read: isolated '+failure+' stays an error at its path and leaves other fields readable', async () => {
+  const remote = new Remote({ 'Workspace/a.txt':'healthy A','Workspace/b.txt':'original B','Workspace/dir/b.txt':'B' }), original=remote.fetch.bind(remote)
+  const repo = new GitHubRepository(new GitHubClient(async()=>({value:'synthetic-isolated-path',source:'fixture'}),async(url,init)=>{
+    const response=await original(url,init);if(!url.endsWith('/graphql'))return response
+    const body=await response.json(),value=body.data.repository.ref.target
+    if(failure==='field-error') {value.p1=null;body.errors=[{type:'FORBIDDEN',message:'This field is forbidden',path:['repository','ref','target','p1']}]}
+    else if(failure==='incomplete-blob')delete value.p1.object.byteSize
+    else delete value.p0.object.entries
+    return Response.json(body)
+  }),()=>({ownerRepo:'example/private',repositoryDirectory:'Workspace',participantId:1}))
+  const plan={files:['dss-coop/a.txt'],directories:['dss-coop/dir'],isolatePathErrors:true}
+  // Demand ordering is directory first, then body; the error owns only that field.
+  const snapshot=await repo.snapshot(false,plan)
+  if(failure==='incomplete-blob') {await assert.rejects(repo.read(snapshot,'dss-coop/a.txt'));assert.equal((await repo.listDirectory(snapshot,'dss-coop/dir')).length,1)}
+  else if(failure==='incomplete-directory') {assert.equal(await repo.read(snapshot,'dss-coop/a.txt'),'healthy A');await assert.rejects(repo.listDirectory(snapshot,'dss-coop/dir'))}
+  else {assert.equal((await repo.listDirectory(snapshot,'dss-coop/dir')).length,1);await assert.rejects(repo.read(snapshot,'dss-coop/a.txt'),/forbidden/)}
+  assert.equal(remote.count('/git/blobs/'),0);assert.equal(remote.count('/git/trees/'),0)
+})
+
+test('batch read: GitHub UTF-16 text projection retains original BOM bytes through the existing byte endpoint', async () => {
+  const bytes=Buffer.from('\uFEFFSynthetic UTF-16 BOM\r\n','utf16le'),remote=new Remote();remote.append(new Map([['Workspace/original.txt',bytes]]),'Original UTF-16')
+  const original=remote.fetch.bind(remote),repo=new GitHubRepository(new GitHubClient(async()=>({value:'synthetic-utf16',source:'fixture'}),async(url,init)=>{
+    const response=await original(url,init);if(!url.endsWith('/graphql'))return response
+    const body=await response.json(),blob=body.data.repository.ref.target.p0.object
+    blob.isBinary=false;blob.isTruncated=false;blob.text=bytes.toString('utf16le');assert.equal(blob.byteSize,46);assert.equal(Buffer.byteLength(blob.text),25)
+    return Response.json(body)
+  }),()=>({ownerRepo:'example/private',repositoryDirectory:'Workspace',participantId:1}))
+  const snapshot=await repo.snapshot(false,{files:['dss-coop/original.txt']})
+  assert.deepEqual(await repo.readBytes(snapshot,'dss-coop/original.txt'),bytes);assert.equal(remote.count('/git/blobs/'),1)
+})

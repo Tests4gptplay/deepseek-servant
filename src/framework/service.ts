@@ -494,7 +494,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             signal?.throwIfAborted();
             const controls = tasks.length ? await this.controls(access, active).taskStates(tasks.map(task => task.taskId)) : undefined;
             signal?.throwIfAborted();
-            await access.connection.files.prefetch?.(snapshot, { signal, files: tasks.filter(task => task.status !== 'complete')
+            await access.connection.files.prefetch?.(snapshot, { signal, isolatePathErrors: true, files: tasks.filter(task => task.status !== 'complete')
                 .flatMap(task => (task.members ?? [task.owner]).map(name => paths.memberStatus(task.taskId, name))) });
             signal?.throwIfAborted();
             for (const task of tasks) {
@@ -518,7 +518,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             try {
             const migrations = await readJson<{ migrations: Array<{ id: string; manifestPath: string }> }>(access.connection.files, snapshot, 'technical/legacy-migrations/index.json');
             signal?.throwIfAborted();
-            await access.connection.files.prefetch?.(snapshot, { signal, files: (migrations?.migrations ?? []).map(migration => migration.manifestPath) });
+            await access.connection.files.prefetch?.(snapshot, { signal, isolatePathErrors: true, files: (migrations?.migrations ?? []).map(migration => migration.manifestPath) });
             signal?.throwIfAborted();
             for (const migration of migrations?.migrations ?? []) {
                 signal?.throwIfAborted();
@@ -570,7 +570,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 }));
             }
             } catch (error) { report(error); }
-        }, { signal, files: [access.conversation.indexPath, 'technical/legacy-migrations/index.json'],
+        }, { signal, isolatePathErrors: true, files: [access.conversation.indexPath, 'technical/legacy-migrations/index.json'],
             directories: ['tasks', ...(!active ? ['instances'] : [])] });
         signal?.throwIfAborted();
         if (active && this.running.get(mode) === active && active.connection.scope === access.connection.scope) {
@@ -906,6 +906,16 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             username: active.connection.repository?.identity.login || (this.config(mode).settings.userName || active.connection.identity.login) }, { reevaluate: true });
         this.changed();
         return receipt;
+    }
+    async sentMessage(input: FrameworkSendInput, signal?: AbortSignal) {
+        signal?.throwIfAborted();
+        const mode = z.enum(['local', 'git']).parse(input.mode), access = await this.access(mode);
+        this.checkScope(access, input.storageScope);
+        if (input.collaborationId !== access.conversation.scope.collaborationId) throw new Error('Conversation selection changed.');
+        const hint = z.object({ id: z.string().min(1), createdAt: z.string().datetime({ offset: true }), text: z.string() }).parse(input);
+        const participantId = access.connection.repository ? String(access.connection.repository.identity.id) : access.connection.identity.login;
+        signal?.throwIfAborted();
+        return access.conversation.readback(hint.id, { ...hint, participantId, role: 'user' }, signal);
     }
     foregroundModel(input: Parameters<FrameworkClientApi['foregroundModel']>[0]): Promise<FrameworkClientView> {
         let mode: FrameworkMode, route: FrameworkClientSettings['foreground'];

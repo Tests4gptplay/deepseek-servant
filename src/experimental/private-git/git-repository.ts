@@ -58,7 +58,7 @@ interface TreeNode {
 }
 interface ReadOperation { session?: GitHubSession; scope: RemoteScope; signal: AbortSignal; binding: string; active: boolean; reusable: boolean; pending: Set<Promise<unknown>> }
 interface SnapshotState { scope: RemoteScope; head: string; root: TreeNode; nodes: Map<string, TreeNode>; loaded: Set<string>;
-  planned: Map<string, (TreeEntry & { node?: TreeNode }) | null>; bodies: Map<string, Uint8Array>;
+  planned: Map<string, (TreeEntry & { node?: TreeNode }) | null>; pathErrors: Map<string, unknown>; bodies: Map<string, Uint8Array>;
   verifiedWrites?: ReadonlyArray<Readonly<{ path: string; sha256: string | null }>> }
 const sha256 = (value: string | Uint8Array) => createHash('sha256').update(value).digest('hex')
 function changeBytes(change: GitChange): Buffer | null {
@@ -236,7 +236,7 @@ export class GitHubRepository implements GitRepository {
     }
     index(root)
     const snapshot: GitSnapshot = { head, tree, files: new Map(), reads: new Map() }
-    this.states.set(snapshot, { scope, head, root, nodes, loaded: new Set(), planned: new Map(), bodies: new Map() })
+    this.states.set(snapshot, { scope, head, root, nodes, loaded: new Set(), planned: new Map(), pathErrors: new Map(), bodies: new Map() })
     return snapshot
   }
   snapshot(_afterWrite = false, plan?: GitReadPlan): Promise<GitSnapshot> {
@@ -250,22 +250,22 @@ export class GitHubRepository implements GitRepository {
         const demands = this.demands(scope, plan)
         const first = demands.slice(0, 64)
         let result: Awaited<ReturnType<typeof readPlan>>
-        try { result = await readPlan(session, scope.connection.repository.fullName, scope.connection.repository.branch, undefined, first) }
+        try { result = await readPlan(session, scope.connection.repository.fullName, scope.connection.repository.branch, undefined, first, plan.isolatePathErrors) }
         catch (error) {
           // A genuinely unresolved ref still follows the established empty-repo
           // check. Permission, partial and transport failures never switch APIs.
           if (!(error instanceof GitRefNotResolvedError)) throw error
           plan.signal?.throwIfAborted()
           const snapshot = await this.makeSnapshot(session, scope, await this.head(session, scope))
-          if (snapshot.head) await this.prefetchDemands(session, snapshot, demands, plan.signal)
+          if (snapshot.head) await this.prefetchDemands(session, snapshot, demands, plan.signal, plan.isolatePathErrors)
           return snapshot
         }
         plan.signal?.throwIfAborted()
         this.check(scope)
         const snapshot = await this.makeSnapshot(session, scope, result.head, result.tree)
-        this.acceptPlan(snapshot, first, result.entries)
+        this.acceptPlan(snapshot, first, result.entries, plan.isolatePathErrors)
         scope.metadata.head = result.head; scope.metadata.latestTree = { head: result.head, tree: result.tree }
-        await this.prefetchDemands(session, snapshot, demands.slice(first.length), plan.signal)
+        await this.prefetchDemands(session, snapshot, demands.slice(first.length), plan.signal, plan.isolatePathErrors)
         return snapshot
       }
       return this.makeSnapshot(session, scope, await this.head(session, scope))
@@ -285,13 +285,14 @@ export class GitHubRepository implements GitRepository {
     plan.signal?.throwIfAborted()
     const state = this.state(snapshot)
     const demands = this.demands(state.scope, plan).filter(demand => {
+      if (state.pathErrors.has(demand.path)) return false
       const entry = state.planned.get(demand.path)
       return !state.planned.has(demand.path) || !!entry && (demand.body ? entry.type === 'blob' && !state.bodies.has(entry.sha) : entry.type === 'tree' && !entry.node?.entries)
     })
     if (!demands.length || !snapshot.head) return
-    await this.readSession(session => this.prefetchDemands(session, snapshot, demands, plan.signal))
+    await this.readSession(session => this.prefetchDemands(session, snapshot, demands, plan.signal, plan.isolatePathErrors))
   }
-  private async prefetchDemands(session: GitHubSession, snapshot: GitSnapshot, demands: readonly PathDemand[], signal?: AbortSignal): Promise<void> {
+  private async prefetchDemands(session: GitHubSession, snapshot: GitSnapshot, demands: readonly PathDemand[], signal?: AbortSignal, isolatePathErrors = false): Promise<void> {
     const state = this.state(snapshot)
     if (session.authorizationScope !== state.scope.metadata.authorizationScope) throw new GitHubError(409, 'The GitHub authorization changed. Read a new snapshot before continuing.')
     // Bound a transport batch, not history or message length. Later batches use
@@ -299,47 +300,56 @@ export class GitHubRepository implements GitRepository {
     for (let start = 0; start < demands.length; start += 64) {
       signal?.throwIfAborted()
       const batch = demands.slice(start, start + 64)
-      const result = await readPlan(session, state.scope.connection.repository.fullName, state.scope.connection.repository.branch, snapshot.head, batch)
+      const result = await readPlan(session, state.scope.connection.repository.fullName, state.scope.connection.repository.branch, snapshot.head, batch, isolatePathErrors)
       signal?.throwIfAborted()
       this.check(state.scope)
-      this.acceptPlan(snapshot, batch, result.entries)
+      this.acceptPlan(snapshot, batch, result.entries, isolatePathErrors)
     }
   }
-  private acceptPlan(snapshot: GitSnapshot, demands: readonly PathDemand[], values: readonly (PlannedEntry | null)[]): void {
+  private acceptPlan(snapshot: GitSnapshot, demands: readonly PathDemand[], values: readonly (PlannedEntry | null | GitHubError)[], isolatePathErrors = false): void {
     const state = this.state(snapshot), updates: Array<() => void> = []
     const gitOid = (value: unknown): value is string => typeof value === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value)
     for (let i = 0; i < demands.length; i++) {
-      const demand = demands[i]!, value = values[i]!
-      if (value === null) { updates.push(() => state.planned.set(demand.path, null)); continue }
-      const entry: TreeEntry & { node?: TreeNode } = { path: demand.path.split('/').at(-1)!, type: value.type, sha: value.oid }
-      const object = value.object
-      if (demand.body && value.type === 'blob') {
-        if (!object || object.oid !== value.oid || !Number.isSafeInteger(object.byteSize) || object.byteSize! < 0
-          || typeof object.isTruncated !== 'boolean' || ![true, false, null].includes(object.isBinary as boolean | null)
-          || object.text !== null && typeof object.text !== 'string')
-          throw new GitHubError(502, 'GitHub returned incomplete blob metadata.')
-        entry.size = object.byteSize
-        if (object.isBinary === false && !object.isTruncated && typeof object.text === 'string') {
-          const bytes = Buffer.from(object.text, 'utf8')
-          // A text projection may omit bytes (for example a BOM). Retain the
-          // exact metadata, then let the existing byte reader verify originals.
-          if (bytes.length === object.byteSize) updates.push(() => state.bodies.set(value.oid, bytes))
+      const demand = demands[i]!, value = values[i]!, start = updates.length
+      try {
+        if (value instanceof GitHubError) throw value
+        if (value === null) { updates.push(() => state.planned.set(demand.path, null)); continue }
+        const entry: TreeEntry & { node?: TreeNode } = { path: demand.path.split('/').at(-1)!, type: value.type, sha: value.oid }
+        const object = value.object
+        if (demand.body && value.type === 'blob') {
+          if (!object || object.oid !== value.oid || !Number.isSafeInteger(object.byteSize) || object.byteSize! < 0
+            || typeof object.isTruncated !== 'boolean' || ![true, false, null].includes(object.isBinary as boolean | null)
+            || object.text !== null && typeof object.text !== 'string')
+            throw new GitHubError(502, 'GitHub returned incomplete blob metadata.')
+          entry.size = object.byteSize
+          if (object.isBinary === false && !object.isTruncated && typeof object.text === 'string') {
+            const bytes = Buffer.from(object.text, 'utf8')
+            // A text projection may omit bytes (for example a BOM). Retain the
+            // exact metadata, then let the existing byte reader verify originals.
+            if (bytes.length === object.byteSize) updates.push(() => state.bodies.set(value.oid, bytes))
+          }
+          // Binary, truncated, unavailable or lossy text uses the existing byte reader;
+          // GraphQL errors never trigger that fallback.
+        } else if (!demand.body && value.type === 'tree') {
+          if (!object || object.oid !== value.oid || !Array.isArray(object.entries)) throw new GitHubError(502, 'GitHub returned an incomplete directory.')
+          const entries: TreeEntry[] = object.entries.map(child => {
+            if (!child.name || child.name.includes('/') || ['.', '..'].includes(child.name) || !gitOid(child.oid) || !['blob', 'tree', 'commit'].includes(child.type))
+              throw new GitHubError(502, 'GitHub returned an invalid directory entry.')
+            return { path: child.name, type: child.type, sha: child.oid, ...(child.object?.byteSize === undefined ? {} : { size: child.object.byteSize }) }
+          })
+          const node: TreeNode = { sha: value.oid, entries, children: new Map() }
+          for (const child of entries) if (child.type === 'tree') node.children.set(child.path, state.nodes.get(child.sha) ?? { sha: child.sha, children: new Map() })
+          entry.node = node
+          updates.push(() => { state.nodes.set(node.sha, node); for (const child of node.children.values()) state.nodes.set(child.sha, child) })
         }
-        // Binary, truncated, unavailable or lossy text uses the existing byte reader;
-        // GraphQL errors never trigger that fallback.
-      } else if (!demand.body && value.type === 'tree') {
-        if (!object || object.oid !== value.oid || !Array.isArray(object.entries)) throw new GitHubError(502, 'GitHub returned an incomplete directory.')
-        const entries: TreeEntry[] = object.entries.map(child => {
-          if (!child.name || child.name.includes('/') || ['.', '..'].includes(child.name) || !gitOid(child.oid) || !['blob', 'tree', 'commit'].includes(child.type))
-            throw new GitHubError(502, 'GitHub returned an invalid directory entry.')
-          return { path: child.name, type: child.type, sha: child.oid, ...(child.object?.byteSize === undefined ? {} : { size: child.object.byteSize }) }
-        })
-        const node: TreeNode = { sha: value.oid, entries, children: new Map() }
-        for (const child of entries) if (child.type === 'tree') node.children.set(child.path, state.nodes.get(child.sha) ?? { sha: child.sha, children: new Map() })
-        entry.node = node
-        updates.push(() => { state.nodes.set(node.sha, node); for (const child of node.children.values()) state.nodes.set(child.sha, child) })
+        updates.push(() => state.planned.set(demand.path, entry))
+      } catch (error) {
+        if (!isolatePathErrors) throw error
+        // Never publish a failed field as absence or retry it through REST.
+        // Healthy fields share this commit; consumers keep their original catch.
+        updates.length = start
+        updates.push(() => state.pathErrors.set(demand.path, error))
       }
-      updates.push(() => state.planned.set(demand.path, entry))
     }
     this.check(state.scope)
     for (const update of updates) update()
@@ -391,6 +401,7 @@ export class GitHubRepository implements GitRepository {
     const state = this.state(snapshot)
     if (session.authorizationScope !== state.scope.metadata.authorizationScope) throw new GitHubError(409, 'The GitHub authorization changed. Read a new snapshot before continuing.')
     if (!snapshot.tree) return
+    if (state.pathErrors.has(physical)) throw state.pathErrors.get(physical)
     if (state.planned.has(physical)) return state.planned.get(physical) ?? undefined
     if (!physical) return { path: '', type: 'tree', sha: snapshot.tree, node: state.root }
     let node = state.root

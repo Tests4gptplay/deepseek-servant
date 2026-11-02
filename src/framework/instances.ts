@@ -147,7 +147,7 @@ export class InstanceRegistration {
     const rows = []
     const current = new Map<string, HeartbeatObservation>()
     const entries = await this.files.listDirectory(snapshot, 'instances/')
-    await this.files.prefetch?.(snapshot, { signal, files: entries.filter(entry => parseInstancePath(entry.path) && this.heartbeatObservations.get(entry.path)?.version !== entry.version).map(entry => entry.path) })
+    await this.files.prefetch?.(snapshot, { signal, isolatePathErrors: true, files: entries.filter(entry => parseInstancePath(entry.path) && this.heartbeatObservations.get(entry.path)?.version !== entry.version).map(entry => entry.path) })
     for (const entry of entries) {
       const registration = parseInstancePath(entry.path)
       if (!registration) continue

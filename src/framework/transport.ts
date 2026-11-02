@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { ModeEvents } from '../mode-router/events.js';
 import { FilesConflictError, FilesOutcomeUnknownError } from './transactions.js';
 import type { FrameworkService } from './service.js';
-const methods = ['maintenanceView', 'openMaintenancePath', 'exportRecords', 'cleanupPreview', 'cleanupRecords', 'knowledgeList', 'knowledgeRead', 'knowledgeEdit', 'knowledgeStatus', 'view', 'history', 'send', 'foregroundModel', 'configure', 'moveRecords', 'legacyRecords', 'legacyControl', 'invite', 'gitMembers', 'gitMemberAction', 'taskControl', 'stopExecution', 'participation', 'selectMode', 'readFile'] as const;
+const methods = ['maintenanceView', 'openMaintenancePath', 'exportRecords', 'cleanupPreview', 'cleanupRecords', 'knowledgeList', 'knowledgeRead', 'knowledgeEdit', 'knowledgeStatus', 'view', 'history', 'send', 'sentMessage', 'foregroundModel', 'configure', 'moveRecords', 'legacyRecords', 'legacyControl', 'invite', 'gitMembers', 'gitMemberAction', 'taskControl', 'stopExecution', 'participation', 'selectMode', 'readFile'] as const;
 /** Uses the Host's authenticated connection carrier, not an independent web server. */
 export function installFrameworkTransport(ctx: Context, service: FrameworkService): () => Promise<void> {
     const events = new ModeEvents(), off = service.subscribeChanged(events.changed);
@@ -21,6 +21,7 @@ export function installFrameworkTransport(ctx: Context, service: FrameworkServic
                     try {
                         const value = method === 'view' ? await service.view(message.payload as Parameters<FrameworkService['view']>[0], request.signal)
                           : method === 'history' ? await service.history(message.payload as Parameters<FrameworkService['history']>[0], request.signal)
+                          : method === 'sentMessage' ? await service.sentMessage(message.payload as Parameters<FrameworkService['sentMessage']>[0], request.signal)
                           : await (service[method] as (input: any) => Promise<unknown>).call(service, message.payload);
                         return respond({ ok: true, value });
                     }
