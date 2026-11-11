@@ -128,9 +128,8 @@ DeepSeek Servant 由 [Chat Agent Harness（CAH）](https://github.com/Tests4gptp
 
 0.4.1 让安装包中的版本摘要、使用资料与发行说明都能直接打开；任务、设置和 Git 协作的使用方式与 0.4.0 相同。详见 [0.4.1 发布说明](docs/releases/0.4.1.md) 与[历史候选修改及验证记录](https://github.com/Tests4gptplay/deepseek-servant/blob/d28a4d8538abc966608761bcfd60d568dec11cc9/docs/testing/MODEL-AUTO-CANDIDATE10.md)。
 
+[查验具体用例、实际结果与公开净化证据](https://github.com/Tests4gptplay/deepseek-servant/blob/d28a4d8538abc966608761bcfd60d568dec11cc9/docs/testing/EVIDENCE.md)。
+
 ## 支持项目 / Support
 
 [GitHub Sponsors](https://github.com/sponsors/Tests4gptplay) · [Ko-fi](https://ko-fi.com/kou392350) · [支付宝 / Alipay](SPONSOR.md)
-
-
-[查验具体用例、实际结果与公开净化证据](https://github.com/Tests4gptplay/deepseek-servant/blob/d28a4d8538abc966608761bcfd60d568dec11cc9/docs/testing/EVIDENCE.md)。
