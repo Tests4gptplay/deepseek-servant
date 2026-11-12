@@ -73,6 +73,7 @@ dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.4.1'
 
 - [安装、升级与开发构建](docs/INSTALLATION.md)：固定版本安装、升级与显式开发命令。
 - [使用指南](docs/USAGE.md)：任务提交与修订、聊天答复、并发控制、历史阅读、重启接续和记录管理。
+
 ### 当前协作范围
 
 Git 模式支持参与者分工、任务控制、接续及归档，Worker 在各自 DSH 实例的工作区执行。远端交流需使用协作指南约定的消息投递入口；仅同步普通聊天记录不会自动发起前台回复或任务。
