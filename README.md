@@ -10,6 +10,12 @@
 
 **当前版本：** `0.4.1` · **最近测试宿主：** Windows Desktop `0.2.1-rc.5` · **项目形态：** 独立安装的社区插件
 
+## 技术评述与项目实践 / Review & project practice
+
+**摘要：** CAH 与 DSS 延续同一套面向长期工作的 Agent 架构：任务持续存在，执行者可以接替，解决方法能够根据实际证据调整。评述结合 CAH 多日任务、Viewer 技术路线转换与 DSS 原生实现，介绍**任务连续性、路线纠偏、跨宿主迁移**的优势，并与相关论文及持续型助理产品对照。
+
+**[阅读全文：CAH 与 DeepSeek Servant——面向长期工作的 Agent 系统评述](docs/reviews/CAH-DSS-REVIEW.zh-CN.md)**
+
 ## 独立实践与架构趋同 / Independent work, convergent architecture
 
 DSS 的 [v0.2.0（2026-10-26）](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.2.0) 已公开多角色协作、持久任务记录与异常接续，早于 DeepSeek 团队于 2026-10-31 公开的 [Super-agent 研究原型](https://github.com/deepseek-ai/dsh-superagent-prototype)。这条独立工程路线延续自 [CAH v1.0.4（2026-09-20）](https://github.com/Tests4gptplay/chat-agent-harness/releases/tag/v1.0.4) 中的 Git 任务记录与可替换 Worker。
@@ -67,7 +73,6 @@ dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.4.1'
 
 - [安装、升级与开发构建](docs/INSTALLATION.md)：固定版本安装、升级与显式开发命令。
 - [使用指南](docs/USAGE.md)：任务提交与修订、聊天答复、并发控制、历史阅读、重启接续和记录管理。
-
 ### 当前协作范围
 
 Git 模式支持参与者分工、任务控制、接续及归档，Worker 在各自 DSH 实例的工作区执行。远端交流需使用协作指南约定的消息投递入口；仅同步普通聊天记录不会自动发起前台回复或任务。
