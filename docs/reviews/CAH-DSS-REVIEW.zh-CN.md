@@ -254,13 +254,28 @@ CAH 提供了多日任务完成与技术路线调整的案例；DSS 将这套经
 
 ### 项目资料
 
+| 编号 | 资料 |
+|---|---|
+| **A** | CAH v1.0.4 公开发行说明；Viewer/Cook 案例与运行记录。[^A] |
+| **B** | DeepSeek Servant 项目说明；2026年10月26日原生协作、双代执行与进程中断恢复验收。[^B] |
+| **C** | CAH 多日媒体制作任务提交与最终验收记录，2026年10月17日—22日，项目方留存。[^C] |
+| **D** | CAH 早期连续性研发记录，2026年9月17日，项目方留存。[^D] |
+
+### 研究与产品资料
+
+| 来源 | 资料 |
+|---|---|
+| **Microsoft Research** | *Magentic-One: A Generalist Multi-Agent System for Solving Complex Tasks*，2024。[^R1] |
+| **Anthropic** | *Effective Harnesses for Long-Running Agents*，2025；*Scaling Managed Agents: Decoupling the Brain from the Hands*，2026。[^R2][^R3] |
+| **Letta** | *Introducing Context Repositories: Git-based Memory for Coding Agents*，2026。[^R4] |
+| **Sakana AI** | *The Agentic Scientist*，2026。[^R5] |
+| **Agent 系统评估研究** | *Towards a Science of Scaling Agent Systems*，2025年首次提交、2026年修订。[^R6] |
+| **持续型助理产品** | Grok Bot、Meta Muse、OpenAI dots 官方发布资料，2026。[^R7][^R8][^R9] |
+
 [^A]: CAH：[v1.0.4 公开发行说明](https://github.com/Tests4gptplay/chat-agent-harness/releases/tag/v1.0.4)；[Viewer/Cook 案例](https://github.com/Tests4gptplay/chat-agent-harness/blob/d9c5453df87c0fd261f8ffbb90df3d8727525797/showcases/ue-parallel-viewer/README.md)与[运行记录](https://github.com/Tests4gptplay/chat-agent-harness/blob/d9c5453df87c0fd261f8ffbb90df3d8727525797/showcases/ue-parallel-viewer/records/2026-09-28-rerun-record.md)。
 [^B]: DeepSeek Servant：[项目说明](../../README.md)；[2026年10月26日原生协作、双代执行与进程中断恢复验收](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/docs/acceptance-private-git-20261026.md)。
 [^C]: CAH 多日媒体制作任务提交与最终验收记录，2026年10月17日—22日，项目方留存。
 [^D]: CAH 早期连续性研发记录，2026年9月17日，项目方留存。
-
-### 研究与产品资料
-
 [^R1]: Microsoft Research，[*Magentic-One: A Generalist Multi-Agent System for Solving Complex Tasks*](https://www.microsoft.com/en-us/research/articles/magentic-one-a-generalist-multi-agent-system-for-solving-complex-tasks/)，2024。
 [^R2]: Anthropic，[*Effective Harnesses for Long-Running Agents*](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents)，2025。
 [^R3]: Anthropic，[*Scaling Managed Agents: Decoupling the Brain from the Hands*](https://www.anthropic.com/research/managed-agents)，2026。
