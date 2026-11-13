@@ -1254,14 +1254,8 @@ export class FrameworkRoleRuntime {
     const request = retired.helper?.delivery?.request ?? retired.helper?.lastWake
     const owner = request && this.helperTaskOwner(request)
     if (!request || !owner) return true
-    const released = await withSnapshot(this.files, async snapshot => {
-      const task = await readJson<TaskMetadata>(this.files, snapshot, paths.task(owner.taskId))
-      if (task) return taskLifecycle(task) === taskLifecycle(owner) && isTerminalTask(task)
-        && await this.taskRuntimeReleased(owner, snapshot)
-      const history = await readTaskHistoryIdentity(this.files, snapshot, owner.taskId)
-      return !!history && taskLifecycle(history) === taskLifecycle(owner) && isTerminalTask(history)
-    })
-    if (!released) return true
+    if (!await this.releasedHelperTask(owner)) return true
+    await this.retireUnadmittedHelperContinuation(retired, request)
     const key = this.prefix + 'wakes/' + hash(request.id), wake = await this.records.get<WakeRecord>(key)
     if (!wake) return true
     if (JSON.stringify(wake.request) !== JSON.stringify(request)) return false
@@ -1271,6 +1265,53 @@ export class FrameworkRoleRuntime {
     this.taskHelperWakes?.set(request.id, wake)
     await this.retireReleasedTaskHelperClaims(owner, request.id)
     return !await this.records.get<WakeRecord>(key)
+  }
+  private releasedHelperTask(owner: Pick<TaskMetadata, 'taskId' | 'lifecycleId'>): Promise<boolean> {
+    return withSnapshot(this.files, async snapshot => {
+      const task = await readJson<TaskMetadata>(this.files, snapshot, paths.task(owner.taskId))
+      if (task) return taskLifecycle(task) === taskLifecycle(owner) && isTerminalTask(task)
+        && await this.taskRuntimeReleased(owner, snapshot)
+      const history = await readTaskHistoryIdentity(this.files, snapshot, owner.taskId)
+      return !!history && taskLifecycle(history) === taskLifecycle(owner) && isTerminalTask(history)
+    })
+  }
+  /** A Host summary can replace the stopped Helper before its separately
+   * queued closed continuation enters native. Only this exact released input's
+   * unadmitted continuation and own signal retire; other claims stay owned. */
+  private async retireUnadmittedHelperContinuation(retired: NonNullable<RoleRecord['nativeRetirements']>[number], request: RoleWake): Promise<void> {
+    const id = 'closed-continuation:' + retired.executionId, signalKey = hash(id), key = this.prefix + 'wakes/' + signalKey
+    const workId = this.roleKey('Helper')
+    await this.serialWork(workId, async () => {
+      const writes = this.helperWakeWrites ??= new Map()
+      const operation = (writes.get(signalKey) ?? Promise.resolve()).catch(() => undefined).then(async () => {
+        const removal = (this.wakeWrites.get(key) ?? Promise.resolve()).catch(() => undefined).then(async () => {
+          const wake = await this.records.get<WakeRecord>(key), current = this.roleRecords.get(workId)
+          if (!wake || wake.delivered || this.wakeAdmission(wake)?.executionId
+            || (current?.delivery?.request ?? current?.lastWake)?.id === id
+            || wake.recovery?.targetExecutionId !== retired.executionId
+            || !wake.recovery.confirmedStoppedExecutions?.includes(retired.executionId)
+            || JSON.stringify(wake.recovery.original?.request) !== JSON.stringify(request)
+            || wake.request.context?.notificationClaims || wake.safetyParentWakeId
+            || wake.safetyFaults?.length || wake.safetyAttempts?.length || wake.resolvedSafetyFaultIds?.length
+            || wake.request.context?.safetyFault || wake.request.context?.safetyFaults
+            || [...this.safetyEpisodes.values()].some(episode => episode.helperWakeId === id)) return
+          const signal = wake.helperSignal
+          if (signal && helperSignalWakeHash(signal, this.config.member) !== signalKey) return
+          if (this.files instanceof PhysicalLocalFiles) {
+            if (signal) {
+              const observed = await this.files.fileMetadata(signal)
+              if (observed && !await this.files.deleteObserved(signal, observed.version)) return
+            }
+            await this.deleteRuntimeRecord(key, wake)
+          } else await this.deleteRuntimeRecord(key, wake, signal ? [signal] : [])
+        })
+        this.wakeWrites.set(key, removal)
+        try { await removal } finally { if (this.wakeWrites.get(key) === removal) this.wakeWrites.delete(key) }
+        return true
+      })
+      writes.set(signalKey, operation)
+      try { await operation } finally { if (writes.get(signalKey) === operation) writes.delete(signalKey) }
+    })
   }
   /** Native completion or confirmed original-conversation clear owns this
    * exact input after later responsibilities are handed off. */
@@ -5014,9 +5055,36 @@ executionId: binding.executionId, run: persistContext,
             recovered.add(record.identity.workId); continue
           }
           if (this.config.mode === 'git' && await this.recoverGitResponsibility(record)) { recovered.add(record.identity.workId); continue }
-          const continuation = await this.arrangeNativeContinuation(record, {
-            facts: 'The previous native execution was confirmed closed. Continue its accepted responsibility from saved inputs and current Task records.'
-          })
+          const resume = async () => {
+            const current = this.roleRecords.get(record.identity.workId)
+            if (!current || current.identity.executionId !== record.identity.executionId || current.sessionId !== record.sessionId) return
+            if (record.identity.role === 'Helper') {
+              const request = current.delivery?.request ?? current.lastWake, owner = request && this.helperTaskOwner(request)
+              // A finished Task is not a fresh diagnostic request. Accepted
+              // mixed/ordinary claims remain whole; startup's existing Task
+              // checks and original surviving wakes still carry other work.
+              if (request && owner && !Object.keys(current.notificationClaims ?? {}).length
+                && !request.context?.notificationClaims && await this.releasedHelperTask(owner)) {
+                const prior = await this.records.get<WakeRecord>(this.prefix + 'wakes/' + hash(request.id))
+                const context = request.context
+                const faults = [...prior?.safetyFaults ?? [], ...prior?.safetyAttempts?.map(attempt => attempt.fault) ?? [],
+                  ...context?.safetyFault ? [context.safetyFault as SafetyFault] : [], ...context?.safetyFaults as SafetyFault[] ?? []]
+                if (!prior?.safetyParentWakeId && faults.every(fault => this.resolvedSafetyFaultIds.has(fault.id))
+                  && (prior?.resolvedSafetyFaultIds ?? []).every(id => this.resolvedSafetyFaultIds.has(id))
+                  && ![...this.safetyEpisodes.values()].some(episode => episode.helperWakeId === request.id
+                    && !this.resolvedSafetyFaultIds.has(episode.fault.id))) return
+              }
+            }
+            return this.arrangeNativeContinuation(current, {
+              facts: 'The previous native execution was confirmed closed. Continue its accepted responsibility from saved inputs and current Task records.'
+            })
+          }
+          // Only Helper startup competes with its shared admission lane.
+          // Native report/HostRestore readers finish outside this short lane.
+          const continuation = record.identity.role === 'Helper'
+            ? await this.serialWork(record.identity.workId, resume) : await this.arrangeNativeContinuation(record, {
+              facts: 'The previous native execution was confirmed closed. Continue its accepted responsibility from saved inputs and current Task records.'
+            })
           if (continuation) { continuations.push(continuation); recovered.add(record.identity.workId) }
         } catch (error) { this.error(error, { identity: record.identity, stage: 'startup-closed-continuation' }) }
         continue;
