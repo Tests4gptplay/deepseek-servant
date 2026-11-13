@@ -102,7 +102,7 @@ export interface FrameworkClientView {
   processGroups?: FrameworkClientProcessGroup[]
   pendingRecordMove?: { commandId: string; storageScope: string; expectedRevision: string; directory: string }
   /** This request's response only; a current location is not an old command receipt. */
-  recordMoveOutcome?: { status: 'applied' | 'current-location'; commandId: string; requestedDirectory: string; directory: string }
+  recordMoveOutcome?: { status: 'applied' | 'current-location'; commandId: string; requestedDirectory: string; directory: string; retainedSource?: string; sourceCleanup?: { retained: Array<{ directory: string; reason: string }> } }
   revision: string
   activeMode: FrameworkMode
   collaborationId: string

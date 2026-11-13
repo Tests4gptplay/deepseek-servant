@@ -1,3 +1,4 @@
+import { helperReportSignalPath, isHelperDatedRecord, isHelperWritableRecord } from './helper-debug-path.js'
 import { createHash } from 'node:crypto'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { HelperRepairAttempt } from './role-tools.js'
@@ -41,14 +42,14 @@ const facts = (input: Pick<PhysicalHelperReportInput, 'path' | 'text' | 'append'
   hash(JSON.stringify([input.path, input.text, input.append, input.notifyForeground === true,
     input.repairAttempt ? [input.repairAttempt.faultId ?? null, input.repairAttempt.actionsTaken, input.repairAttempt.outcome, input.repairAttempt.result] : null]))
 function reportSignal(input: PhysicalHelperReportInput): string | undefined {
-  const daily = /^debug\/\d{4}-\d{2}-\d{2}\.md$/.test(input.path)
-  const named = /^debug\/helper-reports\/([^/\\\0\r\n:*?"<>|]+\.md)$/.exec(input.path)
-  if (!daily && !named || input.repairAttempt && !daily) throw new Error('A Helper publication requires its original dated record or named report.')
-  if (!input.notifyForeground) return
-  const signal = named ? 'Foreground_Helper_Report_' + named[1]
-    : 'Foreground_Helper_' + input.path.slice(6, 16) + '_' + hash(input.originalCommandId)
-  if (Buffer.byteLength(signal, 'utf8') > 255) throw new Error('Helper report filename is too long for its complete Foreground signal.')
-  return 'state/' + signal
+  if (!isHelperWritableRecord(input.path) || input.repairAttempt && !isHelperDatedRecord(input.path))
+    throw new Error('A Helper publication requires its original dated record or named report.')
+  const signal = input.notifyForeground ? helperReportSignalPath(input.path, input.originalCommandId) : undefined
+  // Preserve the existing physical publication's filename constraint; Git has
+  // no corresponding filesystem component limit here.
+  if (signal && Buffer.byteLength(signal.slice('state/'.length), 'utf8') > 255)
+    throw new Error('Helper report filename is too long for its complete Foreground signal.')
+  return signal
 }
 const operations = new Map<string, Promise<unknown>>()
 async function inReport<T>(files: PhysicalLocalFiles, commandId: string, action: () => Promise<T>): Promise<T> {
@@ -158,9 +159,11 @@ async function retire(files: PhysicalLocalFiles, commandId: string): Promise<voi
 /** Caller supplies the known inactive Helper's persisted native session. An
  * unaccepted native call does not create a report. A completed physical effect
  * is not fabricated into a native result; its exact retry fact stays until the
- * original native result becomes durable. No unrelated session/file is read. */
+ * original native result becomes durable, unless its confirmed-stopped execution
+ * was permanently replaced and all accepted effects actually finished. No
+ * unrelated session/file is read. */
 export async function resumePhysicalHelperReportsFromEvents(files: PhysicalLocalFiles, executionId: string,
-  events: readonly SessionEvent[], services: PhysicalHelperReportServices = {}): Promise<void> {
+  events: readonly SessionEvent[], services: PhysicalHelperReportServices = {}, permanentlyStopped = false): Promise<void> {
   const results = await Promise.allSettled([...callsFromEvents(events)].map(([callId, call]) => {
     const commandId = executionId + ':' + callId
     return inReport(files, commandId, async () => {
@@ -170,6 +173,10 @@ export async function resumePhysicalHelperReportsFromEvents(files: PhysicalLocal
       // Failed/unaccepted native calls may have malformed arguments. Only an
       // actual accepted fact gives this exact call a publication responsibility.
       await publish(files, fact, { ...acceptedInput(call.arguments), commandId, originalCommandId: fact.originalCommandId }, services, () => {})
+      // A replaced execution cannot retry a native call. Its actual accepted
+      // effects are now complete; retire only the temporary publication facts.
+      // No native result or model completion is fabricated.
+      if (permanentlyStopped) await retire(files, commandId)
     })
   }))
   const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason)

@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto'
 import type { DshForegroundProcessGroup } from '../adapters/dsh/foreground-process.js'
 import { preservePublishedReferences, preservePhysicalPublishedReferences } from './published-references.js'
 import { PhysicalLocalFiles } from './physical-local-files.js'
-import { FrameworkTransactions, type CommandOptions } from './command-transactions.js'
+import { FrameworkTransactions, gitCommandReceiptPath, type CommandOptions } from './command-transactions.js'
 import { filePath, withSnapshot, type FileChange, type FileReceipt, type FilesSnapshot, type FilesStore } from './transactions.js'
 
 export interface ConversationScope { mode: 'local' | 'git'; collaborationId: string }
@@ -831,6 +831,10 @@ export class FrameworkConversation {
   async notificationPaths(snapshot: FilesSnapshot): Promise<string[]> {
     return (await this.routeForegroundSignals(await this.files.listDirectory(snapshot, 'state/', { namePrefix: 'Foreground_' })))
       .map(row => row.path)
+  }
+  /** Exact initial-claim receipt owned by the original Foreground wake. */
+  claimForegroundSignalsReceiptPath(commandId: string): string {
+    return gitCommandReceiptPath(this.command(commandId))
   }
   /** Consume the notified signal paths before reading current conversation content.
    * The storage CAS preserves concurrent changes outside this consumption. */

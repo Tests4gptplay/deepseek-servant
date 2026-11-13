@@ -27,8 +27,6 @@ export interface RecordStorageView {
   directory: string
   nativeDirectory?: string
   issues?: string[]
-  /** The move committed and the source copy was retained. */
-  retainedSource?: string
 }
 export interface ServantView {
   conversationMode?: 'LOCAL' | 'PRIVATE_GIT_EXPERIMENTAL'

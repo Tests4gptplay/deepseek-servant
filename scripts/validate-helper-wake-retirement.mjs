@@ -77,7 +77,7 @@ for(const mode of ['local','git']){
   const a=await f.addWake(),later={id:'later',role:'Helper',reason:'helper',sources:[],context:{facts:'exact later input'}}
   const wrong={...later,id:'wrong'},k=f.key('wakes','later'),bad=f.key('wakes','wrong')
   await f.rt.updateWake(k,()=>({request:later,delivered:true}));await f.rt.updateWake(bad,()=>({request:wrong,delivered:true}))
-  await f.rt.saveRole({...f.record,notificationClaims:{claim:{commandId:'claim',executionId:f.record.identity.executionId,wakeId:f.request.id,initialSignals:[],sources:[],helperWakes:[later,wrong]}}})
+  await f.rt.saveRole(f.record,false,undefined,false,undefined,{id:'claim',value:{commandId:'claim',executionId:f.record.identity.executionId,wakeId:f.request.id,initialSignals:[],sources:[],helperWakes:[later,wrong]}})
   f.input();f.call('claim','dss_claim');f.result('claim',...(mode==='local'?[false,JSON.stringify({helperNotifications:[later,{...wrong,context:{facts:'wrong'}}]})]:[JSON.stringify({helperNotifications:[later,{...wrong,context:{facts:'wrong'}}]})]));f.done();await f.finish()
   check(await f.records.get(a.k),undefined);check(await f.records.get(k),undefined);check(!!await f.records.get(bad),true)
  })
@@ -183,7 +183,7 @@ for(const mode of ['local','git']){
    f.add('turn/start',{turn:2});f.add('user/message',{id:'probe-2',role:'user',content:[{type:'text',text:'Check later notifications'}],source:{kind:'deepseek-servant'}},{surfaceOp:'append'});f.add('step/start',{turn:2,step:0})
    f.add('assistant/message',{turn:2,step:0,message:{id:'assistant-B',role:'assistant',source:{kind:'model',provider:'controlled-fixture',model:'controlled-fixture'},content:[{type:'tool-call',id:'B',name:'dss_claim',arguments:'{}'}]}},{surfaceOp:'append'})
    f.call('B','dss_claim');f.events.at(-1).data.turn=2
-   await f.rt.saveRole({...f.own(),notificationClaims:{B:{commandId:'B',executionId:f.record.identity.executionId,wakeId:f.request.id,initialSignals:[],sources:[],helperWakes:[later]}}})
+   await f.rt.saveRole(f.own(),false,undefined,false,undefined,{id:'B',value:{commandId:'B',executionId:f.record.identity.executionId,wakeId:f.request.id,initialSignals:[],sources:[],helperWakes:[later]}})
    f.result('B',...(mode==='local'?[false,JSON.stringify({helperNotifications:[later]})]:[JSON.stringify({helperNotifications:[later]})]));f.events.at(-1).data.turn=2
    f.add('step/end',{turn:2,step:0});f.add('turn/end',{turn:2,reason:{kind:'completed'}})
   }}

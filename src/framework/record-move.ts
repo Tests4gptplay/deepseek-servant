@@ -7,7 +7,7 @@ import { isAbsolute, join, relative, sep } from 'node:path'
 import type { StoragePort } from '../contracts/ports.js'
 import { LocalLocationRegistry, canonicalLocalLocation as canonical } from './local-location.js'
 import { localRecordFingerprint, prepareLocalRecordCopy, type LocalRecordBackend } from './maintenance.js'
-import type { RecordTreeCopyState } from './record-tree-copy.js'
+import { retireRecordTreeSource, type RecordTreeCopyState } from './record-tree-copy.js'
 import { prepareLocalUpgradeRelocation, projectLocalUpgradeRelocation, applyLocalUpgradeRelocation, type LocalUpgradeRelocation } from './local-upgrade-relocation.js'
 
 export const recordMoveKey = 'framework/record-moves'
@@ -28,6 +28,8 @@ export interface RecordMoveReceipt extends RecordMoveRequest {
   localCopy?: RecordTreeCopyState
   upgradeRelocation?: LocalUpgradeRelocation
   upgradeRelocated?: true
+  /** Result of this command’s one-shot old-copy cleanup; absent on older receipts. */
+  sourceCleanup?: { retained: Array<{ directory: string; reason: string }> }
   phase: 'prepared' | 'published' | 'reopening' | 'applied'
   settingsAfter: { revision: string; settings: FrameworkClientSettings }
 }
@@ -56,11 +58,11 @@ async function exists(path: string): Promise<boolean> {
 const equalRequest = (a: RecordMoveRequest, b: RecordMoveRequest) => a.sourceRecords === b.sourceRecords && a.targetRecords === b.targetRecords
   && a.sourceLocal === b.sourceLocal && (a.localBackend ?? 'sqlite') === (b.localBackend ?? 'sqlite') && a.scope === b.scope && isDeepStrictEqual(a.settingsBefore, b.settingsBefore) && a.nextSettingsRevision === b.nextSettingsRevision
 /** One current applied move supports the existing UI's uncertain retry. A
- * later applied move replaces it; copy inventories end before new writers run. */
+ * later applied move replaces it; copy inventories end after this move’s one-shot cleanup. */
 function currentReceipts(receipts: RecordMoveReceipt[]): RecordMoveReceipt[] {
   const latest = receipts.filter(receipt => receipt.phase === 'applied').at(-1)
   return receipts.filter(receipt => receipt.phase !== 'applied' || receipt === latest).map(receipt => {
-    if (receipt.phase !== 'reopening' && receipt.phase !== 'applied') return receipt
+    if (receipt.phase !== 'applied') return receipt
     const { localCopy: _finishedCopy, ...current } = receipt
     return current
   })
@@ -214,8 +216,8 @@ export class FrameworkRecordMove {
         await this.save(receipts, receipt.commandId)
       }
       await applyLocalUpgradeRelocation(this.storage, upgrade, signal)
-      // No permanent second metadata manifest. Source keys/original trees stay
-      // retained, and the new exact keys now own their existing responsibility.
+      // No permanent second metadata manifest. The new exact keys now own
+      // their existing responsibility; historical source keys are unchanged.
       receipt.upgradeRelocated = true; delete receipt.upgradeRelocation
       await this.save(receipts, receipt.commandId)
     }
@@ -223,11 +225,27 @@ export class FrameworkRecordMove {
     if (receipt.phase !== 'reopening') {
       // Persist permission for new writers before retiring the exact location
       // operation. Cold continuation then uses its published binding directly.
-      receipt.phase = 'reopening'; delete receipt.localCopy
+      receipt.phase = 'reopening'
       await this.save(receipts, receipt.commandId)
     }
     if (receipt.sourceLocal) await this.locations.applied(receipt.commandId)
     await this.lifecycle.reopen(structuredClone(receipt), signal)
+    // New records are already usable. Cleanup failure is an applied move with
+    // a visible residual, not a reason to roll back or hold the new location.
+    const retained: Array<{ directory: string; reason: string }> = []
+    const copies = [{ source: join(receipt.sourceRecords, 'deepseek_servant'), destination: join(receipt.targetRecords, 'deepseek_servant'),
+      copy: () => this.physical.recordMoveCopy?.(receipt.commandId) },
+      ...(receipt.localKind === 'custom' ? [{ source: receipt.sourceLocal!, destination: receipt.targetLocal!, copy: () => receipt.localCopy }] : [])]
+    for (const { source, destination, copy: readCopy } of copies) {
+      try {
+        const copy = await readCopy()
+        if (!copy || copy.source !== source || copy.destination !== destination) throw new Error('This move has no matching verified copy inventory; source retained.')
+        await retireRecordTreeSource(copy)
+      } catch (error) {
+        retained.push({ directory: source, reason: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    receipt.sourceCleanup = { retained }; delete receipt.localCopy
     receipt.phase = 'applied'; await this.save(receipts, receipt.commandId)
     return receipt
   }

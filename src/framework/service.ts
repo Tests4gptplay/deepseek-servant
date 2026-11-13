@@ -278,7 +278,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 else this.resolveSafetyFault(id);
                 this.refreshErrors(mode); this.changed();
             },
-            safetyAttempted: (id: string, attemptId: string) => { if (this.safetyNet.attempted(id, attemptId)) { this.refreshErrors(mode); this.safetyChanged(mode); } },
+            safetyAttempted: (id: string, attemptId: string) => { if (this.safetyNet.attempted(id, attemptId, true)) { this.refreshErrors(mode); this.safetyChanged(mode); } },
             safetyAttemptFailed: (id: string, attemptId: string, error: unknown, terminal = false) => {
                 this.ctx.logger?.('deepseek-servant').error(error);
                 this.safetyNet.failed(id, attemptId, error, terminal); this.refreshErrors(mode); this.safetyChanged(mode);
@@ -1131,10 +1131,11 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             const mover = this.mover(), prior = await mover.receipt(input.commandId);
             const controller = this.recordMoveController = new AbortController();
             try {
+                let applied: RecordMoveReceipt;
                 if (prior) {
                     if (prior.scope !== input.storageScope || prior.settingsBefore.revision !== input.expectedRevision)
                         throw new Error('Move retry must retain its original location, scope and settings revision.');
-                    await mover.run(input.commandId, { ...prior, targetRecords: input.directory }, controller.signal);
+                    applied = await mover.run(input.commandId, { ...prior, targetRecords: input.directory }, controller.signal);
                 } else {
                     const before = this.config('local');
                     if (before.revision !== input.expectedRevision) {
@@ -1149,7 +1150,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                     const access = await this.access('local'); this.checkScope(access, input.storageScope);
                     if (!(access.connection.files instanceof PhysicalLocalFiles)) throw new Error('Record relocation requires Local files.');
                     const physical = this.storage as StoragePort & RecordMovePhysicalStore;
-                    await mover.run(input.commandId, { sourceRecords: physical.storageView().directory, targetRecords: input.directory,
+                    applied = await mover.run(input.commandId, { sourceRecords: physical.storageView().directory, targetRecords: input.directory,
                         sourceLocal: access.connection.files.directory, scope: access.connection.scope,
                         localBackend: 'physical',
                         settingsBefore: structuredClone(before), nextSettingsRevision: randomUUID() }, controller.signal);
@@ -1159,7 +1160,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 const directory = (this.storage as StoragePort & RecordMovePhysicalStore).storageView().directory;
                 const view = await this.view({ mode: 'local', includeArchives: true, panelsOnly: true }, undefined, 'foreground-read');
                 return { ...view, recordMoveOutcome: { status: 'applied' as const, commandId: input.commandId,
-                    requestedDirectory: input.directory, directory } };
+                    requestedDirectory: input.directory, directory, ...(applied.sourceCleanup ? { sourceCleanup: applied.sourceCleanup } : { retainedSource: applied.sourceRecords }) } };
             } catch (error) {
                 try { this.pendingRecordMove = await mover.pendingReceipt() ?? this.pendingRecordMove; } catch { /* Keep the already-owned intent if locator reconciliation remains unknown. */ }
                 this.report('local', error, input.storageScope, input.commandId); throw error;

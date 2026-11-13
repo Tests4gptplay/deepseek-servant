@@ -1,3 +1,4 @@
+import { helperReportRecordPath, helperDebugPath, isHelperDatedRecord, isHelperWritableRecord, helperReportSignalPath } from './helper-debug-path.js'
 import { publishPhysicalHelperReport } from './physical-helper-report.js'
 import { deliverPhysicalDirect, type DirectSignalSources } from './physical-direct-delivery.js'
 import type { RoleWake } from './host-loop.js'
@@ -137,11 +138,6 @@ export interface FrameworkRoleServices {
     restore(binding: FrameworkRoleBinding, input: HelperRestoreInput, commandId: string): Promise<unknown>
     restoreHost(binding: FrameworkRoleBinding, input: { facts: string; hypotheses: string; actionsTaken: string; continuation: string }, commandId: string): Promise<unknown>
   }
-}
-const helperReportName = (path: string): string | undefined => {
-  const match = /^debug\/helper-reports\/([^/\\\0\r\n:*?"<>|]+\.md)$/.exec(path)
-  if (!match) return undefined
-  return match[1]
 }
 export function workerPaths(taskId: string, member: string, childId: string) {
   filePath(childId)
@@ -419,7 +415,7 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
     if ([binding.recordPath, binding.notePath, binding.replyPath].includes(path)) return true
     if (binding.direct) return path === binding.direct.resultPath
     if (binding.role === 'Foreground' && services.conversation) return ['Foreground_List.md', 'Foreground_Cache.md'].some(name => path === services.conversation!.foregroundRoot + '/' + name)
-    if (binding.role === 'Helper') return /^debug\/\d{4}-\d{2}-\d{2}\.md$/.test(path) || helperReportName(path) !== undefined
+    if (binding.role === 'Helper') return isHelperWritableRecord(path)
     const id = taskId(value), run = paths.run(id)
     if (binding.role === 'Organizer') return path === run + '/Organizer_Note.md' || path === run + '/Dispatch.md'
     if (binding.role === 'Planner' && binding.member) return ['Planner_Memory.md', 'Plan_Note.md', 'Plan.md', 'Reply.md'].some(name => path === paths.member(id, binding.member!) + '/' + name)
@@ -463,7 +459,7 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
       services.errorTaskSelected?.(selected, exec)
       const notifications = await pending(current)
       assertViewLifetime(epoch)
-      return { snapshotId: id, revision: current.snapshot.revision, consistency: current.snapshot.consistency ?? 'revision-fixed', taskId: selected, notifications, binding, ...(binding.role === 'Foreground' && taskControlPath(selected) ? { taskControlPath: taskControlPath(selected) } : {}), ...await archiveView(current, selected), ...await workspaceView(current, selected), ...plannerExecutionFacts(), ...(binding.role === 'Helper' ? { safetyFaults: services.helper?.faults?.(binding) ?? [], helperNotifications: services.helper?.notifications?.(binding) ?? binding.helperNotifications ?? [] } : {}) }
+      return { snapshotId: id, revision: current.snapshot.revision, consistency: current.snapshot.consistency ?? 'revision-fixed', taskId: selected, notifications, binding, ...(binding.role === 'Foreground' && taskControlPath(selected) ? { taskControlPath: taskControlPath(selected) } : {}), ...await archiveView(current, selected), ...await workspaceView(current, selected), ...plannerExecutionFacts(), ...(binding.role === 'Helper' ? { helperRecordPath: selected ? helperDebugPath(selected, new Date().toISOString().slice(0, 10)) : binding.recordPath ?? helperDebugPath(undefined, new Date().toISOString().slice(0, 10)), safetyFaults: services.helper?.faults?.(binding) ?? [], helperNotifications: services.helper?.notifications?.(binding) ?? binding.helperNotifications ?? [] } : {}) }
     } catch (error) { await close(id); throw error }
   })
   register('dss_snapshot_release', 'Release a business read view when no longer needed.', z.object(snapshotInput), async input => { await close(input.snapshotId); return { released: true } })
@@ -566,7 +562,7 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
       ? 'Write this Foreground’s bound memory records normally. Only at the taskControlPath returned by dss_snapshot (or the Git binding sourceLocations.taskControlPath), use append:false and strict JSON text {taskId, lifecycleId?, intent: \"paused\" | \"running\"} for an explicit user pause/resume request on the Task selected by snapshotId. This is a validated scoped control request, never replacement file contents. Copy the exact current lifecycleId; omit only for the original lifecycle. No other control fields or technical paths are writable. Keep the original tool call identity and arguments after UNKNOWN. Cancellation uses dss_task_cancel, never this entry.'
     : binding.role === 'Recorder'
       ? 'Persist actual archive progress in this Recorder’s bound Note. Append preserves earlier facts.'
-      : 'Persist actual progress or results in this role’s record. Append preserves earlier facts. Helper may optionally report an actual repair attempt with a dated debug write; choose faultId explicitly when multiple current faults are associated. Reporting does not reset or restart anything. Helper may explicitly set notifyForeground to save this report before its Foreground state signal (one Git transaction or the same original Local call continuation); its YYYY-MM-DD identifies debug/YYYY-MM-DD.md after signal consumption for ordinary dated reports. For a separate clearly named report in debug/helper-reports/<name>.md, the empty Foreground_Helper_Report_<name>.md signal directly names that report. Preserve the complete filename; no signal body or extra acknowledgement is needed.', z.object({ ...snapshotInput, path: z.string(), text: z.string(), append: z.boolean().default(true), notifyForeground: z.boolean().optional(),
+      : 'Persist actual progress or results in this role’s record. Append preserves earlier facts. Helper may optionally report an actual repair attempt with a dated debug write; choose faultId explicitly when multiple current faults are associated. Reporting does not reset or restart anything. Helper may explicitly set notifyForeground to save this report before its Foreground state signal (one Git transaction or the same original Local call continuation); New records belong under debug/helper-debug/tasks/<actual-task-id>/ or debug/helper-debug/host/ when no Task is involved, with dated filenames. Foreground_Helper_Report_<encoded-path>_<command-hash> names that complete retained file; underscores within the path are encoded as %5F. Old accepted dated/named reports keep their original signal. These are permanent diagnostic records, not temporary claim state; only user-directed deletion removes them. No signal body or extra acknowledgement is needed.', z.object({ ...snapshotInput, path: z.string(), text: z.string(), append: z.boolean().default(true), notifyForeground: z.boolean().optional(),
     repairAttempt: z.object({ faultId: z.string().min(1).optional(), actionsTaken: z.string().min(1), outcome: z.enum(['repaired', 'attempted-not-repaired']), result: z.string().min(1) }).optional() }),
     async (input, exec) => {
       const controlPath = services.taskControl?.taskPath ? taskControlPath(mutationView(input.snapshotId).taskId) : services.taskControl?.path
@@ -581,14 +577,12 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
         return services.taskControl.write(binding, request, command(exec), exec.signal)
       }
       await services.conversation?.prepare?.(input.path)
-      const dedicatedReport = helperReportName(input.path)
-      if (input.notifyForeground && (binding.role !== 'Helper' || !dedicatedReport && !/^debug\/\d{4}-\d{2}-\d{2}\.md$/.test(input.path)))
+      if (input.notifyForeground && (binding.role !== 'Helper' || !isHelperWritableRecord(input.path)))
         throw new Error('Only Helper dated debug records or dedicated Helper reports can notify Foreground.')
-      if (input.repairAttempt && (binding.role !== 'Helper' || !/^debug\/\d{4}-\d{2}-\d{2}\.md$/.test(input.path)))
+      if (input.repairAttempt && (binding.role !== 'Helper' || !isHelperDatedRecord(input.path)))
         throw new Error('Only Helper dated debug records can report a repair attempt.')
       if (input.repairAttempt && !services.helper?.recordAttempt) throw new Error('Helper repair-attempt reporting is unavailable.')
-      const foregroundSignal = input.notifyForeground ? dedicatedReport ? 'state/Foreground_Helper_Report_' + dedicatedReport
-        : 'state/Foreground_Helper_' + input.path.slice(6, 16) + '_' + createHash('sha256').update(command(exec)).digest('hex') : undefined
+      const foregroundSignal = input.notifyForeground ? helperReportSignalPath(input.path, command(exec)) : undefined
       if (files instanceof PhysicalLocalFiles && (foregroundSignal || input.repairAttempt)) {
         const selected = mutationView(input.snapshotId), assertLive = liveAttempt(exec)
         services.errorTaskSelected?.(binding.taskId ?? selected.taskId, exec)
@@ -673,7 +667,7 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
       const selected = consumed.taskId ?? binding.taskId
       const { id, current } = await openView(selected, epoch)
       assertViewLifetime(epoch)
-      return { signals: consumed.signals, snapshotId: id, consistency: current.snapshot.consistency ?? 'revision-fixed', taskId: selected, ...await archiveView(current, selected), ...await workspaceView(current, selected), binding: consumed.claimedNotifications ? {...binding, claimedNotifications: consumed.claimedNotifications} : binding, ...plannerExecutionFacts(), ...(binding.role === 'Helper' ? { safetyFaults: services.helper?.faults?.(binding) ?? [], helperNotifications: consumed.helperNotifications ?? services.helper?.notifications?.(binding) ?? binding.helperNotifications ?? [] } : {}) }
+      return { signals: consumed.signals, ...(binding.role === 'Foreground' ? { helperReports: consumed.signals.flatMap(signal => { const path = helperReportRecordPath(signal); return path ? [{ signal, path }] : [] }) } : {}), snapshotId: id, consistency: current.snapshot.consistency ?? 'revision-fixed', taskId: selected, ...await archiveView(current, selected), ...await workspaceView(current, selected), binding: consumed.claimedNotifications ? {...binding, claimedNotifications: consumed.claimedNotifications} : binding, ...plannerExecutionFacts(), ...(binding.role === 'Helper' ? { safetyFaults: services.helper?.faults?.(binding) ?? [], helperNotifications: consumed.helperNotifications ?? services.helper?.notifications?.(binding) ?? binding.helperNotifications ?? [] } : {}) }
     })
 
   if (binding.role === 'Foreground') {

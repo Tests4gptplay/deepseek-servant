@@ -62,7 +62,21 @@ try{
  await input(occupied);await button('搬家并应用');await button('确认搬家并应用')
  check(await store.get(recordMoveKey),undefined);check(quiesced,0);check(store.storageView().directory,occupied)
  check(!!container.querySelector('input'),true)
- check(container.textContent.includes('explicit record move'),true);await input(destination);await button('搬家并应用');await button('确认搬家并应用');check(store.storageView().directory,destination);check(quiesced,1);check(container.textContent.includes('记录已搬家并应用'),true)
+ check(container.textContent.includes('explicit record move'),true);await input(destination);await button('搬家并应用');await button('确认搬家并应用');check(store.storageView().directory,destination);check(quiesced,1);check(container.textContent.includes('记录已搬家并应用'),true);check(container.textContent.includes('本次搬迁确认的旧 DSS 副本已删除'),true);check(await fs.lstat(path.join(occupied,'deepseek_servant')).then(()=>true,e=>{if(e.code!=='ENOENT')throw e;return false}),false)
+ // Real permission failure on a second, separately confirmed move; new address still applies.
+ const second=path.join(scratch,'second-target'),locked=path.join(current.settings.localDirectory,'locked')
+ await fs.mkdir(locked);await fs.writeFile(path.join(locked,'original.txt'),'preserved original');await fs.chmod(locked,0o500)
+ try {
+  await act(async()=>root.render(React.createElement(RecordMovePanel,{api,storageScope:scope,settingsRevision:current.revision,tr:cn=>cn,changed:async()=>{}})))
+  await input(second);await button('搬家并应用');await button('确认搬家并应用')
+  check(store.storageView().directory,second)
+  check(container.textContent.includes('新地址已生效，以下旧副本未清完'),true)
+  check(container.textContent.includes(locked.slice(0,-'/locked'.length)),true)
+  check(container.textContent.includes('EACCES'),true)
+  check(await fs.readFile(path.join(locked,'original.txt'),'utf8'),'preserved original')
+  check(await fs.readFile(path.join(current.settings.localDirectory,'locked/original.txt'),'utf8'),'preserved original')
+  await store.set('framework-git-enabled',true);check(await store.get('framework-git-enabled'),true)
+ } finally { await fs.chmod(locked,0o700) }
  console.log(JSON.stringify({status:'recovered',assertions,calls,failures,serviceSHA256:createHash('sha256').update(readFileSync(serviceFile)).digest('hex'),limits:'Real React/ReactDOM/JSDOM panel, actual FrameworkService.moveRecords, frameworkFailure and frameworkRpcError methods, FrameworkRecordMove and installed DSH storage on temp directories. Selected destination is the currently active records directory, a normal user input; no injected errors. Button/Input HTML ports with onInput forwarded to product onChange; lifecycle/model/UI view/acquisition unrelated ports controlled. Not actual native UI/Windows.'},null,2))
 }finally{await act(async()=>root.unmount());dom.window.close();await sdk.close();await fs.rm(scratch,{recursive:true,force:true});stop();hooks.deregister()}
 process.exit(0)

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { constants, type BigIntStats } from 'node:fs'
-import { lstat, mkdir, open, readdir, realpath, type FileHandle } from 'node:fs/promises'
+import { lstat, mkdir, open, readdir, realpath, rmdir, unlink, type FileHandle } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { canonicalLocalLocation } from './local-location.js'
 
@@ -47,7 +47,7 @@ async function fileHash(path: string, signal?: AbortSignal): Promise<{ bytes: nu
     return { bytes, sha256: hash.digest('hex') }
   } finally { await handle.close() }
 }
-async function manifest(root: string, signal?: AbortSignal): Promise<Entry[]> {
+async function manifest(root: string, signal?: AbortSignal, observed?: Map<string, BigIntStats>): Promise<Entry[]> {
   const entries: Entry[] = []
   const visit = async (path: string) => {
     signal?.throwIfAborted()
@@ -58,6 +58,7 @@ async function manifest(root: string, signal?: AbortSignal): Promise<Entry[]> {
       signal?.throwIfAborted()
       const logical = path ? path + '/' + name : name, absolute = join(directory, name)
       const info = await lstat(absolute, { bigint: true })
+      observed?.set(logical, info)
       if (info.isSymbolicLink()) throw new Error('Record copy does not follow symbolic links: ' + absolute)
       if (info.isDirectory()) { entries.push({ path: logical, kind: 'directory' }); await visit(logical) }
       else if (info.isFile()) entries.push({ path: logical, kind: 'file', ...await fileHash(absolute, signal) })
@@ -159,4 +160,34 @@ export async function copyRecordTree(sourceDirectory: string, destinationDirecto
   if (await recordTreeFingerprint(source, signal) !== fingerprint || await recordTreeFingerprint(destination, signal) !== fingerprint)
     throw new Error('Record copy verification failed; both locations are preserved.')
   return state
+}
+
+/** One explicit move's old copy, after its target has been verified and reopened.
+ * Use the existing copy inventory. Changed sources are left for the user; never
+ * recursively delete a parent, chase a link, or create a background cleanup. */
+export async function retireRecordTreeSource(copy: RecordTreeCopyState): Promise<void> {
+  if (await canonicalLocalLocation(copy.source) !== copy.source || await canonicalLocalLocation(copy.destination) !== copy.destination
+    || nested(copy.source, copy.destination) || nested(copy.destination, copy.source)) throw new Error('Moved copy locations changed; source retained.')
+  let sourceRoot: BigIntStats
+  try { sourceRoot = await ordinaryDirectory(copy.source) }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
+  const owner = copy.owned['']
+  if (!owner || !same(owner, identity(await ordinaryDirectory(copy.destination)))) throw new Error('Moved destination ownership changed; source retained.')
+  const observed = new Map<string, BigIntStats>(), entries = await manifest(copy.source, undefined, observed)
+  if (digest(entries) !== copy.fingerprint || entries.some(entry => !Object.hasOwn(copy.owned, entry.path)))
+    throw new Error('Old copy changed since it was copied; remaining source retained.')
+  // Children first; rmdir never removes files added after the accepted copy.
+  for (const entry of [...entries].reverse()) {
+    const original = join(copy.source, entry.path), before = observed.get(entry.path)!, current = await lstat(original, { bigint: true })
+    await ordinaryDirectory(dirname(original))
+    if (entry.kind === 'directory') {
+      if (!current.isDirectory() || !same(identity(current), identity(before))) throw new Error('Old directory changed; remaining source retained: ' + original)
+      await rmdir(original)
+    } else {
+      if (!current.isFile() || version(current) !== version(before)) throw new Error('Old file changed; remaining source retained: ' + original)
+      await unlink(original)
+    }
+  }
+  if (!same(identity(sourceRoot), identity(await ordinaryDirectory(copy.source)))) throw new Error('Old root changed; source retained.')
+  await rmdir(copy.source)
 }

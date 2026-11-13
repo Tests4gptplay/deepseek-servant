@@ -125,7 +125,7 @@ try{
  {
   const f=new PhysicalLocalFiles(path.join(root,'independent')),r=makeRuntime(f),a=taskAt(11),b=taskAt(12),c=taskAt(13),day='debug/2026-11-09.md'
   for(const t of[a,b,c])await seed(f,t);await f.replace(day,'old daily original\n')
-  const pa=await workerObservation(r,a,'obs-A'),aPath=hostRecoveryDebugPath(day,'observation-recovery:obs-A'),bPath=hostRecoveryDebugPath(day,'observation-recovery:obs-B')
+  const pa=await workerObservation(r,a,'obs-A'),aPath=hostRecoveryDebugPath('debug/helper-debug/tasks/'+a.taskId+'/2026-11-09.md','observation-recovery:obs-A'),bPath=hostRecoveryDebugPath('debug/helper-debug/tasks/'+b.taskId+'/2026-11-09.md','observation-recovery:obs-B')
   const hold=holdPrepared(f,'appendPrepared',args=>args[0]===aPath)
   await bounded(r.processObservations(false,'settle',false),'schedule A');await bounded(hold.entered.promise,'A own prepared')
   await workerObservation(r,b,'obs-B');await bounded(r.processObservations(false,'settle',false),'schedule B while A held')

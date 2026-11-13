@@ -74,7 +74,6 @@ export class DshStorageAdapter implements StoragePort {
   private readonly writes = new Map<string, Promise<void>>()
   private barrier: Promise<void> = Promise.resolve()
   private readonly leases = new Set<Promise<void>>()
-  private retainedSource?: string
   private closed = false
   private disposal?: Promise<void>
   private pendingRelocation?: PendingRelocation
@@ -134,8 +133,7 @@ export class DshStorageAdapter implements StoragePort {
   storageView(): RecordStorageView {
     const nativeRoot = (this.ctx.get('sessionPersistence') as unknown as { root?: unknown } | undefined)?.root
     return { directory: this.directory, issues: [...(this.records.files?.problems() ?? []), ...this.configurationIssues],
-      ...(typeof nativeRoot === 'string' && path.isAbsolute(nativeRoot) ? { nativeDirectory: nativeRoot } : {}),
-      ...(this.retainedSource ? { retainedSource: this.retainedSource } : {}) }
+      ...(typeof nativeRoot === 'string' && path.isAbsolute(nativeRoot) ? { nativeDirectory: nativeRoot } : {}) }
   }
   /** d19 persisted the whole scoped control in other/, not today's category.
    * Read its one known native JSON unit once; never enumerate or import other/.
@@ -327,7 +325,6 @@ export class DshStorageAdapter implements StoragePort {
     this.oldLocalControls.clear() // The verified move selected a different exact old-folder path.
     this.oldLocalConfigurations.clear()
     this.pendingRelocation = undefined
-    this.retainedSource = path.dirname(move.sourceTree)
     await previous.close()
   }
   private async reconcileRelocation(): Promise<void> {
