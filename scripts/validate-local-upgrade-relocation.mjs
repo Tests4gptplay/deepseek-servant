@@ -98,7 +98,7 @@ try{
   await restoreLegacyTask(target,task.taskId,host,f.store);await restoreLegacyConversationScope(target,'existing-chat',f.store)
   check(await fs.readFile(path.join(target,'task-runs/existing-task/local-owner/notes.md'),'utf8'),'later task user edit');check(JSON.parse(await fs.readFile(path.join(target,'conversation-index/local/existing-chat/index.json'),'utf8')).user,'later edit')
   check((await f.store.get(localUpgradeMappingKey(target,'tasks/existing-task.json'))).directory,target);check((await f.store.get(localStartupUpgradeKey(f.sourceLocal))).source,beforeMechanical.source)
-  check(existsSync(path.join(f.sourceLocal,'dss-files.sqlite')),true)
+  check(existsSync(path.join(f.sourceLocal,'dss-files.sqlite')),false)
  }
  for(const layout of ['owned','custom']){
   const f=await fixture(path.join(base,'complete-'+layout),layout,'complete');opened.push(f.store)
@@ -118,7 +118,7 @@ try{
   const receipt=await new FrameworkRecordMove(f.store,f.store,lifecycle(f.store)).run('upgrade-move',f.request,signal()),target=receipt.targetLocal,moved=await f.store.get(localStartupUpgradeKey(target))
   if(scenario!=='unknown')check(moved.files[0].owned,await statIdentity(path.join(target,oldStage)));else check(moved.files[0].owned,undefined)
   check(moved.status,'publishing');check((await materializeLegacyLocalFiles(target,f.store)).status,'complete');check((await fs.stat(path.join(target,'archives/partial.txt'))).size,180000)
-  check(existsSync(path.join(f.sourceLocal,oldStage)),true);if(scenario==='unknown')check(existsSync(path.join(target,oldStage)),true)
+  check(existsSync(path.join(f.sourceLocal,oldStage)),false);if(scenario==='unknown')check(existsSync(path.join(target,oldStage)),true)
  }
  // Replaced old stage identity is not granted to its copied replacement.
  const replaced=await fixture(path.join(base,'replaced-stage'),'owned','stage');opened.push(replaced.store);const priorStage=await replaced.store.get(localStartupUpgradeKey(replaced.sourceLocal)),stagePath=priorStage.files[0].stagePath

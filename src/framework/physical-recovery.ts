@@ -5,7 +5,7 @@ import type { DirectSignalSources } from './physical-direct-delivery.js'
 import { publishPreparedPhysicalFile } from './physical-publication-evidence.js'
 import { paths, readJson, encodeJson } from './task-files.js'
 import { withSnapshot } from './transactions.js'
-import { hostRecoveryDebugPath, hostRecoverySignalPath, isHostRecoveryDebugPath } from './recovery-debug-record.js'
+import { hostRecoveryDebugPath, hostRecoverySignalPath, hostRecoverySignalRecordPath } from './recovery-debug-record.js'
 
 interface RecoveryPublication {
   commandId: string
@@ -53,8 +53,8 @@ function publicationTargets(input: RecoveryPublication, targets?: PhysicalRecove
     throw new Error('The accepted Host recovery record target is invalid.')
   if (targets?.signalPath && targets.signalPath !== input.signalPath) {
     const name = targets.signalPath.slice(targets.signalPath.lastIndexOf('/') + 1)
-    const recordPath = 'debug/' + name.slice('Planner_Recovery_Report_'.length)
-    if (!input.signalPath || !name.startsWith('Planner_Recovery_Report_') || !isHostRecoveryDebugPath(recordPath)
+    const recordPath = hostRecoverySignalRecordPath(targets.signalPath)
+    if (!input.signalPath || !name.startsWith('Planner_Recovery_Report_') || !recordPath
       || targets.signalPath !== hostRecoverySignalPath(input.signalPath, recordPath))
       throw new Error('The accepted Host recovery signal target is invalid.')
   }

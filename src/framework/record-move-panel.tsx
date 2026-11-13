@@ -43,7 +43,13 @@ export function RecordMovePanel({ api, storageScope, settingsRevision, pendingRe
       setResult(outcome?.status === 'current-location'
         ? tr('原请求的完成结果尚未确认，本次没有再次搬迁。核对时的记录目录：', 'The original request’s completion is unconfirmed; no move was repeated. Record directory at this check: ') + outcome.directory
         : tr('记录已搬家并应用。宿主原生日志位置未改变。', 'Records moved and applied. Native Host log locations were not changed.')
-          + (outcome ? tr(' 核对时的记录目录：', ' Record directory at this check: ') + outcome.directory : ''))
+          + (outcome ? tr(' 核对时的记录目录：', ' Record directory at this check: ') + outcome.directory : '')
+          + (outcome?.sourceCleanup
+            ? outcome.sourceCleanup.retained.length
+              ? tr(' 新地址已生效，以下旧副本未清完：', ' The new location is active; these old copies remain: ')
+                + outcome.sourceCleanup.retained.map(item => item.directory + ' (' + item.reason + ')').join('; ')
+              : tr(' 本次搬迁确认的旧 DSS 副本已删除。', ' The confirmed old DSS copies from this move were removed.')
+            : outcome?.retainedSource ? tr(' 本次未删除原目录：', ' Source directory not deleted by this move: ') + outcome.retainedSource : ''))
     } catch (reason) {
       if (isRecordMoveNotStarted(reason)) {
         retained.delete(storageScope)
@@ -71,7 +77,7 @@ export function RecordMovePanel({ api, storageScope, settingsRevision, pendingRe
       <Button disabled={busy || !directory.trim()} onClick={prepare}>{tr('搬家并应用', 'Move and apply')}</Button></>}
     {pending && <div role="group" aria-label={tr('确认记录搬家', 'Confirm record move')}>
       <code>{pending.input.directory}</code>
-      <p>{tr('这不是单纯修改目录：会暂停本插件受影响的 Local 执行，确认已停止后复制技术记录和 Local 记录，核验完整内容后应用新地址，保留原逻辑范围、身份和原件。Git 执行与宿主原生日志位置不变。已有目标内容不会被覆盖，原目录不会被自动删除。', 'This is not merely a directory setting: it pauses affected Local executions, copies technical and Local records, then verifies their complete contents before applying the new location. Logical scope, identities and originals are preserved. Git executions and native Host log locations are unchanged. Existing destination contents are not overwritten and source directories are not automatically deleted.')}</p>
+      <p>{tr('这不是单纯修改目录：会暂停本插件受影响的 Local 执行，确认已停止后复制技术记录和 Local 记录，核验完整内容后应用新地址，保留原逻辑范围、身份和完整资料。Git 执行与宿主原生日志位置不变。已有目标内容不会被覆盖；新地址生效后删除本次确认复制的旧 DSS 副本，不删除无关资料。若清理未完成，会显示实际保留的旧位置与原因，不影响新地址继续使用。', 'This is not merely a directory setting: it pauses affected Local executions, copies technical and Local records, then verifies their complete contents before applying the new location. Logical scope, identities and all contents are preserved. Git executions and native Host log locations are unchanged. Existing destination contents are not overwritten. Once the new location is active, this move removes its confirmed old DSS copies, not unrelated files. Any cleanup residual is shown with its location and reason; the new location remains usable.')}</p>
       <Button disabled={busy} onClick={() => void submit(pending)}>{pending.submitted ? tr('核对并重试原搬家', 'Resolve and retry original move') : tr('确认搬家并应用', 'Confirm move and apply')}</Button>
       {!pending.submitted && <Button disabled={busy} onClick={() => { retained.delete(storageScope); setPending(undefined); setError('') }}>{tr('取消', 'Cancel')}</Button>}
       {pending.submitted && <p>{tr('请求已发送；结果未确认时保留原命令、原目录和原设置版本。关闭面板不会撤销已接纳的搬家。', 'The request was sent. An unconfirmed outcome retains the original command, locations and settings revision. Closing this panel does not cancel an accepted move.')}</p>}

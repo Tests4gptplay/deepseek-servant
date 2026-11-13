@@ -88,6 +88,10 @@ export class FrameworkSafetyNet {
   private index(record: FaultRecord): FaultRecord {
     const key = this.key(record.fault, record.kind), existing = this.records.get(key)
     if (existing && existing !== record) {
+      if (existing.attempted || record.attempted) {
+        if (existing.attempted && !record.attempted) this.records.set(key, record)
+        return record
+      }
       existing.assigned ||= record.assigned
       existing.attempted ??= record.attempted
       existing.visible ||= record.visible
@@ -111,12 +115,17 @@ export class FrameworkSafetyNet {
     const kind = code ?? createHash('sha256').update(JSON.stringify([error instanceof Error ? error.name : typeof error, message])).digest('hex')
     const key = this.key(context, kind)
     let record = this.records.get(key)
-    if (!record) {
+    // A producer operation that began after an actual repair is new evidence.
+    // Replayed details and delayed failures from before that repair remain the
+    // original incident. Neither a Helper turn ending nor a read of old state
+    // creates another repair request or a user-visible error.
+    const afterRepair = record?.repairSettled && record.attempted && occurrence > record.attempted.boundary
+    if (!record || afterRepair) {
       record = { fault: { ...context, ...(code ? { code } : {}), id: randomUUID(), message, occurrence, fingerprint: kind, failureDetails: failureDetails(error) }, assigned: false, visible: false, kind, observed: occurrence }
       this.records.set(key, record); this.byId.set(record.fault.id, record)
     }
-    // Another occurrence is diagnostic evidence, not the Helper's decision
-    // to notify the user. Preserve the existing repair responsibility.
+    // The new Helper decides what to do and whether the user needs a report.
+    // An older UNKNOWN operation keeps its own identity and outcome.
     if (occurrence > 0 && occurrence >= record.observed) record.observedMessage = message
     record.observed = Math.max(record.observed, occurrence)
     return this.presentation(record.fault.id)!
@@ -130,11 +139,12 @@ export class FrameworkSafetyNet {
     const record = this.byId.get(id)
     return !!record && !record.assigned && !record.attempted && !record.visible
   }
-  attempted(id: string, attemptId: string): boolean {
+  attempted(id: string, attemptId: string, settled = false): boolean {
     const record = this.byId.get(id)
-    if (!record || record.attempted) return false
+    if (!record || record.attempted && (!settled || record.repairSettled)) return false
     record.attempted = { id: attemptId, boundary: this.begin() }
     record.assigned = true
+    if (settled) record.repairSettled = true
     return true
   }
   failed(id: string, attemptId: string, error: unknown, terminal = false): void {
@@ -169,16 +179,19 @@ export class FrameworkSafetyNet {
       record.fault = { ...record.fault, diagnosticContext: fault.diagnosticContext, errorSignature: fault.errorSignature }
       record = this.index(record)
     }
-    record ??= this.records.get(key)
+    const grouped = this.records.get(key)
+    if (!record && !result.attemptId && !grouped?.attempted) record = grouped
     if (!record) {
       record = { fault: { ...fault, occurrence: 0 }, assigned: true, visible: false, kind, observed: 0 }
-      this.records.set(key, record)
+      // A still-unhandled recurrence owns new observations. Replaying its older
+      // repair must not fold the two persisted fault identities back together.
+      if (!grouped || grouped.attempted) this.records.set(key, record)
     }
     record.assigned = true
     this.byId.set(fault.id, record)
     if (result.attemptId) {
       if (result.failure !== undefined) this.failed(fault.id, result.attemptId, result.failure, result.terminal)
-      else this.attempted(fault.id, result.attemptId)
+      else this.attempted(fault.id, result.attemptId, true)
       // A prior Host's attempt does not decide visibility on this Host.
     }
 

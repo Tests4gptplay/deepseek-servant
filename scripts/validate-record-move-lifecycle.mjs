@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -148,7 +148,7 @@ try {
   await fs.writeFile(after, 'user changed after response loss')
   const retriedFirst = await service.moveRecords(firstInput)
   check(retriedFirst.applied, first.targetLocal)
-  check(retriedFirst.recordMoveOutcome, { status: 'applied', commandId: firstInput.commandId, requestedDirectory: firstInput.directory, directory: first.targetRecords })
+  check(retriedFirst.recordMoveOutcome, { status: 'applied', commandId: firstInput.commandId, requestedDirectory: firstInput.directory, directory: first.targetRecords, sourceCleanup: { retained: [] } })
   check(counts, { quiesce: 1, reopen: 1 }); check(await fs.readFile(after, 'utf8'), 'user changed after response loss')
   const secondInput = { ...firstInput, commandId: 'ui-second', directory: path.join(root, 'C'), expectedRevision: current.revision }
   await service.moveRecords(secondInput)
@@ -159,10 +159,10 @@ try {
   check(await registry.resolve(second.targetLocal), request.scope)
   await movedError(registry, request.sourceLocal, first.targetLocal)
   await movedError(registry, first.targetLocal, second.targetLocal)
-  check(await fs.readFile(path.join(request.sourceLocal, 'archives/task/records.md'), 'utf8'), 'original controlled archive\n')
+  check(existsSync(path.join(request.sourceLocal, 'archives/task/records.md')), false)
   const retriedSecond = await service.moveRecords(secondInput)
   check(retriedSecond.applied, second.targetLocal)
-  check(retriedSecond.recordMoveOutcome, { status: 'applied', commandId: secondInput.commandId, requestedDirectory: secondInput.directory, directory: second.targetRecords })
+  check(retriedSecond.recordMoveOutcome, { status: 'applied', commandId: secondInput.commandId, requestedDirectory: secondInput.directory, directory: second.targetRecords, sourceCleanup: { retained: [] } })
   check(counts, { quiesce: 2, reopen: 2 })
   {
     const writes = store.set.bind(store); let actualWrites = 0

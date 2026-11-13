@@ -1,3 +1,4 @@
+import { helperDebugRoot, isHelperDebugRecord } from './helper-debug-path.js'
 import { PhysicalLocalFiles } from './physical-local-files.js'
 import { isHostRecoveryDebugPath } from './recovery-debug-record.js'
 import { listTaskHistory, readTaskHistoryIdentity, taskHistoryPath, type TaskHistoryIdentity } from './task-history.js'
@@ -435,8 +436,8 @@ export class FrameworkManualCleanup {
     if (!preview) throw new Error('Review the current List and Cache before clearing.')
     return this.clearPhysicalFiles(this.local(), commandId, 'planning', confirmation, preview, signal)
   }
-  /** Existing confirmation preview: only the two Foreground files, or the two
-   * known debug directories. Never recurse other records or collect their bodies. */
+  /** Existing confirmation preview: only the two Foreground files, or permanent Helper
+   * records. The explicit user preview walks that directory only, never Task data. */
   async previewFiles(kind: 'planning' | 'debug'): Promise<ManualFileCleanupPreview> {
     this.local()
     if (kind !== 'planning' && kind !== 'debug') throw new Error('Invalid manual file cleanup kind.')
@@ -444,7 +445,7 @@ export class FrameworkManualCleanup {
     return withSnapshot(this.files, async snapshot => {
       const entries = kind === 'planning'
         ? (await this.files.listDirectory(snapshot, this.conversation.foregroundRoot + '/')).filter(entry => this.ownsFile(kind, entry.path))
-        : (await Promise.all(['debug/', 'debug/helper-reports/'].map(root => this.files.listDirectory(snapshot, root)))).flat().filter(entry => this.ownsFile(kind, entry.path))
+        : (await Promise.all([this.files.listDirectory(snapshot, 'debug/'), this.files.listDirectory(snapshot, 'debug/helper-reports/'), this.files.list(snapshot, helperDebugRoot)])).flat().filter(entry => this.ownsFile(kind, entry.path))
       const files = entries.map(({ path, version, bytes }) => ({ path, version, bytes: bytes ?? 0 })).sort((a, b) => a.path.localeCompare(b.path))
       return { id: hash(json([this.scope, kind, files])), kind, files, bytes: files.reduce((sum, file) => sum + file.bytes, 0) }
     })
@@ -452,7 +453,7 @@ export class FrameworkManualCleanup {
   private ownsFile(kind: 'planning' | 'debug', path: string): boolean {
     filePath(path)
     return kind === 'planning' ? ['Foreground_List.md', 'Foreground_Cache.md'].some(name => path === this.conversation.foregroundRoot + '/' + name)
-      : /^debug\/\d{4}-\d{2}-\d{2}\.md$/.test(path) || isHostRecoveryDebugPath(path) || /^debug\/helper-reports\/[^/]+\.md$/.test(path)
+      : isHelperDebugRecord(path) || /^debug\/\d{4}-\d{2}-\d{2}\.md$/.test(path) || isHostRecoveryDebugPath(path) || /^debug\/helper-reports\/[^/]+\.md$/.test(path)
   }
   private filePreview(kind: 'planning' | 'debug', preview: ManualFileCleanupPreview): void {
     if (!preview || preview.kind !== kind || !Array.isArray(preview.files)

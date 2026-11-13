@@ -33,7 +33,7 @@ try {
  await actual.runtime.recordSafetyAttempt(caller,{faultId:fault.id,actionsTaken:'Actual first repair',outcome:'attempted-not-repaired',result:'Needs further diagnosis'},'helper-report-one')
  check(actual.resolutions,[]);check(actual.attempted,[])
  await actual.runtime.recordSafetyAttempt(caller,{faultId:fault.id,actionsTaken:'Actually restored continuation',outcome:'repaired',result:'Original task continues'},'helper-report-two')
- check(actual.resolutions,[fault.id]);check(actual.runtime.wake.resolvedSafetyFaultIds,[fault.id]);check(actual.attempted,[])
+ check(actual.resolutions,[fault.id]);check(actual.runtime.wake.resolvedSafetyFaultIds,[fault.id]);check(actual.attempted,[[fault.id,'helper-report-two']])
  const cold=makeRuntime(fault);cold.runtime.safetyEpisodes.clear();cold.runtime.replaySafetyWakes([actual.runtime.wake]);check(cold.resolutions,[fault.id]);check(cold.replayed,[])
  const old={...actual.runtime.wake};delete old.resolvedSafetyFaultIds
  const oldCold=makeRuntime(fault);oldCold.runtime.safetyEpisodes.clear();oldCold.runtime.replaySafetyWakes([old]);check(oldCold.runtime.resolvedSafetyFaultIds.has(fault.id),true);check(oldCold.resolutions,[fault.id])

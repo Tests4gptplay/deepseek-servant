@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { foregroundFullGuide, foregroundStorageRecoveryNote } from './role-prompts.js'
 import { foregroundGuideUpgradeRules } from './foreground-guide-upgrade-rules.js'
 
-export const foregroundGuideUpgradeVersion = 'foreground-task-runtime-state-v11'
+export const foregroundGuideUpgradeVersion = 'foreground-helper-debug-v12'
 export interface ForegroundGuideUpgrade {
   text: string
   changedRules: number
@@ -20,6 +20,11 @@ const heading = '# Foreground wake priority: reply briefly, then act'
 export function upgradeForegroundGuide(text: string): ForegroundGuideUpgrade {
   if (!text) return { text, changedRules: 0, unreviewedSections: [] }
   const currentGuide = foregroundFullGuide()
+  // Only the exact old official default gains the new report-path explanation.
+  // Custom guides remain authoritative; current core and claim results carry it.
+  const debugNotice = currentGuide.split('\n').find(line => line.startsWith('Keep Foreground_List'))?.match(/ For a state\/Foreground_Helper_Report_debug%2Fhelper-debug%2F.*$/)?.[0]
+  if (debugNotice && text === currentGuide.replace(debugNotice, ''))
+    return { text: currentGuide, changedRules: 1, unreviewedSections: [] }
   // Add the naming suggestion only to the exact previous default, preserving custom guides.
   if (text === currentGuide.replace('Keep task titles concise and prefer short English names when they still make the task recognizable. ', ''))
     return { text: currentGuide, changedRules: 1, unreviewedSections: [] }

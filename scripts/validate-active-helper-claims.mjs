@@ -30,6 +30,7 @@ const hooks = registerHooks({ resolve(specifier, context, next) {
   return next(url,context)
 } })
 const {PhysicalLocalFiles}=await import('../src/framework/physical-local-files.ts')
+const {helperDebugPath}=await import('../src/framework/helper-debug-path.ts')
 const {FrameworkHostLoop,helperSignalWakeHash}=await import('../src/framework/host-loop.ts')
 const {withSnapshot,withOperationChannel,GitFiles}=await import('../src/framework/transactions.ts')
 const {GitAuthorityStore,listAuthorityInRound,SessionGitOperations}=await import('../src/framework/git-authority.ts')
@@ -46,7 +47,7 @@ function method(name){const start=source.indexOf(name);assert(start>=0,name);con
 const names=['  private roleKey(', '  private roleRecordPath(', '  private physicalDirectInput(', '  async wake(', '  private async storeWake(', '  private continueSettledHelperWakeRetirement(', '  private scheduleHelperSignal(', '  private async publishHelperSignal(', '  private wakeAdmission(', '  private updateWake(', '  private rememberAdmissionWake(', '  private forgetAdmissionWake(', '  private addressedSignals(', '  private consumeWakeSignals(', '  private taskNoticeConsumption(', '  private watchKey(', '  private async serialRecoveryWatch', '  private async observeRecoveryMarkers(', '  private async resetRecoveryCheck(', '  private scheduleHostRestoreRetirement(', '  private scheduleCompletedHostRestoreRetirement(', '  private async finishGitAuxiliaryRound(', '  private async retrySettledHelperWakeRetirement(', '  private async retireSettledHelperWakes(', '  private admissionWakes(', '  private startTargetedAdmission(', '  private runQueue(', '  private async runQueueInChannel(', '  private async settleOperations(', '  async notifications(', '  private claimCurrentNotifications(', '  private withRoleWrite', '  private async settleNotificationClaim(', '  private helperResponsibilities(', '  private forgetForegroundNotices(', '  private binding(', '  private safetyFaultFromWake(', '  private replaySafetyWake(', '  private safetyFaultIds(', '  private async recordSafetyAttempt(']
 class DshSessionReader{constructor(ctx){this.ctx=ctx}async capture(){return this.ctx.nativeCapture}async events(){return this.ctx.events??[]}}
 const {retirePhysicalPublicationsFromEvents}=await import('../src/framework/physical-publication-retirement.ts')
-const deps={GitFiles,localForegroundRoleRecordPath,DshStorageAdapter: class ControlledNonDshStorageAdapter {},retirePhysicalPublicationsFromEvents,hash:t=>createHash('sha256').update(t).digest('hex'),randomUUID,PhysicalLocalFiles,GitAuthorityStore,helperSignalWakeHash,withSnapshot,withOperationChannel,paths,readJson,readMemberStatus,taskLifecycleKey,assertTaskLifecycle,readTaskCleanupRecord,createRecoveryWatch,dueRecoveryWatch,parseDirectSignal,signalWorkerId,taskLifecycle,DshSessionReader,listAuthorityInRound}
+const deps={helperDebugPath,GitFiles,localForegroundRoleRecordPath,DshStorageAdapter: class ControlledNonDshStorageAdapter {},retirePhysicalPublicationsFromEvents,hash:t=>createHash('sha256').update(t).digest('hex'),randomUUID,PhysicalLocalFiles,GitAuthorityStore,helperSignalWakeHash,withSnapshot,withOperationChannel,paths,readJson,readMemberStatus,taskLifecycleKey,assertTaskLifecycle,readTaskCleanupRecord,createRecoveryWatch,dueRecoveryWatch,parseDirectSignal,signalWorkerId,taskLifecycle,DshSessionReader,listAuthorityInRound}
 const Runtime=new Function(...Object.keys(deps),stripTypeScriptTypes('class Runtime {\n'+names.map(method).join('\n')+'\n}',{mode:'transform'})+'\nreturn Runtime')(...Object.values(deps))
 const scratch=await fs.mkdtemp(path.join(os.tmpdir(),'dss-helper-')),files=new PhysicalLocalFiles(scratch)
 let assertions=0;const check=(a,b)=>{assert.deepEqual(a,b);assertions++},hash=deps.hash
@@ -114,7 +115,7 @@ async function scenario(mode){
  check((await r.records.list('runtime/wakes/')).length,beforeRaw.length)
  check((await api.call('raw-snapshot','dss_snapshot')).notifications.filter(p=>[raw1,raw2].includes(p)).sort(),[raw1,raw2].sort())
  const raw=await api.call('raw-claim','dss_claim'),rawInputs=raw.helperNotifications.filter(q=>q.reason==='notification'&&q.sources.some(s=>s.path===raw1))
- check(rawInputs.length,1);check(rawInputs[0].context,undefined);check(rawInputs[0].role,'Helper')
+ check(rawInputs.length,1);check(rawInputs[0].context,{helperDebugPath:helperDebugPath(undefined,new Date().toISOString().slice(0,10)),helperDebugDirectory:'debug/helper-debug/host/'});check(rawInputs[0].role,'Helper')
  check(rawInputs[0].sources.map(s=>s.path).sort(),[raw1,raw2].sort())
  check(raw.signals.includes(raw1)&&raw.signals.includes(raw2),true);check(await read(raw1),undefined);check(await read(raw2),undefined)
  const rawSaved=await r.records.get('runtime/wakes/'+hash(rawInputs[0].id))

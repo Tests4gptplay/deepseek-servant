@@ -1,3 +1,4 @@
+import { helperDebugPath } from './helper-debug-path.js'
 import { DshStorageAdapter } from '../adapters/dsh/storage.js'
 import { prepareLocalConversation } from './local-upgrade-conversation.js'
 import { reconstructPhysicalTask, type PhysicalRecoveredTaskPlan } from './physical-task-recovery.js'
@@ -74,7 +75,7 @@ interface TaskNotice { version: string; messageId: string; delivered: boolean }
 interface TaskNoticeState { consumedAt: number; signals: Map<string, TaskNotice>; consumptions: Map<string, Map<string, { version: string; notices: Set<TaskNotice> }>> }
 interface ClaimedNotificationContext { taskId?: string; signals: string[] }
 interface NotificationClaim { helperWakes?: RoleWake[]; lifecycleId?: string; claimedNotifications?: ClaimedNotificationContext[]; commandId: string; executionId: string; wakeId: string; taskId?: string; initialSignals: string[]; sources: Array<{ path: string; version: string }> }
-interface RoleRecord { foregroundCollaborationId?: string; nativeRetirements?: Array<{ sessionId: string; executionId: string; wakeId?: string }>; taskWorkspace?: TaskWorkspaceLocation; notificationClaims?: Record<string, NotificationClaim>; businessTransferred?: boolean; foregroundOutputIds?: string[]; gitSettledWakeId?: string; identity: WorkIdentity; sessionId: string; generation: number; completedRound?: boolean; lastWake?: RoleWake; delivery?: { request: RoleWake; messageId: string; text?: string; confirmed: boolean; sequence?: number }; released?: boolean; stopped?: boolean; stopIntent?: NativeStopEvidence; stopUnknown?: { reason: string; jobs: string[] } }
+interface RoleRecord { foregroundCollaborationId?: string; nativeRetirements?: Array<{ sessionId: string; executionId: string; wakeId?: string; helper?: Pick<RoleRecord, 'delivery' | 'lastWake' | 'notificationClaims'> }>; taskWorkspace?: TaskWorkspaceLocation; notificationClaims?: Record<string, NotificationClaim>; businessTransferred?: boolean; foregroundOutputIds?: string[]; gitSettledWakeId?: string; identity: WorkIdentity; sessionId: string; generation: number; completedRound?: boolean; lastWake?: RoleWake; delivery?: { request: RoleWake; messageId: string; text?: string; confirmed: boolean; sequence?: number }; released?: boolean; stopped?: boolean; stopIntent?: NativeStopEvidence; stopUnknown?: { reason: string; jobs: string[] } }
 interface TrackedStop { lifecycleId?: string; executionId: string; taskId?: string; promise: Promise<void>; settled: boolean; result?: StopResult; persistedStopped?: boolean; reportedFailure?: string; failure?: unknown; controlCommands?: Set<string> }
 interface WakeRecovery {
   targetExecutionId?: string
@@ -88,8 +89,8 @@ interface WakeRecord { signalsConsumed?: boolean; helperSignal?: string; safetyA
 interface AdmissionControlPublication { task: TaskMetadata; intent: 'running' | 'paused' | 'cancelled'; records?: readonly TaskControl[]; terminal?: boolean }
 interface LocalWakeAdmission { taskFacts?: Map<string, TaskMetadata>; pendingControl?: AdmissionControlPublication; wake: WakeRecord; eligibleSince?: number; reportedAt?: number; diagnosticContext?: Record<string, unknown>; accepted?: boolean; held?: boolean; eligibleKnown?: boolean; controlVersion?: number; ownershipHeld?: boolean; replayPending?: boolean; executionId?: string; phase?: NonNullable<WakeRecord['admission']>['phase'] }
 interface SafetyRepairContext { safetyDisplayOwner?: string; safetyFaultIds?: string[]; safetyFaults?: SafetyFault[]; safetyKind?: 'target' | 'host'; safetyAttempt?: { failure: string; terminal: boolean } }
-interface RoleRestore extends SafetyRepairContext { taskOwner?: { taskId: string; lifecycleId?: string }; commandId: string; createdAt: string; input: HelperRestoreInput; complete: boolean; resolvedTarget?: WorkIdentity; admissionWakeId?: string; continuationId?: string; outcome?: string }
-interface HostRestore extends SafetyRepairContext { commandId: string; requester?: FrameworkRoleBinding; input: { facts: string; hypotheses: string; actionsTaken: string; continuation: string }; createdAt: string; complete: boolean; managerPublications?: Array<{ taskId: string; lifecycleId?: string; member: string; role: 'Planner' | 'Organizer' }>; targets?: Array<{ identity: WorkIdentity; sessionId: string; complete?: boolean; outcome?: 'superseded' | 'released' | 'user-stopped' | 'arranged' | 'no-continuation' }> }
+interface RoleRestore extends SafetyRepairContext { debugPath?: string; taskOwner?: { taskId: string; lifecycleId?: string }; commandId: string; createdAt: string; input: HelperRestoreInput; complete: boolean; resolvedTarget?: WorkIdentity; admissionWakeId?: string; continuationId?: string; outcome?: string }
+interface HostRestore extends SafetyRepairContext { debugPath?: string; commandId: string; requester?: FrameworkRoleBinding; input: { facts: string; hypotheses: string; actionsTaken: string; continuation: string }; createdAt: string; complete: boolean; managerPublications?: Array<{ taskId: string; lifecycleId?: string; member: string; role: 'Planner' | 'Organizer' }>; targets?: Array<{ identity: WorkIdentity; sessionId: string; complete?: boolean; outcome?: 'superseded' | 'released' | 'user-stopped' | 'arranged' | 'no-continuation' }> }
 interface ObservationRecord { pending: ScheduledObservation; complete: boolean; stopStarted?: boolean }
 interface StartupRecoveryFacts { restoring: Set<string>; recovered: Set<string> }
 interface RecoveryWatchRecord { markerVersion?: string; taskId?: string; lifecycleId?: string; member?: string; watch?: RecoveryWatch; released?: boolean }
@@ -315,6 +316,8 @@ export class FrameworkRoleRuntime {
   private coldHostRestoreRetirement = true
   private readonly targetedPumps = new Map<string, Promise<void>>()
   private readonly admissionCancellations = new Map<string, unknown>()
+  // Read-through view of existing Task Helper WakeRecords; no extra file or poll.
+  private readonly taskHelperWakes = new Map<string, WakeRecord>()
   private readonly wakeWriteOwners = new Map<string, RoleWake>()
   private readonly roleWriteOwners = new Map<string, WorkIdentity>()
   private readonly wakeWrites = new Map<string, Promise<unknown>>()
@@ -819,6 +822,7 @@ export class FrameworkRoleRuntime {
       if (!this.records.delete) throw new Error('Runtime storage does not support retirement.')
       await this.records.delete(key)
     }
+    if (key.startsWith(this.prefix + 'wakes/')) this.taskHelperWakes?.delete((expected as WakeRecord)?.request?.id)
     this.admissionObservationVersion++; this.forgetAdmissionWake(key)
   }
   private roleKey(role: RecoveryRole, taskId?: string, workerId?: string, directId?: string): string {
@@ -911,10 +915,10 @@ export class FrameworkRoleRuntime {
     const direct = request.sources.map((source) => parseDirectSignal(source.path.split('/').at(-1)!)).find(Boolean);
     return this.roleKey(request.role, request.taskId, request.workerId, direct?.id)
   }
-  private saveRole(record: RoleRecord, evidenceUpdate = false, deliveryUpdate?: 'prepare' | 'confirm', retiredRecorderSettled = false, completedNativeCommands?: readonly string[]): Promise<void> {
-    return withOperationChannel(this.files, record.identity.role === 'Foreground' ? 'foreground-read' : record.identity.role === 'Helper' ? 'host-poll-write' : 'read', () => this.saveRoleInChannel(record, evidenceUpdate, deliveryUpdate, retiredRecorderSettled, completedNativeCommands))
+  private saveRole(record: RoleRecord, evidenceUpdate = false, deliveryUpdate?: 'prepare' | 'confirm', retiredRecorderSettled = false, completedNativeCommands?: readonly string[], addedClaim?: { id: string; value: NotificationClaim }): Promise<void> {
+    return withOperationChannel(this.files, record.identity.role === 'Foreground' ? 'foreground-read' : record.identity.role === 'Helper' ? 'host-poll-write' : 'read', () => this.saveRoleInChannel(record, evidenceUpdate, deliveryUpdate, retiredRecorderSettled, completedNativeCommands, addedClaim))
   }
-  private saveRoleInChannel(record: RoleRecord, evidenceUpdate = false, deliveryUpdate?: 'prepare' | 'confirm', retiredRecorderSettled = false, completedNativeCommands?: readonly string[]): Promise<void> {
+  private saveRoleInChannel(record: RoleRecord, evidenceUpdate = false, deliveryUpdate?: 'prepare' | 'confirm', retiredRecorderSettled = false, completedNativeCommands?: readonly string[], addedClaim?: { id: string; value: NotificationClaim }): Promise<void> {
     this.roleWrites ??= new Map()
     const workId = record.identity.workId
     this.roleWriteOwners.set(workId, record.identity)
@@ -1010,7 +1014,8 @@ export class FrameworkRoleRuntime {
         ...record,
         ...(latest.stopIntent ? { stopIntent: latest.stopIntent } : {}),
         foregroundOutputIds: [...new Set([...(latest.foregroundOutputIds ?? []), ...(record.foregroundOutputIds ?? [])])],
-        ...((latest.notificationClaims || record.notificationClaims) ? { notificationClaims: { ...latest.notificationClaims, ...record.notificationClaims } } : {}),
+        // Ordinary saves carry a snapshot, not permission to restore retired claims.
+        notificationClaims: latest.notificationClaims,
         gitSettledWakeId: record.gitSettledWakeId ?? latest.gitSettledWakeId,
         businessTransferred: record.businessTransferred || latest.businessTransferred,
         completedRound: record.completedRound || latest.completedRound,
@@ -1021,6 +1026,7 @@ export class FrameworkRoleRuntime {
         delivery: latest.delivery ?? record.delivery,
         lastWake: latest.lastWake ?? record.lastWake
       };
+      if (addedClaim) record = { ...record, notificationClaims: { ...record.notificationClaims, [addedClaim.id]: addedClaim.value } }
       if (deliveryUpdate && incomingDelivery) {
         if (deliveryUpdate === 'confirm') {
           if (latest?.delivery?.messageId !== incomingDelivery.messageId) throw new Error('A superseded delivery cannot confirm another input.');
@@ -1044,6 +1050,15 @@ export class FrameworkRoleRuntime {
           && record.identity.executionId !== latest.identity.executionId && record.sessionId !== latest.sessionId
           && !retirements.some(item => item.sessionId === latest.sessionId && item.executionId === latest.identity.executionId))
           retirements.push({ sessionId: latest.sessionId, executionId: latest.identity.executionId })
+        // A replaced, confirmed-stopped Helper cannot be reused. Keep only its
+        // original accepted claims beside the existing exact retirement item;
+        // report replay and HostRestore proof finish independently of admission.
+        if (latest.identity.role === 'Helper' && latest.stopped && !latest.stopUnknown
+          && record.identity.role === 'Helper' && record.identity.executionId !== latest.identity.executionId
+          && record.sessionId !== latest.sessionId
+          && !retirements.some(item => item.sessionId === latest.sessionId && item.executionId === latest.identity.executionId))
+          retirements.push({ sessionId: latest.sessionId, executionId: latest.identity.executionId,
+            helper: { delivery: latest.delivery, lastWake: latest.lastWake, notificationClaims: latest.notificationClaims } })
         if (record.identity.role === 'Foreground' && record.completedRound && record.stopped
           && (!latest.completedRound || !latest.stopped)
           && record.identity.executionId === latest.identity.executionId
@@ -1119,6 +1134,19 @@ export class FrameworkRoleRuntime {
       const operations = this.nativeRetirementOperations ??= new Map<string, Promise<void>>()
       if (operations.has(id)) continue
       const operation = Promise.resolve().then(async () => {
+        if (retired.helper) {
+          if (this.closed) return
+          // Reuse shutdown's existing maintenance drain for the accepted
+          // publication replay, never for Cleaner acceptance or file deletion.
+          const key = 'helper-retirement:' + id
+          const maintenance = this.maintenance ??= new Map()
+          let finished = false
+          const finishing = this.finishRetiredHelper(record.identity.workId, retired).then(value => { finished = value })
+          maintenance.set(key, finishing)
+          try { await finishing }
+          finally { if (maintenance.get(key) === finishing) maintenance.delete(key) }
+          if (!finished) return
+        }
         if (retired.wakeId) await this.settleOperations([retireNativeSession(this.ctx, retired.sessionId),
           this.retireCompletedForegroundWake(retired.wakeId)], 'Foreground retirement failed')
         else await retireNativeSession(this.ctx, retired.sessionId)
@@ -1157,6 +1185,46 @@ export class FrameworkRoleRuntime {
         .finally(() => { if (operations.get(id) === operation) operations.delete(id) })
     }
   }
+  /** Only a replaced, stopped Helper reaches this last native-log consumer.
+   * Its accepted physical publication may still need original call arguments;
+   * HostRestore may still need its persisted result. No Debug retention scan. */
+  private async finishRetiredHelper(workId: string, retired: NonNullable<RoleRecord['nativeRetirements']>[number]): Promise<boolean> {
+    const current = this.roleRecords.get(workId)
+    if (!current || current.identity.executionId === retired.executionId || current.sessionId === retired.sessionId) return false
+    const original: RoleRecord = { ...retired.helper, identity: { role: 'Helper', workId, executionId: retired.executionId },
+      sessionId: retired.sessionId, generation: 0, stopped: true }
+    const events = await new DshSessionReader(this.ctx).events(retired.sessionId)
+    const request = original.delivery?.request ?? original.lastWake
+    if (this.files instanceof PhysicalLocalFiles && request)
+      await resumePhysicalHelperReportsFromEvents(this.files, retired.executionId, events, {
+        recordAttempt: (input, commandId) => this.recordSafetyAttempt(this.binding(original, request), input, commandId, original),
+        signalSources: path => this.physicalSignalSources(path)
+      }, true)
+    const calls = new Map(events.flatMap(event => event.type === 'tool/call' && event.data.name === 'dss_restore_host'
+      ? [[event.seq, event] as const] : []))
+    const successful = new Set<number>()
+    for (const event of events) {
+      if (event.type !== 'tool/result' || event.surfaceOp !== 'append' || event.data.message.isError) continue
+      const call = event.sourceEventSeqs?.map(seq => calls.get(seq)).find(call => call
+        && call.data.turn === event.data.turn && call.data.step === event.data.step
+        && call.data.callId === event.data.message.toolCallId)
+      if (call) successful.add(call.seq)
+    }
+    let finished = true
+    for (const call of calls.values()) {
+      const commandId = retired.sessionId + ':' + call.data.callId
+      const proof = { workId, executionId: retired.executionId }
+      if (successful.has(call.seq)) {
+        ;(this.hostRestoreNativeEvidence ??= new Map()).set(commandId, proof)
+        await this.retireCompletedHostRestore(commandId, proof)
+      }
+      // An accepted call without its native success is not invented into a
+      // successful result. Keep this exact old session while its row remains.
+      const value = await this.records.get<HostRestore>(this.prefix + 'host-restores/' + hash(commandId))
+      if (value?.requester?.workId === workId && value.requester.executionId === retired.executionId) finished = false
+    }
+    return finished
+  }
   /** Native completion or confirmed original-conversation clear owns this
    * exact input after later responsibilities are handed off. */
   private async retireCompletedForegroundWake(wakeId: string): Promise<void> {
@@ -1166,7 +1234,19 @@ export class FrameworkRoleRuntime {
       // Native continuation owns its recovery input separately. Git cold
       // continuation uses startup-recovery without a WakeRecovery payload.
       if (!wake || wake.request.role !== 'Foreground' || wake.recovery || wake.request.reason === 'startup-recovery') return
-      await this.deleteRuntimeRecord(key, wake)
+      // The stopped ordinary Foreground no longer replays this initial claim.
+      // Retire its exact receipt with the existing wake CAS, without reading or
+      // scanning receipts. Recovery and later notification claims keep their owners.
+      const receiptPaths: string[] = []
+      if (this.records instanceof GitAuthorityStore) {
+        const signals = [...new Set(wake.request.sources.filter(source => source.path.startsWith('state/') && source.path.split('/').at(-1) !== 'recovery').map(source => source.path))].sort()
+        if (signals.length) {
+          const originalWake = typeof wake.request.context?.originalWake === 'string' ? wake.request.context.originalWake : wake.request.id
+          const commandId = 'consume-wake/' + hash(JSON.stringify([this.config.member, originalWake, signals]))
+          receiptPaths.push(this.conversation.claimForegroundSignalsReceiptPath(commandId))
+        }
+      }
+      await this.deleteRuntimeRecord(key, wake, receiptPaths)
     })
     this.wakeWrites.set(key, operation)
     try { await operation }
@@ -1374,6 +1454,13 @@ export class FrameworkRoleRuntime {
       });
       return true;
     }
+    if (request.role === 'Helper' && typeof request.context?.helperDebugPath !== 'string') {
+      const target = request.context?.target as { taskId?: string } | undefined
+      const taskId = request.taskId ?? target?.taskId ?? (typeof request.context?.taskId === 'string' ? request.context.taskId : undefined)
+      const debugPath = helperDebugPath(taskId, new Date().toISOString().slice(0, 10))
+      request = { ...request, context: { ...request.context, helperDebugPath: debugPath,
+        helperDebugDirectory: debugPath.slice(0, debugPath.lastIndexOf('/') + 1) } }
+    }
     const helperSource = request.role === 'Helper' && request.reason === 'notification'
       ? request.sources.find(source => helperSignalWakeHash(source.path, this.config.member)) : undefined
     let key = this.prefix + 'wakes/' + hash(request.id)
@@ -1489,10 +1576,12 @@ export class FrameworkRoleRuntime {
     const operation = (writes.get(key) ?? Promise.resolve()).catch(() => false).then(async () => {
       const current = await this.records.get<WakeRecord>(this.prefix + 'wakes/' + hash(wake.request.id))
       if (!current || current.delivered || current.signalsConsumed || current.request.sources.some(source => source.path === path)) return false
+      const debugPath = typeof current.request.context?.helperDebugPath === 'string' ? current.request.context.helperDebugPath : undefined
       if (this.files instanceof PhysicalLocalFiles) {
+        if (debugPath) await this.files.createIfAbsent(debugPath, '')
         await this.files.createIfAbsent(path, '')
       } else await this.transactions.run('helper-signal/' + hash(wake.request.id), { path, wakeId: wake.request.id }, { reevaluate: true, gitReplay: 'session-only' },
-        async () => [{ path, content: '' }])
+        async snapshot => [...debugPath && await this.files.read(snapshot, debugPath) === undefined ? [{ path: debugPath, content: '' }] : [], { path, content: '' }])
       this.publishedHelperSignals.add(path)
       return true
     })
@@ -1565,6 +1654,7 @@ export class FrameworkRoleRuntime {
   /** Only observed committed pending wakes live here. This is an observation,
    * not a second scheduler, durable file or authorization to replace an owner. */
   private rememberAdmissionWake(key: string, wake: WakeRecord): LocalWakeAdmission | undefined {
+    if (this.helperTaskOwner(wake.request)) this.taskHelperWakes?.set(wake.request.id, wake)
     if (wake.delivered) { this.forgetAdmissionWake(key); return }
     let state = this.localWakeAdmissions.get(key)
     if (!state) {
@@ -2253,6 +2343,12 @@ export class FrameworkRoleRuntime {
             return true;
           };
           const binding = this.binding(record, request)
+          if (request.role === 'Helper' && !row.value.helperSignal && binding.recordPath) {
+            const path = binding.recordPath
+            if (this.files instanceof PhysicalLocalFiles) await this.files.createIfAbsent(path, '')
+            else await this.transactions.run('helper-debug/' + hash(request.id), { path }, { reevaluate: true, gitReplay: 'session-only' },
+              async snapshot => await this.files.read(snapshot, path) === undefined ? [{ path, content: '' }] : [])
+          }
           if (taskWorkspace) binding.taskWorkspace = taskWorkspace;
           const resume = await this.gateway.exists(record.sessionId)
           if (this.closed) return
@@ -2596,10 +2692,19 @@ export class FrameworkRoleRuntime {
     }
     this.trackedStop(record)
   }
-  private helperResponsibilities(record: RoleRecord): RoleWake[] {
+  private helperTaskOwner(request: RoleWake): { taskId: string; lifecycleId?: string } | undefined {
+    if (request.role !== 'Helper') return
+    const identity = (request.context?.target ?? request.context?.identity) as { taskId?: string; lifecycleId?: string } | undefined
+    const taskId = request.taskId ?? identity?.taskId ?? request.context?.taskId
+    if (typeof taskId !== 'string') return
+    return { taskId, lifecycleId: request.lifecycleId ?? identity?.lifecycleId }
+  }
+  private helperResponsibilities(record: RoleRecord, currentTaskWakes = true): RoleWake[] {
     if (record.identity.role !== 'Helper') return []
     const initial = record.delivery?.request ?? record.lastWake
-    return [...new Map([...(initial ? [initial] : []), ...Object.values(record.notificationClaims ?? {}).flatMap(claim => claim.helperWakes ?? [])]
+    return [...new Map([...(initial ? [initial] : []),
+      ...(currentTaskWakes ? [...this.taskHelperWakes?.values() ?? []].filter(wake => wake.delivered && wake.signalsConsumed).map(wake => wake.request) : []),
+      ...Object.values(record.notificationClaims ?? {}).flatMap(claim => claim.helperWakes ?? [])]
       .map(request => [request.id, request] as const)).values()]
   }
   private binding(record: RoleRecord, request: RoleWake): FrameworkRoleBinding {
@@ -2620,7 +2725,11 @@ export class FrameworkRoleRuntime {
       }
     }
     if (identity.role === 'Foreground') base.recordPath = this.conversation.foregroundRoot + '/Foreground_Cache.md'
-    if (identity.role === 'Helper') base.recordPath = 'debug/' + new Date().toISOString().slice(0, 10) + '.md'
+    if (identity.role === 'Helper') {
+      const target = request.context?.target as { taskId?: string } | undefined
+      const taskId = request.taskId ?? target?.taskId ?? (typeof request.context?.taskId === 'string' ? request.context.taskId : undefined)
+      base.recordPath = typeof request.context?.helperDebugPath === 'string' ? request.context.helperDebugPath : helperDebugPath(taskId, new Date().toISOString().slice(0, 10))
+    }
     return base;
   }
   async notifications(snapshot: FilesSnapshot, binding: FrameworkRoleBinding, selectedTaskId?: string): Promise<string[]> {
@@ -2801,7 +2910,9 @@ signals: [...new Set([...claim.initialSignals, ...claim.sources.map(source => so
             : (await this.files.listDirectory(snapshot, path.slice(0, path.lastIndexOf('/') + 1), { paths: [path] })).find(item => item.path === path)
           if (source) sources.push({ path: source.path, version: source.version })
         }
-        const helperWakes = binding.role === 'Helper' ? this.helperResponsibilities(record).filter(item => item.id !== wake.id) : []
+        // Earlier inputs retain their original immutable claims; a new claim
+        // stores only the Helper notifications selected by this invocation.
+        const helperWakes: RoleWake[] = []
         if (binding.role === 'Helper') {
           const candidates = sources.splice(0)
           for (const source of candidates) {
@@ -2834,7 +2945,7 @@ signals: [...new Set([...claim.initialSignals, ...claim.sources.map(source => so
           otherTasks.set(prior.taskId, paths)
         }
         const claimedNotifications = [...otherTasks].map(([taskId, paths]) => ({ taskId, signals: [...paths].sort() }))
-        return { ...(helperWakes.length ? { helperWakes } : {}), ...(claimedNotifications.length ? { claimedNotifications } : {}), commandId: operationId, lifecycleId: binding.lifecycleId, executionId: binding.executionId, wakeId: wake.id, taskId, initialSignals: [...new Set([...initial.signals, ...Object.values(record.notificationClaims ?? {}).filter(claim => claim.taskId === taskId).flatMap(claim => [...claim.initialSignals, ...claim.sources.map(source => source.path)])])], sources };
+        return { ...(helperWakes.length ? { helperWakes } : {}), ...(claimedNotifications.length ? { claimedNotifications } : {}), commandId: operationId, lifecycleId: binding.lifecycleId, executionId: binding.executionId, wakeId: wake.id, taskId, initialSignals: binding.role === 'Helper' ? initial.signals : [...new Set([...initial.signals, ...Object.values(record.notificationClaims ?? {}).filter(claim => claim.taskId === taskId).flatMap(claim => [...claim.initialSignals, ...claim.sources.map(source => source.path)])])], sources };
       };
       let selectedClaim: NotificationClaim = await withSnapshot(this.files, select)
       // No later notification was selected. The original wake has already been
@@ -2875,7 +2986,7 @@ executionId: binding.executionId, run: persistContext,
       } else {
         const current = owns(this.roleRecords.get(workId))
         if ((current.delivery?.request ?? current.lastWake)?.id !== wake.id) throw new Error('Signal claim wake changed before context persistence.')
-        await this.saveRole({ ...current, notificationClaims: { ...current.notificationClaims, [commandId]: selectedClaim } })
+        await this.saveRole(current, false, undefined, false, undefined, { id: commandId, value: selectedClaim })
         record = owns(this.roleRecords.get(workId))
       }
       this.wakeConsumptions.delete(binding.executionId)
@@ -3255,6 +3366,10 @@ executionId: binding.executionId, run: persistContext,
       const exactDiagnostic = typeof fault.diagnosticContext?.roleAuthorityContent === 'string'
         || typeof fault.diagnosticContext?.hostRestorationCommandId === 'string'
       const matches = (wake: RoleWake) => {
+        // An earlier fault input does not silently acquire a distinct new fault.
+        // Publish its ordinary Helper signal so a busy Helper can claim it
+        // after the current work, or Host can wake the idle Helper normally.
+        if ([...this.safetyEpisodes.values()].some(value => value.helperWakeId === wake?.id && value.fault.id !== fault.id)) return false
         const context = wake?.context, identity = ((context?.identity ?? context?.target) as WorkIdentity | undefined);
         if (fault.admissionTimeout) return wake?.role === 'Helper' && wake.id === (helperFault ? fault.admissionTimeout.context.wakeId : fault.admissionTimeout.helperWakeId)
         if (exactDiagnostic)
@@ -3277,7 +3392,7 @@ executionId: binding.executionId, run: persistContext,
         context: {
           ...(fault.diagnosticContext ?? {}), ...(fault.errorSignature ? { errorSignature: fault.errorSignature } : {}),
           ...(fault.admissionTimeout?.context ?? {}), safetyFault: fault, failureDetails: fault.failureDetails, ...(fault.admissionTimeout ? {} : { facts: fault.message }), ...(fault.identity ? { target: fault.identity } : {}), ...(fault.taskId ? { taskId: fault.taskId } : {}),
-          instruction: 'Outer Safety Net: diagnose this fault and choose the appropriate authorized repair or restoration using the existing exact target and scope. If the initial repair is insufficient, continue recovery until the original continuation is restored or an actual permission or capability blocker remains. Preserve original responsibility and permissions. Verify actual continuation; arranging a tool request is not completed recovery.'
+          instruction: 'Outer Safety Net: diagnose this actual fault and choose the appropriate authorized repair or restoration for its exact target and scope. Preserve original responsibility and permissions and let the original work continue. Read the supplied Helper Debug location for prior actual handling. Only a new failure from that original work after its earlier repair is another Safety Net entry; a Helper turn ending or an old failure being reread is not. On an actual repeated fault, decide further handling and whether the user needs a Foreground report through the existing state signal. Verify actual continuation; arranging a tool request is not completed recovery.'
         }
       }, undefined, [fault])
       if (active || waiting || fault.admissionTimeout) {
@@ -3395,11 +3510,16 @@ executionId: binding.executionId, run: persistContext,
     const wakes = new Set(this.helperResponsibilities(record).map(request => request.id))
     return [...this.safetyEpisodes ?? []].filter(([, value]) => !value.settled && value.helperWakeId !== undefined && wakes.has(value.helperWakeId)).map(([id]) => id)
   }
-  private async recordSafetyAttempt(binding: FrameworkRoleBinding, input: HelperRepairAttempt, commandId: string): Promise<void> {
+  private async recordSafetyAttempt(binding: FrameworkRoleBinding, input: HelperRepairAttempt, commandId: string, retired?: RoleRecord): Promise<void> {
     if (binding.role !== 'Helper') throw new Error('Only the owning Helper can report its repair attempt.')
-    const caller = this.roleRecords.get(binding.workId)
+    const owner = this.roleRecords.get(binding.workId)
+    // Only replay of an already accepted physical publication can supply this
+    // exact predecessor. Native tool calls still require the current execution.
+    const caller = retired && owner?.nativeRetirements?.some(item => item.helper
+      && item.executionId === retired.identity.executionId && item.sessionId === retired.sessionId)
+      ? retired : owner
     if (caller?.identity.executionId !== binding.executionId) throw new Error('The Helper execution no longer owns this diagnostic responsibility.')
-    const wakes = new Set(this.helperResponsibilities(caller).map(request => request.id))
+    const wakes = new Set(this.helperResponsibilities(caller, caller !== retired).map(request => request.id))
     let associated = [...this.safetyEpisodes.values()].filter(value => value.helperWakeId !== undefined && wakes.has(value.helperWakeId))
     if (!associated.length || input.faultId && !associated.some(value => value.fault.id === input.faultId)) {
       // Cold replay of this already-owned report need not wait for unrelated
@@ -3444,6 +3564,7 @@ executionId: binding.executionId, run: persistContext,
     if (this.safetyReplayed.has(key)) return
     this.safetyReplayed.add(key)
     if (input.outcome === 'repaired') {
+      this.environment.safetyAttempted?.(selected.fault.id, commandId)
       selected.settled = true
       if (!selected.fault.operationId) this.resolvedSafetyFaultIds.add(selected.fault.id)
       // Respect the Helper's actual repaired assessment; this does not confirm
@@ -3930,19 +4051,29 @@ executionId: binding.executionId, run: persistContext,
           });
           const target = input.target ?? (input.wakeId ? (await this.records.get<WakeRecord>(this.prefix + 'wakes/' + hash(input.wakeId)))?.request : undefined)
           const taskOwner = target?.taskId && target.role !== 'Foreground' ? { taskId: target.taskId, lifecycleId: target.lifecycleId } : undefined
-          await this.createSafetyRestoreRow(key, { commandId, requester: binding, input, ...(taskOwner ? { taskOwner } : {}), ...safetyFaultIds.length ? { safetyFaultIds, safetyFaults: safetyFaultIds.map((id) => this.safetyEpisodes.get(id)!.fault), safetyKind: 'target' } : {}, ...(admissionWakeId ? { admissionWakeId } : {}), createdAt: new Date().toISOString(), complete: false });
+          const createdAt = new Date().toISOString()
+          await this.createSafetyRestoreRow(key, { commandId, requester: binding, input, debugPath: helperDebugPath(taskOwner?.taskId, createdAt.slice(0, 10)), ...(taskOwner ? { taskOwner } : {}), ...safetyFaultIds.length ? { safetyFaultIds, safetyFaults: safetyFaultIds.map((id) => this.safetyEpisodes.get(id)!.fault), safetyKind: 'target' } : {}, ...(admissionWakeId ? { admissionWakeId } : {}), createdAt, complete: false });
           for (const id of safetyFaultIds) this.safetyEpisodes.get(id)!.commands.add(commandId);
           return { arranged: true }
         },
         restoreHost: async (binding, input, commandId) => {
           const key = this.prefix + 'host-restores/' + hash(commandId)
           const safetyFaultIds = this.safetyFaultIds(binding)
+          const caller = this.roleRecords.get(binding.workId)
+          const diagnosticTasks = safetyFaultIds.length
+            ? safetyFaultIds.map(id => { const fault = this.safetyEpisodes.get(id)!.fault; return fault.taskId ?? fault.identity?.taskId })
+            : caller?.identity.executionId === binding.executionId
+              ? this.helperResponsibilities(caller).map(request => this.helperTaskOwner(request)?.taskId) : []
+          const taskId = diagnosticTasks.length && diagnosticTasks[0]
+            && diagnosticTasks.every(id => id === diagnosticTasks[0]) ? diagnosticTasks[0] : undefined
+          const createdAt = new Date().toISOString()
           await this.createSafetyRestoreRow(key, {
+            debugPath: helperDebugPath(taskId, createdAt.slice(0, 10)),
             commandId,
             requester: binding,
             input,
             ...safetyFaultIds.length ? { safetyFaultIds, safetyFaults: safetyFaultIds.map((id) => this.safetyEpisodes.get(id)!.fault), safetyKind: 'host' } : {},
-            createdAt: new Date().toISOString(),
+            createdAt,
             complete: false
           });
           for (const id of safetyFaultIds) this.safetyEpisodes.get(id)!.commands.add(commandId);
@@ -4403,6 +4534,17 @@ executionId: binding.executionId, run: persistContext,
       // Keep it through restoration; retire it atomically with the original row.
       await this.deleteRuntimeRecord(key, current, [gitCommandReceiptPath('host-restore:' + commandId)])
       forget()
+      // The original Host row was a real last consumer, not a timer or a
+      // Task-completion gate. Retry its exact predecessor after any current read.
+      const owner = this.roleRecords.get(proof.workId)
+      const retired = owner?.nativeRetirements?.find(item => item.helper && item.executionId === proof.executionId)
+      if (owner && retired) {
+        const pending = this.nativeRetirementOperations?.get(proof.workId + '\0' + retired.sessionId)
+        void Promise.resolve(pending).catch(() => {}).then(() => {
+          const latest = this.roleRecords.get(proof.workId)
+          if (latest) this.continueNativeRetirements(latest)
+        })
+      }
     })
     this.safetyRestoreWrites.set(commandId, operation)
     try { await operation }
@@ -4435,8 +4577,13 @@ executionId: binding.executionId, run: persistContext,
     const boundary = [...events].reverse().find(event => event.type === 'turn/start' || event.type === 'turn/end')
     if (boundary?.type !== 'turn/end' || boundary.data.reason.kind !== 'completed') return
     const pending = new Set<string>(), calls = new Set<string>(), returned = new Map<string, RoleWake>()
-    const accepted = new Map(Object.values(checkedOwner.notificationClaims ?? {})
-      .filter(claim => claim.wakeId === initial.id && claim.executionId === record.identity.executionId)
+    const claims = Object.values(checkedOwner.notificationClaims ?? {})
+    // A current-delivery claim proves that this turn received the complete
+    // outstanding Helper context. Reuse each input's original immutable claim;
+    // an initial-only delivery still causes no historical wake reads.
+    const hasCurrentClaim = claims.some(claim => claim.wakeId === initial.id
+      && claim.executionId === record.identity.executionId && claim.helperWakes?.length)
+    const accepted = new Map((hasCurrentClaim ? claims : [])
       .flatMap(claim => claim.helperWakes ?? []).map(wake => [wake.id, wake]))
     for (const event of inputEvents) {
       if (event.type === 'tool/call') {
@@ -4463,6 +4610,9 @@ executionId: binding.executionId, run: persistContext,
     returned.set(initial.id, initial)
     let changed = false
     for (const request of returned.values()) {
+      // Consuming/ending a native turn does not finish this Task's diagnosis.
+      // Its original WakeRecord remains the sole pending business context.
+      if (this.helperTaskOwner(request)) continue
       const key = this.prefix + 'wakes/' + hash(request.id)
       // All ordinary mutations of this wake use this exact existing lane.
       const operation = (this.wakeWrites.get(key) ?? Promise.resolve()).then(async () => {
@@ -4661,6 +4811,10 @@ executionId: binding.executionId, run: persistContext,
     const restoring = new Set((await this.records.list<ObservationRecord>(this.prefix + 'observations/'))
       .filter(row => !row.value.complete && row.value.stopStarted).map(row => row.value.pending.action.identity.executionId))
     const wakes = await this.records.list<WakeRecord>(this.prefix + 'wakes/')
+    // Hydrate once from the original startup inventory. Subsequent changes
+    // follow updateWake/deleteRuntimeRecord, not an older in-flight poll.
+    for (const { value } of wakes) if (this.helperTaskOwner(value.request) && !this.taskHelperWakes?.has(value.request.id))
+      this.taskHelperWakes?.set(value.request.id, value)
     for (const { value } of wakes) if (!value.delivered && value.request.taskId && !['Foreground', 'Helper'].includes(value.request.role))
       this.workspaces.rememberRoot(value.request.taskId)
     const recovered = new Set(wakes
@@ -4886,7 +5040,19 @@ executionId: binding.executionId, run: persistContext,
         if (continuation) continuations.push(continuation)
       } catch (error) { this.error(error, { identity: record.identity, sessionId: record.sessionId, stage: 'startup-member-input-inspection' }) }
     }
-    if (targets.length || continuations.length) await this.wake({ id: 'startup-helper:' + randomUUID(), role: 'Helper', reason: 'startup-recovery', sources: [], context: { targets, continuations } })
+    // Existing startup checks follow their actual Task; Host-only checks remain Host scoped.
+    const checks = new Map<string | undefined, { targets: typeof targets; continuations: RoleWake[] }>()
+    const checkFor = (taskId: string | undefined) => {
+      let check = checks.get(taskId)
+      if (!check) { check = { targets: [], continuations: [] }; checks.set(taskId, check) }
+      return check
+    }
+    for (const target of targets) checkFor(target.taskId).targets.push(target)
+    for (const continuation of continuations) checkFor(['Planner', 'Worker', 'Organizer', 'Recorder'].includes(continuation.role)
+      ? continuation.taskId : undefined).continuations.push(continuation)
+    for (const [taskId, context] of checks) await this.wake({ id: 'startup-helper:' + randomUUID(), role: 'Helper',
+      ...(taskId ? { taskId, lifecycleId: this.knownTaskLifecycles.get(taskId) } : {}),
+      reason: 'startup-recovery', sources: [], context })
     this.startOwnedPump()
   }
   private async currentTask(record: RoleRecord): Promise<string | undefined> {
@@ -5359,7 +5525,7 @@ executionId: binding.executionId, run: persistContext,
     return commandId ? retirePublishedPhysicalRecovery(this.files, commandId) : false
   }
   private async recordRestoreDebug(row: { key: string; value: RoleRestore }, input: unknown = row.value.input): Promise<string | undefined> {
-    const path = 'debug/' + row.value.createdAt.slice(0, 10) + '.md'
+    const path = row.value.debugPath ?? 'debug/' + row.value.createdAt.slice(0, 10) + '.md'
     if (this.files instanceof PhysicalLocalFiles) {
       if (row.value.complete) return
       // Restore already owns its exact original input. This diagnostic outlives
@@ -5372,6 +5538,7 @@ executionId: binding.executionId, run: persistContext,
     }
     await this.transactions.run('restore-debug:' + row.value.commandId, input, { reevaluate: true }, async snapshot =>
       [{ path, content: (await this.files.read(snapshot, path) ?? '') + '\n' + JSON.stringify(input) + '\n' }])
+    return path
   }
   private async ownerRecoveryChanges(snapshot: FilesSnapshot, taskId: string): Promise<Array<{ path: string; content: string }>> {
     // Final cleanup is a namespace retirement, including a completed Recorder's R.
@@ -5643,7 +5810,7 @@ executionId: binding.executionId, run: persistContext,
         if (this.files instanceof PhysicalLocalFiles) {
           const date = new Date(pending.checkedAt ?? Date.now()).toISOString().slice(0, 10)
           debugPath = await this.publishPhysicalMemberRecovery('observation-recovery:' + pending.id, { taskId, member, lifecycleId: record.identity.lifecycleId },
-            record.identity.role === 'Worker' ? { path: 'debug/' + date + '.md', text: '\n' + JSON.stringify(context) + '\n' } : undefined,
+            record.identity.role === 'Worker' ? { path: helperDebugPath(taskId, date), text: '\n' + JSON.stringify(context) + '\n' } : undefined,
             record.identity.role === 'Worker' ? paths.state(member, taskId) + '/Planner_Recovery_' + date + '_' + hash('observation:' + pending.id) : undefined)
         } else await this.transactions.run('observation-recovery:' + pending.id, { taskId, member, executionId: record.identity.executionId }, { reevaluate: true, taskOwner: this.taskCommandOwner(record.identity) }, async (snapshot) => {
           if (await this.manuallyCleared(taskId, snapshot) || await readTaskCleanupRecord(this.files, snapshot, taskId)) return []
@@ -5655,9 +5822,9 @@ executionId: binding.executionId, run: persistContext,
           if (record!.identity.role === 'Worker') {
             // Publish the real interruption facts with an ordinary empty STATE
             // notification. Only subsequent discovery can admit the Planner.
-            const date = new Date(pending.checkedAt ?? Date.now()).toISOString().slice(0, 10), debug = 'debug/' + date + '.md'
+            const date = new Date(pending.checkedAt ?? Date.now()).toISOString().slice(0, 10), debug = helperDebugPath(taskId, date)
             changes.push({ path: debug, content: (await this.files.read(snapshot, debug) ?? '') + '\n' + JSON.stringify(context) + '\n' },
-              { path: paths.state(member, taskId) + '/Planner_Recovery_' + date + '_' + hash('observation:' + pending.id), content: '' })
+              { path: hostRecoverySignalPath(paths.state(member, taskId) + '/Planner_Recovery_' + date + '_' + hash('observation:' + pending.id), debug), content: '' })
           }
           return changes
         });
@@ -5845,11 +6012,13 @@ executionId: binding.executionId, run: persistContext,
     await Promise.all([...this.restoreWriteOwners].filter(([, owner]) => belongs(owner)).map(([commandId]) => this.safetyRestoreWrites.get(commandId)))
     const restores = this.records instanceof GitAuthorityStore
       ? await this.taskReleaseRuntimeRows<RoleRestore>('restores', task) : await this.localTaskRetirementRows<RoleRestore>('restores', task)
+    let pendingTaskRestore = false
     for (const row of restores) {
       const owner = this.restoreTaskOwner(row.value)
       if (!owner || !belongs(owner)) continue
       await this.safetyRestoreWrites.get(row.value.commandId)
       const current = await this.records.get<RoleRestore>(row.key)
+      if (current && !current.complete) pendingTaskRestore = true
       // An unfinished repair still owns its uncertain operation. Completion
       // retires it at the writer above rather than preserving terminal input.
       if (current?.complete && this.restoreTaskOwner(current) && belongs(this.restoreTaskOwner(current)!)) {
@@ -5858,12 +6027,107 @@ executionId: binding.executionId, run: persistContext,
           await this.deleteRuntimeRecord(row.key, current, this.restoreCommandReceiptPaths(current))
       }
     }
+    if (isTerminalTask(task) && !pendingTaskRestore) this.startMaintenance('helper-task-claims:' + taskLifecycleKey(task), async () => {
+      try { await this.retireReleasedTaskHelperClaims(task) }
+      catch (error) { this.ctx.logger?.('deepseek-servant').warn('Finished Task Helper claim cleanup was skipped; Task release continues.', error) }
+    })
     for (const member of new Set([...(task.members ?? [task.owner]), this.config.member])) await this.serialRecoveryWatch(task.taskId, member, async key => {
       const current = await this.records.get<RecoveryWatchRecord>(key)
       if (current) await this.deleteRuntimeRecord(key, current)
     }, task.lifecycleId)
     if (this.files instanceof PhysicalLocalFiles) this.pendingControlStops = this.pendingControlStops.filter(target =>
       !target.awaitingTaskRetirement || !target.owner || !belongs(target.owner))
+  }
+  /** Release finished Task inputs, while other Tasks retain their original
+   * WakeRecords. A consumed mixed claim is retired whole with its old receipt;
+   * no historical request body is edited or synthetic claim is created. */
+  private async retireReleasedTaskHelperClaims(task: TaskMetadata): Promise<void> {
+    const workId = this.roleKey('Helper')
+    try { await this.notificationClaimWrites?.get(workId) } catch { return }
+    await this.withRoleWrite(workId, async () => {
+      const selected = this.roleRecords.get(workId)
+      if (!selected) return
+      const belongs = (wake: RoleWake) => {
+        const owner = this.helperTaskOwner(wake)
+        return owner?.taskId === task.taskId && taskLifecycle(owner) === taskLifecycle(task)
+      }
+      const completedInput = (wake: WakeRecord) => {
+        const context = wake.request.context
+        const faults = [...wake.safetyFaults ?? [], ...wake.safetyAttempts?.map(attempt => attempt.fault) ?? [],
+          ...context?.safetyFault ? [context.safetyFault as SafetyFault] : [], ...context?.safetyFaults as SafetyFault[] ?? []]
+        return wake.delivered && wake.signalsConsumed && !wake.recovery && !wake.safetyParentWakeId
+          && !context?.originalWake && !context?.notificationClaims
+          // Helper self-report/idle is insufficient. Task release has already
+          // committed its real resolutions; UNKNOWN operations remain unresolved.
+          && faults.every(fault => this.resolvedSafetyFaultIds.has(fault.id))
+          && (wake.resolvedSafetyFaultIds ?? []).every(id => this.resolvedSafetyFaultIds.has(id))
+          && ![...this.safetyEpisodes.values()].some(episode => episode.helperWakeId === wake.request.id
+            && !this.resolvedSafetyFaultIds.has(episode.fault.id))
+      }
+      const finished = [...this.taskHelperWakes?.values() ?? []].filter(wake => belongs(wake.request) && completedInput(wake))
+      if (!finished.length) return
+      const finishedIds = new Set(finished.map(wake => wake.request.id))
+      const ids = Object.entries(selected.notificationClaims ?? {}).filter(([, claim]) =>
+        claim.helperWakes?.some(wake => finishedIds.has(wake.id))).map(([id]) => id)
+      const requests = new Map([...finished.map(wake => wake.request), ...ids.flatMap(id => selected.notificationClaims![id].helperWakes ?? [])].map(wake => [wake.id, wake]))
+      const wakeKeys = [...requests.keys()].map(id => this.prefix + 'wakes/' + hash(id))
+      const key = this.roleRecordPath(workId)
+      const prune = (current: RoleRecord | undefined, rows: ReadonlyMap<string, unknown>) => {
+        if (!current || current.identity.executionId !== selected.identity.executionId) return { current, removed: [] as string[], retired: [] as WakeRecord[] }
+        const original = (request: RoleWake) => rows.get(this.prefix + 'wakes/' + hash(request.id)) as WakeRecord | undefined
+        const retired = finished.filter(wake => { const value = original(wake.request); return value && completedInput(value) && JSON.stringify(value.request) === JSON.stringify(wake.request) })
+        const retiredIds = new Set(retired.map(wake => wake.request.id))
+        const removed = ids.filter(id => {
+          const claim = current.notificationClaims?.[id]
+          return claim && JSON.stringify(claim) === JSON.stringify(selected.notificationClaims![id])
+            && claim.helperWakes?.some(wake => retiredIds.has(wake.id))
+            && claim.helperWakes.every(wake => { const value = original(wake); return value?.delivered && value.signalsConsumed && JSON.stringify(value.request) === JSON.stringify(wake) })
+            && claim.sources.every(source => claim.helperWakes!.some(wake => wake.sources.some(item => item.path === source.path && item.version === source.version)))
+        })
+        const claims = { ...current.notificationClaims }
+        for (const id of removed) delete claims[id]
+        const referenced = new Set(Object.values(claims).flatMap(claim => claim.helperWakes?.map(wake => wake.id) ?? []))
+        return { current: { ...current, notificationClaims: Object.keys(claims).length ? claims : undefined }, removed,
+          retired: retired.filter(wake => !referenced.has(wake.request.id)) }
+      }
+      let saved: RoleRecord | undefined, retired: WakeRecord[] = []
+      if (this.records instanceof GitAuthorityStore) {
+        const authority = this.records
+        const result = await authority.updateWithReads<RoleRecord, ReturnType<typeof prune>>(key, wakeKeys, (current, rows) => {
+          const result = prune(current, rows)
+          const changes: FileChange[] = [
+            ...result.removed.map(id => ({ path: gitCommandReceiptPath(current!.notificationClaims![id].commandId), content: null })),
+            ...result.retired.map(wake => authority.deleteChange(this.prefix + 'wakes/' + hash(wake.request.id)))
+          ]
+          return { write: !!result.removed.length || !!changes.length, value: result.current, result, changes }
+        })
+        saved = result.current; retired = result.retired
+      } else {
+        const rows = new Map(await Promise.all(wakeKeys.map(async key => [key, await this.records.get<WakeRecord>(key)] as const)))
+        const current = await this.records.get<RoleRecord>(key), result = prune(current, rows)
+        saved = result.current
+        if (result.removed.length) await this.records.set(key, saved!)
+        for (const wake of result.retired) {
+          const wakeKey = this.prefix + 'wakes/' + hash(wake.request.id)
+          const operation = (this.wakeWrites.get(wakeKey) ?? Promise.resolve()).then(async () => {
+            const current = await this.records.get<WakeRecord>(wakeKey)
+            if (JSON.stringify(current) !== JSON.stringify(wake)) return
+            await this.deleteRuntimeRecord(wakeKey, wake)
+            retired.push(wake)
+          })
+          this.wakeWrites.set(wakeKey, operation)
+          try { await operation }
+          finally { if (this.wakeWrites.get(wakeKey) === operation) this.wakeWrites.delete(wakeKey) }
+        }
+      }
+      for (const wake of retired) this.taskHelperWakes?.delete(wake.request.id)
+      if (!saved) return
+      const live = this.roleRecords.get(workId)
+      if (live?.identity.executionId === saved.identity.executionId) {
+        this.roleRecords.set(workId, { ...live, notificationClaims: saved.notificationClaims })
+        ;(this.roleBases ??= new Map()).set(workId, structuredClone(saved))
+      }
+    })
   }
   private taskReleaseIndexes?: {
     roles: GitRecordIndex<AuthorityDiscoveryKey>
@@ -6186,7 +6450,7 @@ executionId: binding.executionId, run: persistContext,
       const accepted = await this.updateSafetyRestoreRow<HostRestore>(row.key, commandId, current => ({ ...current, managerPublications: current.managerPublications ?? managers }))
       row.value.managerPublications = accepted.managerPublications
     }
-    const dailyDebug = 'debug/' + createdAt.slice(0, 10) + '.md'
+    const dailyDebug = row.value.debugPath ?? 'debug/' + createdAt.slice(0, 10) + '.md'
     const managers = row.value.managerPublications ?? []
     const debugCommand = 'host-restore-debug:' + commandId
     const publication = await publishPhysicalRecovery(files, { commandId: debugCommand,
@@ -6275,15 +6539,15 @@ executionId: binding.executionId, run: persistContext,
               if (status?.state === 'complete' || !inbox?.length) continue
               writes.set(paths.state(member, task.taskId) + '/recovery', '')
               writes.set(paths.state(member, task.taskId) + '/Planner_Helper', '')
-              writes.set(this.recoveryInputPath(task.taskId, member, 'Planner'), JSON.stringify({ ...input, at: createdAt, debugPath: 'debug/' + createdAt.slice(0, 10) + '.md' }))
+              writes.set(this.recoveryInputPath(task.taskId, member, 'Planner'), JSON.stringify({ ...input, at: createdAt, debugPath: row.value.debugPath ?? 'debug/' + createdAt.slice(0, 10) + '.md' }))
             }
             if (task.route === 'O' && task.owner === this.config.member) {
               writes.set(paths.state(task.owner, task.taskId) + '/recovery', '')
               writes.set(paths.state(task.owner, task.taskId) + '/Organizer_Helper', '')
-              writes.set(this.recoveryInputPath(task.taskId, task.owner, 'Organizer'), JSON.stringify({ ...input, at: createdAt, debugPath: 'debug/' + createdAt.slice(0, 10) + '.md' }))
+              writes.set(this.recoveryInputPath(task.taskId, task.owner, 'Organizer'), JSON.stringify({ ...input, at: createdAt, debugPath: row.value.debugPath ?? 'debug/' + createdAt.slice(0, 10) + '.md' }))
             }
           }
-          const debug = 'debug/' + createdAt.slice(0, 10) + '.md'
+          const debug = row.value.debugPath ?? 'debug/' + createdAt.slice(0, 10) + '.md'
           writes.set(debug, (await this.files.read(snapshot, debug) ?? '') + '\n' + JSON.stringify({ at: createdAt, mode: 'host-restoration', ...input, managers: [...writes.keys()] }) + '\n')
           return [...writes].map(([path, content]) => ({ path, content }))
         })
@@ -6883,7 +7147,7 @@ executionId: binding.executionId, run: persistContext,
           if (task?.status !== 'running' || status?.state === 'complete') return []
           return [
             ...(inbox?.length ? [{ path: paths.state(member, taskId) + '/recovery', content: '' }] : []),
-            ...record.identity.role === 'Worker' ? [{ path: paths.state(member, taskId) + '/Planner_Recovery_' + date + '_' + hash('restore:' + row.value.commandId), content: '' }] : []
+            ...record.identity.role === 'Worker' ? [{ path: hostRecoverySignalPath(paths.state(member, taskId) + '/Planner_Recovery_' + date + '_' + hash('restore:' + row.value.commandId), debugPath!), content: '' }] : []
           ];
         });
       }
