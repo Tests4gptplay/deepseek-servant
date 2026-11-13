@@ -14,7 +14,7 @@
 
 两者共同探索的是：**让执行者可以更换、工作方法可以调整，而用户目标、已有成果和后续责任保持连续。**
 
-**[阅读全文：让 AI 持续完成工作——CAH / DSS 的技术框架与工程实践](docs/reviews/CAH-DSS-TECHNICAL-FRAMEWORK.zh-CN.md)**
+**[阅读全文：让 AI 持续完成工作——CAH / DSS 的技术框架与工程实践](https://github.com/Tests4gptplay/deepseek-servant/blob/main/docs/reviews/CAH-DSS-TECHNICAL-FRAMEWORK.zh-CN.md)**
 
 ## 独立实践与架构趋同 / Independent work, convergent architecture
 
