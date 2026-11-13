@@ -6,6 +6,26 @@
   <img src="https://raw.githubusercontent.com/Tests4gptplay/deepseek-servant/v0.3.0/docs/images/deepseek-servant-maids-duo.webp" alt="DeepSeek Servant 短裙与长裙女仆角色设计">
 </p>
 
+## 技术评述与项目实践 / Review & project practice
+
+**摘要：** 当 AI 从回答问题走向承担工程、研究和创作任务，系统需要解决的问题也随之变化：工作怎样跨越会话边界，成果怎样被后继执行者继承，遇到中断怎样恢复，原有方案失效后怎样重新选择路线。
+
+[Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness) 与 [DeepSeek Servant（DSS）](https://github.com/Tests4gptplay/deepseek-servant) 围绕这些问题形成了一条持续演进的技术路线：以持久任务为中心，将模型推理、角色协作、工作记忆、状态调度与执行环境分离。CAH 提供了长期任务和技术路线调整的实际案例，DSS 则将同一架构原则迁移到 DeepSeek Harness 的原生 Agent 环境。
+
+两者共同探索的是：**让执行者可以更换、工作方法可以调整，而用户目标、已有成果和后续责任保持连续。**
+
+**[阅读全文：让 AI 持续完成工作——CAH / DSS 的技术框架与工程实践](docs/reviews/CAH-DSS-TECHNICAL-FRAMEWORK.zh-CN.md)**
+
+## 独立实践与架构趋同 / Independent work, convergent architecture
+
+DSS 的 [v0.2.0（2026-10-26）](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.2.0) 已公开多角色协作、持久任务记录与异常接续，早于 DeepSeek 团队于 2026-10-31 公开的 [Super-agent 研究原型](https://github.com/deepseek-ai/dsh-superagent-prototype)。这条独立工程路线延续自 [CAH v1.0.4（2026-09-20）](https://github.com/Tests4gptplay/chat-agent-harness/releases/tag/v1.0.4) 中的 Git 任务记录与可替换 Worker。
+
+从双方公开实现看，交互与执行分工、任务状态持久化、中断恢复呈现**架构趋同**。DSS 的 [0.5.0-rc.2 测试版](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.0-rc.2) 沿自己的 Local／Git 协作路线采用六类原生角色；Super-agent 原型围绕 GitHub／飞书事件和 Ticket／Executor 模型运作。公开的 [CAH 运行记录](https://github.com/Tests4gptplay/chat-agent-harness-records)展示了 [Helper 恢复与 Planner 重新规划](https://github.com/Tests4gptplay/chat-agent-harness-records/blob/76646cc709375b1d8d262d809d76b3156698e796/showcase-observer/world-execute-chatgpt-20261017/backfills/2026-10-19T10-05Z-helper-image-replanning.md)的实际过程。
+
+DSS [v0.2.0 (2026-10-26)](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.2.0) already included multi-role collaboration, persistent task records and recovery before the DeepSeek team's [Super-agent research prototype](https://github.com/deepseek-ai/dsh-superagent-prototype) was published on 2026-10-31. This independent engineering path continues the Git-backed task records and replaceable Workers published in [CAH v1.0.4 (2026-09-20)](https://github.com/Tests4gptplay/chat-agent-harness/releases/tag/v1.0.4).
+
+The two independently developed projects show **architectural convergence** in separating interaction from execution, persisting task state and recovering interrupted work. DSS's [0.5.0-rc.2 test release](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.0-rc.2) follows its own Local/Git collaboration path with six native roles; the Super-agent prototype centers on GitHub/Feishu events and Ticket/Executor. Public [CAH run records](https://github.com/Tests4gptplay/chat-agent-harness-records) include a [Helper recovery and Planner replanning case](https://github.com/Tests4gptplay/chat-agent-harness-records/blob/76646cc709375b1d8d262d809d76b3156698e796/showcase-observer/world-execute-chatgpt-20261017/backfills/2026-10-19T10-05Z-helper-image-replanning.md).
+
 ## 安装测试版 RC2
 
 在 DSH 的 **插件 → 添加插件 → 包名或地址** 输入固定来源：
@@ -57,4 +77,4 @@ DeepSeek Servant 由 [Chat Agent Harness（CAH）](https://github.com/Tests4gptp
 
 ## 支持项目 / Support
 
-[GitHub Sponsors](https://github.com/sponsors/Tests4gptplay) · [Ko-fi](https://ko-fi.com/kou392350) · [Patreon](https://www.patreon.com/cw/Kou848) · [爱发电 / Afdian](https://afdian.com/a/kkt_ifd1) · [支付宝 / Alipay](SPONSOR.md)
+[GitHub Sponsors](https://github.com/sponsors/Tests4gptplay) · [Ko-fi](https://ko-fi.com/kou392350) · [支付宝 / Alipay](SPONSOR.md)
