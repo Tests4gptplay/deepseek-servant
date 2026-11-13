@@ -1087,7 +1087,28 @@ export class FrameworkRoleRuntime {
           if (JSON.stringify(current) !== JSON.stringify(base)) throw new Error('Role authority changed since this operation observed it; re-evaluate the owned execution.')
           let changes: FileChange[] = []
           if (completedNativeCommands?.length) {
-            try { changes = await this.transactions.completedNativeCommandChanges(snapshot, completedNativeCommands) }
+            try {
+              const claims = record.identity.role === 'Helper' ? completedNativeCommands.flatMap(id => {
+                const claim = record.notificationClaims?.[id]
+                return claim?.executionId === record.identity.executionId && !claim.taskId && claim.sources.length
+                  && claim.commandId === 'consume-later/' + hash(id) && claim.helperWakes?.length
+                  && claim.helperWakes.every(wake => !this.helperTaskOwner(wake) && wake.reason !== 'startup-recovery'
+                    && !wake.context?.originalWake && !wake.context?.notificationClaims && !wake.context?.safetyFault && !wake.context?.safetyFaults)
+                  && claim.sources.every(source => claim.helperWakes!.some(wake => wake.sources.some(item => item.path === source.path && item.version === source.version)))
+                  ? [{ id, claim }] : []
+              }) : []
+              const ids = new Map(claims.map(({ id, claim }) => [id, claim.commandId]))
+              changes = await this.transactions.completedNativeCommandChanges(snapshot, completedNativeCommands.map(id => ids.get(id) ?? id))
+              if (claims.length) {
+                const retained = { ...record.notificationClaims }
+                for (const { id, claim } of claims) retained[id] = { ...claim,
+                  initialSignals: [...new Set([...claim.initialSignals, ...claim.sources.map(source => source.path)])], sources: [] }
+                // Native success settles only the signal mutation. Keep every
+                // original Helper request and path for continuing business work.
+                // Empty sources use settlement's existing no-mutation path.
+                record = { ...record, notificationClaims: retained }
+              }
+            }
             catch (error) { this.ctx.logger?.('deepseek-servant').warn('Successful command receipt cleanup was skipped; the original role completion continues.', error) }
           }
           return { write: true, value: record, result: true, ...(changes.length ? { changes } : {}) }
@@ -4398,7 +4419,7 @@ executionId: binding.executionId, run: persistContext,
     const unresolved = new Set<string>()
     for (const event of events) {
       if (event.seq >= actual.session.inheritedEventCount) {
-        if (helperCommands && event.type === 'turn/start') completed = new NativeCommandSuccess(new Set(['dss_record']))
+        if (helperCommands && event.type === 'turn/start') completed = new NativeCommandSuccess(new Set(['dss_record', 'dss_claim']))
         completed?.accept(event)
       }
       if (event.type === 'tool/call') unresolved.add(event.data.callId)
@@ -4416,6 +4437,11 @@ executionId: binding.executionId, run: persistContext,
       await this.ctx.sessions.flush(actual.session)
       nativeFlushed = true
       await retirePhysicalPublicationsFromEvents(this.files, record.identity.executionId, events)
+    }
+    if (record.identity.role === 'Helper' && !nativeFlushed
+      && completed?.callIds().some(id => record.notificationClaims?.[record.sessionId + ':' + id])) {
+      await this.ctx.sessions.flush(actual.session)
+      nativeFlushed = true
     }
     await this.saveRole({
       ...record,
@@ -4458,7 +4484,7 @@ executionId: binding.executionId, run: persistContext,
     let completed: NativeCommandSuccess | undefined
     const reportEvidence = this.records instanceof GitAuthorityStore && record.identity.role === 'Helper'
       ? (event: import('@deepseek-ai/dsh-session').SessionEvent) => {
-        if (event.type === 'turn/start') completed = new NativeCommandSuccess(new Set(['dss_record']))
+        if (event.type === 'turn/start') completed = new NativeCommandSuccess(new Set(['dss_record', 'dss_claim']))
         completed?.accept(event)
       } : undefined
     const capture = await sessions.capture(record.sessionId, reportEvidence)
