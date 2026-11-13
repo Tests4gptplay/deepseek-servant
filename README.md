@@ -12,9 +12,13 @@
 
 ## 技术评述与项目实践 / Review & project practice
 
-**摘要：** CAH 与 DSS 延续同一套面向长期工作的 Agent 架构：任务持续存在，执行者可以接替，解决方法能够根据实际证据调整。评述结合 CAH 多日任务、Viewer 技术路线转换与 DSS 原生实现，介绍**任务连续性、路线纠偏、跨宿主迁移**的优势，并与相关论文及持续型助理产品对照。
+**摘要：** 当 AI 从回答问题走向承担工程、研究和创作任务，系统需要解决的问题也随之变化：工作怎样跨越会话边界，成果怎样被后继执行者继承，遇到中断怎样恢复，原有方案失效后怎样重新选择路线。
 
-**[阅读全文：CAH 与 DeepSeek Servant——面向长期工作的 Agent 系统评述](docs/reviews/CAH-DSS-REVIEW.zh-CN.md)**
+[Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness) 与 [DeepSeek Servant（DSS）](https://github.com/Tests4gptplay/deepseek-servant) 围绕这些问题形成了一条持续演进的技术路线：以持久任务为中心，将模型推理、角色协作、工作记忆、状态调度与执行环境分离。CAH 提供了长期任务和技术路线调整的实际案例，DSS 则将同一架构原则迁移到 DeepSeek Harness 的原生 Agent 环境。
+
+两者共同探索的是：**让执行者可以更换、工作方法可以调整，而用户目标、已有成果和后续责任保持连续。**
+
+**[阅读全文：让 AI 持续完成工作——CAH / DSS 的技术框架与工程实践](docs/reviews/CAH-DSS-TECHNICAL-FRAMEWORK.zh-CN.md)**
 
 ## 独立实践与架构趋同 / Independent work, convergent architecture
 
