@@ -3451,6 +3451,11 @@ executionId: binding.executionId, run: persistContext,
         this.startRestoration(); return
       }
       const helperFault = fault.identity?.role === 'Helper' || fault.role === 'Helper'
+      // Queue/publication failures already name their exact original request.
+      // A stopped predecessor is not the owner of a replacement's admission.
+      // The same catch also covers post-send writes: do not infer delivery.
+      const admissionWakeId = helperFault && !fault.identity && typeof fault.diagnosticContext?.wakeId === 'string'
+        ? fault.diagnosticContext.wakeId : undefined
       const exactDiagnostic = typeof fault.diagnosticContext?.roleAuthorityContent === 'string'
         || typeof fault.diagnosticContext?.hostRestorationCommandId === 'string'
       const matches = (wake: RoleWake) => {
@@ -3458,6 +3463,7 @@ executionId: binding.executionId, run: persistContext,
         // Publish its ordinary Helper signal so a busy Helper can claim it
         // after the current work, or Host can wake the idle Helper normally.
         if ([...this.safetyEpisodes.values()].some(value => value.helperWakeId === wake?.id && value.fault.id !== fault.id)) return false
+        if (admissionWakeId) return wake?.role === 'Helper' && wake.id === admissionWakeId
         const context = wake?.context, identity = ((context?.identity ?? context?.target) as WorkIdentity | undefined);
         if (fault.admissionTimeout) return wake?.role === 'Helper' && wake.id === (helperFault ? fault.admissionTimeout.context.wakeId : fault.admissionTimeout.helperWakeId)
         if (exactDiagnostic)
@@ -3467,9 +3473,10 @@ executionId: binding.executionId, run: persistContext,
       };
       const active = [...this.roleRecords.values()].find((record) => record.identity.role === 'Helper' && (helperFault ? (!fault.identity || record.identity.workId === fault.identity.workId && record.identity.executionId === fault.identity.executionId)
         && !!(record.delivery?.request ?? record.lastWake)
+        && (!admissionWakeId || (record.delivery?.request ?? record.lastWake)?.id === admissionWakeId)
         && (!fault.admissionTimeout || (record.delivery?.request ?? record.lastWake)?.id === fault.admissionTimeout.context.wakeId) : this.active(record) && matches(record.delivery?.request ?? record.lastWake!)));
       const waiting = active ? undefined : (await this.records.list<WakeRecord>(this.prefix + 'wakes/')).find(row =>
-        (!row.value.delivered || exactDiagnostic) && matches(row.value.request))
+        (!row.value.delivered || exactDiagnostic || !!admissionWakeId) && matches(row.value.request))
       if (helperFault && !active && !waiting) throw new Error('Original Helper is unavailable for diagnostic delivery; preserve its existing recovery responsibility.')
       const priorTimeout = fault.admissionTimeout && !active && !waiting
         ? await this.records.get<WakeRecord>(this.prefix + 'wakes/' + hash(fault.admissionTimeout.helperWakeId)) : undefined
