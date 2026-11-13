@@ -26,36 +26,30 @@ DSS [v0.2.0 (2026-10-26)](https://github.com/Tests4gptplay/deepseek-servant/rele
 
 The two independently developed projects show **architectural convergence** in separating interaction from execution, persisting task state and recovering interrupted work. DSS's [0.5.0-rc.2 test release](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.0-rc.2) follows its own Local/Git collaboration path with six native roles; the Super-agent prototype centers on GitHub/Feishu events and Ticket/Executor. Public [CAH run records](https://github.com/Tests4gptplay/chat-agent-harness-records) include a [Helper recovery and Planner replanning case](https://github.com/Tests4gptplay/chat-agent-harness-records/blob/76646cc709375b1d8d262d809d76b3156698e796/showcase-observer/world-execute-chatgpt-20261017/backfills/2026-10-19T10-05Z-helper-image-replanning.md).
 
-## 安装测试版 RC2
+## 安装
 
-在 DSH 的 **插件 → 添加插件 → 包名或地址** 输入固定来源：
+下载插件 TGZ 后，在运行 DSH 的电脑上保留该文件。在 **插件 → 添加插件 → 包名或地址** 中填写其完整绝对路径，无需解压。安装后启用插件，按宿主提示重启。
 
-```text
-github:Tests4gptplay/deepseek-servant#v0.5.0-rc.2
-```
+**升级与资料保留：** 先正常停止 DSS 执行并保留原数据备份。若宿主提示已安装，先卸载插件条目，再从 TGZ 安装。保留 DSH 数据目录、Local 记录目录及任务工作区，不手工删除记录或数据。Desktop 需要时完整退出托盘进程后再打开；升级后检查设置、对话、任务记录与成果可读取。
 
-[RC2 Release](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.0-rc.2) 提供备用安装包 [deepseek-servant-0.5.0-rc.2.tgz](https://github.com/Tests4gptplay/deepseek-servant/releases/download/v0.5.0-rc.2/deepseek-servant-0.5.0-rc.2.tgz)。可将该下载地址填入同一个输入框，或下载后填写运行 DSH 的电脑上文件的完整绝对路径，无需解压。安装后启用插件。
-
-包内版本显示 **0.5.0**，本测试候选由固定标签 **v0.5.0-rc.2** 标识。RC1 同样显示 0.5.0，升级时应核对安装来源变为 RC2。
-
-**升级：** 先停止 DSS 任务并保留原数据。填写上面的 RC2 来源；若宿主提示已安装，先在插件管理中卸载该插件条目，再安装 RC2。保留 DSH 数据目录、Local 库及任务工作区，不执行记录清理或手工删除数据。按宿主提示重启；Desktop 需要时完整退出托盘进程再打开。升级后检查原设置、对话、任务记录与成果可读取。
-
-**Web：** 在运行服务的环境停止对应 profile 后执行，再重新启动该 profile：
+**Web：** 先停止对应 profile，在运行该服务的环境执行，之后重启：
 
 ```sh
-dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.5.0-rc.2'
+dsh plugin --profile web add '/absolute/path/deepseek-servant-0.5.0.tgz'
 ```
 
-使用 Release 资产时，将命令中的来源换成对应 TGZ 下载地址。Desktop 与 Web 分别管理安装。启用后从侧栏打开 DeepSeek Servant，详见[使用说明](docs/USAGE.md)。模型提供者与工具权限由 DSH 管理。
+将示例替换为安装包在运行 DSH 的电脑上的实际绝对路径。Desktop 与 Web 分别管理安装。模型提供者与工具权限仍由 DSH 管理。
+
+Git 模式需要 Python、Dulwich、urllib3 与已授权的 GitHub CLI；插件不会静默安装或磁盘回退。请先按 [安装与依赖](docs/INSTALLATION.md) 配置虚拟环境的完整路径。Local 模式不启动 Git helper。
 
 ## 统一框架能力
 
 - **六类原生角色**：Foreground 交流需求，Organizer 分派与总验收，Planner 规划与成员验收，Worker 执行，Recorder 整理长期记录与技能，Helper 协助恢复。角色使用 DSH 原生 Agent、Session、工具和 Jobs。
-- **Local / Git**：Local 使用 SQLite 文件库；Git 通过 GitHub API 读写私有协作仓库。前台访问与本端后台参与分别管理。
+- **Local / Git**：Local 将任务资料和长期记录分类保存在所选本机目录；Git 统一以 Dulwich 常驻内存后端通过标准 Git HTTPS 协议读写私有协作仓库，连接身份与显式成员管理保留必要的平台 API。前台访问与本端后台参与分别管理。
 - **持续对话**：Foreground 每轮完成后使用新会话接续，带入最近六个完整对话往返原文；历史支持上滚和日期定位；AI 可检索原文并按字符分页读取长文。
-- **成果与知识**：查看任务结果、下载已保存附件，读取旧任务完整原记录、偏好及项目事实；技能支持候选编辑与停用，并保留来源和版本。
-- **记录管理**：Local 分别提供任务历史、前台对话和工作规划记录的明确清理操作；记录搬家核验原生执行停止、复制结果和原存储身份，保留任务与会话关联。
-- **长期归档**：Recorder 编写记录，Cleaner 核对原资料与保留成果后清理临时文件；结果引用与成果附件继续可用。
+- **成果与知识**：查看任务结果、下载已保存附件，读取旧任务完整原记录、偏好及项目事实；技能正文可直接编辑保存，支持停用，并保留已有来源和历史资料。
+- **记录管理**：Local 提供任务历史、前台对话、工作规划和故障记录的查看与明确清理操作；记录搬家保留原件及任务、会话关联。
+- **长期归档**：总任务完成后，Recorder 整理需要保留的记录，Cleaner 清理该任务的临时工作目录；子任务随总任务统一收尾，长期成果与独立工作区继续保留。
 
 ## 开始使用
 
@@ -63,7 +57,7 @@ dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.5.0-rc.2'
 
 模型提供者、工具及工作区权限由 DSH 管理。Git 仓库内容对获授权的协作者共享，请选用适合协作范围的仓库。
 
-[使用说明](docs/USAGE.md) · [Git 设置](PRIVATE_GIT.md) · [数据保留](RETENTION.md) · [实现与构建](IMPLEMENTATION.md) · [开发验证](docs/TESTING.md) · [版本历史](CHANGELOG.md)
+[使用说明](docs/USAGE.md) · [Git 设置](PRIVATE_GIT.md) · [数据保留](RETENTION.md)
 
 ## 来源与开源许可
 

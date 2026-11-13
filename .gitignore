@@ -11,3 +11,9 @@ coverage/
 validation/
 tsconfig.validation.json
 .test-tmp/
+
+# Runtime helpers emitted by the package build.
+!lib/client.css
+!lib/dulwich-helper.py
+!lib/native-cleaner/
+!lib/native-cleaner/*.mjs

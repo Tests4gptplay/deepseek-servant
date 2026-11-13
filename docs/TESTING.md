@@ -1,66 +1,74 @@
-# Tests and reproducibility
+# Current-design validation
 
-Run tests from a source checkout with its declared dependencies installed.
-Record the source commit, Node and Host dependency versions, and package SHA-256
-with release test results.
+The accumulated legacy suites, assertions and fixtures are retired. They are not
+acceptance criteria, must not drive product behavior, and must not be restored as
+compatibility requirements. Historical evidence remains preserved outside ordinary product APIs for traceability.
+The narrowly scoped frozen v44 producer under scripts/test-support/historical-v44
+only constructs real old SQL/WAL inputs for the one-time read-only migration
+regressions. Its original hashes are verified; it does not define current behavior.
 
-## Commands
+## Establish the expected behavior first
+
+For each current validation case, record the applicable current design and user
+correction, the real production entrypoint, the triggering inputs, and the
+observable outcome. Do not infer intended behavior from a prior test result.
+A synthetic scenario demonstrates its own conditions; distinguish it from a
+real-device observation. Do not add a production mechanism merely to satisfy a
+fixture or reduce normal-path performance to cover an unreachable scenario.
+
+## Source checks and delivery
+
+The source checkout currently exposes this check:
 
 ```sh
 npm run typecheck
-npm test
-npm run build
-npm run test:package
 ```
 
-## Current implementation
+Create focused validation from the current source and current requirements.
+Record the exact source inventory SHA-256 and dependency versions. Distinguish
+source-level checks, physical Local operations, old SQL read-only migration,
+controlled native execution, actual Git
+transport, and user-device/end-to-end testing. Never add historical counts to a
+current candidate's results or describe an unrun stage as passed.
 
-`npm test` runs the current suites listed in `scripts/test-suites.mjs`.
-The runner checks for missing, duplicate and unclassified suites before compilation.
-The suites cover:
+Preserve the exact editable source and its validation evidence in the destination
+authorized for the current work. A later source edit invalidates the affected
+results and requires a new source checkpoint and rerun of those cases. Saving
+source, testing, building, publishing and deployment are separate outcomes;
+report which actions were actually performed and authorized.
 
-- Local SQLite and native JSON storage, persistence, reopening and migration.
-- Git repository operations, concurrent updates, cancellation, account and scope
-  changes, message identity and acknowledgement recovery.
-- Role dispatch, native execution admission and stopping, task controls and cleanup.
-- Complete conversation text, history navigation, Foreground continuity, record
-  export, preference and project-fact discovery, and skill operations.
-- Record relocation, retained artifact bytes and references, and cleanup boundaries.
+## Tests using the actual Host SDK
 
-`native-model-selection` mounts the official Agent loop, default-model service and
-system-prompt registry for all six roles. It checks Auto and explicit model selection,
-including selection before persona rendering. Its controlled adapter and JSONL
-backend exercise persisted selection across resume and changes to provider defaults.
-The test adapter retains its upstream MIT notice and is excluded from installation
-packages.
+The following checks load the real Cordis, Storage, Domain and JSON backend from
+an explicitly selected DSH Host dependency tree:
 
-Tests using official-service compositions and controlled model responses exercise
-role handoff, rework, pause/resume, graceful shutdown/restart and artifact readback.
-Real-provider tasks, browser interaction, operating-system termination and
-collaboration between different real accounts are separate acceptance scenarios.
+- `scripts/validate-local-record-concurrency.mjs`
+- `scripts/validate-record-entry-isolation.mjs`
+- `scripts/validate-upgrade-record-categories.mjs`
+- `scripts/validate-physical-record-move.mjs`
+- `scripts/validate-local-upgrade-relocation.mjs`
 
-## Historical implementation
+Set `DSS_SDK_HOST_ROOT` to the absolute Host folder containing `node_modules`,
+then run each script with Node. The shared support under `scripts/test-support`
+records the loaded package versions and source hashes. It does not download
+packages or silently replace the SDK with test doubles. The SDK itself is not
+included in the source archive. Missing dependencies are an unrun check, not a
+pass or a reason to weaken assertions. These cloud filesystem/SDK checks do not
+replace full type checking, a complete Host/model run, or Windows verification.
 
-```sh
-node scripts/test-historical.mjs
-```
+The focused Local upgrade relocation check covers 118 assertions and three
+deliberate subprocess exits, including owned/custom directory layouts, exact-key
+relocation and restart recovery without global technical-record scans. Its
+non-SDK `mdast-util-from-markdown` import has an explicit fail-if-used boundary:
+the covered scenarios do not invoke Markdown parsing, and any parser call throws
+instead of returning fabricated output. This result does not validate Markdown
+parsing; that coverage requires the actual parser dependency.
 
-This command runs the baseline commit named in `scripts/test-suites.mjs`, using that
-commit's source, prompts, tests and runner in a separate tree. The baseline must be
-available locally; CI checkout uses `fetch-depth: 0`.
+## Necessary coverage for changed behavior
 
-The historical run reuses the checkout's installed `node_modules`. Record its
-dependency versions and results separately from the current implementation.
-
-## Package and installation checks
-
-`npm run test:package` builds and packs offline. It verifies the explicit production
-file list, regular-file entries, compiled bundle bytes, Host module import and
-configuration schema, and client registration envelope. Host import uses the
-checkout's installed dependencies; client registration checks capture the factory
-without executing it.
-
-Installation acceptance uses the final archive and fixed Git tag with the official
-DSH installer. Check installed file hashes, plugin enablement, restart behavior,
-and preservation of existing settings, conversations, tasks and artifacts. Record
-the actual Host version, platform and installation source with each result.
+Use the actual implementation and fresh data. Cover the changed successful path,
+repeated requests and relevant concurrent/interrupted paths. Verify that writes
+preserve existing user content, that Git authority remains on Git, and that true
+native stop or unresolved write outcomes are neither fabricated nor discarded.
+Report exact limitations and unresolved decisions without turning them into new
+business admission rules.

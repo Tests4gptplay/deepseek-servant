@@ -15,7 +15,6 @@ export function streamProgress(frame: AssistantStreamFrame): DshProgress['kind']
   const chunk = frame.chunk
   if (chunk.type === 'text-delta' && chunk.text.length) return 'model-text'
   if (chunk.type === 'reasoning-delta' && chunk.text.length) return 'reasoning'
-  if (chunk.type === 'tool-call-delta' && (chunk.argumentsDelta.length || chunk.name?.length)) return 'tool-progress'
 }
 
 /** Keep only live-job counters/progress lines, never the output ring or its payloads. */
@@ -53,8 +52,8 @@ export function observeDshProgress(agent: Agent, listener: (event: DshProgress) 
     const kind = streamProgress(event.frame)
     if (kind) listener({ kind, source: 'assistant-stream', observedAt: now() })
   })
-  const tool = agent.ctx.on('tools/result', exec => {
-    if (exec.agent === agent) listener({ kind: 'tool-progress', source: 'tools/result', observedAt: now() })
+  const tool = agent.ctx.on('tools/result', (exec, result) => {
+    if (exec.agent === agent && !result.isError) listener({ kind: 'tool-progress', source: 'tools/result', observedAt: now() })
     return undefined
   })
   const jobs = registry?.events.subscribe({ owner: agent.id }, event => {

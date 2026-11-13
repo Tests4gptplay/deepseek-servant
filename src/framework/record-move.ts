@@ -1,17 +1,21 @@
+import { RecordMoveNotStartedError } from './client-error.js'
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import type { FrameworkClientSettings } from './client-contracts.js'
 import { lstat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { isAbsolute, join, relative, sep } from 'node:path'
 import type { StoragePort } from '../contracts/ports.js'
 import { LocalLocationRegistry, canonicalLocalLocation as canonical } from './local-location.js'
-import { localRecordFingerprint, prepareLocalRecordCopy } from './maintenance.js'
+import { localRecordFingerprint, prepareLocalRecordCopy, type LocalRecordBackend } from './maintenance.js'
+import type { RecordTreeCopyState } from './record-tree-copy.js'
+import { prepareLocalUpgradeRelocation, projectLocalUpgradeRelocation, applyLocalUpgradeRelocation, type LocalUpgradeRelocation } from './local-upgrade-relocation.js'
 
 export const recordMoveKey = 'framework/record-moves'
 export interface RecordMoveRequest {
   sourceRecords: string
   targetRecords: string
   sourceLocal?: string
+  localBackend?: LocalRecordBackend
   scope?: string
   settingsBefore: { revision: string; settings: FrameworkClientSettings }
   nextSettingsRevision: string
@@ -21,12 +25,16 @@ export interface RecordMoveReceipt extends RecordMoveRequest {
   targetLocal?: string
   localKind: 'owned' | 'custom' | 'none'
   fingerprint?: string
+  localCopy?: RecordTreeCopyState
+  upgradeRelocation?: LocalUpgradeRelocation
+  upgradeRelocated?: true
   phase: 'prepared' | 'published' | 'reopening' | 'applied'
   settingsAfter: { revision: string; settings: FrameworkClientSettings }
 }
 export interface RecordMovePhysicalStore {
   storageView(): { directory: string }
-  moveRecords(target: string, expected: string, signal: AbortSignal, verifyPublished?: (directory: string) => Promise<void>): Promise<{ directory: string }>
+  moveRecords(target: string, expected: string, signal: AbortSignal, verifyPublished?: (directory: string) => Promise<void>, commandId?: string): Promise<{ directory: string }>
+  recordMoveCopy?(commandId: string): RecordTreeCopyState | undefined | Promise<RecordTreeCopyState | undefined>
 }
 export interface RecordMoveLifecycle {
   /** Must confirm all affected native producers stopped before resolving. */
@@ -46,11 +54,23 @@ async function exists(path: string): Promise<boolean> {
   try { await lstat(path); return true } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error }
 }
 const equalRequest = (a: RecordMoveRequest, b: RecordMoveRequest) => a.sourceRecords === b.sourceRecords && a.targetRecords === b.targetRecords
-  && a.sourceLocal === b.sourceLocal && a.scope === b.scope && isDeepStrictEqual(a.settingsBefore, b.settingsBefore) && a.nextSettingsRevision === b.nextSettingsRevision
+  && a.sourceLocal === b.sourceLocal && (a.localBackend ?? 'sqlite') === (b.localBackend ?? 'sqlite') && a.scope === b.scope && isDeepStrictEqual(a.settingsBefore, b.settingsBefore) && a.nextSettingsRevision === b.nextSettingsRevision
+/** One current applied move supports the existing UI's uncertain retry. A
+ * later applied move replaces it; copy inventories end before new writers run. */
+function currentReceipts(receipts: RecordMoveReceipt[]): RecordMoveReceipt[] {
+  const latest = receipts.filter(receipt => receipt.phase === 'applied').at(-1)
+  return receipts.filter(receipt => receipt.phase !== 'applied' || receipt === latest).map(receipt => {
+    if (receipt.phase !== 'reopening' && receipt.phase !== 'applied') return receipt
+    const { localCopy: _finishedCopy, ...current } = receipt
+    return current
+  })
+}
 const queues = new WeakMap<StoragePort, Promise<unknown>>()
+const inside = (parent: string, child: string) => { const path = relative(parent, child); return path === '' || !isAbsolute(path) && path !== '..' && !path.startsWith('..' + sep) }
 
 /** Coordinates the physical store adapter and explicit Local scope binding.
- * It never rewrites role/session/operation payloads or copies native Host data.
+ * It never rewrites business/session payloads or copies native Host data. The
+ * exact one-time upgrade's location/inode metadata follows this verified move.
  */
 export class FrameworkRecordMove {
   private readonly locations: LocalLocationRegistry
@@ -69,10 +89,10 @@ export class FrameworkRecordMove {
     return structuredClone(value.receipts)
   }
   private async save(receipts: RecordMoveReceipt[], commandId: string): Promise<void> {
-    try { await this.storage.set(recordMoveKey, { version: 1, receipts: structuredClone(receipts) }) }
+    try { await this.storage.set(recordMoveKey, { version: 1, receipts: structuredClone(currentReceipts(receipts)) }) }
     catch (error) { throw new RecordMoveOutcomeUnknownError(commandId, error) }
   }
-  async receipt(commandId: string): Promise<RecordMoveReceipt | undefined> { return (await this.receipts()).find(item => item.commandId === commandId) }
+  async receipt(commandId: string): Promise<RecordMoveReceipt | undefined> { return currentReceipts(await this.receipts()).find(item => item.commandId === commandId) }
   async pendingReceipt(): Promise<RecordMoveReceipt | undefined> {
     const pending = (await this.receipts()).filter(item => item.phase !== 'applied')
     if (pending.length > 1) throw new Error('Multiple unresolved record moves require inspection.')
@@ -89,13 +109,20 @@ export class FrameworkRecordMove {
         return this.advance(receipts, prior, signal)
       }
       if (!commandId || !request.settingsBefore?.revision || !request.nextSettingsRevision || request.sourceRecords === request.targetRecords
-        || Boolean(request.sourceLocal) !== Boolean(request.scope)) throw new Error('An explicit record move requires its original settings and Local scope identity.')
+        || Boolean(request.sourceLocal) !== Boolean(request.scope)) throw new RecordMoveNotStartedError('An explicit record move requires its original settings and Local scope identity.')
       if (receipts.some(item => item.phase !== 'applied')) throw new Error('Resolve the existing record move before starting another.')
-      if (await canonical(this.physical.storageView().directory) !== request.sourceRecords) throw new Error('Active record storage changed before preparing the move.')
+      if (await canonical(this.physical.storageView().directory) !== request.sourceRecords) throw new RecordMoveNotStartedError('Active record storage changed before preparing the move.')
       const localKind = !request.sourceLocal ? 'none' : request.sourceLocal === join(request.sourceRecords, 'deepseek_servant', 'framework') ? 'owned' : 'custom'
       const targetLocal = localKind === 'none' ? undefined : localKind === 'owned' ? join(request.targetRecords, 'deepseek_servant', 'framework')
         : join(request.targetRecords, 'framework-local-' + createHash('sha256').update(request.scope!).digest('hex'))
-      if (targetLocal && await exists(join(targetLocal, 'dss-files.sqlite'))) throw new Error('Move target already has Local records without this prepared command.')
+      const sourceTree = join(request.sourceRecords, 'deepseek_servant'), targetTree = join(request.targetRecords, 'deepseek_servant')
+      if (inside(sourceTree, targetTree) || inside(targetTree, sourceTree)
+        || request.sourceLocal && targetLocal && (inside(request.sourceLocal, targetLocal) || inside(targetLocal, request.sourceLocal)))
+        throw new RecordMoveNotStartedError('Record move source and destination trees must not overlap.')
+      if (request.localBackend === 'physical' && request.sourceLocal && inside(request.sourceLocal, sourceTree))
+        throw new RecordMoveNotStartedError('The selected Local record tree also contains the technical record root; separate these locations before moving them.')
+      if (targetLocal && await exists(request.localBackend === 'physical' ? targetLocal : join(targetLocal, 'dss-files.sqlite')))
+        throw new RecordMoveNotStartedError('Move target already has Local records without this prepared command.')
       const configuredDefault = request.settingsBefore.settings.localDirectory
         && await canonical(request.settingsBefore.settings.localDirectory) === join(request.sourceRecords, 'deepseek_servant', 'framework')
       const localDirectory = targetLocal ?? (configuredDefault ? join(request.targetRecords, 'deepseek_servant', 'framework') : request.settingsBefore.settings.localDirectory)
@@ -109,7 +136,16 @@ export class FrameworkRecordMove {
     return this.serial(async () => {
       const receipts = await this.receipts(), pending = receipts.filter(item => item.phase !== 'applied')
       if (pending.length > 1) throw new Error('Multiple unresolved record moves require inspection.')
-      return pending[0] ? this.advance(receipts, pending[0], signal) : undefined
+      if (pending[0]) return this.advance(receipts, pending[0], signal)
+      // This existing startup path also retires already completed legacy detail.
+      // A failed write is reported for retry; optional housekeeping never
+      // becomes an admission condition for ordinary records.
+      try {
+        const current = currentReceipts(receipts)
+        if (!isDeepStrictEqual(current, receipts)) await this.save(current, current[0]!.commandId)
+        await this.locations.compactCompleted()
+      } catch (error) { console.error('deepseek-servant completed record move maintenance', error) }
+      return undefined
     })
   }
   private async advance(receipts: RecordMoveReceipt[], receipt: RecordMoveReceipt, signal: AbortSignal): Promise<RecordMoveReceipt> {
@@ -119,22 +155,29 @@ export class FrameworkRecordMove {
     if (actual !== receipt.sourceRecords && actual !== receipt.targetRecords) throw new RecordMoveOutcomeUnknownError(receipt.commandId, new Error('Active root is neither retained move location.'))
     const verify = async (directory: string) => {
       if (await canonical(directory) !== receipt.targetRecords) throw new Error('Published record destination differs from the prepared move.')
-      if (receipt.targetLocal && (!receipt.fingerprint || await localRecordFingerprint(receipt.targetLocal) !== receipt.fingerprint)) throw new Error('Published Local records differ from the frozen source fingerprint.')
+      if (receipt.targetLocal && (!receipt.fingerprint || await localRecordFingerprint(receipt.targetLocal, receipt.localBackend, signal) !== receipt.fingerprint)) throw new Error('Published Local records differ from the frozen source fingerprint.')
     }
+    let verifiedByMove = false
     if (actual === receipt.sourceRecords) {
       if (receipt.phase !== 'prepared') throw new RecordMoveOutcomeUnknownError(receipt.commandId, new Error('Published receipt disagrees with active root.'))
       await this.lifecycle.quiesce(structuredClone(receipt), signal)
       signal.throwIfAborted()
       if (receipt.sourceLocal) {
-        const fingerprint = await localRecordFingerprint(receipt.sourceLocal)
+        if (receipt.localBackend === 'physical' && !receipt.upgradeRelocation && !receipt.upgradeRelocated) {
+          receipt.upgradeRelocation = await prepareLocalUpgradeRelocation(this.storage, receipt.sourceLocal, receipt.targetLocal!, signal)
+          await this.save(receipts, receipt.commandId)
+        }
+        const fingerprint = await localRecordFingerprint(receipt.sourceLocal, receipt.localBackend, signal)
         if (receipt.fingerprint && receipt.fingerprint !== fingerprint) throw new Error('Original Local records changed after the move fingerprint was frozen.')
         if (!receipt.fingerprint) { receipt.fingerprint = fingerprint; await this.save(receipts, receipt.commandId) }
         const identity = { source: receipt.sourceLocal, target: receipt.targetLocal!, scope: receipt.scope!, fingerprint }
         await this.locations.prepare(receipt.commandId, identity)
         if (receipt.localKind === 'custom') {
-          if (await exists(join(receipt.targetLocal!, 'dss-files.sqlite'))) await verify(receipt.targetRecords)
+          if (receipt.localBackend !== 'physical' && await exists(join(receipt.targetLocal!, 'dss-files.sqlite'))) await verify(receipt.targetRecords)
           else {
-            const copy = await prepareLocalRecordCopy(receipt.sourceLocal, receipt.targetLocal!, signal)
+            const copy = await prepareLocalRecordCopy(receipt.sourceLocal, receipt.targetLocal!, signal, receipt.localBackend, {
+              state: receipt.localCopy, save: async state => { receipt.localCopy = state; await this.save(receipts, receipt.commandId) },
+            })
             try {
               if (copy.fingerprint !== fingerprint) throw new Error('Local records changed while preparing their physical copy.')
               await copy.publish()
@@ -142,23 +185,48 @@ export class FrameworkRecordMove {
           }
         }
       }
-      await this.physical.moveRecords(receipt.targetRecords, receipt.sourceRecords, signal, verify)
+      await this.physical.moveRecords(receipt.targetRecords, receipt.sourceRecords, signal, async directory => {
+        await verify(directory)
+        verifiedByMove = true
+      }, receipt.commandId)
       if (await canonical(this.physical.storageView().directory) !== receipt.targetRecords) throw new RecordMoveOutcomeUnknownError(receipt.commandId, new Error('Physical move did not confirm the active target.'))
     }
     if (receipt.phase !== 'reopening') {
-      await verify(receipt.targetRecords)
+      // Reuse only this call's completed callback, never a prior move's result.
+      if (!verifiedByMove) await verify(receipt.targetRecords)
       if (receipt.sourceLocal) await this.locations.publish(receipt.commandId, { source: receipt.sourceLocal, target: receipt.targetLocal!, scope: receipt.scope!, fingerprint: receipt.fingerprint! })
       if (receipt.phase === 'prepared') { receipt.phase = 'published'; await this.save(receipts, receipt.commandId) }
     } else if (receipt.targetLocal && await this.locations.resolve(receipt.targetLocal) !== receipt.scope) {
       throw new Error('Reopened target no longer owns the published logical scope.')
     }
+    if (receipt.phase !== 'reopening' && receipt.sourceLocal && receipt.localBackend === 'physical' && !receipt.upgradeRelocated) {
+      // A prior accepted move can have published its physical location before
+      // acknowledgement. Its retained original records remain the exact input;
+      // this is continuation of that command, never an ordinary-read fallback.
+      if (!receipt.upgradeRelocation) {
+        receipt.upgradeRelocation = await prepareLocalUpgradeRelocation(this.storage, receipt.sourceLocal, receipt.targetLocal!, signal)
+        await this.save(receipts, receipt.commandId)
+      }
+      const upgrade = receipt.upgradeRelocation
+      if (!upgrade.projected) {
+        const copy = receipt.localKind === 'custom' ? receipt.localCopy : await this.physical.recordMoveCopy?.(receipt.commandId)
+        upgrade.projected = await projectLocalUpgradeRelocation(upgrade, copy, signal)
+        await this.save(receipts, receipt.commandId)
+      }
+      await applyLocalUpgradeRelocation(this.storage, upgrade, signal)
+      // No permanent second metadata manifest. Source keys/original trees stay
+      // retained, and the new exact keys now own their existing responsibility.
+      receipt.upgradeRelocated = true; delete receipt.upgradeRelocation
+      await this.save(receipts, receipt.commandId)
+    }
     await this.lifecycle.applySettings(structuredClone(receipt))
     if (receipt.phase !== 'reopening') {
-      if (receipt.sourceLocal) await this.locations.applied(receipt.commandId)
-      // Persist permission for new writers before reopening: later replay must
-      // not compare their legitimate new records to the original copy digest.
-      receipt.phase = 'reopening'; await this.save(receipts, receipt.commandId)
+      // Persist permission for new writers before retiring the exact location
+      // operation. Cold continuation then uses its published binding directly.
+      receipt.phase = 'reopening'; delete receipt.localCopy
+      await this.save(receipts, receipt.commandId)
     }
+    if (receipt.sourceLocal) await this.locations.applied(receipt.commandId)
     await this.lifecycle.reopen(structuredClone(receipt), signal)
     receipt.phase = 'applied'; await this.save(receipts, receipt.commandId)
     return receipt

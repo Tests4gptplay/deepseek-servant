@@ -1,0 +1,4 @@
+61f1b4ac358eccf850d6b5f96d634d419c78308e3e420e17b79fca558b8f81c8  lib/dulwich-helper.py
+7d7c7cdfd0de344773500fad5e3be8ed01dee1ef6c2b58acd0cb44f08d9a2cbb  python/requirements.txt
+e17db6e0f06d3a70a9a6a6e4e1b85c6dfaa2c7d0154147c798435e333f4b366d  python/licenses/Dulwich-COPYING
+130e3a64d5fdd5d096a752694634a7d9df284469de86e5732100268041e3d686  python/licenses/urllib3-LICENSE.txt

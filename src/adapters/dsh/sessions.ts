@@ -5,6 +5,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { SessionAlreadyOwnedError, SessionPersistenceNotFoundError } from '@deepseek-ai/dsh-session-persistence'
 import type { InboxState, TurnBoundaryProjection } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-session-projection'
+import type { UserQuestionProjectionView } from '@deepseek-ai/dsh-user-questions'
 import type {} from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-workspace'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
@@ -32,6 +33,8 @@ export interface DshSessionInspection {
   queuedInbox: { nextTurn: string[]; nextStep: string[] }
   lastTurn?: { turn: number; closed: boolean; toolCallIds: string[]; reason?: string; abortCause?: string; error?: string }
   unresolvedToolCallIds: string[]
+  /** Existing optional native question projection; no new question ownership. */
+  unansweredQuestionCallIds?: string[]
   /** Durable history hints only. These records never imply surviving OS jobs after restart. */
   jobs: Array<{ id: string; owner: string; kind: string; state: 'registered' | 'completed' | 'killed' | 'failed'; producerReported?: boolean }>
 }
@@ -77,10 +80,11 @@ export class DshSessionReader {
   }
 
   /** Native projection replay only: no Agent ownership, inbox wake, or model request. */
-  async inspect(sessionId: string): Promise<DshSessionInspection> {
+  async inspect(sessionId: string, persistedEvent?: (event: SessionEvent) => void): Promise<DshSessionInspection> {
     const id = SessionId(sessionId)
     const live = this.ctx.sessions.get(id)
-    if (live !== undefined) await this.ctx.sessions.flush(live)
+    const beforeFlush = persistedEvent && live ? live.seq : 0
+    const flushed = live !== undefined ? await this.ctx.sessions.flush(live) : false
     const persistence = this.ctx.get('sessionPersistence')
     if (persistence === undefined) throw new Error('Servant requires DSH Session persistence for inspection.')
     const stat = await persistence.stat(id)
@@ -100,10 +104,14 @@ export class DshSessionReader {
       const boundary = projected?.checkpoint.turnBoundary?.val as TurnBoundaryProjection | undefined
       base.lifecycleKnown = inbox !== undefined && boundary !== undefined
       base.eventCount = events.length
+      const questions = projected?.checkpoint.userQuestions?.val as { questions: UserQuestionProjectionView } | undefined
+      base.unansweredQuestionCallIds = questions?.questions.active.map(question => question.callId)
       if (inbox !== undefined) base.queuedInbox = { nextTurn: inbox['next-turn'].map(message => message.id), nextStep: inbox['next-step'].map(message => message.id) }
       const pendingTools = new Set<string>()
       const jobs = new Map<string, DshSessionInspection['jobs'][number]>()
+      const persistedEnd = live === undefined ? events.length : flushed ? beforeFlush : 0
       for (const event of events) {
+        if (persistedEvent && event.seq >= inherited && event.seq < persistedEnd) persistedEvent(event)
         if (event.type === 'turn/start') base.lastTurn = { turn: event.data.turn, closed: false, toolCallIds: [] }
         if (event.type === 'turn/end') base.lastTurn = {
           turn: event.data.turn, closed: true, reason: event.data.reason.kind,
@@ -190,14 +198,14 @@ export class DshSessionReader {
     } finally { await lease.close() }
   }
 
-  async capture(sessionId: string) {
+  async capture(sessionId: string, persistedEvent?: (event: SessionEvent) => void) {
     const live = this.ctx.sessions.get(SessionId(sessionId))
     if (live) await this.ctx.sessions.flush(live)
     const snapshot = conversationSnapshot(await this.events(sessionId))
     if (snapshot.finished) {
-      const state = await this.inspect(sessionId)
+      const state = await this.inspect(sessionId, persistedEvent)
       snapshot.finished = state.lifecycleKnown && state.queuedInbox.nextTurn.length === 0
-        && state.queuedInbox.nextStep.length === 0 && state.unresolvedToolCallIds.length === 0
+        && state.queuedInbox.nextStep.length === 0 && state.unresolvedToolCallIds.length === 0 && !state.unansweredQuestionCallIds?.length
     }
     return snapshot
   }

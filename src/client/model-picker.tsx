@@ -52,6 +52,7 @@ export function ModelPicker({ value, models, onChange, onRefresh, disabled, labe
     return () => window.removeEventListener('keydown', back, true)
   }, [open, composer, pane])
   const auto = isAutoModel(value)
+  const resolvedAutoHint = autoHint ?? t('model.autoHint')
   const effective = isAutoModel(value) ? followModel ?? models.current : value
   const selectedGroup = models.groups.find(group => group.id === effective?.provider)
   const selectedModel = selectedGroup?.models.find(model => model.id === effective?.model)
@@ -70,7 +71,7 @@ export function ModelPicker({ value, models, onChange, onRefresh, disabled, labe
       items.push({ id: 'effort-default', label: t('model.providerDefault') })
       for (const choice of selectedModel?.reasoning?.efforts ?? []) items.push({ id: 'effort:' + choice.id, label: choice.name })
     } else {
-      items.push({ id: 'auto', label: <span className={css.modelOption}><span>{autoLabel ?? 'Auto'}</span><small>{(autoHint ?? t('model.autoHint'))}</small></span> })
+      items.push({ id: 'auto', label: <span className={css.modelOption}><span>{autoLabel ?? 'Auto'}</span>{resolvedAutoHint && <small>{resolvedAutoHint}</small>}</span> })
       if (!composer && !auto && selectedModel?.reasoning) items.push({ id: 'effort', label: <span className={css.modelMenuRow}><span>{t('model.effort')}</span><span>{effortName ?? t('model.providerDefault')}</span></span> })
       items.push({ type: 'separator', id: 'model-options-divider' })
       for (const group of models.groups) {
@@ -127,7 +128,7 @@ export function ModelPicker({ value, models, onChange, onRefresh, disabled, labe
     getAnchorRect={composer ? () => { const r = trigger.current?.getBoundingClientRect(); return r ? new window.DOMRect(r.x, r.y - 4, r.width, r.height) : null } : undefined}
     listClassName={`${css.modelMenu} ${composer ? css.composerModelMenu : ''}`} items={composer ? [] : items} selectedId={selectedId} onSelect={choose} onClose={() => setOpen(false)}
     anchor={<Button ref={trigger} type="button" variant={composer ? 'ghost' : 'outline'} size={composer ? 'sm' : undefined} disabled={disabled} aria-label={label}
-      aria-expanded={open} aria-haspopup="menu" title={auto ? caption + ' — ' + (autoHint ?? t('model.autoHint')) : composer ? caption : selectedGroup?.name}
+      aria-expanded={open} aria-haspopup="menu" title={auto ? [caption, resolvedAutoHint].filter(Boolean).join(' — ') : composer ? caption : selectedGroup?.name}
       className={`${css.modelTrigger} ${composer ? css.composerModelTrigger : ''}`} onClick={() => { setPane(homePane); setQuery(''); setHighlighted(0); if (!open && models.status !== 'error') void onRefresh(); setOpen(!open) }}>
       {composer && <IconDataOutlineRegular size={16} className={css.modelIcon} />}<span className={css.modelLabel}>{composer ? [auto ? (autoLabel ?? 'Auto') : undefined, modelName].filter(Boolean).join(' · ') || t('model.loading') : caption || t('model.loading')}</span>
       {composer && effortName && <span className={css.modelEffort}>{effortName}</span>}<IconChevronDownOutlineRegular size={14} />

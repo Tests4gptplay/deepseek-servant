@@ -1,5 +1,9 @@
 - insert:
+    - id: deepseek-servant-native-cleaner
+      name: deepseek-servant/cleaner
     - id: deepseek-servant
       name: deepseek-servant
+      inject:
+        - nativeSessionCleanerComposition
       config:
         workerSeats: 2

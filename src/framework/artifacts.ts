@@ -1,9 +1,13 @@
+import { PhysicalLocalFiles } from './physical-local-files.js'
+import { preservePhysicalArtifact } from './physical-artifact-publication.js'
+import { taskCommandReceiptRoot } from './task-command-paths.js'
 import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-fs'
 import { FrameworkTransactions, type CommandOptions } from './command-transactions.js'
 import { filePath, withSnapshot, type FilesSnapshot, type FilesStore } from './transactions.js'
-import { paths } from './task-files.js'
+import { readTaskArchiveIdentity, taskArchiveReadPath } from './task-archive.js'
+import { paths, taskLifecycle, taskArchiveOwnsPath } from './task-files.js'
 
 export interface ArtifactReference {
   path: string
@@ -13,7 +17,7 @@ export interface ArtifactReference {
   bytes: number
 }
 export interface PreserveArtifactInput { taskId: string; sourcePath: string; destinationPath: string; name?: string }
-export interface PreserveArtifactOptions extends CommandOptions { cwd?: string; signal?: AbortSignal }
+export interface PreserveArtifactOptions extends CommandOptions { cwd?: string; signal?: AbortSignal; beforeWrite?: (snapshot: FilesSnapshot) => Promise<void> }
 interface ArtifactManifest extends ArtifactReference { version: 1; taskId: string }
 interface ArtifactCommand { version: 1; requestHash: string; artifact: ArtifactReference }
 const sha256 = (value: string | Uint8Array) => createHash('sha256').update(value).digest('hex')
@@ -35,31 +39,87 @@ export class FrameworkArtifacts {
 
   async preserve(commandId: string, input: PreserveArtifactInput, options: PreserveArtifactOptions = {}): Promise<ArtifactReference> {
     const destination = filePath(input.destinationPath)
-    const archive = paths.archive(input.taskId)
-    if (!destination.startsWith(archive + '/')) throw new Error('An artifact destination must be inside its task archive.')
-    if (destination === archive + '/records.md' || destination === archive + '/retention.json') throw new Error('This archive path is reserved for task records, not artifact bytes.')
     if (!input.sourcePath.trim()) throw new Error('An artifact source path is required.')
     const name = input.name ?? destination.slice(destination.lastIndexOf('/') + 1)
     const request = { taskId: input.taskId, sourcePath: input.sourcePath, destinationPath: destination, name, cwd: options.cwd ?? this.workspace }
     const requestHash = sha256(JSON.stringify(request))
-    const receiptPath = 'technical/artifacts/commands/' + sha256(commandId) + '.json'
-    await this.transactions.run(commandId, request, options, async snapshot => {
+    if (options.taskOwner && options.taskOwner.taskId !== input.taskId) throw new Error('Artifact command belongs to another Task.')
+    const receiptPath = options.taskOwner ? taskCommandReceiptRoot(options.taskOwner) + 'artifact-results/' + sha256(commandId) + '.json'
+      : 'technical/artifacts/commands/' + sha256(commandId) + '.json'
+    if (this.files instanceof PhysicalLocalFiles) return preservePhysicalArtifact(this.files,
+      { commandId, requestHash, taskId: input.taskId, destination, manifestPath: manifestPath(destination), name },
+      async () => {
+        options.signal?.throwIfAborted()
+        const target = await this.ctx.fs.resolve(input.sourcePath, { cwd: request.cwd, signal: options.signal })
+        const before = await this.ctx.fs.stat(target, options.signal)
+        if (!before || before.type !== 'file') throw new Error('Artifact source must be an existing regular file.')
+        return {
+          // DSH FsInfo requires an opaque string version; size is optional.
+          // Store/compare the token verbatim, never derive a native path or
+          // freshness fields from the target or the backend's version format.
+          version: JSON.stringify([before.version, before.size]),
+          read: async (offset, length) => {
+            options.signal?.throwIfAborted()
+            return this.ctx.fs.readByteRange(target, { offset, length }, options.signal)
+          },
+          verify: async bytes => {
+            const after = await this.ctx.fs.stat(target, options.signal)
+            if (!after || after.type !== 'file' || after.version !== before.version || after.size !== before.size
+              || (after.size !== undefined && after.size !== bytes))
+              throw new Error('Artifact source changed while being captured; no archive was written.')
+            options.signal?.throwIfAborted()
+          },
+        }
+      }, async snapshot => {
+        await options.beforeWrite?.(snapshot)
+        const task = await readTaskArchiveIdentity(this.files, snapshot, input.taskId), archive = paths.archive(task)
+        if (options.taskOwner && taskLifecycle(task) !== taskLifecycle(options.taskOwner)) throw new Error('Artifact command belongs to another Task lifecycle.')
+        if (!destination.startsWith(archive + '/') || !taskArchiveOwnsPath(task, destination)) throw new Error('An artifact destination must be inside its task archive.')
+        if (['records.md', 'retention.json', 'state.json'].some(name => destination === archive + '/' + name || destination.startsWith(archive + '/' + name + '/')))
+          throw new Error('This archive path is reserved for task records, not artifact bytes.')
+        return taskLifecycle(task)
+      }, options.beforeAttempt ?? (() => {}), options.signal)
+    let result: ArtifactReference | undefined, captured: { data: Uint8Array; sha256: string } | undefined
+    // This invocation imports its one successful capture, not a later version
+    // of the native source. Reevaluate current Task/destination facts on a
+    // conflict; their own checks below protect identity and existing contents.
+    await this.transactions.run(commandId, request, { reevaluate: true, ...options, preserveInputs: false,
+      readPlan: { ...options.readPlan, signal: options.signal ?? options.readPlan?.signal, files: [...(options.readPlan?.files ?? []),
+        receiptPath, destination, manifestPath(destination)] } }, async (snapshot, resumedChanges) => {
+      await options.beforeWrite?.(snapshot)
+      const task = await readTaskArchiveIdentity(this.files, snapshot, input.taskId), archive = paths.archive(task)
+      if (options.taskOwner && taskLifecycle(task) !== taskLifecycle(options.taskOwner)) throw new Error('Artifact command belongs to another Task lifecycle.')
+      if (!destination.startsWith(archive + '/') || !taskArchiveOwnsPath(task, destination)) throw new Error('An artifact destination must be inside its task archive.')
+      if (['records.md', 'retention.json', 'state.json'].some(name => destination === archive + '/' + name || destination.startsWith(archive + '/' + name + '/'))) throw new Error('This archive path is reserved for task records, not artifact bytes.')
       // Receipts are in the same commit as the actual bytes. Replays do not touch
       // the source, which can have changed or disappeared since the original call.
       const old = await this.files.read(snapshot, receiptPath)
       if (old !== undefined) {
         const receipt = JSON.parse(old) as ArtifactCommand
         if (receipt.requestHash !== requestHash) throw new Error('Artifact command arguments changed.')
-        await this.readAt(snapshot, receipt.artifact.path)
+        result = receipt.artifact
         return []
       }
-      const data = await this.capture(input.sourcePath, request.cwd, options.signal)
-      const artifact: ArtifactReference = { path: destination, manifestPath: manifestPath(destination), name, sha256: sha256(data), bytes: data.byteLength }
+      if (!captured) {
+        const prior = resumedChanges?.find(change => change.path === destination)
+        if (prior?.bytes !== undefined) {
+          // These are this exact command's own previously prepared outputs,
+          // still held by its unresolved transaction, not a new source read.
+          const manifest = resumedChanges!.find(change => change.path === manifestPath(destination))!
+          captured = { data: prior.bytes, sha256: (JSON.parse(manifest.content!) as ArtifactManifest).sha256 }
+        } else {
+          const data = await this.capture(input.sourcePath, request.cwd, options.signal)
+          captured = { data, sha256: sha256(data) }
+        }
+      }
+      const { data } = captured
+      const artifact: ArtifactReference = { path: destination, manifestPath: manifestPath(destination), name, sha256: captured.sha256, bytes: data.byteLength }
       const existing = await this.files.readBytes(snapshot, destination)
       if (existing !== undefined) {
-        const prior = await this.readAt(snapshot, destination)
+        const prior = await this.readAt(snapshot, destination, existing)
         if (prior.artifact.sha256 !== artifact.sha256 || prior.artifact.name !== name) throw new Error('An archived artifact reference cannot be overwritten with different content or identity.')
       }
+      result = artifact
       const manifest: ArtifactManifest = { version: 1, taskId: input.taskId, ...artifact }
       return [
         { path: destination, bytes: data },
@@ -67,33 +127,50 @@ export class FrameworkArtifacts {
         { path: receiptPath, content: encode({ version: 1, requestHash, artifact } satisfies ArtifactCommand) },
       ]
     })
-    // A successful commit/remote receipt alone is not a successful integrity read.
-    // Always fetch all bytes from authoritative storage before returning a link.
+    if (result) return result
+    // A replay can skip the builder. Recover the saved reference without
+    // recapturing its source or turning the return into a second integrity read.
     return withSnapshot(this.files, async snapshot => {
-      const raw = await this.files.read(snapshot, receiptPath)
-      if (raw === undefined) throw new Error('Committed artifact receipt is missing.')
-      const receipt = JSON.parse(raw) as ArtifactCommand
-      if (receipt.version !== 1 || receipt.requestHash !== requestHash) throw new Error('Artifact receipt does not match the command.')
-      const result = await this.readAt(snapshot, receipt.artifact.path)
-      if (JSON.stringify(result.artifact) !== JSON.stringify(receipt.artifact)) throw new Error('Artifact receipt and manifest disagree.')
-      return result.artifact
+      let raw = await this.files.read(snapshot, receiptPath)
+      if (raw === undefined && options.taskOwner) {
+        // Cross-Host replay already matched the original ordinary command
+        // receipt. Locate only that command's result in this exact lifecycle.
+        const ownerRoot = taskCommandReceiptRoot(options.taskOwner)
+        const lifecycleRoot = ownerRoot.slice(0, ownerRoot.lastIndexOf('/', ownerRoot.length - 2) + 1)
+        const name = sha256(commandId) + '.json'
+        const matches = (await this.files.list(snapshot, lifecycleRoot, { names: [name],
+          pathSegments: [...lifecycleRoot.slice(0, -1).split('/'), null, 'artifact-results', name] }))
+          .filter(entry => /^[a-f0-9]{64}\/artifact-results\/[a-f0-9]{64}\.json$/.test(entry.path.slice(lifecycleRoot.length)))
+        if (matches.length > 1) throw new Error('Artifact command has multiple original result records.')
+        if (matches.length === 1) raw = await this.files.read(snapshot, matches[0]!.path)
+      }
+      if (raw === undefined) throw new Error('Saved artifact reference is missing.')
+      const saved = JSON.parse(raw) as ArtifactCommand
+      if (saved.version !== 1 || saved.requestHash !== requestHash) throw new Error('Artifact command arguments changed.')
+      return saved.artifact
     })
   }
 
-  /** For the download endpoint: returns original bytes only after complete verification. */
+  /** Download current physical bytes; Git verifies its immutable archived object. */
   read(path: string): Promise<{ artifact: ArtifactReference; data: Uint8Array }> {
     return withSnapshot(this.files, snapshot => this.readAt(snapshot, filePath(path)))
   }
 
-  private async readAt(snapshot: FilesSnapshot, path: string): Promise<{ artifact: ArtifactReference; data: Uint8Array }> {
+  private async readAt(snapshot: FilesSnapshot, path: string, capturedBytes?: Uint8Array): Promise<{ artifact: ArtifactReference; data: Uint8Array }> {
     const index = manifestPath(filePath(path)), raw = await this.files.read(snapshot, index)
     if (raw === undefined) throw new Error('Artifact manifest is missing: ' + path)
     const manifest = JSON.parse(raw) as ArtifactManifest
+    const task = await readTaskArchiveIdentity(this.files, snapshot, manifest.taskId)
     if (manifest.version !== 1 || manifest.path !== path || manifest.manifestPath !== index
-      || !path.startsWith(paths.archive(manifest.taskId) + '/') || typeof manifest.name !== 'string'
+      || !(taskArchiveOwnsPath(task, path) || taskArchiveReadPath(task) !== paths.archive(task) && path.startsWith(taskArchiveReadPath(task) + '/')) || typeof manifest.name !== 'string'
       || !Number.isSafeInteger(manifest.bytes) || manifest.bytes < 0 || !/^[a-f0-9]{64}$/.test(manifest.sha256)) throw new Error('Invalid artifact manifest: ' + path)
-    const data = await this.files.readBytes(snapshot, path)
-    if (data === undefined || data.byteLength !== manifest.bytes || sha256(data) !== manifest.sha256) throw new Error('Artifact integrity verification failed: ' + path)
+    // preserve() already read these exact destination bytes at this snapshot.
+    // Reuse that read, but still verify the manifest against their actual hash.
+    const data = capturedBytes ?? await this.files.readBytes(snapshot, path)
+    if (data === undefined) throw new Error('Artifact file is missing: ' + path)
+    if (this.files instanceof PhysicalLocalFiles) return { data,
+      artifact: { path, manifestPath: index, name: manifest.name, sha256: sha256(data), bytes: data.byteLength } }
+    if (data.byteLength !== manifest.bytes || sha256(data) !== manifest.sha256) throw new Error('Artifact integrity verification failed: ' + path)
     const artifact: ArtifactReference = { path, manifestPath: index, name: manifest.name, sha256: manifest.sha256, bytes: manifest.bytes }
     return { artifact, data }
   }
@@ -107,6 +184,11 @@ export class FrameworkArtifacts {
     let offset = 0
     for (;;) {
       signal?.throwIfAborted()
+      // FsInfo.size is the observed byte length when supplied. Keep the first
+      // read even for an empty file so the source's byte-read permission is
+      // checked; after reading nonempty bytes, the final stat below verifies
+      // their count and the source's version/size without another EOF read.
+      if (offset > 0 && before.size !== undefined && offset >= before.size) break
       const chunk = await this.ctx.fs.readByteRange(target, { offset, length: WINDOW }, signal)
       if (chunk.byteLength > WINDOW) throw new Error('Filesystem returned more bytes than the requested window.')
       if (chunk.byteLength === 0) break

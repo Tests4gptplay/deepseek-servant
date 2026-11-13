@@ -1,6 +1,6 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { MessageId, type Message } from '@deepseek-ai/dsh-llm'
-import type { FilesStore } from './transactions.js'
+import type { FilesStore, FilesSnapshot } from './transactions.js'
 import { withSnapshot } from './transactions.js'
 
 /** Structural read face of the native tokenMeter service. Kept optional so a
@@ -42,7 +42,7 @@ export interface RecorderCapacity {
  * cumulative usage remain distinct and never get substituted for one another.
  */
 export function createRecorderCapacity(files: FilesStore) {
-  return async (agent: Agent, input: { taskId: string; paths: string[] }): Promise<RecorderCapacity> => {
+  return async (agent: Agent, input: { taskId: string; paths: string[] }, view?: FilesSnapshot): Promise<RecorderCapacity> => {
     const services = agent.ctx as unknown as { get(name: string): unknown }
     const meter = services.get('tokenMeter') as NativeMeter | undefined
     const projections = services.get('sessionProjections') as NativeProjections | undefined
@@ -52,7 +52,7 @@ export function createRecorderCapacity(files: FilesStore) {
     const pressure = values?.contextPressure as Pressure | undefined
     const usage = values?.tokenUsage as Usage | undefined
     const contextWindow = agent.session.requestContext()?.contextWindow ?? pressure?.contextWindow ?? null
-    return withSnapshot(files, async snapshot => {
+    const inspect = async (snapshot: FilesSnapshot): Promise<RecorderCapacity> => {
       const materials: MaterialCapacity[] = []
       for (const path of new Set(input.paths)) {
         const bytes = await files.readBytes(snapshot, path)
@@ -74,6 +74,9 @@ export function createRecorderCapacity(files: FilesStore) {
           pressureTokens: pressure?.pressureTokens ?? null, projectedTokens: pressure?.projectedTokens ?? null,
           contextWindow, cumulativeUsage: usage ?? null },
       }
-    })
+    }
+    // The role tool lends its already-authorized view; do not reread a reused
+    // filename at a newer revision or release a view owned by the caller.
+    return view ? inspect(view) : withSnapshot(files, inspect)
   }
 }

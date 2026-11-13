@@ -35,14 +35,3 @@ export interface RecordAppend {
   metadata?: Record<string, unknown>
 }
 export interface RecordSummary extends Omit<RecordEntry, 'parts' | 'fingerprint'> {}
-export interface RecordPage {
-  entries: RecordSummary[]
-  nextCursor?: number
-  revision: number
-}
-export interface RecordRead {
-  entry: RecordSummary
-  text: string
-  cursor: number
-  nextCursor?: number
-}

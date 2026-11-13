@@ -6,6 +6,8 @@ export interface StoragePort {
   delete?(key: string): Promise<void>
   /** Actual files in the owned record tree, including serialized wrappers. */
   usageFiles?(): Promise<Array<{ key?: string; path: string; bytes: number }>>
+  /** Exact d19 Local Host control row, read only from its retained native JSON folder. */
+  readLegacyLocalControls?(scope: string): Promise<unknown | undefined>
 }
 
 export interface Clock { now(): string }

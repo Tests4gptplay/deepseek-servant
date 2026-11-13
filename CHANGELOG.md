@@ -2,16 +2,17 @@
 
 当前候选：`0.5.0`（尚未 Release）；历史已发布版：`0.4.1`。安装方式见[安装指南](docs/INSTALLATION.md)。
 
-## 0.5.0 — 候选，尚未发布
+## 0.5.0 — 实现中的候选，尚未发布或最终验收
 
-- Local / Git 统一六角色、原生执行、快照事务及恢复路径。
-- Foreground 完成轮次后换新会话，保留最近六个完整往返原文；补齐最终回复捕获、上滚历史、日期定位和长文搜索/分页。
-- 恢复旧任务完整原记录、项目事实与偏好的可发现读取；Local 支持完整记录导出。
-- Local 提供三类独立手动清理及经核验的记录搬家，保留逻辑存储身份和成果引用。
-- 取消 Task 仅在原生生产者确切停止后允许清历史；回收后旧 Task 不再启动，业务状态不伪装为完成。
-- Recorder 保存/读回与 Cleaner 依据原资料和成果版本核验；附件按真实二进制保存和下载。
+- Local 使用按职责分类的物理文件；Git 保留独立的远端提交与固定读视图。两种模式共享角色端口，不把 Local 多文件操作称为原子事务。
+- Foreground 直接处理短任务，需要协作时使用 P/O 任务路径。现行新消息由 Conversation 进入 Foreground；旧 Direct 信号及已接纳的指定结果交付继续接续，当前插件不创建新的直投 Planner/Worker 信号。
+- 同一总任务树统一收尾，子任务完成仅交接给父任务，不单独启动 Recorder/Cleaner。总任务结束后的 Foreground 与 Recorder 独立推进；固定 Cleaner 按 Recorder 通知删除对应工作目录，不审核技能或长期档案。
+- 原生会话日志回收与任务目录清理分开；关闭会话本身不等于永久退役。Local 同一任务先完成本端原生执行及控制责任的释放再删运行目录；Git 删除提交与各 Host 资源收尾分别推进。
+- Local 聊天保留完整原文、最近六组上下文及历史读取；任务、成果和长期记录沿原端口显示。已有资料的一次性升级保留旧源及未完成接续，不自动删除旧 SQL。
+- Local 附件引用 DSH 桌面选中的原文件路径，不复制成 DSS 分块附件；图片通过宿主原生工具权限链读取。Git 附件保持自己的保存和读取路径。
+- Local 提供任务历史、前台聊天、工作清单/缓存及调试记录的明确手动清理，并适配物理记录目录搬家。原数据保留，搬家不停止 Git 执行。
 
-安装与完整行为说明见 [0.5.0 候选说明](docs/releases/0.5.0.md)。
+上述为当前源码候选的实现范围，不是已发布安装包或整体验收结论。完整构建、原生 DSH 和 Windows 验证及仍未闭合的边界另行核验。当前功能说明见 [使用说明](docs/USAGE.md)；原 v44 所附候选包的历史事实保留在 [历史候选说明](docs/releases/0.5.0.md)。
 
 ## 0.4.1 — 2026-10-30
 
@@ -183,4 +184,4 @@
 
 ## 早期基线
 
-alpha.1–alpha.3 的 Linux 原生运行、16 批任务、技能复用和当时清理结果保留在[实现记录](IMPLEMENTATION.md#历史版本验证结果)及[历史清理数据](RETENTION.md#历史版本实测)。原始架构和旧 Helper 契约保留于 [docs/history](https://github.com/Tests4gptplay/deepseek-servant/blob/d28a4d8538abc966608761bcfd60d568dec11cc9/docs/history/architecture-20261024.md)。
+alpha.1–alpha.3 的 Linux 原生运行、16 批任务、技能复用和当时清理结果保留在[实现记录](https://github.com/Tests4gptplay/deepseek-servant/blob/d28a4d8538abc966608761bcfd60d568dec11cc9/IMPLEMENTATION.md#历史版本验证结果)及[历史清理数据](https://github.com/Tests4gptplay/deepseek-servant/blob/d28a4d8538abc966608761bcfd60d568dec11cc9/RETENTION.md#历史版本实测)。原始架构和旧 Helper 契约保留于 [docs/history](https://github.com/Tests4gptplay/deepseek-servant/blob/d28a4d8538abc966608761bcfd60d568dec11cc9/docs/history/architecture-20261024.md)。

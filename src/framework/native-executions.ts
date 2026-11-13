@@ -9,7 +9,18 @@ import type { ExecutionObservations, ScheduledObservation } from './execution-ob
 
 const nativeRole = { Foreground: 'foreground', Organizer: 'organizer', Planner: 'planner', Worker: 'worker', Recorder: 'recorder', Helper: 'helper' } satisfies Record<WorkIdentity['role'], DshAgentRole>
 interface Opening { identity: WorkIdentity; sessionId: string; controller: AbortController; settled: Promise<void>; result?: StopResult; detail?: string; cancellation?: Promise<StopResult> }
-interface Execution { identity: WorkIdentity; agent: OwnedDshAgent; stopping: boolean; unsettled: Set<string>; unconfirmed?: string; off?: () => void; stopEvidence?: () => void }
+interface Execution {
+  identity: WorkIdentity
+  agent: OwnedDshAgent
+  ready: Promise<void>
+  detached: Promise<void>
+  release: () => void
+  stopping?: Promise<StopResult>
+  unsettled: Set<string>
+  unconfirmed?: string
+  off?: () => void
+  stopEvidence?: () => void
+}
 export type StopResult = { status: 'stopped' } | { status: 'superseded' } | { status: 'unconfirmed'; reason: string; jobs: string[] }
 
 export interface NativeStopEvidence {
@@ -46,6 +57,7 @@ export class NativeExecutions {
   private readonly openings = new Map<string, Opening>()
   private readonly unconfirmedOpenings = new Map<string, Opening>()
   private readonly executions = new Map<string, Execution>()
+  private readonly retired = new Map<string, Map<string, Execution>>()
   private readonly operations = new Map<string, Promise<unknown>>()
   constructor(private readonly ctx: Context, private readonly gateway: DshAgentGateway, private readonly observations: ExecutionObservations,
     private readonly evidence?: NativeStopEvidenceHooks) {}
@@ -59,7 +71,14 @@ export class NativeExecutions {
     return this.serial(identity.workId, async () => {
       const unresolved = this.unconfirmedOpenings.get(identity.workId)
       if (unresolved) throw new Error(unresolved.result?.status === 'unconfirmed' ? unresolved.result.reason : 'Prior native creation stop is unconfirmed.')
-      const current = this.executions.get(identity.workId)
+      let current = this.executions.get(identity.workId)
+      // Ordinary replacement still waits for its owner's actual stop. A committed
+      // business transfer, however, releases this wait without claiming teardown.
+      if (current?.stopping) {
+        await Promise.race([current.stopping, current.detached])
+        current = this.executions.get(identity.workId)
+      }
+      if (this.retired.get(identity.workId)?.has(identity.executionId)) throw new Error('A retired execution identity cannot be reopened.')
       if (current) {
         if (current.unconfirmed) throw new Error(current.unconfirmed)
         if (current.identity.executionId === identity.executionId) return current.agent
@@ -92,7 +111,10 @@ export class NativeExecutions {
         if (this.openings.get(identity.workId) === opening) this.openings.delete(identity.workId)
         finishOpening()
       }
-      const execution: Execution = { identity: { ...identity }, agent, stopping: false, unsettled: new Set() }
+      let finishBinding!: () => void, release!: () => void
+      const ready = new Promise<void>(resolve => { finishBinding = resolve })
+      const detached = new Promise<void>(resolve => { release = resolve })
+      const execution: Execution = { identity: { ...identity }, agent, ready, detached, release, unsettled: new Set() }
       this.executions.set(identity.workId, execution)
       try {
         // Register while the Host is active. Root disposal cannot create new
@@ -114,11 +136,29 @@ export class NativeExecutions {
         const stopped = await this.stopOwned(execution)
         if (stopped.status === 'unconfirmed') throw new AggregateError([error, new Error(stopped.reason)], 'Execution binding and native cleanup failed')
         throw error
-      }
+      } finally { finishBinding() }
       return agent
     })
   }
-  get(workId: string): OwnedDshAgent | undefined { return this.executions.get(workId)?.agent }
+  private owned(workId: string, executionId: string): Execution | undefined {
+    const current = this.executions.get(workId)
+    return current?.identity.executionId === executionId ? current : this.retired.get(workId)?.get(executionId)
+  }
+  get(workId: string, executionId?: string): OwnedDshAgent | undefined {
+    return (executionId === undefined ? this.executions.get(workId) : this.owned(workId, executionId))?.agent
+  }
+  /** Called only after authoritative normal handoff commits. This transfers the
+   * business pointer, not native stop ownership or producer-settlement evidence. */
+  detach(workId: string, executionId: string): boolean {
+    const current = this.executions.get(workId)
+    if (!current || current.identity.executionId !== executionId) return false
+    let retired = this.retired.get(workId)
+    if (!retired) this.retired.set(workId, retired = new Map())
+    retired.set(executionId, current)
+    this.executions.delete(workId)
+    current.release()
+    return true
+  }
   /** Abort only the matching admission out of band, then join its actual factory/cleanup. */
   cancelOpening(workId: string, executionId: string, reason: unknown = new Error('Owned native creation cancelled.')): Promise<StopResult> {
     const opening = this.openings.get(workId) ?? this.unconfirmedOpenings.get(workId)
@@ -132,9 +172,9 @@ export class NativeExecutions {
         opening.controller.abort(reason)
         await opening.settled
         // A factory ignoring cancellation can return a real handle. Keep the
-        // ordinary serial stop responsible for that handle, never drop it.
-        const current = this.executions.get(workId)
-        if (current?.identity.executionId === executionId) return await this.serial(workId, () => this.stopOwned(current))
+        // exact native stop responsible for that handle, never drop it.
+        const current = this.owned(workId, executionId)
+        if (current) return await this.stopExecution(current)
         const result = opening.result ?? { status: 'unconfirmed' as const, reason: 'Native creation cancellation has no quiescence evidence.', jobs: [] }
         if (result.status === 'stopped') {
           if (this.evidence) await evidence('disposed', opening.detail)
@@ -159,16 +199,25 @@ export class NativeExecutions {
         ? this.cancelOpening(workId, executionId) : { status: 'superseded' as const })
       return this.cancelOpening(workId, executionId)
     }
-    return this.serial(workId, async () => {
-      const current = this.executions.get(workId)
-      if (!current || current.identity.executionId !== executionId) return { status: 'superseded' }
-      return this.stopOwned(current, recoveryAction)
-    })
+    const current = this.owned(workId, executionId)
+    if (current) return this.stopExecution(current, recoveryAction)
+    // An open queued just before this stop may not yet have published its handle.
+    // Only lookup joins admission; disposal must never become a work-wide tail.
+    return this.serial(workId, async () => this.owned(workId, executionId)).then(owned =>
+      owned ? this.stopExecution(owned, recoveryAction) : { status: 'superseded' })
+  }
+  private stopExecution(current: Execution, recoveryAction?: ScheduledObservation): Promise<StopResult> {
+    // Teardown is serialized by exact execution, not by the reusable business ID.
+    const result = (current.stopping ?? current.ready).catch(() => {}).then((): Promise<StopResult> | StopResult =>
+      this.owned(current.identity.workId, current.identity.executionId) === current
+        ? this.stopOwned(current, recoveryAction) : { status: 'superseded' })
+    current.stopping = result
+    void result.finally(() => { if (current.stopping === result) current.stopping = undefined }).catch(() => {})
+    return result
   }
   private async stopOwned(current: Execution, recoveryAction?: ScheduledObservation): Promise<StopResult> {
     const { workId, executionId } = current.identity
     if (recoveryAction && !await this.observations.mayApply(recoveryAction)) return { status: 'superseded' }
-    current.stopping = true
     const agent = current.agent.actualAgent
     const unsettled = current.unsettled
     const reconcileHistory = () => {
@@ -215,7 +264,12 @@ export class NativeExecutions {
         return { status: 'unconfirmed', reason: current.unconfirmed, jobs: [...unsettled] }
       }
       await save('disposed')
-      this.executions.delete(workId)
+      if (this.executions.get(workId) === current) this.executions.delete(workId)
+      const retired = this.retired.get(workId)
+      if (retired?.get(executionId) === current) {
+        retired.delete(executionId)
+        if (!retired.size) this.retired.delete(workId)
+      }
       return { status: 'stopped' }
     } catch (error) {
       off()
@@ -224,6 +278,6 @@ export class NativeExecutions {
       // Retain the in-memory handle even if persistence itself failed. Never turn
       // an empty registry or failed acknowledgement into successful replacement.
       return { status: 'unconfirmed', reason: current.unconfirmed, jobs: [...unsettled] }
-    } finally { current.stopEvidence = undefined; off(); current.stopping = false }
+    } finally { current.stopEvidence = undefined; off() }
   }
 }

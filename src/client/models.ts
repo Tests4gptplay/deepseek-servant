@@ -1,3 +1,4 @@
+import { frameworkErrorText } from '../framework/client-error.js'
 import type { ModelCatalog, ModelSelection, ModelProviderGroup, ModelCatalogFailure } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 export interface ServantModels {
@@ -32,7 +33,7 @@ export function createServantModels(catalog: () => Promise<ModelCatalog>) {
         const value = await catalog()
         if (epoch === generation) publish({ current: value.default, groups: value.groups, failures: value.failures, status: 'ready', error: null })
       } catch (error) {
-        if (epoch === generation) publish({ ...state, current: null, status: 'error', error: error instanceof Error ? error.message : String(error) })
+        if (epoch === generation) publish({ ...state, current: null, status: 'error', error: frameworkErrorText(error) })
       }
     })()
     pending = operation
