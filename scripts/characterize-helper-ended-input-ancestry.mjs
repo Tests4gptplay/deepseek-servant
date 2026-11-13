@@ -133,8 +133,12 @@ try{
   const reportIndex=trace.findIndex(e=>e.event==='original-B-attempt-persisted'),replacementIndex=trace.findIndex(e=>e.event==='role-persisted'&&e.record.identity.role==='Helper'&&e.record.identity.executionId===replacement.identity.executionId)
   check('normal startup saves original B attempt before replacing its owning Helper',reportIndex>=0&&reportIndex<replacementIndex,true)
   if(expectRetired){
-   const liveInput=f.rt.roleRecords.get(replacement.identity.workId),inputKey=f.prefix+'wakes/'+hash(liveInput.delivery.request.id),oldFile=f.file(liveInput)
-   check('ended A current native input still exists while that Helper uses it',!!await f.active.connection.records.get(inputKey),true)
+   const liveInput=f.rt.roleRecords.get(replacement.identity.workId),inputKey=f.prefix+'wakes/'+hash(liveInput.delivery.request.id),oldFile=f.file(liveInput),currentIsA=wakeTask(liveInput.delivery.request)===a.identity.taskId
+   if(currentIsA)check('ended A current native input still exists while that Helper uses it',!!await f.active.connection.records.get(inputKey),true)
+   else{
+    check('finished A is not assigned as the replacement native input',wakeTask(liveInput.delivery.request)===a.identity.taskId,false)
+    check('no finished A wake is regenerated after its original consumer retires',(await f.active.connection.records.list(f.prefix+'wakes/')).filter(r=>wakeTask(r.value.request)===a.identity.taskId).length,0)
+   }
    check('B is genuinely unfinished before independent A input retirement',JSON.parse(await read('tasks/'+b.identity.taskId+'.json')).status,'running')
    const originalBBytes=JSON.stringify(await f.active.connection.records.get(originalB.key))
    await f.service.participation({mode:'local',enabled:false})
@@ -142,7 +146,8 @@ try{
    replacement=await ready('Helper')
    await until('exact A input owner native log retired while B remains open',()=>fs.access(oldFile).then(()=>false,e=>{if(e.code==='ENOENT')return true;throw e}))
    await until('exact A input last-consumer cleanup drained',()=>!f.rt.roleRecords.get(replacement.identity.workId)?.nativeRetirements?.some(item=>item.sessionId===liveInput.sessionId))
-   check('ended A exact input retires without awaiting B completion',await f.active.connection.records.get(inputKey),undefined)
+   if(currentIsA)check('ended A exact input retires without awaiting B completion',await f.active.connection.records.get(inputKey),undefined)
+   check('no ended A input remains while B still runs',(await f.active.connection.records.list(f.prefix+'wakes/')).filter(r=>wakeTask(r.value.request)===a.identity.taskId).length,0)
    check('unfinished B original wake and report-attempt bytes are preserved',JSON.stringify(await f.active.connection.records.get(originalB.key)),originalBBytes)
    check('B remains genuinely running after independent A retirement',JSON.parse(await read('tasks/'+b.identity.taskId+'.json')).status,'running')
    mark('A-input-retired-while-B-open',{inputKey,oldFile,originalBKey:originalB.key,replacement})
