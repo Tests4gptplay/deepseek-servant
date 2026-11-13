@@ -1162,7 +1162,9 @@ export class FrameworkRoleRuntime {
           const key = 'helper-retirement:' + id
           const maintenance = this.maintenance ??= new Map()
           let finished = false
-          const finishing = this.finishRetiredHelper(record.identity.workId, retired).then(value => { finished = value })
+          const finishing = this.finishRetiredHelper(record.identity.workId, retired).then(async value => {
+            if (value) finished = await this.retireFinishedHelperInput(retired)
+          })
           maintenance.set(key, finishing)
           try { await finishing }
           finally { if (maintenance.get(key) === finishing) maintenance.delete(key) }
@@ -1245,6 +1247,30 @@ export class FrameworkRoleRuntime {
       if (value?.requester?.workId === workId && value.requester.executionId === retired.executionId) finished = false
     }
     return finished
+  }
+  /** The replaced Helper's last native reader has finished. Retire only an
+   * actually released Task input, before accepting native Session retirement. */
+  private async retireFinishedHelperInput(retired: NonNullable<RoleRecord['nativeRetirements']>[number]): Promise<boolean> {
+    const request = retired.helper?.delivery?.request ?? retired.helper?.lastWake
+    const owner = request && this.helperTaskOwner(request)
+    if (!request || !owner) return true
+    const released = await withSnapshot(this.files, async snapshot => {
+      const task = await readJson<TaskMetadata>(this.files, snapshot, paths.task(owner.taskId))
+      if (task) return taskLifecycle(task) === taskLifecycle(owner) && isTerminalTask(task)
+        && await this.taskRuntimeReleased(owner, snapshot)
+      const history = await readTaskHistoryIdentity(this.files, snapshot, owner.taskId)
+      return !!history && taskLifecycle(history) === taskLifecycle(owner) && isTerminalTask(history)
+    })
+    if (!released) return true
+    const key = this.prefix + 'wakes/' + hash(request.id), wake = await this.records.get<WakeRecord>(key)
+    if (!wake) return true
+    if (JSON.stringify(wake.request) !== JSON.stringify(request)) return false
+    const current = this.roleRecords.get(this.roleKey('Helper'))
+    if (current && (!current.stopped || current.identity.executionId !== retired.executionId)
+      && (current.delivery?.request ?? current.lastWake)?.id === request.id) return false
+    this.taskHelperWakes?.set(request.id, wake)
+    await this.retireReleasedTaskHelperClaims(owner, request.id)
+    return !await this.records.get<WakeRecord>(key)
   }
   /** Native completion or confirmed original-conversation clear owns this
    * exact input after later responsibilities are handed off. */
@@ -6082,7 +6108,7 @@ executionId: binding.executionId, run: persistContext,
   /** Release finished Task inputs, while other Tasks retain their original
    * WakeRecords. A consumed mixed claim is retired whole with its old receipt;
    * no historical request body is edited or synthetic claim is created. */
-  private async retireReleasedTaskHelperClaims(task: Pick<TaskMetadata, 'taskId' | 'lifecycleId'>): Promise<void> {
+  private async retireReleasedTaskHelperClaims(task: Pick<TaskMetadata, 'taskId' | 'lifecycleId'>, nativeFinishedWakeId?: string): Promise<void> {
     const workId = this.roleKey('Helper')
     try { await this.notificationClaimWrites?.get(workId) } catch { return }
     await this.withRoleWrite(workId, async () => {
@@ -6096,8 +6122,11 @@ executionId: binding.executionId, run: persistContext,
         const context = wake.request.context
         const faults = [...wake.safetyFaults ?? [], ...wake.safetyAttempts?.map(attempt => attempt.fault) ?? [],
           ...context?.safetyFault ? [context.safetyFault as SafetyFault] : [], ...context?.safetyFaults as SafetyFault[] ?? []]
-        return wake.delivered && wake.signalsConsumed && !wake.recovery && !wake.safetyParentWakeId
-          && !context?.originalWake && !context?.notificationClaims
+        const finishedNativeInput = wake.request.id === nativeFinishedWakeId
+          && (!wake.recovery || !!wake.recovery.targetExecutionId
+            && wake.recovery.confirmedStoppedExecutions?.includes(wake.recovery.targetExecutionId))
+        return wake.delivered && wake.signalsConsumed && (!wake.recovery || finishedNativeInput) && !wake.safetyParentWakeId
+          && (!context?.originalWake || finishedNativeInput) && !context?.notificationClaims
           // Helper self-report/idle is insufficient. Task release has already
           // committed its real resolutions; UNKNOWN operations remain unresolved.
           && faults.every(fault => this.resolvedSafetyFaultIds.has(fault.id))
