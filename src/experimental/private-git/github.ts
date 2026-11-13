@@ -11,7 +11,6 @@ export interface GitHubSession {
   /** Process-local credential identity; never contains an authenticating value. */
   readonly authorizationScope: object
   request<T>(method: string, path: string, body?: unknown): Promise<T>
-  head(path: string, knownHead?: string): Promise<string>
 }
 
 export class GitHubError extends Error {
@@ -51,13 +50,12 @@ export class GitHubClient {
     if (this.authorization?.fingerprint !== fingerprint) this.authorization = { fingerprint, scope: {}, limits: new Map() }
     const authorization = this.authorization
     for (const [key, error] of authorization.limits) if (error.retryAt !== undefined && error.retryAt <= Date.now()) authorization.limits.delete(key)
-    const request = async <R>(method: string, path: string, body?: unknown, sha?: { knownHead?: string }): Promise<R> => {
+    const request = async <R>(method: string, path: string, body?: unknown): Promise<R> => {
       signal.throwIfAborted()
       if (!path.startsWith('/') || path.startsWith('//') || path.includes('://')) throw new Error('Invalid GitHub API path.')
-      // All REST endpoints used by this adapter consume core; GraphQL has its
-      // own primary bucket. A secondary limit can span REST and GraphQL, so no
-      // per-repository exemption is inferred. Local/other credentials are separate.
-      const resource = path === '/graphql' ? 'graphql' : 'core', requestKey = method + ' ' + path
+      // Current identity/member endpoints consume the REST core bucket.
+      // Cooldowns belong to this credential, never to one repository.
+      const resource = 'core', requestKey = method + ' ' + path
       const limited = [authorization.limits.get('*'), authorization.limits.get(resource)]
         .filter((error): error is GitHubError => error?.retryAt !== undefined && error.retryAt > Date.now())
         .sort((a, b) => b.retryAt! - a.retryAt!)[0]
@@ -65,7 +63,7 @@ export class GitHubClient {
       let response: Response
       try {
         response = await this.fetcher('https://api.github.com' + path, {
-          method, signal, headers: { Accept: sha ? 'application/vnd.github.sha' : 'application/vnd.github+json', ...(sha?.knownHead ? { 'If-None-Match': '"' + sha.knownHead + '"' } : {}), Authorization: 'Bearer ' + token.value,
+          method, signal, headers: { Accept: 'application/vnd.github+json', Authorization: 'Bearer ' + token.value,
             'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'DeepSeek-Servant-Coop', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         })
@@ -77,9 +75,36 @@ export class GitHubClient {
         throw new GitHubError(0, (error instanceof Error ? error.message : 'GitHub network request failed.').split(token.value).join('[redacted]'))
       }
       signal.throwIfAborted()
-      if (response.status === 304) {
-        if (sha?.knownHead) { if (authorization.secondaryFailure?.request === requestKey) authorization.secondaryFailure = undefined; return sha.knownHead as R }
-        throw new GitHubError(304, 'GitHub returned 304 without a previously observed HEAD.')
+      const rejection = (status: number, message: string): GitHubError => {
+        const now = Date.now(), retry = response.headers.get('retry-after'), reset = response.headers.get('x-ratelimit-reset')
+        let retryTime = retry === null ? NaN : /^\d+(?:\.\d+)?$/.test(retry.trim()) ? now + Number(retry) * 1000 : Date.parse(retry)
+        const headerReset = response.headers.get('x-ratelimit-remaining') === '0' && reset !== null ? Number(reset) * 1000 : NaN
+        const resetTime = Number.isFinite(headerReset) ? headerReset : 0
+        if ([403, 429].includes(status) && /\bsecondary rate limit\b/i.test(message)
+          && !(retryTime > now) && !(resetTime > now)) {
+          // GitHub prescribes at least one minute, then exponential increases.
+          // Doubling is this client's engineering choice, not a quoted GitHub factor.
+          // Only a new upstream response advances it; no automatic retry or cutoff.
+          const delay = authorization.secondaryFailure === undefined ? 60_000 : authorization.secondaryFailure.delay * 2
+          authorization.secondaryFailure = { request: requestKey, delay }
+          retryTime = now + delay
+        }
+        const until = Math.max(Number.isFinite(retryTime) ? retryTime : 0, Number.isFinite(resetTime) ? resetTime : 0)
+        const retryAt = [403, 429].includes(status) && until > now ? until : undefined
+        const hint = token.source === 'GitHub CLI' && [401, 403, 404].includes(status) && retryAt === undefined ? GITHUB_CLI_ACCESS_REQUIRED + ' ' : ''
+        const error = new GitHubError(status, hint + 'GitHub ' + status + ': ' + message + ' (' + method + ' ' + path + '; authorization: ' + token.source + ')', retryAt === undefined ? undefined : (retryAt - now) / 1000, retryAt, retryAt === undefined ? undefined : {})
+        if (retryAt !== undefined) {
+          // https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api
+          const retain = (key: string, deadline: number) => {
+            if (Number.isFinite(deadline) && deadline > now && (authorization.limits.get(key)?.retryAt ?? 0) < deadline) {
+              authorization.limits.set(key, new GitHubError(error.status, error.message, (deadline - now) / 1000, deadline, error.rateLimit))
+            }
+          }
+          // A response may declare both limits; retain each actual deadline.
+          retain('*', retryTime)
+          retain(response.headers.get('x-ratelimit-resource') || resource, resetTime)
+        }
+        return error
       }
       if (!response.ok) {
         const data = await response.json().catch(error => {
@@ -90,63 +115,29 @@ export class GitHubClient {
         }) as { message?: string }
         signal.throwIfAborted()
         const message = String(data.message ?? response.statusText).split(token.value).join('[redacted]')
-        const now = Date.now(), retry = response.headers.get('retry-after'), reset = response.headers.get('x-ratelimit-reset')
-        let retryTime = retry === null ? NaN : /^\d+(?:\.\d+)?$/.test(retry.trim()) ? now + Number(retry) * 1000 : Date.parse(retry)
-        const resetTime = response.headers.get('x-ratelimit-remaining') === '0' && reset !== null ? Number(reset) * 1000 : NaN
-        if ([403, 429].includes(response.status) && /\bsecondary rate limit\b/i.test(message)
-          && !(retryTime > now) && !(resetTime > now)) {
-          // GitHub prescribes at least one minute, then exponential increases.
-          // Doubling is this client's engineering choice, not a quoted GitHub factor.
-          // Only a new upstream response advances it; no automatic retry or cutoff.
-          const delay = authorization.secondaryFailure === undefined ? 60_000 : authorization.secondaryFailure.delay * 2
-          authorization.secondaryFailure = { request: requestKey, delay }
-          retryTime = now + delay
-        }
-        const until = Math.max(Number.isFinite(retryTime) ? retryTime : 0, Number.isFinite(resetTime) ? resetTime : 0)
-        const retryAt = [403, 429].includes(response.status) && until > now ? until : undefined
-        const hint = token.source === 'GitHub CLI' && [401, 403, 404].includes(response.status) && retryAt === undefined ? GITHUB_CLI_ACCESS_REQUIRED + ' ' : ''
-        const error = new GitHubError(response.status, hint + 'GitHub ' + response.status + ': ' + message + ' (' + method + ' ' + path + '; authorization: ' + token.source + ')', retryAt === undefined ? undefined : (retryAt - now) / 1000, retryAt, retryAt === undefined ? undefined : {})
-        if (retryAt !== undefined) {
-          // https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api
-          const retain = (key: string, deadline: number) => {
-            if (Number.isFinite(deadline) && deadline > now && (authorization.limits.get(key)?.retryAt ?? 0) < deadline) {
-              authorization.limits.set(key, new GitHubError(error.status, error.message, (deadline - now) / 1000, deadline, error.rateLimit))
-            }
-          }
-          // A response may declare both limits. Keep their real scopes/deadlines
-          // separately: a longer core reset must not extend GraphQL's Retry-After.
-          retain('*', retryTime)
-          retain(response.headers.get('x-ratelimit-resource') || resource, resetTime)
-        }
-        throw error
+        throw rejection(response.status, message)
       }
-      // An unrelated successful observation (for example HEAD304) is not proof
-      // that a still-failing mutation recovered. Keep only the current failure,
-      // not an accumulating per-URL history.
+      const result = response.status === 204 ? undefined : await response.json()
+      signal.throwIfAborted()
+      // Only the previously failing request can reset its secondary backoff.
       if (authorization.secondaryFailure?.request === requestKey) authorization.secondaryFailure = undefined
-      const result = response.status === 204 ? undefined : sha ? (await response.text()).trim() : await response.json()
-      if (sha && (typeof result !== 'string' || !/^[0-9a-f]{40}$/.test(result))) throw new GitHubError(502, 'GitHub returned an invalid commit SHA.')
       signal.throwIfAborted()
       return result as R
     }
-    return operation({ authorizationScope: authorization.scope, request,
-      // Official Get a commit SHA media type permits the local SHA as its ETag:
-      // https://docs.github.com/en/rest/commits/commits#get-a-commit
-      head: (path, knownHead) => request<string>('GET', path, undefined, { knownHead }),
-    })
+    return operation({ authorizationScope: authorization.scope, request })
   }
 }
 
 export async function inspectPrivateRepo(session: GitHubSession, binding: RepoBinding): Promise<RepoConnection> {
   const [repo, identity] = await Promise.all([
-    session.request<{ id: number; full_name: string; default_branch: string; private: boolean; permissions?: Record<string, boolean> }>('GET', repositoryPath(binding.ownerRepo)),
+    session.request<{ id: number; full_name: string; private: boolean; permissions?: Record<string, boolean> }>('GET', repositoryPath(binding.ownerRepo)),
     session.request<{ id: number; login: string }>('GET', '/user'),
   ])
   if (!repo.private) throw new GitHubError(422, 'This repository is public. Git collaboration requires a private repository.')
   if (binding.repositoryId !== undefined && repo.id !== binding.repositoryId) throw new GitHubError(409, 'This is a different GitHub repository. Confirm the repository selection.')
   if (binding.participantId !== undefined && identity.id !== binding.participantId) throw new GitHubError(409, 'The GitHub account changed. Connect this account before continuing.')
   return { identity: { id: identity.id, login: identity.login }, repository: {
-    id: repo.id, fullName: repo.full_name, branch: binding.branch ?? repo.default_branch ?? 'main', private: true,
+    id: repo.id, fullName: repo.full_name, branch: binding.branch ?? 'main', private: true,
     permissions: { pull: repo.permissions?.pull ?? true, push: repo.permissions?.push ?? false, admin: repo.permissions?.admin ?? false },
   } }
 }
@@ -172,12 +163,26 @@ export class GitHubMembers {
     }
   }
   invitations(expected?: MemberScope): Promise<CoopInvitation[]> {
-    return this.withRepo(async (session, path) => (await this.pages<{ id: number; invitee: { login: string }; html_url?: string }>(session, path + '/invitations'))
-      .map(item => ({ id: item.id, login: item.invitee.login, status: 'pending', htmlUrl: item.html_url })), expected)
+    return this.withRepo((session, path) => this.readInvitations(session, path), expected)
   }
   collaborators(expected?: MemberScope): Promise<CoopCollaborator[]> {
-    return this.withRepo(async (session, path) => (await this.pages<{ id: number; login: string; permissions: Record<string, boolean> }>(session, path + '/collaborators'))
-      .map(item => ({ id: item.id, login: item.login, permissions: item.permissions, status: 'accepted' })), expected)
+    return this.withRepo((session, path) => this.readCollaborators(session, path), expected)
+  }
+  /** One member refresh owns one credential resolution and repository inspection.
+   * Each endpoint still follows its own pagination; nothing survives this call. */
+  list(expected?: MemberScope): Promise<{ invitations: CoopInvitation[]; collaborators: CoopCollaborator[] }> {
+    return this.withRepo(async (session, path) => {
+      const [invitations, collaborators] = await Promise.all([this.readInvitations(session, path), this.readCollaborators(session, path)])
+      return { invitations, collaborators }
+    }, expected)
+  }
+  private async readInvitations(session: GitHubSession, path: string): Promise<CoopInvitation[]> {
+    return (await this.pages<{ id: number; invitee: { login: string }; html_url?: string }>(session, path + '/invitations'))
+      .map(item => ({ id: item.id, login: item.invitee.login, status: 'pending', htmlUrl: item.html_url }))
+  }
+  private async readCollaborators(session: GitHubSession, path: string): Promise<CoopCollaborator[]> {
+    return (await this.pages<{ id: number; login: string; permissions: Record<string, boolean> }>(session, path + '/collaborators'))
+      .map(item => ({ id: item.id, login: item.login, permissions: item.permissions, status: 'accepted' }))
   }
   invite(login: string, expected?: MemberScope): Promise<{ status: 'pending' | 'accepted'; id?: number; login: string }> {
     if (!/^[A-Za-z0-9-]+$/.test(login)) throw new Error('Enter a GitHub username.')

@@ -11,6 +11,7 @@ export interface WorkIdentity {
   executionId: string
   role: RecoveryRole
   taskId?: string
+  lifecycleId?: string
   member?: string
   workerId?: string
 }
@@ -67,37 +68,30 @@ export function createRecoveryWatch(identity: MemberIdentity, now: number): Reco
   return { ...identity, cycleStartedAt: now, stageStartedAt: now, stage: 0 }
 }
 export function dueRecoveryWatch(state: RecoveryWatch, now: number): { state: RecoveryWatch; action?: { kind: 'recovery-check'; taskId: string; member: string; stage: number; elapsedMs: number } } {
-  if (now - state.stageStartedAt < 30 * 60_000) return { state }
+  // A positive stage is the already-owned Helper check. Helper explicitly
+  // resets its watch after checking; elapsed time must not queue another check
+  // while that original responsibility is still running or recovering.
+  if (state.stage > 0 || now - state.stageStartedAt < 30 * 60_000) return { state }
   const stage = state.stage + 1
   return { state: { ...state, stage, stageStartedAt: now }, action: {
     kind: 'recovery-check', taskId: state.taskId, member: state.member, stage, elapsedMs: now - state.cycleStartedAt,
   } }
 }
-export function canConsumeRecovery(actor: Pick<WorkIdentity, 'role' | 'taskId' | 'member'>, marker: MemberIdentity): boolean {
-  return actor.role === 'Planner' && actor.taskId === marker.taskId && actor.member === marker.member
-}
-/** Return undefined only after this exact Planner confirms normal-chain arrival/self-resumption.
- * No all-Workers ACK or business-quality-complete condition is introduced.
- */
-export function consumeRecoveryWatch(state: RecoveryWatch, actor: Pick<WorkIdentity, 'role' | 'taskId' | 'member'>, canContinue: boolean): RecoveryWatch | undefined {
-  if (!canConsumeRecovery(actor, state)) throw new Error('Only the corresponding member Planner can consume recovery.')
-  return canContinue ? undefined : state
-}
-export type HelperTrigger = 'ai-help' | 'host-error' | 'no-progress-warning' | 'warning'
-export function invokesHelper(trigger: HelperTrigger): boolean { return trigger === 'ai-help' || trigger === 'host-error' }
 
 export interface WorkerRecoveryInput {
   workerId: string
   executionId: string
   notePath: string
-  /** Body bytes, not JSON/manifest container bytes. Zero is the only empty state. */
-  noteBodyBytes: number
+  /** Actual Note body content, not JSON/manifest container size or text significance. */
+  noteHasContent: boolean
   executing: boolean
+  /** Existing Host responsibility facts, not inferred from retained Note text. */
+  ended?: boolean
 }
 export interface MemberRecoveryInput extends MemberIdentity {
   taskPath: string
   inboxPath: string
-  inboxBodyBytes: number
+  inboxHasContent: boolean
   status: 'running' | 'complete'
   pendingBusiness: boolean
   needsRecovery: boolean
@@ -116,8 +110,8 @@ export interface RecoveryTarget extends MemberIdentity {
   recordPath: string
   pendingSignals: readonly string[]
 }
-export function memberRecoveryEligible(member: Pick<MemberRecoveryInput, 'inboxBodyBytes' | 'status' | 'pendingBusiness'>): boolean {
-  return member.inboxBodyBytes > 0 && (member.status === 'running' || member.pendingBusiness)
+export function memberRecoveryEligible(member: Pick<MemberRecoveryInput, 'inboxHasContent' | 'status' | 'pendingBusiness'>): boolean {
+  return member.inboxHasContent && (member.status === 'running' || member.pendingBusiness)
 }
 export function recoveryTargetKey(target: Pick<RecoveryTarget, 'taskId' | 'member' | 'role' | 'workerId'>): string {
   return JSON.stringify([target.taskId, target.member, target.role, target.workerId ?? null])
@@ -126,12 +120,12 @@ export function recoveryTargetKey(target: Pick<RecoveryTarget, 'taskId' | 'membe
 export function scanMemberRecovery(members: readonly MemberRecoveryInput[], scheduled: readonly RecoveryTarget[] = []): RecoveryTarget[] {
   const seen = new Set(scheduled.map(recoveryTargetKey)), targets: RecoveryTarget[] = []
   for (const member of members) {
-    if (!memberRecoveryEligible(member) || !member.needsRecovery || member.workers.some(worker => worker.executing)) continue
-    const notes = member.workers.filter(worker => worker.noteBodyBytes > 0)
+    if (!memberRecoveryEligible(member) || !member.needsRecovery) continue
+    const notes = member.workers.filter(worker => !worker.executing && !worker.ended && worker.noteHasContent)
     const candidates: RecoveryTarget[] = notes.length ? notes.map(worker => ({
       role: 'Worker', taskId: member.taskId, member: member.member, executionId: worker.executionId,
       workerId: worker.workerId, taskPath: member.taskPath, recordPath: worker.notePath, pendingSignals: [...member.pendingSignals],
-    })) : member.plannerExecuting ? [] : [{
+    })) : member.plannerExecuting || member.workers.some(worker => worker.executing) ? [] : [{
       role: 'Planner', taskId: member.taskId, member: member.member, executionId: member.plannerExecutionId,
       taskPath: member.taskPath, recordPath: member.plannerMemoryPath, pendingSignals: [...member.pendingSignals],
     }]
@@ -141,45 +135,4 @@ export function scanMemberRecovery(members: readonly MemberRecoveryInput[], sche
     }
   }
   return targets
-}
-/** Actual Helper recovery selects all eligible domains, not merely the first failed Task.
- * Call only after diagnosis decides to restore. Warning inspection does not hang markers.
- */
-export function helperRecoveryMembers(members: readonly MemberRecoveryInput[]): MemberIdentity[] {
-  const found = new Map<string, MemberIdentity>()
-  for (const member of members) if (memberRecoveryEligible(member)) found.set(JSON.stringify([member.taskId, member.member]), { taskId: member.taskId, member: member.member })
-  return [...found.values()]
-}
-export function usesMemberRecovery(role: RecoveryRole, member?: MemberIdentity): boolean {
-  return member !== undefined && (role === 'Planner' || role === 'Worker')
-}
-
-/** Holds the startup boundary only. enqueue() must record scheduling, not await model work.
- * The scheduler rechecks actual execution again when a queued item actually starts.
- */
-export class StartupRecoveryBatch {
-  phase: 'scanning' | 'arranging' | 'normal' = 'scanning'
-  private members: MemberRecoveryInput[] = []
-  private targets: RecoveryTarget[] = []
-  private next = 0
-  collect(member: MemberRecoveryInput): void {
-    if (this.phase !== 'scanning') throw new Error('Startup recovery scan already finished.')
-    this.members.push(member)
-  }
-  finishScan(scheduled: readonly RecoveryTarget[] = []): readonly RecoveryTarget[] {
-    if (this.phase !== 'scanning') return this.targets
-    this.targets = scanMemberRecovery(this.members, scheduled)
-    this.phase = 'arranging'
-    return this.targets
-  }
-  async arrange(enqueue: (target: RecoveryTarget) => Promise<void>, alreadyExecutingOrScheduled: (target: RecoveryTarget) => Promise<boolean>): Promise<void> {
-    if (this.phase === 'scanning') throw new Error('Finish the full recovery scan before arranging wakeups.')
-    while (this.next < this.targets.length) {
-      const target = this.targets[this.next]!
-      if (!await alreadyExecutingOrScheduled(target)) await enqueue(target)
-      this.next++
-    }
-    this.phase = 'normal'
-  }
-  get ordinaryWakeupsAllowed(): boolean { return this.phase === 'normal' }
 }

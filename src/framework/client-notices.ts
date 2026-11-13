@@ -22,11 +22,16 @@ export interface FrameworkClientNotices {
   ackLocal(scope: FrameworkNoticeScope): void
 }
 
+/** Temporary presentation switch. Retain the completion implementation and
+ * unread badge; change only this flag when top completion toasts are restored. */
+export const completionToastEnabled = false
+
 /** Observe authoritative task-completion facts, without creating conversation
  * messages, delivery protocols, Host actions, timers or Recorder dependencies.
  * Lifetime belongs to the client plugin, not the main page's mounted lifetime.
  */
-export function createFrameworkClientNotices(): FrameworkClientNotices {
+export function createFrameworkClientNotices(options: { completionToast?: boolean } = {}): FrameworkClientNotices {
+  const completionToast = options.completionToast ?? true
   const listeners = new Set<() => void>()
   const completed = new Map<string, Set<string>>()
   const unread = new Map<string, Set<string>>()
@@ -53,7 +58,7 @@ export function createFrameworkClientNotices(): FrameworkClientNotices {
       for (const task of view.tasks) {
         if (task.status !== 'complete' || previous.has(task.taskId)) continue
         previous.add(task.taskId)
-        queue.push(Object.freeze({ id: JSON.stringify([scopeKey, task.taskId]), scopeKey,
+        if (completionToast) queue.push(Object.freeze({ id: JSON.stringify([scopeKey, task.taskId]), scopeKey,
           taskId: task.taskId, title: task.title, kind: 'success', key: 'completed' }))
         const pending = unread.get(scopeKey) ?? new Set<string>()
         pending.add(task.taskId); unread.set(scopeKey, pending)

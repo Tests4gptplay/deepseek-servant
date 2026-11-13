@@ -4,8 +4,8 @@ import type { ConnectionStateSource } from '@deepseek-ai/dsh-client-connection/c
  * or invalid content type permanently closes an EventSource. A new official
  * Connection generation must therefore replace the previous streams as well as
  * reread state. Errors alone never start an extra retry loop or replay a write. */
-export function subscribeEventStreams(
-  paths: readonly string[], listener: () => void, subscribeReset: (listener: () => void) => () => void,
+export function subscribeEventStreams<T = unknown>(
+  paths: readonly string[], listener: (change?: T) => void, subscribeReset: (listener: () => void) => () => void,
   create: (url: URL) => EventSource = url => new EventSource(url),
   availability?: (available: boolean) => void,
   connectionState?: ConnectionStateSource,
@@ -15,7 +15,7 @@ export function subscribeEventStreams(
     if (value !== undefined) carrierAvailable = value
     availability?.(carrierAvailable && (!connectionState || connectionState.getSnapshot() === 'connected'))
   }
-  let streams: Array<{ source: EventSource; changed: () => void; opened: () => void; failed: () => void; available: boolean }> = []
+  let streams: Array<{ source: EventSource; changed: EventListener; opened: () => void; failed: () => void; available: boolean }> = []
   const close = () => {
     generation++
     reportAvailability(false)
@@ -33,7 +33,12 @@ export function subscribeEventStreams(
     try {
       for (const path of paths) {
         const source = create(new URL(path, document.baseURI))
-        const changed = () => { if (!disposed && generation === current) listener() }
+        const changed: EventListener = event => {
+          if (disposed || generation !== current) return
+          let change: T | undefined
+          try { change = JSON.parse((event as MessageEvent).data) as T } catch {}
+          listener(change)
+        }
         const item = { source, changed, opened: () => {}, failed: () => {}, available: false }
         item.opened = () => { if (disposed || generation !== current) return; item.available = true; reportAvailability(streams.every(value => value.available)); listener() }
         item.failed = () => { if (disposed || generation !== current) return; item.available = false; reportAvailability(false) }

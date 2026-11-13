@@ -1,0 +1,9 @@
+{
+  "purpose": "Frozen original v44 SQLite input producer for one-time read-only migration tests only. Never a product backend, compatibility fallback, or current business acceptance model.",
+  "sourceInventory": "c12f92ec3679edcd487defa4d6841ef8fa7c7c55873f50e2c58606f0e99ddb1b",
+  "sourceInventoryFile": "git-verification/integrated-checkpoint/original-v44/SOURCE-MANIFEST.json",
+  "files": {
+    "local-files-worker.ts": "7728ce4836b1935d1cdda624dbde0e5432fa746c60cb3167cfc866b74948e0fa",
+    "file-list-selection.ts": "770aeeb363eaf3d2ddbc96c78b06e18ee11082dd12629970eca824c2391e3b7b"
+  }
+}

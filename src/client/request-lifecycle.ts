@@ -1,3 +1,15 @@
+// Only errors minted by this owning client scope are expected lifecycle ends.
+// Do not infer cancellation from prose, an AbortError name or a remote code.
+const lifecycleCancellations = new WeakSet<object>()
+export function isClientLifecycleCancellation(error: unknown): boolean {
+  return !!error && typeof error === 'object' && lifecycleCancellations.has(error)
+}
+function lifecycleEnded(): Error {
+  const error = new Error('The client connection lifecycle ended.')
+  lifecycleCancellations.add(error)
+  return error
+}
+
 /** Forward lifecycle cancellation to the transport and settle the consumer even
  * if a carrier does not honour AbortSignal. Late receipts are observed but do
  * not change current UI state. There is no timeout or automatic replay. */
@@ -31,7 +43,7 @@ export function createRequestLifecycle() {
   let scope = new AbortController()
   let disposed = false
   const listeners = new Set<() => void>()
-  const end = () => scope.abort(new Error('The client connection lifecycle ended.'))
+  const end = () => scope.abort(lifecycleEnded())
   return {
     request<T>(signal: AbortSignal | undefined, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
       return lifecycleRequest(signal ? [scope.signal, signal] : [scope.signal], operation)

@@ -4,8 +4,10 @@ import { lstat, mkdir, mkdtemp, open, realpath, rm, unlink } from 'node:fs/promi
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { backup, DatabaseSync } from 'node:sqlite'
 import type { StorageUsageStats } from '../contracts/retention.js'
-import { paths } from './task-files.js'
+import { ensureWriteDirectory, openNewOutput } from './write-directories.js'
+import { readTaskArchiveIdentity, taskArchivePath, taskArchiveReadPath } from './task-archive.js'
 import { filePath, withSnapshot, type FilesStore } from './transactions.js'
+import { copyRecordTree, recordTreeFingerprint, type RecordTreeCopyState } from './record-tree-copy.js'
 
 /** User-requested accounting of logical DSS records, not SQLite allocation or
  * native DSH session logs. No background sweep or retention policy is installed.
@@ -14,7 +16,7 @@ export async function frameworkStorageUsage(files: FilesStore, now = new Date())
   return withSnapshot(files, async snapshot => {
     const usage: StorageUsageStats = {
       totalBytes: 0, permanentBytes: 0, temporaryBytes: 0, recordedAt: now.toISOString(),
-      permanent: { chatBytes: 0, assistantBytes: 0, knowledgeBytes: 0, originBytes: 0, archiveBytes: 0, planningBytes: 0, otherBytes: 0 },
+      permanent: { chatBytes: 0, assistantBytes: 0, knowledgeBytes: 0, originBytes: 0, archiveBytes: 0, planningBytes: 0, debugBytes: 0 },
       temporary: { taskBytes: 0, plannerMemoryBytes: 0, plannerNoteBytes: 0, workerReplyBytes: 0, executionBytes: 0, recoveryBytes: 0 },
     }
     for (const entry of await files.list(snapshot, '')) {
@@ -22,11 +24,13 @@ export async function frameworkStorageUsage(files: FilesStore, now = new Date())
       // may read the requested record; this is an explicit statistics action only.
       const bytes = entry.bytes ?? (await files.readBytes(snapshot, entry.path))?.byteLength
       if (bytes === undefined) throw new Error('Record disappeared from the statistics snapshot: ' + entry.path)
+      usage.totalBytes += bytes
       const p = entry.path
-      if (p.startsWith('conversations/') || p.startsWith('conversation-index/')) usage.permanent.chatBytes += bytes
+      if (p.startsWith('conversations/') || p.startsWith('conversation-index/') || p.startsWith('conversation-context/')) usage.permanent.chatBytes += bytes
       else if (p.startsWith('assistants/') && /\/Foreground_(?:List|Cache)\.md$/.test(p)) usage.permanent.planningBytes += bytes
       else if (p.startsWith('assistants/')) usage.permanent.assistantBytes += bytes
       else if (p.startsWith('skills/') || p.startsWith('knowledge/')) usage.permanent.knowledgeBytes += bytes
+      else if (p.startsWith('debug/')) usage.permanent.debugBytes = (usage.permanent.debugBytes ?? 0) + bytes
       else if (p.startsWith('archives/')) usage.permanent.archiveBytes += bytes
       else if (/^tasks\/.*_(P|O)\.md$/.test(p)) usage.permanent.originBytes += bytes
       else if (p.startsWith('task-runs/')) {
@@ -35,13 +39,13 @@ export async function frameworkStorageUsage(files: FilesStore, now = new Date())
         else if (p.includes('/workers/') || p.endsWith('/Reply.md')) usage.temporary.workerReplyBytes += bytes
         else usage.temporary.taskBytes += bytes
       } else if (p.startsWith('tasks/')) usage.temporary.taskBytes += bytes
-      else if (p.startsWith('state/')) usage.temporary.recoveryBytes += bytes
+      else if (p.startsWith('state/') || p.startsWith('technical/recovery-inputs/') || p.startsWith('technical/worker-transfers/')) usage.temporary.recoveryBytes += bytes
       else if (p.startsWith('instances/') || p.startsWith('Recorder Cache/')) usage.temporary.executionBytes += bytes
-      else usage.permanent.otherBytes! += bytes
     }
-    usage.permanentBytes = Object.values(usage.permanent).reduce((sum, bytes) => sum + bytes, 0)
     usage.temporaryBytes = Object.values(usage.temporary).reduce((sum, bytes) => sum + bytes, 0)
-    usage.totalBytes = usage.permanentBytes + usage.temporaryBytes
+    // Unclassified records remain included in the retained total without a
+    // catchall display category. This accounting never changes stored records.
+    usage.permanentBytes = usage.totalBytes - usage.temporaryBytes
     return usage
   })
 }
@@ -77,7 +81,15 @@ async function assertAbsent(paths: string[]): Promise<void> {
  * The authoritative archive and all result artifacts remain unchanged.
  */
 export async function exportFrameworkRecords(files: FilesStore, taskId: string, workspace: string): Promise<{ path: string; sha256: string; bytes: number }> {
-  return exportFrameworkDocument(files, paths.archive(taskId) + '/records.md', taskId, workspace)
+  const data = await withSnapshot(files, async snapshot => {
+    const task = await readTaskArchiveIdentity(files, snapshot, taskId)
+    const current = taskArchivePath(task), historical = taskArchiveReadPath(task)
+    const body = await files.readBytes(snapshot, current + '/records.md')
+      ?? (historical !== current ? await files.readBytes(snapshot, historical + '/records.md') : undefined)
+    if (body === undefined) throw new Error('Task records have not been saved yet.')
+    return body
+  })
+  return exportFrameworkBytes(data, taskId, workspace)
 }
 
 /** The caller resolves this document from the current Task/archive or a verified
@@ -97,13 +109,15 @@ export async function exportFrameworkDocument(files: FilesStore, recordPath: str
 /** Copies an already assembled and verified historical record verbatim. This
  * does not reconstruct journals or produce a new summary. */
 export async function exportFrameworkBytes(data: Uint8Array, taskId: string,
-  workspace: string): Promise<{ path: string; sha256: string; bytes: number }> {
-  const sha256 = createHash('sha256').update(data).digest('hex')
+  workspace: string, sourceSha256?: string): Promise<{ path: string; sha256: string; bytes: number }> {
+  // Reuse only the digest handed over with these bytes by the current read.
+  // The actual output file still owns its separate verification below.
+  const sha256 = sourceSha256 ?? createHash('sha256').update(data).digest('hex')
   // Keep the existing export naming convention, including its short display hashes.
   const filename = 'records-' + createHash('sha256').update(taskId).digest('hex').slice(0, 12) + '-' + sha256.slice(0, 12) + '.md'
-  const path = join(await realpath(workspace), filename)
+  const path = join(await ensureWriteDirectory(workspace), filename)
   let file
-  try { file = await open(path, 'wx') }
+  try { file = await openNewOutput(path) }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
     if (await fileDigest(path) !== sha256) throw new Error('The export path already contains different content: ' + path)
@@ -141,18 +155,23 @@ function databaseDigest(database: DatabaseSync): string {
   return digest.digest('hex')
 }
 
-function inspectDatabase(path: string): string {
+function inspectDatabase(path: string, integrity = false): string {
   const database = new DatabaseSync(path, { readOnly: true })
   try {
-    const checks = database.prepare('PRAGMA integrity_check').all()
-    if (checks.length !== 1 || Object.values(checks[0]!)[0] !== 'ok') throw new Error('The copied Local records database failed its integrity check.')
     database.exec('BEGIN')
+    if (integrity) {
+      const checks = database.prepare('PRAGMA integrity_check').all()
+      if (checks.length !== 1 || Object.values(checks[0]!)[0] !== 'ok') throw new Error('The copied Local records database failed its integrity check.')
+    }
     return databaseDigest(database)
   } finally { if (database.isTransaction) database.exec('ROLLBACK'); database.close() }
 }
 
-/** Verify an already existing, owned Local database after its writers closed. */
-export async function localRecordFingerprint(directory: string): Promise<string> {
+export type LocalRecordBackend = 'sqlite' | 'physical'
+/** Verify the selected backend after its affected writers closed. Historical
+ * receipts without a backend retain their original SQLite interpretation. */
+export async function localRecordFingerprint(directory: string, backend: LocalRecordBackend = 'sqlite', signal?: AbortSignal): Promise<string> {
+  if (backend === 'physical') return recordTreeFingerprint(directory, signal)
   return inspectDatabase(join(await realpath(directory), 'dss-files.sqlite'))
 }
 
@@ -171,9 +190,26 @@ export interface PreparedLocalRecordCopy {
  * and confirming the new store before considering source-copy cleanup.
  */
 export async function prepareLocalRecordCopy(sourceDirectory: string, destinationDirectory: string,
-  signal?: AbortSignal): Promise<PreparedLocalRecordCopy> {
+  signal?: AbortSignal, backend: LocalRecordBackend = 'sqlite',
+  continuation?: { state?: RecordTreeCopyState; save(state: RecordTreeCopyState): Promise<void> }): Promise<PreparedLocalRecordCopy> {
   signal?.throwIfAborted()
   if (!isAbsolute(sourceDirectory) || !isAbsolute(destinationDirectory)) throw new Error('Choose absolute record directory paths.')
+  if (backend === 'physical') {
+    if (!continuation) throw new Error('A physical record move requires its accepted copy continuation.')
+    const fingerprint = await recordTreeFingerprint(sourceDirectory, signal)
+    let disposed = false, publishing: Promise<void> | undefined
+    return { source: sourceDirectory, destination: destinationDirectory, fingerprint,
+      publish: () => {
+        if (disposed) return Promise.reject(new Error('The prepared record copy has been released.'))
+        return publishing ??= copyRecordTree(sourceDirectory, destinationDirectory, continuation.state, continuation.save, signal, fingerprint).then(state => {
+          if (state.fingerprint !== fingerprint) throw new Error('Local records changed while preparing their physical copy.')
+        })
+      },
+      // Retain a partial accepted copy for exact continuation. No source, target,
+      // or user-added file is deleted by releasing this operation handle.
+      dispose: async () => { disposed = true; await publishing?.catch(() => {}) },
+    }
+  }
   const source = await realpath(sourceDirectory)
   await mkdir(destinationDirectory, { recursive: true })
   const destination = await realpath(destinationDirectory)
@@ -193,7 +229,7 @@ export async function prepareLocalRecordCopy(sourceDirectory: string, destinatio
       await backup(database, stagePath)
     } finally { if (database.isTransaction) database.exec('ROLLBACK'); database.close() }
     signal?.throwIfAborted()
-    if (inspectDatabase(stagePath) !== fingerprint) throw new Error('Copied records do not match the source snapshot.')
+    if (inspectDatabase(stagePath, true) !== fingerprint) throw new Error('Copied records do not match the source snapshot.')
     stagedSha256 = await fileDigest(stagePath)
   } catch (error) { await rm(stage, { recursive: true, force: true }); throw error }
   let disposed = false, publishing: Promise<void> | undefined, disposal: Promise<void> | undefined

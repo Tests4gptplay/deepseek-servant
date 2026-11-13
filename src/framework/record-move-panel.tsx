@@ -1,10 +1,11 @@
+import { frameworkErrorText, errorMessage, isRecordMoveNotStarted } from './client-error.js'
 import { useEffect, useRef, useState } from 'react'
 import { Button, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { FrameworkClientApi } from './client-contracts.js'
 import css from '../client/page.module.css'
 
 type MoveInput = Parameters<FrameworkClientApi['moveRecords']>[0]
-interface Attempt { input: MoveInput; submitted: boolean; promise?: ReturnType<FrameworkClientApi['moveRecords']>; confirmed?: boolean; error?: string }
+interface Attempt { input: MoveInput; submitted: boolean; promise?: ReturnType<FrameworkClientApi['moveRecords']>; confirmed?: boolean; outcome?: Awaited<ReturnType<FrameworkClientApi['moveRecords']>>['recordMoveOutcome']; error?: string }
 // Closing Settings is not cancellation. Retain the original browser command so
 // its uncertain result is resolved rather than replaced with another move.
 const attempts = new WeakMap<FrameworkClientApi, Map<string, Attempt>>()
@@ -30,16 +31,26 @@ export function RecordMovePanel({ api, storageScope, settingsRevision, pendingRe
     try {
       if (!attempt.confirmed) {
         attempt.promise ??= api.moveRecords(attempt.input)
-        await attempt.promise
+        const response = await attempt.promise
+        attempt.outcome = response.recordMoveOutcome
         attempt.confirmed = true
       }
       if (!active.current) return
       await changed()
       if (!active.current) return
       retained.delete(storageScope); setPending(undefined); setDirectory('')
-      setResult(tr('记录已搬家并应用。宿主原生日志位置未改变。', 'Records moved and applied. Native Host log locations were not changed.'))
+      const outcome = attempt.outcome
+      setResult(outcome?.status === 'current-location'
+        ? tr('原请求的完成结果尚未确认，本次没有再次搬迁。核对时的记录目录：', 'The original request’s completion is unconfirmed; no move was repeated. Record directory at this check: ') + outcome.directory
+        : tr('记录已搬家并应用。宿主原生日志位置未改变。', 'Records moved and applied. Native Host log locations were not changed.')
+          + (outcome ? tr(' 核对时的记录目录：', ' Record directory at this check: ') + outcome.directory : ''))
     } catch (reason) {
-      attempt.error = reason instanceof Error ? reason.message : String(reason)
+      if (isRecordMoveNotStarted(reason)) {
+        retained.delete(storageScope)
+        if (active.current) { setPending(undefined); setDirectory(attempt.input.directory); setError(errorMessage(reason)) }
+        return
+      }
+      attempt.error = frameworkErrorText(reason)
       if (active.current) setError(attempt.error)
     } finally { attempt.promise = undefined; if (active.current) setBusy(false) }
   }
@@ -60,7 +71,7 @@ export function RecordMovePanel({ api, storageScope, settingsRevision, pendingRe
       <Button disabled={busy || !directory.trim()} onClick={prepare}>{tr('搬家并应用', 'Move and apply')}</Button></>}
     {pending && <div role="group" aria-label={tr('确认记录搬家', 'Confirm record move')}>
       <code>{pending.input.directory}</code>
-      <p>{tr('这不是单纯修改目录：会暂停本插件在 Local 和 Git 两种模式中拥有的执行，确认已停止后搬迁技术记录与 Local 数据库，保留原逻辑范围、身份和完整正文；宿主原生日志不搬迁。不会自动删除你选择的目录。', 'This is not merely a directory setting: it pauses executions owned by this plugin in both Local and Git modes, confirms they stopped, then moves technical records and the Local database while preserving logical scope, identities and full originals. Native Host logs are not moved. The selected directories are not automatically deleted.')}</p>
+      <p>{tr('这不是单纯修改目录：会暂停本插件受影响的 Local 执行，确认已停止后复制技术记录和 Local 记录，核验完整内容后应用新地址，保留原逻辑范围、身份和原件。Git 执行与宿主原生日志位置不变。已有目标内容不会被覆盖，原目录不会被自动删除。', 'This is not merely a directory setting: it pauses affected Local executions, copies technical and Local records, then verifies their complete contents before applying the new location. Logical scope, identities and originals are preserved. Git executions and native Host log locations are unchanged. Existing destination contents are not overwritten and source directories are not automatically deleted.')}</p>
       <Button disabled={busy} onClick={() => void submit(pending)}>{pending.submitted ? tr('核对并重试原搬家', 'Resolve and retry original move') : tr('确认搬家并应用', 'Confirm move and apply')}</Button>
       {!pending.submitted && <Button disabled={busy} onClick={() => { retained.delete(storageScope); setPending(undefined); setError('') }}>{tr('取消', 'Cancel')}</Button>}
       {pending.submitted && <p>{tr('请求已发送；结果未确认时保留原命令、原目录和原设置版本。关闭面板不会撤销已接纳的搬家。', 'The request was sent. An unconfirmed outcome retains the original command, locations and settings revision. Closing this panel does not cancel an accepted move.')}</p>}

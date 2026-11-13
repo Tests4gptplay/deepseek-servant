@@ -1,0 +1,24 @@
+{
+  "baseline": "original v44 zip; exact conversation source producer only",
+  "files": {
+    "src/experimental/private-git/contracts.ts": "0176b006d1d2502e355db76aa7a33b7d173fb7f776480df0e178801ad1b22999",
+    "src/experimental/private-git/github.ts": "8d07e2a8f8d9ca9eaef2e7f402f94f9ea7743e41a47a011b6f9a9bdab634e869",
+    "src/framework/command-transactions.ts": "27573acd34b402a1b5a38b90ff3196e3f42c43942d1c5784f8f0bbcb42596a40",
+    "src/framework/conversation-attachment-reference.ts": "1a906edcef899ce9e254a8e7bd86634355c758abc7dd3c98af547af48b0d8938",
+    "src/framework/conversation-attachments.ts": "d55607b495d569e4a2be56f90c9bda6ce475c026998f03f3bc7f8023aab7d121",
+    "src/framework/conversation-context.ts": "a8f2c9cf1bd9fa489b0d2472570146f19bf6e4744ebcdc84046881a15d416679",
+    "src/framework/conversation.ts": "4a9d20dd2fc4f38460f90f1fdc3ea5042d895c4eafa6986c6decf1c8a2379355",
+    "src/framework/file-list-selection.ts": "770aeeb363eaf3d2ddbc96c78b06e18ee11082dd12629970eca824c2391e3b7b",
+    "src/framework/file-read-observation.ts": "501592f44cdfb4e4f363c7aeeb060edb0f06c091b2b51e57662a64975ff1217d",
+    "src/framework/local-files-worker.ts": "7728ce4836b1935d1cdda624dbde0e5432fa746c60cb3167cfc866b74948e0fa",
+    "src/framework/local-files.ts": "4a649dade7618dc8d7767a8a9d9a30478a6869da67c126643d5402e73a0f7ae1",
+    "src/framework/local-location.ts": "5b7bc0ce65c4a317d254ce64d54f134950f23946ae27c09c927a957b63ac8e7e",
+    "src/framework/markdown-destination.ts": "f5ef1782eaa77cef796f895e4b640df18d94095d6e7e8ef2fb3b0144d395dfa8",
+    "src/framework/published-references.ts": "3f03032b935842d3272b51e547a154953beca7132ea518b3e6628a4984e48634",
+    "src/framework/task-archive.ts": "b74fd9d5cc25b361a4cf2e4aecccd6e9c9bb812746108b7b0d312ee7c2b9c875",
+    "src/framework/task-command-paths.ts": "a22b2a083eff5e0d6179ef13156f95ac060168b8045a1c335a99d46a510dc7ab",
+    "src/framework/task-files.ts": "9bb4ac3507f19fa06e8e5b3dea5af875eeaae74082f9d65838696d62d8bde6d7",
+    "src/framework/transactions.ts": "a211c6c14b818db058c68b8163263a6846cb2eb9b53ceb514b9486936b0079af",
+    "src/framework/workspace-paths.ts": "d4c4a4af1f587db769b8bf3bb127de275a9c78b94375cb71038936ef91ab0427"
+  }
+}

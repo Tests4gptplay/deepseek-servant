@@ -1,33 +1,51 @@
-# Git 协作存储（工作分支候选）
-
-本说明针对当前统一框架源码，尚未作为新 Release 发布；历史 `v0.4.1` 不包含这里的全部改造。真实公网专用账号、Host 与 Web 最终验收仍待完成。
+# Git 协作存储
 
 ## 用途与权限
 
 Git 模式把对话、任务、成员状态、归档和技能等业务资料保存在所选 **GitHub 私有仓库**。推荐专用仓库，并先确认参与者可以看到的内容：私有仓库并不把同一仓库内不同成员的业务正文彼此隔离。不要将凭据或不应共享的文件作为任务资料写入。
 
-当前凭据来源是运行 DSH 的环境中的 GitHub CLI 登录。先通过官方 `gh auth login` 完成授权；插件使用该登录身份，不要求在 DSS 设置中粘贴 token，也不另读环境变量凭据作为降级路径。仓库访问及成员管理仍受 GitHub 实际权限限制。
+当前凭据来源是运行 DSH 的环境中的 GitHub CLI 登录，内容后端需 Python、Dulwich 和 urllib3，安装步骤见 [安装说明](docs/INSTALLATION.md)；产品内容读写不需要 Git 命令。先通过官方 `gh auth login` 完成授权；插件使用该登录身份，不要求在 DSS 设置中粘贴 token，也不另读环境变量凭据作为降级路径。仓库访问及成员管理仍受 GitHub 实际权限限制。
 
 设置填写 `owner/repo` 和仓库目录；目录可为仓库根或指定子目录。工作区是本实例原生工具执行的位置，与远端业务存储目录不是一回事。其他成员加入同一仓库和目录，并使用各自获授权的工作区；这不会授予远程操纵其他电脑的权限。
 
-前台回复和任务调度由仓库所有者账号的主理实例负责。它是在同一仓库、分支和目录中登记后使用该账号原名的实例，需要在线并已开启后台参与；同账号的其他实例使用带编号的别名。其他有写权限的协作者可以加入协作，但协作域、目录或显示名称不能把协作者变为仓库主理者。
+全局前台回复与顶层任务初始投递入口由仓库所有者账号的主理实例负责。它是在同一仓库、分支和目录中登记后使用该账号原名的实例，需要在线并已开启后台参与；同账号的其他实例使用带编号的别名。其他有写权限的协作者可以加入协作；已明确分派到其他实例的独立总 O 任务及其 Recorder、Cleaner 由该任务的实际 owner 实例处理，无需成为全局主理者。子任务完成只向父任务交接，整棵总任务统一归档和清理。协作域、目录或显示名称不能把协作者变为仓库主理者。
 
-Foreground replies and task scheduling require the repository owner's primary instance to be online with background participation enabled. In a given repository, branch, and directory, this instance uses the owner's exact account name; additional instances of that account receive numbered aliases. Other collaborators with write access can participate. A collaboration, directory, or display name cannot make a collaborator the repository's primary instance.
+Global Foreground replies and initial admission of top-level task sources require the repository owner's primary instance to be online with background participation enabled. In a given repository, branch, and directory, this instance uses the owner's exact account name; additional instances of that account receive numbered aliases. Other collaborators with write access can participate. An independent root O task explicitly assigned to another instance, together with its Recorder and Cleaner, runs on that task's actual owner instance without requiring global-primary status. Child tasks hand results to their parent; archive and cleanup apply to the whole task tree. A collaboration, directory, or display name cannot make a collaborator the repository's primary instance.
 
 ## 前台访问不等于后台加入
 
 - 授权存储访问可查看历史、保存消息、读取及下载成果，不隐含登记成员、写心跳或启动六角色。
 - 保存设置会尝试登记并开始后台参与；也可通过参与开关明确开始或退出。关闭侧栏不退出后台。
-- 空仓库的只读访问不创建分支。实际写入或开始参与时，才进行必要的写入初始化。
+- 普通 Git 访问固定使用 main。空仓库的只读访问不创建分支。实际写入或开始参与时，才进行必要的写入初始化。
 - 成员列表区分未知、在线、离线和停止。心跳表示实例观察事实，不证明任务有实质进展，也不是前台读取的额外门禁。
 
-## 远端原生事务，不是本地 Git 镜像
+## 远端 Git 事务与内存对象后端
 
-`GitHubRepository` 直接通过 GitHub API 读取远端提交、树和 blob；`GitFiles` 提供固定快照及多文件事务。没有常驻 bare clone、工作树、后台 fetch 镜像或旧 Consumer 协议。
+`RemoteGitRepository` 保留共用的权限、事务、回执和恢复逻辑，默认以 Dulwich 常驻内存对象后端通过标准 Git HTTPS 协议读取远端分支、提交、树和 blob，并发布单个原子提交；`GitFiles` 提供 Git 固定快照及多文件原子事务，与 Local 分别实现各自的存储职责。日常正文、任务、信号和心跳不使用 GraphQL 或 REST 内容接口。现有 Host 的一秒任务/信号轮询和三十秒实例心跳间隔不变。
 
-每次事务根据读取的分支头提交。分支头变化会返回冲突，调用方必须重新读取并判断，不能仅换一个 parent 后照抄旧业务操作。请求已发送但返回丢失时，保存原 operation ID、正文摘要及预期提交事实，再核查原操作；不能把“未知”当作“没有写入”并重投新消息。
+每个仓库/authority 实例最多使用七条独立通道：后台读、后台写、前台读、前台写、界面高频刷新、Host 固定轮询、周期心跳发布。各通道仅在使用时启动自己的 Python helper，不创建工作树、对象目录或持久业务镜像。前台访问与后台连接可为不同实例，因此七进程不是整个 Host 的总上限。对象仅为不可变传输缓存；每次新快照仍新观察远端分支头，进程重启后重新取得对象，不以缓存恢复业务事实。
 
-二进制附件使用远端原生 blob；归档逻辑路径在 Local / Git 中一致。Host 本机路径或本机 attachment ID 本身不是跨成员可用的长期成果。Git 平台的实际容量、API 和权限错误会明确返回，不以自造的固定文件大小门槛替代。
+固定路径读取将远端分支观察与树元数据获取合成一次 `blob:none` fetch，再合批取得明确需要的 blob；不按目录深度逐层发起网络读取。已验证的上一次提交仅作为 Git 对象协商提示，减少不变目录元数据的重复传输，每次新快照仍以远端当前分支为准。首次准备且尚未派发的写入直接使用精确预期父提交的 CAS push；重试和结果不明的操作仍先核对原操作，不以本地成功记录替代远端事实。
+
+每条通道按约 40MiB 原始 Git 对象内容触发内存代替换，保留当前树元数据与近期正文；已有快照、正在执行的请求和 UNKNOWN 写入继续保留原代，释放后回收。清理不设全局读屏障、不增加远端探针。单个大对象与被固定的旧代使上限保持柔性；暂存对象、delta 处理、TypeScript 完整输入输出缓冲、元数据、排队请求和分配器仍占内存，40MiB 不是 RSS 或 Host 总内存硬限。
+
+接收 pack 通过 64KiB 窗口与背压流式解析，不保留整包压缩副本；完整校验 pack 校验和、对象及 delta 后才原子提升，并重新检查取消。不使用临时对象文件或 spooled pack 回退。IPC 将元数据与原始二进制正文分块传输，每包载荷最多 64KiB，不对正文作 base64 编码。每 helper 有四个网络 worker 和两个本地对象 worker；其余请求排队且可取消，正文待 worker 开始处理后才获准传输。不设 pack 总量、IPC 消息总量或待处理请求数量上限，传输窗口不是总内存上限。
+
+生产只保留 Dulwich，不再运行 Native Git、askpass 或临时 bare 对象库。仓库资料、授权、回执和 UNKNOWN 恢复记录仍由现有事务管理。
+
+身份、仓库 ID、私有属性在连接时通过平台 API 确认；普通读取与提交不重复查询。只有实际凭据或配置变化、真实认证错误才重新处理相应连接状态。成员邀请/移除等显式管理操作仍需要 GitHub 平台 API，因为 Git 对象不提供这些管理能力。
+
+凭据仅由既有授权源通过私有进程管道供当前操作使用，不写入 Git URL、命令参数、配置、脚本或日志。池可复用连接但不保留 token 默认头；操作结束清除 client 凭据引用，账号/token 改变使全部通道作用域失效。保留已有代理与 CA 选择，强制 TLS/主机名检查，不改系统信任，不读取用户 Git 凭据文件。取消按请求终止并回收其 DNS 子进程、唤醒连接等待、中断该请求仍拥有的底层 socket，包括 TLS 与嵌套 TLS；不因取消一个请求而终止同通道其他快照。传输不设固定超时，等待完成、实际失败或取消；取消返回不等于所有清理已完成，也不保证立即擦除内存中的凭据。平台与代理限制见 [内存 Git](docs/MEMORY_GIT.md)。提交不自动获得 GitHub API 签名；远端签名或保护规则拒绝会明确报告，不修改规则或换认证方式。
+
+Git 是业务资料、命令结果和执行恢复事实的唯一权威。本地设置与实例 UUID 用于配置和标识；当前连接的会话缓存仅服务读取及在途核对，不保存另一份持久历史或恢复账本。前台独立持续读取并展示 Git 对话内容，不等待发送回执，也不与本地输入或回执 SHA 配对。输入和 AI 回复直接写入 Git，页面缓存仅用于显示及上翻预加载，关闭 DSH 时释放。AI 选项卡提交输入时写入 Foreground 信号，群聊不写该信号。Host 看状态机唤醒角色；角色先消费本次信号，再读取 Git 内容并执行。
+
+实际可见的 Git 对话页恢复原同步节拍：完成一次内容读取后等 1 秒再读，网络耗时另计，不承诺 1 秒内展示。只浏览和参与协作使用同一接收路径，不等待 Host 心跳、资源或任务列表；现有即时变更通知复用同一读取责任，不重复排队。切换到其他页面、隐藏窗口或卸载对话页时停止该定时读取并取消在途内容读取，不取消消息发送。后台 Host 的 1 秒同步和 30 秒心跳节拍不变。
+
+每次事务根据读取的分支头 H 构造唯一父提交为 H 的新提交，并在 receive-pack 更新中携带精确预期旧值 H 发布；不使用无条件 force、rebase 或合并来覆盖并发写入。已证明原尝试未发布且分支头变化时，先用本次 push 广告中的新 HEAD 取得精确树，核对实际读取的文件或缺失状态、目录筛选结果、全部写入/删除目标的类型、模式和对象 ID，确认不变后便可复用原业务结果，在最新父提交上重建受影响树链。命令、实例登记/心跳、技术权威记录、初始化、Cleaner 及迁移写入均按实际内容依赖处理，不因无关整体版本变化锁住业务。迁移仍保留已选来源和目标内容；本机成果仍核对真实路径与所属 Host，这些条件不借整个分支版本代替。Cleaner 使用 Recorder 通知所指的确切任务树和工作目录，按子树删除，并在同一提交保留既有任务退休事实；不枚举目录下每个文件，不审核归档清单、原件或技能。预取但未使用的正文、未选中的目录项和其他实例的心跳序号不作为虚假冲突来源。每个父提交使用独立且不可变的传输 operation，原 ID 和 expectedHead 不会改写；实际输入改变则按调用者策略重算或拒绝。Recorder 已审输入若真正变化会要求重新审阅，不静默生成或替换审阅结果。必须取得完整 unpack OK 和目标 ref 明确 OK 才直接确认；ACK 缺失或畸形不算成功。请求已发送但返回丢失时，保存原 operation ID、正文摘要及预期提交事实，再核查原操作；不能把“未知”当作“没有写入”并重投新消息。
+
+复用仅减少已验证重复工作，不引入全局发布队列、额外 GitHub API 轮询、正文长期缓存或轮询降频。提交前仍检查取消和账号/仓库作用域；有角色归属的命令保留对应的角色与所有权判断。已确认回执先按原命令重放，UNKNOWN 必须先核查实际派发的原 operation。新父尝试先保存，再在 live guard 通过后同步转移在途责任并派发，旧冲突元数据只在结果落定后尽力清理。会话 operation 缓存仍不是持久恢复账本。历史 v1 传输记录只证明原 operation 的身份、正文摘要和预期父提交，须先按原身份核实结果；证明未发布后，只有重新建立并核验实际相关输入和目标依赖，才能生成新父尝试，不能仅凭 HEAD 变化换父，原 operation 始终不改写。远端原子命令回执仍是持久重放依据。
+
+二进制附件使用远端原生 blob；归档逻辑路径在 Local / Git 中一致。Host 本机路径或本机 attachment ID 本身不是跨成员可用的长期成果。Git 平台的实际容量、API 和权限错误会明确返回；分块传输不消除远端容量、运行时缓冲或可用内存的限制。
 
 ## 身份和切换账号
 
@@ -39,6 +57,4 @@ Foreground replies and task scheduling require the repository owner's primary in
 
 P 路由进入成员 Planner；O 路由由 Organizer 分派和总验收，成员 Planner / Worker 执行。Foreground、Recorder 与 Helper 使用同一套持久记录和真实原生执行接口。任务整体完成不等待用户阅读回执或 Recorder 模型轮次。
 
-Recorder 生成长期记录并确认保存后，Cleaner 才执行固定清理。删除当前分支中的临时文件不等于删除 Git 历史，也不应当被用作秘密清除机制。详见 [数据保留](RETENTION.md) 和 [使用说明](docs/USAGE.md)。
-
-实现可追溯至 `src/framework/connection.ts`、`transactions.ts`、`instances.ts` 及 `src/experimental/private-git/git-repository.ts`。目前对远端行为的自动验证包含受控 HTTP 服务，不等于真实专用账号公网验证。
+Recorder 生成长期记录并确认保存后，通过 Cleaner 信号交接整棵总任务的固定目录清理。本 Recorder 提交的技能定义及实际冲突先各自处理完成，再保存归档并通知自己的 Cleaner；其他 Recorder 和任务独立推进，不等待未提交的编辑者。尚未完成的提案保留在原 Recorder 的接续责任内。每个技能定义及其共享目录条目在同一 Git 条件提交内发布；并发提交基于最新内容合并，共享目录保留所有已发布条目。确认发布后刷新本端各角色缓存，不等待其他任务，也不为缓存失败回滚已成功正文。Git 清理明确提交成功后直接返回，不等待额外回读或 Host 资源释放；Host 分别收尾自身资源。独立原生执行 Cleaner 只清理已登记、实际关闭成功且被明确永久退役的自有会话日志，并独立维护对应投影缓存，不处理宿主 query 数据库；必要记录由生产者事先保存到 Git，原生执行 Cleaner 本身不读取 Git。删除当前分支中的临时文件不等于删除 Git 历史，也不应当被用作秘密清除机制。详见 [数据保留](RETENTION.md) 和 [使用说明](docs/USAGE.md)。

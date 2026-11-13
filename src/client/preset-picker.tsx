@@ -1,3 +1,4 @@
+import { frameworkErrorText } from '../framework/client-error.js'
 import { useCallback, useEffect, useState } from 'react'
 import { Button, IconChevronDownOutlineRegular, Menu, type MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { AgentPresetRow } from '@deepseek-ai/dsh-agent-preset-registry/types'
@@ -12,11 +13,11 @@ export function PresetPicker({ value, onChange, onLoad, disabled, t }: {
   const [open, setOpen] = useState(false)
   const [rows, setRows] = useState<readonly ServantPreset[]>([])
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string>()
+  const [error, setError] = useState('')
   const refresh = useCallback(async () => {
-    setLoading(true); setError(undefined)
+    setLoading(true); setError('')
     try { setRows(await onLoad()) }
-    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
+    catch (cause) { setError(frameworkErrorText(cause)) }
     finally { setLoading(false) }
   }, [onLoad])
   useEffect(() => { void refresh() }, [refresh, t])

@@ -1,9 +1,8 @@
 import { createHash } from 'node:crypto'
 import type { StoragePort } from '../contracts/ports.js'
-import type { RecordAppend, RecordEntry, RecordKind, RecordPage, RecordRead, RecordScope, RecordSummary } from '../contracts/records.js'
+import type { RecordAppend, RecordEntry, RecordKind, RecordScope, RecordSummary } from '../contracts/records.js'
 
 const PART_CHARACTERS = 64 * 1024
-const PAGE_CHARACTERS = 32 * 1024
 const kinds = new Set<RecordKind>(['planner-memory', 'planner-note', 'worker-reply', 'task-origin', 'recovery', 'execution', 'conversation'])
 const digest = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex')
 export function canonicalJson(value: unknown): string {
@@ -22,10 +21,6 @@ export function recordStream(scope: RecordScope): string {
   const root = scope.kind + '/' + component(scope.taskId)
   return scope.kind === 'worker-reply' ? root + '/' + component(scope.childId) : root
 }
-export function taskRecordPrefixes(taskId: string): string[] {
-  return ['planner-memory', 'planner-note', 'worker-reply', 'recovery', 'execution', 'task-runtime', 'task-staging']
-    .map(prefix => prefix + '/' + component(taskId) + '/')
-}
 export function archivedRecordKey(key: string): string {
   return 'record-archive/' + key.split('/')[1] + '/entry/' + digest(key)
 }
@@ -41,12 +36,6 @@ function isEntry(value: unknown): value is RecordEntry {
   return !!value && typeof value === 'object' && (value as RecordEntry).kind === 'servant-record-entry'
     && (value as RecordEntry).schemaVersion === 1
 }
-function positiveLimit(value: number | undefined, fallback: number, maximum: number): number {
-  if (value === undefined) return fallback
-  if (!Number.isInteger(value) || value < 1 || value > maximum) throw new Error('Invalid page size.')
-  return value
-}
-
 /** Full immutable entries in the existing StoragePort. Only a final manifest publishes an entry. */
 export class RecordJournal {
   private readonly queues = new Map<string, Promise<unknown>>()
@@ -98,10 +87,6 @@ export class RecordJournal {
     try { return await pending } finally { if (this.queues.get(stream) === pending) this.queues.delete(stream) }
   }
 
-  async byCommand(scope: RecordScope, commandId: string): Promise<RecordEntry | undefined> {
-    return this.storage.get<RecordEntry>(recordStream(scope) + '/entry/' + digest(commandId))
-  }
-
   async entries(scope: RecordScope): Promise<RecordEntry[]> {
     const live = await this.storage.list<unknown>(recordStream(scope) + '/entry/')
     const archived = scope.taskId ? (await this.storage.list<unknown>('record-archive/' + component(scope.taskId) + '/entry/'))
@@ -113,40 +98,11 @@ export class RecordJournal {
     }).sort((a, b) => a.sequence - b.sequence)
   }
 
-  async page(scope: RecordScope, cursor = 0, limit = 20): Promise<RecordPage> {
-    if (!Number.isInteger(cursor) || cursor < 0) throw new Error('Invalid record cursor.')
-    limit = positiveLimit(limit, 20, 100)
-    const all = await this.entries(scope)
-    const candidates = all.filter(entry => entry.sequence > cursor)
-    const entries = candidates.slice(0, limit)
-    return { entries: entries.map(summary), revision: all.at(-1)?.sequence ?? 0,
-      ...(candidates.length > entries.length ? { nextCursor: entries.at(-1)!.sequence } : {}) }
-  }
-
   async manifest(ref: string): Promise<RecordEntry> {
     const key = keyFromRef(ref)
     const entry = await this.storage.get<unknown>(archivedRecordKey(key)) ?? await this.storage.get<unknown>(key)
     if (!isEntry(entry) || entry.ref !== ref) throw new Error('Record not found: ' + ref)
     return entry
-  }
-
-  async read(ref: string, cursor = 0, limit = PAGE_CHARACTERS): Promise<RecordRead> {
-    const entry = await this.manifest(ref)
-    if (!Number.isInteger(cursor) || cursor < 0 || cursor > entry.characters) throw new Error('Invalid text cursor.')
-    limit = positiveLimit(limit, PAGE_CHARACTERS, 256 * 1024)
-    const end = Math.min(entry.characters, cursor + limit)
-    let position = 0
-    let text = ''
-    for (const part of entry.parts) {
-      const next = position + part.characters
-      if (next > cursor && position < end) {
-        const value = await this.storage.get<{ text: string }>(part.key)
-        if (!value || digest(value.text) !== part.sha256) throw new Error('Record part is missing or corrupt: ' + part.key)
-        text += value.text.slice(Math.max(0, cursor - position), Math.min(part.characters, end - position))
-      }
-      position = next
-    }
-    return { entry: summary(entry), text, cursor, ...(end < entry.characters ? { nextCursor: end } : {}) }
   }
 
   async fullText(ref: string): Promise<string> {
@@ -161,21 +117,4 @@ export class RecordJournal {
     if (digest(text) !== entry.sha256 || Buffer.byteLength(text, 'utf8') !== entry.bytes) throw new Error('Record content hash mismatch.')
     return text
   }
-
-  async search(scope: RecordScope, query: string, cursor = 0, limit = 20): Promise<{ matches: Array<{ entry: RecordSummary; excerpt: string }>; nextCursor?: number }> {
-    if (!query.trim()) throw new Error('Enter a search phrase.')
-    limit = positiveLimit(limit, 20, 100)
-    const matches: Array<{ entry: RecordSummary; excerpt: string }> = []
-    const entries = (await this.entries(scope)).filter(entry => entry.sequence > cursor)
-    for (let index = 0; index < entries.length; index++) {
-      const entry = entries[index]!
-      const text = await this.fullText(entry.ref)
-      const found = text.toLocaleLowerCase().indexOf(query.toLocaleLowerCase())
-      if (found >= 0) matches.push({ entry: summary(entry), excerpt: text.slice(Math.max(0, found - 100), found + query.length + 160) })
-      if (matches.length === limit) return { matches, ...(index + 1 < entries.length ? { nextCursor: entry.sequence } : {}) }
-    }
-    return { matches }
-  }
-
-  async flush(): Promise<void> { await Promise.allSettled([...this.queues.values()]) }
 }

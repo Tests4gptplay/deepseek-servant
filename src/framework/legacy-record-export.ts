@@ -76,15 +76,18 @@ async function context(files: FilesStore, snapshot: FilesSnapshot, manifestPath:
     || manifest.clearedTasks !== undefined && !Array.isArray(manifest.clearedTasks))
     throw new Error('Invalid legacy migration manifest.')
   const root = manifestPath.slice(0, -'/manifest.json'.length)
-  const bytes = async (reference: string): Promise<Uint8Array> => {
+  const checkedBytes = async (reference: string): Promise<{ bytes: Uint8Array; sha256: string }> => {
     const path = manifest.references[reference], expected = manifest.referenceHashes[reference]
     if (typeof path !== 'string' || !digest(expected)) throw new Error('Legacy records reference has not been migrated: ' + reference)
     filePath(path)
     if (!path.startsWith(root + '/source/') && !path.startsWith(root + '/text/')) throw new Error('Legacy records reference escapes its migration: ' + reference)
     const body = await files.readBytes(snapshot, path)
-    if (body === undefined || hash(body) !== expected) throw new Error('Migrated legacy records are missing or corrupt: ' + reference)
-    return body
+    if (body === undefined) throw new Error('Migrated legacy records are missing or corrupt: ' + reference)
+    const sha256 = hash(body)
+    if (sha256 !== expected) throw new Error('Migrated legacy records are missing or corrupt: ' + reference)
+    return { bytes: body, sha256 }
   }
+  const bytes = async (reference: string): Promise<Uint8Array> => (await checkedBytes(reference)).bytes
   const json = async (key: string): Promise<unknown> => {
     const rows = manifest.records.filter(row => row.key === key)
     if (rows.length !== 1 || rows[0]!.path !== root + '/source/' + hash(key) + '.bin'
@@ -92,11 +95,11 @@ async function context(files: FilesStore, snapshot: FilesSnapshot, manifestPath:
       throw new Error('Legacy source record has not been preserved unambiguously: ' + key)
     return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(await bytes(key)))
   }
-  return { manifest, root, bytes, json }
+  return { manifest, root, bytes, checkedBytes, json }
 }
 
 export interface LegacyRecordExportIdentity { oldTaskId: string; taskId: string; continuation: 'complete' | 'cancelled' }
-export interface LegacyRecordExport { taskId: string; path?: string; bytes: Uint8Array }
+export interface LegacyRecordExport { taskId: string; path?: string; bytes: Uint8Array; /** Digest of these exact bytes, computed by this read. */ sha256?: string }
 
 type ExportContext = Awaited<ReturnType<typeof context>>
 async function identityFor(c: ExportContext, oldTaskId: string): Promise<LegacyRecordExportIdentity | undefined> {
@@ -166,7 +169,7 @@ export async function readLegacyRecordExport(files: FilesStore, snapshot: FilesS
   input: { manifestPath: string; oldTaskId: string }): Promise<LegacyRecordExport> {
   const c = await context(files, snapshot, input.manifestPath), selected = await identityFor(c, input.oldTaskId)
   if (!selected) throw new Error('Sealed legacy task records are unavailable or were explicitly cleared.')
-  const { manifest, root, bytes, json } = c
+  const { manifest, root, bytes, checkedBytes, json } = c
   if (manifest.source.mode === 'local') {
     const sealed = await json('records/' + encodeURIComponent(input.oldTaskId) + '/manifest')
     const text = await decodeLegacySealedRecords(sealed, input.oldTaskId, json)
@@ -183,7 +186,7 @@ export async function readLegacyRecordExport(files: FilesStore, snapshot: FilesS
   if (!object(sealed) || typeof sealed.recordsPath !== 'string' || !digest(sealed.recordsSha256)
     || !sealed.recordsPath.startsWith('dss-coop/records/' + input.oldTaskId + '/versions/')) throw new Error('Invalid sealed legacy Git records reference.')
   if (manifest.references[sealed.recordsPath] !== root + '/text/' + hash(sealed.recordsPath) + '.md') throw new Error('Invalid materialized legacy Git records path.')
-  const body = await bytes(sealed.recordsPath)
-  if (hash(body) !== sealed.recordsSha256) throw new Error('Sealed legacy Git records integrity mismatch.')
-  return { taskId: selected.taskId, path: manifest.references[sealed.recordsPath], bytes: body }
+  const body = await checkedBytes(sealed.recordsPath)
+  if (body.sha256 !== sealed.recordsSha256) throw new Error('Sealed legacy Git records integrity mismatch.')
+  return { taskId: selected.taskId, path: manifest.references[sealed.recordsPath], ...body }
 }

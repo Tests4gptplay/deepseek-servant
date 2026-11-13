@@ -1,4 +1,5 @@
-import { DshAgentCreationCancelled } from './host-types.js'
+import { observeNativeQuestionWait } from './native-questions.js'
+import { DshAgentAdmissionClosed, DshAgentCreationCancelled } from './host-types.js'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentOptions } from '@deepseek-ai/dsh-agent'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
@@ -10,9 +11,12 @@ import { SessionId, deriveEventMessage, isAppendSurfaceEvent } from '@deepseek-a
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-tools'
+import type {} from '@deepseek-ai/dsh-working-directory'
+import type {} from '@deepseek-ai/dsh-fs'
 import type { DshAgentRequest, DshModelRoute, ExecutionPermission, OwnedDshAgent } from './host-types.js'
 import { deriveNativeInputs } from './sessions.ts'
 import { observeDshProgress } from './progress.js'
+import { registerNativeSessionCleanup, recordNativeSessionClose, type NativeSessionRegistration } from './native-cleaner.js'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -35,7 +39,15 @@ export class DshAgentGateway {
     if (current !== undefined) return Promise.resolve(current)
     const pending = this.opening.get(request.sessionId)
     if (pending !== undefined) return pending
-    const operation = this.createOwned(request).finally(() => this.opening.delete(request.sessionId))
+    const acquisition = { dispatched: false, closed: false }
+    const operation = this.createOwned(request, acquisition).catch(error => {
+      const disposition = acquisition.closed ? 'closed' : !acquisition.dispatched ? 'not-dispatched' : undefined
+      if (disposition && request.creationFailure) {
+        try { request.creationFailure({ sessionId: request.sessionId, disposition }) }
+        catch (observationError) { this.ctx.logger?.('deepseek-servant').warn('Native acquisition failure observation failed.', observationError) }
+      }
+      throw error
+    }).finally(() => this.opening.delete(request.sessionId))
     this.opening.set(request.sessionId, operation)
     return operation
   }
@@ -55,7 +67,7 @@ export class DshAgentGateway {
     return persistence !== undefined && await persistence.stat(id) !== undefined
   }
 
-  private async createOwned(request: DshAgentRequest): Promise<OwnedDshAgent> {
+  private async createOwned(request: DshAgentRequest, acquisition: { dispatched: boolean; closed: boolean }): Promise<OwnedDshAgent> {
     const checkBeforeNative = () => { if (request.signal?.aborted) throw new DshAgentCreationCancelled(true, request.signal.reason) }
     checkBeforeNative()
     const sessionId = SessionId(request.sessionId)
@@ -80,14 +92,25 @@ export class DshAgentGateway {
       ...(route?.maxTokens === undefined ? {} : { maxTokens: route.maxTokens }),
     }
     let lastError: { message: string; turn: number; step: number } | undefined
+    const questionListeners = new Set<() => void>()
+    let waitingForUser = () => false
     let setupEntered = false, setupReturned = false
+    let cleanupRegistration: NativeSessionRegistration | undefined
+    // The factory can detach pre-setup persistence on abort and return before its
+    // handle cleanup settles. Keep that acquisition owned. Setup is the phase
+    // we can fence ourselves; after setup, await the actual handle and dispose it.
+    const creation = new AbortController()
+    const cancelSetup = () => { if (setupEntered && !setupReturned) creation.abort(request.signal?.reason) }
+    request.signal?.addEventListener('abort', cancelSetup, { once: true })
     const setup = async (agentCtx: Context, agent: Agent) => {
+      cleanupRegistration = registerNativeSessionCleanup(this.ctx, agent)
       setupEntered = true
       request.signal?.throwIfAborted()
       agentCtx.on('agent/error', event => {
         if (event.agent === agent) lastError = { message: errorChain(event.error), turn: event.turn, step: event.step }
       })
       if (presets !== undefined && presetId !== undefined) await presets.mount(agentCtx, presetId)
+      waitingForUser = observeNativeQuestionWait(agentCtx, agent, () => { for (const listener of questionListeners) listener() })
       request.signal?.throwIfAborted()
       // A resumed Auto execution retains its admitted route; a new execution
       // captures the current Host default. Couple prompt and request selection.
@@ -103,17 +126,24 @@ export class DshAgentGateway {
           reasoningEffort: reasoningEffort as ReasoningEffortId,
         }) }, assembled: undefined,
       }))
+      if (request.taskWorkspace) {
+        const working = this.ctx.workingDirectory
+        const root = await this.ctx.fs.resolve(request.taskWorkspace, { signal: request.signal })
+        const current = await this.ctx.fs.resolve(working.get(agent.session), { signal: request.signal })
+        if (!this.ctx.fs.contains(root, current)) await working.set(agent, request.taskWorkspace, request.signal)
+      }
       const commit = await request.setup?.(agentCtx, agent)
       request.signal?.throwIfAborted()
       setupReturned = true
       return commit
     }
     let native: AgentHandle
+    acquisition.dispatched = true
     try { native = request.resume
-      ? await this.ctx.agents.resume({ resumeSessionId: sessionId, agentOptions, setup, signal: request.signal })
+      ? await this.ctx.agents.resume({ resumeSessionId: sessionId, agentOptions, setup, signal: creation.signal })
       : await this.ctx.agents.create({
           sessionId,
-          signal: request.signal,
+          signal: creation.signal,
           agentOptions,
           meta: { cwd: request.cwd, ...(presetId === undefined ? {} : { agentPreset: presetId }) },
           setup,
@@ -123,13 +153,22 @@ export class DshAgentGateway {
         setupEntered && !setupReturned && !this.hasLiveOwner(request.sessionId), request.signal.reason,
         setupEntered && !setupReturned
           ? 'Creation was cancelled before setup returned: publication is fenced. Native rollback resource cleanup is not independently acknowledged.'
-          : 'Native creation was cancelled before a handle was returned; native execution cleanup has not been confirmed.')
+          : 'Native creation failed before its owned handle returned: ' + errorChain(error) + '. Native execution cleanup has not been confirmed.')
       throw error
-    }
+    } finally { request.signal?.removeEventListener('abort', cancelSetup) }
     const agent = native.agent
+    const closeNative = async () => {
+      try { await native.dispose() }
+      catch (error) {
+        recordNativeSessionClose(this.ctx, cleanupRegistration, { status: 'failed', error })
+        throw error
+      }
+      acquisition.closed = true
+      recordNativeSessionClose(this.ctx, cleanupRegistration, { status: 'closed' })
+    }
     const cancelAfterNative = async () => {
       if (!request.signal?.aborted) return
-      try { await native.dispose() }
+      try { await closeNative() }
       catch (error) { throw new DshAgentCreationCancelled(false, request.signal.reason,
         'Native creation cancellation cleanup failed: ' + errorChain(error)) }
       throw new DshAgentCreationCancelled(true, request.signal.reason)
@@ -143,7 +182,7 @@ export class DshAgentGateway {
           + JSON.stringify(request.recentExchanges) }] }))
         await this.ctx.sessions.flush(agent.session)
       } catch (error) {
-        try { await native.dispose() } catch (cleanup) {
+        try { await closeNative() } catch (cleanup) {
           if (request.signal?.aborted) throw new DshAgentCreationCancelled(false, request.signal.reason, errorChain(cleanup))
           throw new AggregateError([error, cleanup], 'Native history admission and cleanup failed')
         }
@@ -170,11 +209,11 @@ export class DshAgentGateway {
       sessionId: request.sessionId,
       actualAgent: agent,
       send: async (text, messageId, mode = 'followup', source = request.role === 'foreground' ? 'user' : 'deepseek-servant', recovery) => {
-        if (closing || disposed) throw new Error(`Servant Agent is closing or disposed: ${request.sessionId}`)
+        if (closing || disposed) throw new DshAgentAdmissionClosed(request.sessionId)
         const predecessor = messageAdmissions.get(messageId)
         const operation = admit(async () => {
           await predecessor?.catch(() => undefined)
-          if (closing || disposed) throw new Error(`Servant Agent is closing or disposed: ${request.sessionId}`)
+          if (closing || disposed) throw new DshAgentAdmissionClosed(request.sessionId)
           if (recovery) {
             if (source !== 'deepseek-servant' || (mode !== 'followup' && mode !== 'steer')) throw new Error('Recovery delivery must be a waking plugin followup or steer input.')
             const input = deriveNativeInputs(agent.session.snapshotEvents(), {
@@ -236,7 +275,7 @@ export class DshAgentGateway {
           // Their callers retain the original failures; a failed admission must
           // not prevent native cleanup from draining/releasing its own resources.
           await Promise.allSettled([...admissions])
-          await native.dispose()
+          await closeNative()
           disposed = true
           if (this.owned.get(request.sessionId) === handle) this.owned.delete(request.sessionId)
         })
@@ -249,6 +288,7 @@ export class DshAgentGateway {
         return {
           state: agent.status === 'running' ? 'running' : ownedJobs.some(job => job.status === 'running' || job.status === 'stopping') ? 'waiting' : 'idle',
           jobs: ownedJobs,
+          waitingForUser: waitingForUser(),
           ...(lastError === undefined ? {} : { error: { ...lastError } }),
         }
       },
@@ -268,6 +308,7 @@ export class DshAgentGateway {
         return unsubscribe
       },
       subscribe: (listener, terminalOnly = false) => {
+        questionListeners.add(listener)
         const onEvent = agent.ctx.on('session/event', (_session, event) => { if (!terminalOnly || event.type === 'turn/end') listener() })
         const onStatus = agent.ctx.on('agent/status', () => listener())
         const onError = agent.ctx.on('agent/error', () => listener())
@@ -276,7 +317,7 @@ export class DshAgentGateway {
           const owner = event.type === 'output' ? event.owner : event.job.owner
           if (owner === agent.id) listener()
         })
-        return () => { onEvent(); onStatus(); onError(); onJob?.() }
+        return () => { questionListeners.delete(listener); onEvent(); onStatus(); onError(); onJob?.() }
       },
     }
     this.owned.set(request.sessionId, handle)
