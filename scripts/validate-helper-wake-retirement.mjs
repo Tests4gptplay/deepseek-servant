@@ -151,6 +151,30 @@ for(const mode of ['local','git']){
   await f.rt.finishGitAuxiliaryRound(newer)
   check(await get(key),undefined)
  })
+ // Consumer contract for the actual runQueue catch context. Controlled role
+ // fixture, not a reproduced filesystem incident or a seeded business finish.
+ for(const delivered of [false,true])await scenario(mode,'new-admission-fault-does-not-borrow-stopped-input-'+delivered,async f=>{
+  await f.rt.saveRole({...f.record,stopped:true,gitSettledWakeId:f.request.id})
+  const request={id:'new-admission',role:'Helper',reason:'helper',sources:[],context:{facts:'the new requested inspection'}},key=f.key('wakes',request.id)
+  await f.rt.updateWake(key,()=>({request,delivered}))
+  let reads=0;const originalGet=f.rt.ctx.sessions.get;f.rt.ctx.sessions.get=(...args)=>{reads++;return originalGet(...args)}
+  const fault={id:'actual-admission-context',mode,scope:'test',role:'Helper',message:'controlled admission error context',source:'runtime',diagnosticContext:{wakeId:request.id,role:'Helper'}}
+  await f.rt.arrangeSafetyRepair(fault)
+  check((await f.records.get(key)).safetyFaults[0].id,fault.id)
+  check(f.rt.safetyEpisodes.get(fault.id).helperWakeId,request.id)
+  check(await f.records.get(f.key('wakes',f.request.id)),undefined)
+  check(f.own().delivery.request.id,f.request.id);check(reads,0)
+  const later={...fault,id:'second-admission-error'}
+  await assert.rejects(f.rt.arrangeSafetyRepair(later),/Original Helper is unavailable/);count++
+  check((await f.records.get(key)).safetyFaults.map(x=>x.id),[fault.id])
+  check(f.rt.safetyEpisodes.has(later.id),false)
+ })
+ await scenario(mode,'missing-admission-wake-never-falls-back-to-old-helper',async f=>{
+  await f.rt.saveRole({...f.record,stopped:true,gitSettledWakeId:f.request.id})
+  const fault={id:'unavailable-admission-context',mode,scope:'test',role:'Helper',message:'controlled admission context with unavailable original',source:'runtime',diagnosticContext:{wakeId:'missing-new-admission',role:'Helper'}}
+  await assert.rejects(f.rt.arrangeSafetyRepair(fault),/Original Helper is unavailable/);count++
+  check(await f.records.get(f.key('wakes',f.request.id)),undefined);check(f.own().delivery.request.id,f.request.id)
+ })
  await scenario(mode,'new-fault-after-retirement-reconstructs-owned-input',async f=>{
   const w=await f.addWake();f.input();f.done();await f.finish();check(await f.records.get(w.k),undefined)
   const fault={id:'new-real-fault',mode,scope:'test',role:'Helper',identity:f.record.identity,message:'actual new fault',source:'native'}
