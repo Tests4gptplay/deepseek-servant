@@ -3679,6 +3679,21 @@ executionId: binding.executionId, run: persistContext,
       if (episode) episode.settled = true
       this.environment.safetyResolved?.(id)
     }
+    const task = this.restoreTaskOwner(completed)
+    if (task) this.startMaintenance('helper-task-claims-after-restore:' + completed.commandId, async () => {
+      try {
+        if (!await this.taskRuntimeReleased(task)) return
+        // Task release skipped these claims while this original repair was
+        // pending. Reuse the existing bounded retirement inventory, without
+        // waiting for another Task or treating this one repair as all repairs.
+        const rows = this.records instanceof GitAuthorityStore
+          ? await this.taskReleaseRuntimeRows<RoleRestore>('restores', task)
+          : await this.localTaskRetirementRows<RoleRestore>('restores', task)
+        if (rows.some(row => { const owner = this.restoreTaskOwner(row.value); return !row.value.complete
+          && owner?.taskId === task.taskId && taskLifecycle(owner) === taskLifecycle(task) })) return
+        await this.retireReleasedTaskHelperClaims(task)
+      } catch (error) { this.ctx.logger?.('deepseek-servant').warn('Finished Task Helper claim cleanup after restoration was skipped.', error) }
+    })
   }
   private replaySafetyRestore(row: SafetyRepairContext & { commandId: string; complete: boolean; outcome?: string }): void {
     if (!row.safetyFaults?.length) return
@@ -5953,7 +5968,7 @@ executionId: binding.executionId, run: persistContext,
   }
   /** Read committed retirement rows without joining other Tasks' proven
    * original writes. Own, unknown and queued restore updates retain their wait. */
-  private localTaskRetirementRows<T>(group: 'observations' | 'restores', task: TaskMetadata): Promise<Array<{ key: string; value: T }>> {
+  private localTaskRetirementRows<T>(group: 'observations' | 'restores', task: Pick<TaskMetadata, 'taskId' | 'lifecycleId'>): Promise<Array<{ key: string; value: T }>> {
     const prefix = this.prefix + group + '/'
     if (!(this.files instanceof PhysicalLocalFiles) || !(this.records instanceof DshStorageAdapter)) return this.records.list<T>(prefix)
     const unrelated = (owner: { taskId?: string; lifecycleId?: string }) => owner.taskId !== task.taskId || taskLifecycle(owner) !== taskLifecycle(task)
@@ -6041,7 +6056,7 @@ executionId: binding.executionId, run: persistContext,
   /** Release finished Task inputs, while other Tasks retain their original
    * WakeRecords. A consumed mixed claim is retired whole with its old receipt;
    * no historical request body is edited or synthetic claim is created. */
-  private async retireReleasedTaskHelperClaims(task: TaskMetadata): Promise<void> {
+  private async retireReleasedTaskHelperClaims(task: Pick<TaskMetadata, 'taskId' | 'lifecycleId'>): Promise<void> {
     const workId = this.roleKey('Helper')
     try { await this.notificationClaimWrites?.get(workId) } catch { return }
     await this.withRoleWrite(workId, async () => {
