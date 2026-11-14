@@ -3710,13 +3710,21 @@ executionId: binding.executionId, run: persistContext,
     }
     if (!wakeIds.size) return
     this.startMaintenance('safety-confirmed:' + operationId, async () => {
-      for (const wakeId of wakeIds) await this.updateWake(this.prefix + 'wakes/' + hash(wakeId), current => {
-        if (!current) return
-        const faults = current.safetyFaults ?? (current.request.context?.safetyFault ? [current.request.context.safetyFault as SafetyFault] : [])
-        const resolved = faults.filter(fault => fault.operationId === operationId && ids.includes(fault.id)).map(fault => fault.id)
-        if (!resolved.length || resolved.every(id => current.resolvedSafetyFaultIds?.includes(id))) return
-        return { ...current, resolvedSafetyFaultIds: [...new Set([...(current.resolvedSafetyFaultIds ?? []), ...resolved])] }
-      })
+      for (const wakeId of wakeIds) {
+        await this.updateWake(this.prefix + 'wakes/' + hash(wakeId), current => {
+          if (!current) return
+          const faults = current.safetyFaults ?? (current.request.context?.safetyFault ? [current.request.context.safetyFault as SafetyFault] : [])
+          const resolved = faults.filter(fault => fault.operationId === operationId && ids.includes(fault.id)).map(fault => fault.id)
+          if (!resolved.length || resolved.every(id => current.resolvedSafetyFaultIds?.includes(id))) return
+          return { ...current, resolvedSafetyFaultIds: [...new Set([...(current.resolvedSafetyFaultIds ?? []), ...resolved])] }
+        })
+        const helper = this.roleRecords.get(this.roleKey('Helper')), wake = this.observedHelperWakes.get(wakeId)
+        // A replaced Helper's logged input no longer owns the current native
+        // delivery. Once its exact operations confirm, retire that transport
+        // like any other consumed non-initial input, without rereading old logs.
+        if (helper && (helper.delivery?.request ?? helper.lastWake)?.id !== wakeId
+          && wake && !this.helperInputKeepsWake(wake)) await this.retireLoggedHelperWake(wake.request)
+      }
       this.helperRetirementChecked = undefined
       const helper = this.roleRecords.get(this.roleKey('Helper'))
       if (helper && helper.gitSettledWakeId === helper.delivery?.request.id) await this.serialWork(helper.identity.workId,
@@ -4877,18 +4885,19 @@ executionId: binding.executionId, run: persistContext,
       const wake = this.observedHelperWakes.get(input.id)
       return wake && !this.helperInputKeepsWake(wake)
     })].map(input => [input.id, input]))
-    for (const request of inputs.values()) {
-      const key = this.prefix + 'wakes/' + hash(request.id)
-      const removal = (this.wakeWrites.get(key) ?? Promise.resolve()).catch(() => {}).then(async () => {
-        const wake = await this.records.get<WakeRecord>(key)
-        if (!wake || !wake.delivered || !wake.signalsConsumed || this.helperInputKeepsWake(wake)
-          || JSON.stringify(wake.request) !== JSON.stringify(request)) return
-        await this.deleteRuntimeRecord(key, wake, this.legacyHelperWakeReceiptPaths(request))
-      })
-      this.wakeWrites.set(key, removal)
-      try { await removal } finally { if (this.wakeWrites.get(key) === removal) this.wakeWrites.delete(key) }
-    }
+    for (const request of inputs.values()) await this.retireLoggedHelperWake(request)
     if (this.roleRecords.get(record.identity.workId) === currentOwner) this.helperRetirementChecked = currentOwner
+  }
+  private async retireLoggedHelperWake(request: RoleWake): Promise<void> {
+    const key = this.prefix + 'wakes/' + hash(request.id)
+    const removal = (this.wakeWrites.get(key) ?? Promise.resolve()).catch(() => {}).then(async () => {
+      const wake = await this.records.get<WakeRecord>(key)
+      if (!wake || !wake.delivered || !wake.signalsConsumed || this.helperInputKeepsWake(wake)
+        || JSON.stringify(wake.request) !== JSON.stringify(request)) return
+      await this.deleteRuntimeRecord(key, wake, this.legacyHelperWakeReceiptPaths(request))
+    })
+    this.wakeWrites.set(key, removal)
+    try { await removal } finally { if (this.wakeWrites.get(key) === removal) this.wakeWrites.delete(key) }
   }
   private async resetRecoveryCheck(binding: FrameworkRoleBinding, recoveryCheckId: string, signal: AbortSignal) {
     const currentCaller = () => {
