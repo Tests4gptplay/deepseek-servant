@@ -179,6 +179,26 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         }
         this.refreshErrors(mode);
     }
+    private gitOperationConfirmed(mode: FrameworkMode, scope: string, operationId: string): void {
+        const messages = this.reportedErrors.get(mode);
+        if (!messages?.size) return;
+        const ids = new Set<string>(); let changed = false;
+        for (const [key, record] of messages) {
+            const fault = record.safety && this.safetyNet.fault(record.safety.faultId);
+            if (record.operationId !== operationId || (record.scope !== scope && fault?.scope !== scope)) continue;
+            if (record.safety) {
+                for (const id of this.safetyNet.ids(record.safety.faultId)) ids.add(id);
+                this.resolveSafetyFault(record.safety.faultId);
+            }
+            messages.delete(key); changed = true;
+        }
+        if (!changed) return;
+        const running = this.running.get(mode);
+        if (running?.connection.scope === scope) running.runtime.confirmSafetyOperation(operationId, [...ids]);
+        // The original caller retains its usual change notification. Transport
+        // confirmation must not invoke UI listeners inside operation persistence.
+        this.refreshErrors(mode);
+    }
     private resolveSafetyFault(id: string): void {
         for (const alias of this.safetyNet.ids(id)) this.resolvedSafetyFaultIds.add(alias);
         this.safetyNet.resolved(id);
@@ -269,12 +289,15 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                     origin: { identity: fault.identity, taskId: fault.taskId }, safety: this.safetyNet.presentation(fault.id) });
                 this.refreshErrors(mode); this.safetyChanged(mode);
             },
-            safetyResolved: (id: string) => {
+            safetyResolved: (id: string, confirmedOperationId?: string) => {
                 const fault = this.safetyNet.fault(id), messages = this.reportedErrors.get(mode);
                 if (!fault) return;
                 const matches = [...messages ?? []].filter(([, value]) => value.safety && this.safetyNet.fault(value.safety.faultId) === fault);
                 for (const [key, value] of matches) if (!value.operationId) { for (const fact of value.ownershipKeys ?? []) this.resolvedRoleFacts.add(fact); messages!.delete(key); }
-                if (fault.operationId || matches.some(([, value]) => value.operationId)) this.safetyNet.awaitingOutcome(id);
+                if (fault.operationId && confirmedOperationId === fault.operationId) {
+                    for (const [key, value] of matches) if (value.operationId === confirmedOperationId) messages!.delete(key);
+                    this.resolveSafetyFault(id);
+                } else if (fault.operationId || matches.some(([, value]) => value.operationId)) this.safetyNet.awaitingOutcome(id);
                 else this.resolveSafetyFault(id);
                 this.refreshErrors(mode); this.changed();
             },
@@ -631,7 +654,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         const controller = new AbortController();
         this.accessOpening.set(mode, controller);
         const pending = openFrameworkStorage(mode === 'local' ? { mode, directory: settings.localDirectory, login: settings.userName, workerSeats: settings.workerSeats }
-            : { mode, ownerRepo: settings.ownerRepo, repositoryDirectory: settings.repositoryDirectory, workerSeats: settings.workerSeats }, { storage: this.storage, signal: controller.signal, gitRuntime: this.gitRuntime })
+            : { mode, ownerRepo: settings.ownerRepo, repositoryDirectory: settings.repositoryDirectory, workerSeats: settings.workerSeats }, { storage: this.storage, signal: controller.signal, gitRuntime: this.gitRuntime, onGitOperationConfirmed: (scope, id) => this.gitOperationConfirmed(mode, scope, id) })
           .then(async connection => {
             const assertCurrent = () => {
                 this.assertOpen();
@@ -728,6 +751,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         this.assertOpen(); signal?.throwIfAborted();
         const connection = await openFrameworkConnection(mode === 'local' ? { mode, directory: settings.localDirectory, login: settings.userName, workerSeats: settings.workerSeats }
              : { mode, ownerRepo: settings.ownerRepo, repositoryDirectory: settings.repositoryDirectory, workerSeats: settings.workerSeats }, { storage: this.storage, signal, gitRuntime: this.gitRuntime,
+                onGitOperationConfirmed: (scope, id) => this.gitOperationConfirmed(mode, scope, id),
                 onStorageOpened: access => this.startLocalUpgrade(access, workspace.directory, settings),
                 onOriginalInstanceIssue: error => { this.report(mode, error); },
                 onInstanceRegistered: (access, registered) => {

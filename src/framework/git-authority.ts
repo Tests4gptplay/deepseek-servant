@@ -20,7 +20,12 @@ export class SessionGitOperations implements GitOperationStore {
   private readonly retiring = new Map<string, 'unused' | 'settled'>()
   private readonly dispatched = new Set<string>()
   private closed = false
-  async save(record: GitOperationRecord): Promise<void> { if (!this.closed) { this.rows.set(record.operation.id, structuredClone(record)); this.releaseRetired(record.operation.id) } }
+  constructor(private readonly confirmed?: (operationId: string) => void) {}
+  async save(record: GitOperationRecord): Promise<void> {
+    if (this.closed) return
+    this.rows.set(record.operation.id, structuredClone(record)); this.releaseRetired(record.operation.id)
+    if (record.resolution?.status === 'confirmed') this.confirmed?.(record.operation.id)
+  }
   async get(id: string): Promise<GitOperationRecord | undefined> { return structuredClone(this.rows.get(id)) }
   async list(): Promise<GitOperationRecord[]> { return structuredClone([...this.rows.values()]) }
   /** References are local ownership only: they never queue or admit a write. */

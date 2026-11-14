@@ -56,7 +56,7 @@ export class FrameworkSafetyNet {
     const signature = typeof context.diagnosticContext?.roleAuthorityContent === 'string'
       || typeof context.diagnosticContext?.hostRestorationCommandId === 'string' ? context.errorSignature : undefined
     return JSON.stringify([context.mode, context.scope, context.source, context.identity?.role ?? context.role,
-      context.identity?.workId ?? context.workId, context.taskId ?? context.identity?.taskId, context.target, kind, signature])
+      context.identity?.workId ?? context.workId, context.taskId ?? context.identity?.taskId, context.target, kind, signature, ...(context.operationId === undefined ? [] : [context.operationId])])
   }
   /** A projected detail is an existing fact, not a new producer failure. Match
    * exact execution and opaque facts only; missing Task metadata is not guessed. */

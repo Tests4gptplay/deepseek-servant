@@ -30,6 +30,8 @@ export interface FrameworkConnectionDependencies {
   /** Explicit storage injection for controlled tests; ordinary Local uses its
    * physical backend and the owning Host starts the one-time source upgrade. */
   localFilesFactory?: (directory: string, options: { requireExisting: boolean }) => Promise<PhysicalLocalFiles>
+  /** Existing original operation confirmation; no extra storage query. */
+  onGitOperationConfirmed?(scope: string, operationId: string): void
   gitRuntime?: Pick<RemoteGitOptions, 'dulwich'>
   credentials?: Pick<CoopCredentials, 'resolve'>
   fetch?: GitHubFetch
@@ -165,7 +167,7 @@ export async function openFrameworkStorage(input: FrameworkConnectionSettings,
         const snapshot = await remote.snapshot()
         try { return !!snapshot.head } finally { remote.releaseSnapshot?.(snapshot) }
       }
-      const operations = new SessionGitOperations()
+      const operations = new SessionGitOperations(id => dependencies.onGitOperationConfirmed?.(scope, id))
       files = new GitFiles(remote, operations)
       const authority = new GitAuthorityStore(files, JSON.stringify(['instance', repository.identity.id, instanceUUID]))
       const shared = new GitAuthorityStore(files, 'shared')

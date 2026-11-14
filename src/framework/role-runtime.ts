@@ -129,7 +129,7 @@ export interface RuntimeEnvironment {
   safetyOccurrence?(): number
   safetyDisplayOwner?(): string
   safetyReplay?(fault: SafetyFault, result: { attemptId?: string; failure?: string; terminal?: boolean; displayOwner?: string }): void
-  safetyResolved?(faultId: string): void
+  safetyResolved?(faultId: string, confirmedOperationId?: string): void
   safetyAttempted?(faultId: string, attemptId: string): void
   safetyAttemptFailed?(faultId: string, attemptId: string, error: unknown, terminal?: boolean): void
   changed?(change?: FrameworkClientChange): void
@@ -1633,7 +1633,10 @@ export class FrameworkRoleRuntime {
       // its source. Do not persist an unowned notification for that absent path.
       if (helperSource && snapshot && this.files instanceof GitFiles
         && !(await this.files.listDirectory(snapshot, 'state/', { paths: [helperSource.path] })).length) return
-      return { request, ...(helperSignal ? { helperSignal } : {}), ...(recovery ? { recovery } : {}), ...(safetyFaults?.length ? { safetyFaults, ...(safetyParentWakeId ? { safetyParentWakeId } : {}) } : {}) }
+      const resolved = safetyFaults?.filter(fault => this.resolvedSafetyFaultIds.has(fault.id)).map(fault => fault.id)
+      return { request, ...(helperSignal ? { helperSignal } : {}), ...(recovery ? { recovery } : {}),
+        ...(safetyFaults?.length ? { safetyFaults, ...(safetyParentWakeId ? { safetyParentWakeId } : {}) } : {}),
+        ...(resolved?.length ? { resolvedSafetyFaultIds: resolved } : {}) }
     }, value => {
       stored = true
       const state = this.localWakeAdmissions.get(key)
@@ -2863,11 +2866,20 @@ export class FrameworkRoleRuntime {
       + JSON.stringify(facts, null, 2) + '\n```\n' }
   }
   private helperInputKeepsWake(wake: WakeRecord): boolean {
-    return !!(this.helperTaskOwner(wake.request) || wake.recovery || wake.safetyParentWakeId
-      || wake.safetyFaults?.length || wake.safetyAttempts?.length || wake.resolvedSafetyFaultIds?.length
-      || wake.request.reason === 'startup-recovery' || wake.request.context?.originalWake
-      || wake.request.context?.safetyFault || wake.request.context?.safetyFaults
-      || [...this.safetyEpisodes.values()].some(episode => episode.helperWakeId === wake.request.id))
+    if (this.helperTaskOwner(wake.request) || wake.recovery || wake.safetyParentWakeId
+      || wake.request.reason === 'startup-recovery' || wake.request.context?.originalWake) return true
+    const context = wake.request.context
+    const faults = [...wake.safetyFaults ?? [], ...wake.safetyAttempts?.map(attempt => attempt.fault) ?? [],
+      ...context?.safetyFault ? [context.safetyFault as SafetyFault] : [], ...context?.safetyFaults as SafetyFault[] ?? []]
+    // Only the original confirmed operations release their diagnostic transport.
+    // Helper assessment alone, other faults and recovery ownership stay pending.
+    const operationConfirmed = faults.length > 0 && faults.every(fault => fault.operationId
+      && wake.resolvedSafetyFaultIds?.includes(fault.id) && this.resolvedSafetyFaultIds.has(fault.id))
+    return !!(!operationConfirmed && (faults.length || wake.safetyAttempts?.length || wake.resolvedSafetyFaultIds?.length
+        || context?.safetyFault || context?.safetyFaults
+        || [...this.safetyEpisodes.values()].some(episode => episode.helperWakeId === wake.request.id))
+      || [...this.safetyEpisodes.values()].some(episode => episode.helperWakeId === wake.request.id
+        && !this.resolvedSafetyFaultIds.has(episode.fault.id)))
   }
   /** Helper reads consume real inputs directly. Debug preserves original facts;
    * only actual Task/recovery Wakes remain pending. No Helper claim is written. */
@@ -3685,10 +3697,42 @@ executionId: binding.executionId, run: persistContext,
     const { errorSignature, facts, failureDetails, ...diagnosticContext } = context
     return { ...fault, diagnosticContext, errorSignature }
   }
+  /** The original transport confirmed this exact operation. Helper assessment
+   * alone never enters here. Reuse the accepted Wake's existing resolved facts. */
+  confirmSafetyOperation(operationId: string, ids: readonly string[]): void {
+    for (const id of ids) this.resolvedSafetyFaultIds.add(id)
+    const wakeIds = new Set<string>(), restoreCommands = new Set<string>()
+    for (const episode of this.safetyEpisodes.values()) {
+      if (episode.fault.operationId !== operationId || !ids.includes(episode.fault.id)) continue
+      episode.settled = true
+      if (episode.helperWakeId) wakeIds.add(episode.helperWakeId)
+      for (const commandId of episode.commands) restoreCommands.add(commandId)
+    }
+    if (!wakeIds.size) return
+    this.startMaintenance('safety-confirmed:' + operationId, async () => {
+      for (const wakeId of wakeIds) await this.updateWake(this.prefix + 'wakes/' + hash(wakeId), current => {
+        if (!current) return
+        const faults = current.safetyFaults ?? (current.request.context?.safetyFault ? [current.request.context.safetyFault as SafetyFault] : [])
+        const resolved = faults.filter(fault => fault.operationId === operationId && ids.includes(fault.id)).map(fault => fault.id)
+        if (!resolved.length || resolved.every(id => current.resolvedSafetyFaultIds?.includes(id))) return
+        return { ...current, resolvedSafetyFaultIds: [...new Set([...(current.resolvedSafetyFaultIds ?? []), ...resolved])] }
+      })
+      this.helperRetirementChecked = undefined
+      const helper = this.roleRecords.get(this.roleKey('Helper'))
+      if (helper && helper.gitSettledWakeId === helper.delivery?.request.id) await this.serialWork(helper.identity.workId,
+        () => this.retryLoggedHelperInputRetirement(helper))
+      for (const commandId of restoreCommands) {
+        const proof = this.hostRestoreNativeEvidence?.get(commandId)
+        if (proof) this.scheduleHostRestoreRetirement(commandId, proof)
+      }
+    })
+  }
   private replaySafetyWakes(rows: readonly WakeRecord[]): void {
     if (this.safetyResolutionReady === false) return
     for (const row of rows) for (const id of row.resolvedSafetyFaultIds ?? []) if (!this.resolvedSafetyFaultIds.has(id)) {
-      this.resolvedSafetyFaultIds.add(id); this.environment.safetyResolved?.(id)
+      this.resolvedSafetyFaultIds.add(id)
+      const fault = row.safetyFaults?.find(fault => fault.id === id) ?? row.safetyAttempts?.find(attempt => attempt.fault.id === id)?.fault
+      this.environment.safetyResolved?.(id, fault?.operationId)
     }
     for (const row of rows) for (const attempt of row.safetyAttempts ?? []) {
       const fault = this.safetyFaultFromWake(row, attempt.fault)
@@ -4829,15 +4873,21 @@ executionId: binding.executionId, run: persistContext,
     const boundary = [...events].reverse().find(event => event.type === 'turn/start' || event.type === 'turn/end')
     if (boundary?.type !== 'turn/end' || boundary.data.reason.kind !== 'completed'
       || deriveNativeInputs(events, undefined, false).get(record.delivery.messageId)?.state !== 'consumed') return
-    const key = this.prefix + 'wakes/' + hash(request.id)
-    const removal = (this.wakeWrites.get(key) ?? Promise.resolve()).catch(() => {}).then(async () => {
-      const wake = await this.records.get<WakeRecord>(key)
-      if (!wake || !wake.delivered || !wake.signalsConsumed || this.helperInputKeepsWake(wake)
-        || JSON.stringify(wake.request) !== JSON.stringify(request)) return
-      await this.deleteRuntimeRecord(key, wake, this.legacyHelperWakeReceiptPaths(request))
-    })
-    this.wakeWrites.set(key, removal)
-    try { await removal } finally { if (this.wakeWrites.get(key) === removal) this.wakeWrites.delete(key) }
+    const inputs = new Map([request, ...this.helperInputsFromEvents(events).filter(input => {
+      const wake = this.observedHelperWakes.get(input.id)
+      return wake && !this.helperInputKeepsWake(wake)
+    })].map(input => [input.id, input]))
+    for (const request of inputs.values()) {
+      const key = this.prefix + 'wakes/' + hash(request.id)
+      const removal = (this.wakeWrites.get(key) ?? Promise.resolve()).catch(() => {}).then(async () => {
+        const wake = await this.records.get<WakeRecord>(key)
+        if (!wake || !wake.delivered || !wake.signalsConsumed || this.helperInputKeepsWake(wake)
+          || JSON.stringify(wake.request) !== JSON.stringify(request)) return
+        await this.deleteRuntimeRecord(key, wake, this.legacyHelperWakeReceiptPaths(request))
+      })
+      this.wakeWrites.set(key, removal)
+      try { await removal } finally { if (this.wakeWrites.get(key) === removal) this.wakeWrites.delete(key) }
+    }
     if (this.roleRecords.get(record.identity.workId) === currentOwner) this.helperRetirementChecked = currentOwner
   }
   private async resetRecoveryCheck(binding: FrameworkRoleBinding, recoveryCheckId: string, signal: AbortSignal) {
