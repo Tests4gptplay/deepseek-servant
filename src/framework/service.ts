@@ -258,8 +258,22 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         this.displayOccurrence = this.safetyNet.begin();
         this.changed({ domain: 'safety', mode, occurrence: this.displayOccurrence, owner: this.displayOwner });
     }
-    private safetyCallbacks(mode: FrameworkMode) {
+    private safetyCallbacks(mode: FrameworkMode, runtimeScope?: string) {
         return { retrySafetyDelivery: () => this.deliverSafetyFaults(), safetyOccurrence: () => this.safetyNet.begin(), safetyDisplayOwner: () => this.displayOwner,
+            // A final stopped Helper must not discard a fault accepted before
+            // Runtime delivery. This reads only the existing in-memory pools;
+            // it neither waits for delivery nor changes startup/admission order.
+            hasPendingHelperSafety: (identity: RoleErrorOrigin['identity'] & {}, wakeHashes: ReadonlySet<string>) => {
+                const scope = runtimeScope ?? this.running.get(mode)?.connection.scope;
+                return [...this.safetyNet.pending(mode, scope), ...this.safetyNet.pending(mode, this.diagnosticScope(mode))].some(fault => {
+                    const workId = fault.identity?.workId ?? fault.workId;
+                    const executionId = fault.identity?.executionId ?? fault.executionId;
+                    if (workId && workId !== identity.workId || executionId && executionId !== identity.executionId) return false;
+                    if (fault.identity?.role !== 'Helper' && fault.role !== 'Helper' && workId !== identity.workId) return false;
+                    const wakeId = fault.admissionTimeout?.context.wakeId ?? fault.diagnosticContext?.wakeId;
+                    return typeof wakeId !== 'string' || wakeHashes.has(createHash('sha256').update(wakeId).digest('hex'));
+                });
+            },
             safetyReplay: (fault: SafetyFault, result: { attemptId?: string; failure?: string; terminal?: boolean; displayOwner?: string }) => {
                 if (!fault.operationId && this.resolvedSafetyFaultIds.has(fault.id)) return;
                 this.safetyNet.restore(fault, result);
@@ -773,7 +787,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                     resource.resources = next;
                     if (changed)
                         this.changed();
-                }, ...this.safetyCallbacks(mode), error: (error, origin, safety) => { this.report(mode, error, connection.scope, undefined, origin, safety); } });
+                }, ...this.safetyCallbacks(mode, connection.scope), error: (error, origin, safety) => { this.report(mode, error, connection.scope, undefined, origin, safety); } });
             resource.runtime = runtime;
             signal?.throwIfAborted();
             if (mode === 'local') {
@@ -1112,7 +1126,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                     scope: access.connection.scope, member: access.connection.identity.login, instanceUUID: access.connection.identity.instanceUUID, primary: mode === 'local',
                     workspace: settings.workspace, workerSeats: settings.workerSeats, mode, collaborationId: settings.collaborationId,
                     presetId: settings.presetId, foreground: settings.foreground, background: settings.background,
-                }, { sharedRecords: access.connection.sharedRecords, observationRecords: access.connection.records, members: () => [], resources: () => [], heartbeat: async () => {}, ...this.safetyCallbacks(mode), error: (error, origin, safety) => { this.report(mode, error, access.connection.scope, undefined, origin, safety); }, resolved: target => this.resolveRoleErrors(mode, access.connection.scope, target), oldLocalControlRecovered: taskId => this.clearLegacyLocalControlIssue(access.connection.scope, taskId), changed: change => this.changed(change), cancelPending: reason => access.connection.cancelPending(reason) });
+                }, { sharedRecords: access.connection.sharedRecords, observationRecords: access.connection.records, members: () => [], resources: () => [], heartbeat: async () => {}, ...this.safetyCallbacks(mode, access.connection.scope), error: (error, origin, safety) => { this.report(mode, error, access.connection.scope, undefined, origin, safety); }, resolved: target => this.resolveRoleErrors(mode, access.connection.scope, target), oldLocalControlRecovered: taskId => this.clearLegacyLocalControlIssue(access.connection.scope, taskId), changed: change => this.changed(change), cancelPending: reason => access.connection.cancelPending(reason) });
                 if (active) await this.stopManualCleanup(active);
                 if (runtime) { this.relocationOwners.set(mode, runtime); await runtime.settleForStorageMove(); }
             } catch (error) { failures.push(error); }
@@ -1287,7 +1301,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             scope: access.connection.scope, member: access.connection.identity.login, instanceUUID: access.connection.identity.instanceUUID, primary: true,
             workspace: settings.workspace, workerSeats: settings.workerSeats, mode: 'local', collaborationId: settings.collaborationId,
             presetId: settings.presetId, foreground: settings.foreground, background: settings.background,
-        }, { members: () => [], resources: () => [], heartbeat: async () => {}, ...this.safetyCallbacks('local'), error: (error, origin, safety) => { this.report('local', error, access.connection.scope, undefined, origin, safety); }, resolved: target => this.resolveRoleErrors('local', access.connection.scope, target), oldLocalControlRecovered: taskId => this.clearLegacyLocalControlIssue(access.connection.scope, taskId), changed: change => this.changed(change) });
+        }, { members: () => [], resources: () => [], heartbeat: async () => {}, ...this.safetyCallbacks('local', access.connection.scope), error: (error, origin, safety) => { this.report('local', error, access.connection.scope, undefined, origin, safety); }, resolved: target => this.resolveRoleErrors('local', access.connection.scope, target), oldLocalControlRecovered: taskId => this.clearLegacyLocalControlIssue(access.connection.scope, taskId), changed: change => this.changed(change) });
         if (runtime.config.scope !== access.connection.scope) throw new Error('Cleanup belongs to another Local storage scope.');
         const cleanup = new FrameworkManualCleanup(access.connection.files, access.connection.transactions, access.conversation, runtime);
         let result: T | undefined; const failures: unknown[] = [];
