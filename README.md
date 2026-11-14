@@ -4,7 +4,7 @@
   <img src="https://raw.githubusercontent.com/Tests4gptplay/deepseek-servant/v0.3.0/docs/images/deepseek-servant-maids-duo.webp" alt="DeepSeek Servant 短裙与长裙女仆角色设计">
 </p>
 
-基于 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai/deepseek-harness) 的自主 AI 助理与多 Agent 协作插件。围绕持久目标进行规划、执行、成果评价、方法调整、任务接续和技能积累。当前提供 Local 持续任务模式与实验性 DSS-cah Git 模式；多 Agent 指前台、Planner 与 Worker 的角色协作。
+基于 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai/deepseek-harness) 的自主 AI 助理与多 Agent 协作插件。围绕持久目标进行规划、执行、成果评价、方法调整、任务接续和技能积累。当前提供 Local 持续任务模式与实验性 DSS-cah Git 模式，让需求、任务进展、已有成果与长期经验在持续工作中保持连贯。
 
 ## 技术评述与项目实践 / Review & project practice
 
@@ -28,10 +28,11 @@ The two independently developed projects show **architectural convergence** in s
 
 ## 核心能力
 
-- **目标驱动的多 Agent 工作**：前台理解要求，Planner 规划与验收，Worker 在所选工作区执行，支持并行席位、评审与任务换代。
+- **目标驱动的多 Agent 工作**：前台交流需求，后台按任务需要进行规划、分工、并行执行与阶段检查，支持长任务接续和最终交付。
 - **Local 持续任务模式**：在当前 DSH 实例中保存任务状态，支持暂停、继续、取消、目标修订、接续恢复及最终交付。
-- **实验性 DSS-CAH 模式**：让多个参与者在各自工作区执行任务，通过私有仓库共享对话、计划、进度、成果与归档，并支持任务控制和接续。
+- **实验性 DSS-CAH 模式**：让多个参与者在各自工作区执行任务，通过私有仓库共享对话、计划、进度、成果与归档，并支持任务控制和接续；本端后台可按需加入或退出协作。
 - **共用操作界面**：模式切换后分别显示对话和任务；模型、预设、工作区及 Worker 席位可配置。
+- **对话、历史与成果**：在工作期间持续交流、补充要求，按日期回看对话、浏览任务历史，查看结果及已保存的成果附件。
 - **工作记忆与技能**：保存和回查任务记录、工作规划随记与知识，支持技能积累；Local 提供分类记录清理与显式任务重置。
 
 ## 安装与使用
