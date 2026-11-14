@@ -125,8 +125,6 @@ export interface RuntimeEnvironment {
   error(error: unknown, origin?: RoleErrorOrigin, occurrence?: { source: string; occurrence: number }): void
   oldLocalControlRecovered?(taskId?: string): void
   retrySafetyDelivery?(): void
-  /** Synchronous ownership read of faults the Service has already accepted. */
-  hasPendingHelperSafety?(identity: WorkIdentity, wakeHashes: ReadonlySet<string>): boolean
   safetyOccurrence?(): number
   safetyDisplayOwner?(): string
   safetyReplay?(fault: SafetyFault, result: { attemptId?: string; failure?: string; terminal?: boolean; displayOwner?: string }): void
@@ -1061,9 +1059,6 @@ export class FrameworkRoleRuntime {
           && !retirements.some(item => item.sessionId === latest.sessionId && item.executionId === latest.identity.executionId))
           retirements.push({ sessionId: latest.sessionId, executionId: latest.identity.executionId,
             helper: { delivery: latest.delivery, lastWake: latest.lastWake, notificationClaims: latest.notificationClaims } })
-        if (record.identity.role === 'Helper' && record.released && record.stopped
-          && !retirements.some(item => item.sessionId === record.sessionId && item.executionId === record.identity.executionId))
-          retirements.push({ sessionId: record.sessionId, executionId: record.identity.executionId })
         if (record.identity.role === 'Foreground' && record.completedRound && record.stopped
           && (!latest.completedRound || !latest.stopped)
           && record.identity.executionId === latest.identity.executionId
@@ -1186,35 +1181,19 @@ export class FrameworkRoleRuntime {
             const pending = current.nativeRetirements.filter(item => item.sessionId !== retired.sessionId || item.executionId !== retired.executionId)
             const next = { ...current }
             if (pending.length) next.nativeRetirements = pending; else delete next.nativeRetirements
-            // This released Helper has no current or predecessor consumer left.
-            // A newer admission owns a different execution and is never removed.
-            if (!pending.length && next.identity.role === 'Helper' && next.released && next.stopped) return undefined
             return next
           }
           let saved: RoleRecord | undefined
-          if (this.records instanceof GitAuthorityStore) {
-            const result = await this.records.update<RoleRecord, { saved?: RoleRecord; remove?: RoleRecord }>(key, current => {
-              const next = remove(current)
-              return { write: next !== current && next !== undefined, value: next,
-                result: { saved: next, ...(current && next === undefined ? { remove: current } : {}) } }
-            })
-            // update's defined-value contract is unchanged. Only a final whole
-            // row deletion uses the existing exact compare-and-delete API.
-            if (result.remove) await this.records.compareAndDelete(key, result.remove)
-            saved = result.saved
-          } else {
+          if (this.records instanceof GitAuthorityStore) saved = await this.records.update<RoleRecord, RoleRecord | undefined>(key, current => {
+            const next = remove(current)
+            return { write: next !== current, ...(next ? { value: next } : {}), result: next }
+          })
+          else {
             const current = await this.records.get<RoleRecord>(key)
             saved = remove(current)
-            if (saved !== current) {
-              if (saved) await this.records.set(key, saved)
-              else await this.records.delete?.(key)
-            }
+            if (saved && saved !== current) await this.records.set(key, saved)
           }
           const live = retiredWorker ? this.retiredWorkers?.get(record.identity.executionId) : this.roleRecords.get(record.identity.workId)
-          if (!saved && live?.identity.executionId === record.identity.executionId && live.sessionId === record.sessionId
-            && live.released && live.identity.role === 'Helper') {
-            this.roleRecords.delete(live.identity.workId); this.roleBases?.delete(live.identity.workId)
-          }
           if (saved && live?.identity.executionId === saved.identity.executionId && live.sessionId === saved.sessionId) {
             if (retiredWorker) this.retiredWorkers!.set(saved.identity.executionId, { ...live, nativeRetirements: saved.nativeRetirements })
             else {
@@ -1233,17 +1212,14 @@ export class FrameworkRoleRuntime {
    * Its accepted physical publication may still need original call arguments;
    * HostRestore may still need its persisted result. No Debug retention scan. */
   private async finishRetiredHelper(workId: string, retired: NonNullable<RoleRecord['nativeRetirements']>[number]): Promise<boolean> {
-    const current = this.roleRecords.get(workId) ?? await this.records.get<RoleRecord>(this.roleRecordPath(workId))
+    const current = this.roleRecords.get(workId)
     if (!current || current.identity.executionId === retired.executionId || current.sessionId === retired.sessionId) return false
     const original: RoleRecord = { ...retired.helper, identity: { role: 'Helper', workId, executionId: retired.executionId },
       sessionId: retired.sessionId, generation: 0, stopped: true }
-    return this.finishStoppedHelper(original, await new DshSessionReader(this.ctx).events(retired.sessionId))
-  }
-  private async finishStoppedHelper(original: RoleRecord, events: readonly import('@deepseek-ai/dsh-session').SessionEvent[]): Promise<boolean> {
-    const { workId, executionId } = original.identity
+    const events = await new DshSessionReader(this.ctx).events(retired.sessionId)
     const request = original.delivery?.request ?? original.lastWake
     if (this.files instanceof PhysicalLocalFiles && request)
-      await resumePhysicalHelperReportsFromEvents(this.files, executionId, events, {
+      await resumePhysicalHelperReportsFromEvents(this.files, retired.executionId, events, {
         recordAttempt: (input, commandId) => this.recordSafetyAttempt(this.binding(original, request), input, commandId, original),
         signalSources: path => this.physicalSignalSources(path)
       }, true)
@@ -1259,8 +1235,8 @@ export class FrameworkRoleRuntime {
     }
     let finished = true
     for (const call of calls.values()) {
-      const commandId = original.sessionId + ':' + call.data.callId
-      const proof = { workId, executionId }
+      const commandId = retired.sessionId + ':' + call.data.callId
+      const proof = { workId, executionId: retired.executionId }
       if (successful.has(call.seq)) {
         ;(this.hostRestoreNativeEvidence ??= new Map()).set(commandId, proof)
         await this.retireCompletedHostRestore(commandId, proof)
@@ -1268,56 +1244,9 @@ export class FrameworkRoleRuntime {
       // An accepted call without its native success is not invented into a
       // successful result. Keep this exact old session while its row remains.
       const value = await this.records.get<HostRestore>(this.prefix + 'host-restores/' + hash(commandId))
-      if (value?.requester?.workId === workId && value.requester.executionId === executionId) finished = false
+      if (value?.requester?.workId === workId && value.requester.executionId === retired.executionId) finished = false
     }
     return finished
-  }
-  private scheduleFinalStoppedHelper(record: RoleRecord): void {
-    if (record.identity.role !== 'Helper' || !record.stopped || record.released || record.stopUnknown) return
-    this.startMaintenance('helper-final-retirement:' + record.identity.executionId, () =>
-      this.serialWork(record.identity.workId, async () => {
-        const current = this.roleRecords.get(record.identity.workId)
-        if (current?.identity.executionId === record.identity.executionId && current.sessionId === record.sessionId)
-          await this.retireFinalStoppedHelper(current)
-      }), { identity: record.identity, stage: 'helper-final-retirement' })
-  }
-  /** The current Helper can end without a replacement. Native stop is not
-   * business completion: every original input must already have lost its Wake
-   * through its real consumer, with no remaining claim or accepted fault.
-   * Only this known Session and its exact original record keys are consulted. */
-  private async retireFinalStoppedHelper(record: RoleRecord,
-    priorEvents?: readonly import('@deepseek-ai/dsh-session').SessionEvent[]): Promise<boolean> {
-    if (record.identity.role !== 'Helper' || !record.stopped || record.stopUnknown || record.released
-      || !record.delivery?.confirmed
-      || Object.keys(record.notificationClaims ?? {}).length || this.active(record)) return false
-    const stop = this.stopOperations?.get(JSON.stringify([record.identity.workId, record.identity.executionId]))
-    if (stop && (!stop.settled || stop.controlCommands?.size)) return false
-    const events = priorEvents ?? await new DshSessionReader(this.ctx).events(record.sessionId)
-    const inputs = deriveNativeInputs(events, undefined, false)
-    const wakeHashes = new Set<string>()
-    for (const [id, input] of inputs) {
-      if (input.source !== 'deepseek-servant' || !id.startsWith('dss-wake-')) continue
-      if (input.state !== 'consumed') return false
-      wakeHashes.add(id.slice('dss-wake-'.length))
-    }
-    if (!wakeHashes.has(hash(record.delivery.request.id))) return false
-    // A mixed claim may have retired whole after Task A ended. Task B still
-    // owns its original Wake even though it was claimed inside the same turn.
-    for (const request of this.helperResponsibilities(record)) wakeHashes.add(hash(request.id))
-    const pendingSafety = () => this.environment.hasPendingHelperSafety?.(record.identity, wakeHashes)
-      || [...this.safetyEpisodes.values()].some(episode => !this.resolvedSafetyFaultIds.has(episode.fault.id)
-        && (episode.helperWakeId && wakeHashes.has(hash(episode.helperWakeId))
-          || episode.fault.identity?.workId === record.identity.workId
-            && episode.fault.identity.executionId === record.identity.executionId))
-    if (pendingSafety()) return false
-    for (const id of wakeHashes) if (await this.records.get<WakeRecord>(this.prefix + 'wakes/' + id)) return false
-    if (!await this.finishStoppedHelper(record, events)) return false
-    // Ordinary admission shares this work lane. No new native admission can
-    // inherit the final stopped record while its existing release is saved.
-    const current = this.roleRecords.get(record.identity.workId)
-    if (current !== record || pendingSafety()) return false
-    await this.saveRole({ ...record, released: true })
-    return true
   }
   /** The replaced Helper's last native reader has finished. Retire only an
    * actually released Task input, before accepting native Session retirement. */
@@ -4648,11 +4577,10 @@ executionId: binding.executionId, run: persistContext,
   // A single Helper's last checked RoleRecord, not a durable index. New claims
   // or replacement records invalidate it; unchanged idle callbacks cost no I/O.
   private helperRetirementChecked?: RoleRecord
-  private async retrySettledHelperWakeRetirement(record: RoleRecord,
-    priorEvents?: readonly import('@deepseek-ai/dsh-session').SessionEvent[]): Promise<void> {
+  private async retrySettledHelperWakeRetirement(record: RoleRecord): Promise<void> {
     if (record.identity.role !== 'Helper' || !record.gitSettledWakeId
       || record.gitSettledWakeId !== record.delivery?.request.id || this.helperRetirementChecked === record) return
-    const events = priorEvents ?? await new DshSessionReader(this.ctx).events(record.sessionId)
+    const events = await new DshSessionReader(this.ctx).events(record.sessionId)
     const live = this.ctx.sessions.get(SessionId(record.sessionId))
     if (live) await this.ctx.sessions.flush(live)
     this.scheduleCompletedHostRestoreRetirement(record, events)
@@ -4724,7 +4652,6 @@ executionId: binding.executionId, run: persistContext,
       // The original Host row was a real last consumer, not a timer or a
       // Task-completion gate. Retry its exact predecessor after any current read.
       const owner = this.roleRecords.get(proof.workId)
-      if (owner?.identity.executionId === proof.executionId) this.scheduleFinalStoppedHelper(owner)
       const retired = owner?.nativeRetirements?.find(item => item.helper && item.executionId === proof.executionId)
       if (owner && retired) {
         const pending = this.nativeRetirementOperations?.get(proof.workId + '\0' + retired.sessionId)
@@ -5071,12 +4998,11 @@ executionId: binding.executionId, run: persistContext,
           } catch (error) { this.error(error, { identity: record.identity, stage: 'startup-direct-delivery' }); continue }
         }
       }
-      let helperEvents: readonly import('@deepseek-ai/dsh-session').SessionEvent[] | undefined
       if (this.files instanceof PhysicalLocalFiles && record.identity.role === 'Helper' && !this.active(record)) {
         try {
           const request = record.delivery?.request ?? record.lastWake
           if (request && (await sessions.inspect(record.sessionId)).exists) {
-            const events = helperEvents = await sessions.events(record.sessionId)
+            const events = await sessions.events(record.sessionId)
             await resumePhysicalHelperReportsFromEvents(this.files, record.identity.executionId,
               events, {
                 recordAttempt: (input, commandId) => this.recordSafetyAttempt(this.binding(record, request), input, commandId),
@@ -5107,7 +5033,7 @@ executionId: binding.executionId, run: persistContext,
       if (record.identity.role === 'Helper' && record.gitSettledWakeId
         && record.gitSettledWakeId === record.delivery?.request.id
         && !this.active(record) && !restoring.has(record.identity.executionId)) {
-        try { await this.serialWork(record.identity.workId, () => this.retrySettledHelperWakeRetirement(record, helperEvents)) }
+        try { await this.serialWork(record.identity.workId, () => this.retrySettledHelperWakeRetirement(record)) }
         catch (error) { this.error(error, { identity: record.identity, stage: 'startup-helper-wake-retirement' }) }
       }
       if (!record.stopped && record.stopIntent?.phase === 'disposed' && !this.active(record)) {
@@ -5130,8 +5056,6 @@ executionId: binding.executionId, run: persistContext,
         try {
           if (this.active(record)) continue
           if (restoring.has(record.identity.executionId)) continue
-          if (record.identity.role === 'Helper' && await this.serialWork(record.identity.workId,
-            () => this.retireFinalStoppedHelper(record, helperEvents))) { recovered.add(record.identity.workId); continue }
           if (record.completedRound || record.gitSettledWakeId === (record.delivery?.request ?? record.lastWake)?.id && record.gitSettledWakeId
             && (!(!!record.identity.taskId && (record.identity.role === 'Planner' || record.identity.role === 'Worker' || record.identity.role === 'Recorder'))
               || !(await sessions.inspect(record.sessionId)).unansweredQuestionCallIds?.length)) {
@@ -5462,14 +5386,10 @@ executionId: binding.executionId, run: persistContext,
           const result = !record || record.identity.executionId !== request.executionId ? { status: ("superseded" as const) } : requestStop(record, record.identity.taskId, request.commandId);
           if (!result) return
           try {
-            const settled = await this.controls.settleExecution(request.commandId, request, {
+            await this.controls.settleExecution(request.commandId, request, {
               state: result.status,
               ...(result.status === 'unconfirmed' ? { detail: result.reason, jobs: result.jobs } : {})
             })
-            if (settled?.result) {
-              this.stopOperations?.get(JSON.stringify([request.workId, request.executionId]))?.controlCommands?.delete(request.commandId)
-              if (record) this.scheduleFinalStoppedHelper(record)
-            }
           } catch (error) {
             // The exact native result already exists. If this Task's original
             // Cleaner removed the control directory, its receipt retires with
@@ -6353,8 +6273,6 @@ executionId: binding.executionId, run: persistContext,
         ;(this.roleBases ??= new Map()).set(workId, structuredClone(saved))
       }
     })
-    const current = this.roleRecords.get(workId)
-    if (current) this.scheduleFinalStoppedHelper(current)
   }
   private taskReleaseIndexes?: {
     roles: GitRecordIndex<AuthorityDiscoveryKey>
@@ -6600,8 +6518,6 @@ executionId: binding.executionId, run: persistContext,
       finally {
         if (stop.persistedStopped) stop.result = { status: 'stopped' }
         stop.settled = true
-        const current = this.roleRecords.get(workId)
-        if (stop.result?.status === 'stopped' && current?.identity.executionId === executionId) this.scheduleFinalStoppedHelper(current)
       }
     }));
     return false;
@@ -7568,9 +7484,6 @@ executionId: binding.executionId, run: persistContext,
       for (const outcome of await Promise.allSettled([...(this.safetyRequests?.values() ?? [])]))
         if (outcome.status === 'rejected') failures.push(outcome.reason)
       for (const outcome of await Promise.allSettled([...(this.safetySettlements?.values() ?? []), ...(this.safetyRestoreWrites?.values() ?? []), ...(this.safetyResolutionLoad ? [this.safetyResolutionLoad] : [])])) if (outcome.status === 'rejected') failures.push(outcome.reason)
-      const helper = this.roleRecords.get(this.roleKey('Helper'))
-      if (helper) try { await this.serialWork(helper.identity.workId, () => this.retireFinalStoppedHelper(helper)) }
-      catch (error) { failures.push(error) }
       this.wakeConsumptions?.clear()
       this.hostRestoreNativeEvidence?.clear()
       this.hostRestoreEvidenceCursor = undefined
