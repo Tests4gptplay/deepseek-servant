@@ -1,3 +1,4 @@
+import { taskCommandReceiptPath } from './task-command-paths.js'
 import { helperDebugPath } from './helper-debug-path.js'
 import { DshStorageAdapter } from '../adapters/dsh/storage.js'
 import { prepareLocalConversation } from './local-upgrade-conversation.js'
@@ -274,7 +275,7 @@ export class FrameworkRoleRuntime {
   private readonly roleRecords = new Map<string, RoleRecord>()
   private legacyForegroundMigration?: Promise<void>
   private roleBases?: Map<string, RoleRecord>
-  private notificationClaimWrites = new Map<string, Promise<unknown>>()
+  private notificationOperations = new Map<string, Promise<unknown>>()
   private notificationContextRetries = new Map<string, { executionId: string; run: () => Promise<void>; retire: (executionId: string) => Promise<void> }>()
   private readonly gitPriorExecutions = new Set<string>()
   private readonly safetyContext = new AsyncLocalStorage<number>()
@@ -316,8 +317,8 @@ export class FrameworkRoleRuntime {
   private coldHostRestoreRetirement = true
   private readonly targetedPumps = new Map<string, Promise<void>>()
   private readonly admissionCancellations = new Map<string, unknown>()
-  // Read-through view of existing Task Helper WakeRecords; no extra file or poll.
-  private readonly taskHelperWakes = new Map<string, WakeRecord>()
+  // Read-through view of existing Helper WakeRecords; no extra file or poll.
+  private readonly observedHelperWakes = new Map<string, WakeRecord>()
   private readonly wakeWriteOwners = new Map<string, RoleWake>()
   private readonly roleWriteOwners = new Map<string, WorkIdentity>()
   private readonly wakeWrites = new Map<string, Promise<unknown>>()
@@ -822,7 +823,7 @@ export class FrameworkRoleRuntime {
       if (!this.records.delete) throw new Error('Runtime storage does not support retirement.')
       await this.records.delete(key)
     }
-    if (key.startsWith(this.prefix + 'wakes/')) this.taskHelperWakes?.delete((expected as WakeRecord)?.request?.id)
+    if (key.startsWith(this.prefix + 'wakes/')) this.observedHelperWakes?.delete((expected as WakeRecord)?.request?.id)
     this.admissionObservationVersion++; this.forgetAdmissionWake(key)
   }
   private roleKey(role: RecoveryRole, taskId?: string, workerId?: string, directId?: string): string {
@@ -1051,7 +1052,7 @@ export class FrameworkRoleRuntime {
           && !retirements.some(item => item.sessionId === latest.sessionId && item.executionId === latest.identity.executionId))
           retirements.push({ sessionId: latest.sessionId, executionId: latest.identity.executionId })
         // A replaced, confirmed-stopped Helper cannot be reused. Keep only its
-        // original accepted claims beside the existing exact retirement item;
+        // original delivery and any pre-change accepted inputs beside the existing retirement item;
         // report replay and HostRestore proof finish independently of admission.
         if (latest.identity.role === 'Helper' && latest.stopped && !latest.stopUnknown
           && record.identity.role === 'Helper' && record.identity.executionId !== latest.identity.executionId
@@ -1088,26 +1089,7 @@ export class FrameworkRoleRuntime {
           let changes: FileChange[] = []
           if (completedNativeCommands?.length) {
             try {
-              const claims = record.identity.role === 'Helper' ? completedNativeCommands.flatMap(id => {
-                const claim = record.notificationClaims?.[id]
-                return claim?.executionId === record.identity.executionId && !claim.taskId && claim.sources.length
-                  && claim.commandId === 'consume-later/' + hash(id) && claim.helperWakes?.length
-                  && claim.helperWakes.every(wake => !this.helperTaskOwner(wake) && wake.reason !== 'startup-recovery'
-                    && !wake.context?.originalWake && !wake.context?.notificationClaims && !wake.context?.safetyFault && !wake.context?.safetyFaults)
-                  && claim.sources.every(source => claim.helperWakes!.some(wake => wake.sources.some(item => item.path === source.path && item.version === source.version)))
-                  ? [{ id, claim }] : []
-              }) : []
-              const ids = new Map(claims.map(({ id, claim }) => [id, claim.commandId]))
-              changes = await this.transactions.completedNativeCommandChanges(snapshot, completedNativeCommands.map(id => ids.get(id) ?? id))
-              if (claims.length) {
-                const retained = { ...record.notificationClaims }
-                for (const { id, claim } of claims) retained[id] = { ...claim,
-                  initialSignals: [...new Set([...claim.initialSignals, ...claim.sources.map(source => source.path)])], sources: [] }
-                // Native success settles only the signal mutation. Keep every
-                // original Helper request and path for continuing business work.
-                // Empty sources use settlement's existing no-mutation path.
-                record = { ...record, notificationClaims: retained }
-              }
+              changes = await this.transactions.completedNativeCommandChanges(snapshot, completedNativeCommands)
             }
             catch (error) { this.ctx.logger?.('deepseek-servant').warn('Successful command receipt cleanup was skipped; the original role completion continues.', error) }
           }
@@ -1216,11 +1198,33 @@ export class FrameworkRoleRuntime {
     if (!current || current.identity.executionId === retired.executionId || current.sessionId === retired.sessionId) return false
     const original: RoleRecord = { ...retired.helper, identity: { role: 'Helper', workId, executionId: retired.executionId },
       sessionId: retired.sessionId, generation: 0, stopped: true }
+    // Pre-change Helper claims may outlive their plain notification Wakes.
+    // Preserve only this exact predecessor's original inputs before its existing
+    // native retirement item is removed. New Helpers never copy that field.
+    const legacy = Object.values(original.notificationClaims ?? {}).flatMap(claim => claim.helperWakes ?? [])
+    if (legacy.length) {
+      const append = async (snapshot: FilesSnapshot) => {
+        const logs = new Map<string, { text: string; append: string }>()
+        for (const request of legacy) {
+          const log = this.helperInputLog({ request })
+          const prior = logs.get(log.path), text = prior?.text ?? await this.files.read(snapshot, log.path) ?? ''
+          if (!text.includes(log.text)) logs.set(log.path, { text: text + log.text, append: (prior?.append ?? '') + log.text })
+        }
+        return logs
+      }
+      if (this.files instanceof PhysicalLocalFiles) {
+        const files = this.files
+        await withSnapshot(files, async snapshot => {
+          for (const [path, log] of await append(snapshot)) await files.append(path, log.append)
+        })
+      } else await this.transactions.run('helper-legacy-inputs/' + retired.executionId, { legacy },
+        { reevaluate: true, gitReplay: 'session-only' }, async snapshot => [...await append(snapshot)].map(([path, log]) => ({ path, content: log.text })))
+    }
     const events = await new DshSessionReader(this.ctx).events(retired.sessionId)
     const request = original.delivery?.request ?? original.lastWake
     if (this.files instanceof PhysicalLocalFiles && request)
       await resumePhysicalHelperReportsFromEvents(this.files, retired.executionId, events, {
-        recordAttempt: (input, commandId) => this.recordSafetyAttempt(this.binding(original, request), input, commandId, original),
+        recordAttempt: (input, commandId) => this.recordSafetyAttempt(this.binding(original, request), input, commandId, original, this.helperInputsFromEvents(events)),
         signalSources: path => this.physicalSignalSources(path)
       }, true)
     const calls = new Map(events.flatMap(event => event.type === 'tool/call' && event.data.name === 'dss_restore_host'
@@ -1262,8 +1266,8 @@ export class FrameworkRoleRuntime {
     const current = this.roleRecords.get(this.roleKey('Helper'))
     if (current && (!current.stopped || current.identity.executionId !== retired.executionId)
       && (current.delivery?.request ?? current.lastWake)?.id === request.id) return false
-    this.taskHelperWakes?.set(request.id, wake)
-    await this.retireReleasedTaskHelperClaims(owner, request.id)
+    this.observedHelperWakes?.set(request.id, wake)
+    await this.retireReleasedTaskHelperWakes(owner, request.id)
     return !await this.records.get<WakeRecord>(key)
   }
   private releasedHelperTask(owner: Pick<TaskMetadata, 'taskId' | 'lifecycleId'>): Promise<boolean> {
@@ -1565,26 +1569,19 @@ export class FrameworkRoleRuntime {
     if (helperSource) for (const row of helperRows) {
       const wake = row.value
       if (wake.request.role !== 'Helper' || wake.signalsConsumed || !(wake.helperSignal === helperSource.path || wake.request.sources.some(source => source.path === helperSource.path))) continue
-      // A completed consumption remains authoritative across a crash before
-      // its ordinary wake metadata update. Never issue another deletion here.
-      const signals = [...new Set(wake.request.sources.filter(source => source.path.startsWith('state/') && source.path.split('/').at(-1) !== 'recovery').map(source => source.path))].sort()
-      const originalWake = typeof wake.request.context?.originalWake === 'string' ? wake.request.context.originalWake : wake.request.id
-      let consumed = false
-      if ((wake.delivered || this.wakeAdmission(wake)?.executionId) && signals.length) {
-        if (this.files instanceof PhysicalLocalFiles) {
-          // Consumption owns the source observations accepted by this wake,
-          // not whatever now occupies their paths. An absent or replaced old
-          // observation needs no deletion and cannot consume the new signal.
-          const files = this.files
-          const sources = wake.request.sources.filter(source => signals.includes(source.path))
-          consumed = (await Promise.all(sources.map(async source =>
-            (await files.fileInfo(source.path))?.version !== source.version))).every(Boolean)
-        } else consumed = !!await this.transactions.committedReceipt('consume-wake/' + hash(JSON.stringify([this.config.member, originalWake, signals])), { signals }, this.taskCommandOwner(wake.request))
-      }
-      if (consumed) {
-        await this.updateWake(row.key, current => current ? { ...current, signalsConsumed: true } : undefined,
-          () => this.continueSettledHelperWakeRetirement(wake.request))
-        continue
+      // Git consumes the signal and marks this original Wake in one CAS.
+      // Only Physical Local may finish its exact deletions before its Wake save.
+      if (this.files instanceof PhysicalLocalFiles && (wake.delivered || this.wakeAdmission(wake)?.executionId)) {
+        const files = this.files
+        const sources = wake.request.sources.filter(source => source.path.startsWith('state/') && source.path.split('/').at(-1) !== 'recovery')
+        // Missing or replaced old observations need no deletion and cannot
+        // consume the newer signal now occupying the same path.
+        if (sources.length && (await Promise.all(sources.map(async source =>
+          (await files.fileInfo(source.path))?.version !== source.version))).every(Boolean)) {
+          await this.updateWake(row.key, current => current ? { ...current, signalsConsumed: true } : undefined,
+            () => this.continueLoggedHelperInputRetirement(wake.request))
+          continue
+        }
       }
       owner = row; break
     }
@@ -1609,7 +1606,7 @@ export class FrameworkRoleRuntime {
     // after its plain Helper wake metadata retires. This is not new work.
     if (request.role === 'Helper' && !helperSource && !recovery && !safetyFaults?.length) {
       const accepted = this.roleRecords.get(this.requestKey(request))
-      if (accepted?.delivery?.confirmed && this.helperResponsibilities(accepted).some(original => original.id === request.id)) return false
+      if (accepted?.delivery?.confirmed && (accepted.delivery.request.id === request.id || this.helperResponsibilities(accepted).some(original => original.id === request.id))) return false
     }
     if (helperSource) {
       request = { ...request, id: 'helper-notification:' + randomUUID() }
@@ -1723,18 +1720,18 @@ export class FrameworkRoleRuntime {
     void operation.finally(() => { if (this.wakeWrites.get(key) === operation) { this.wakeWrites.delete(key); this.wakeWriteOwners.delete(key) } }).catch(() => { })
     return operation
   }
-  private continueSettledHelperWakeRetirement(request: RoleWake): void {
+  private continueLoggedHelperInputRetirement(request: RoleWake): void {
     if (!(this.records instanceof GitAuthorityStore)) return
     const record = this.roleRecords.get(this.requestKey(request))
     if (!record?.gitSettledWakeId || record.gitSettledWakeId !== record.delivery?.request.id
       || !this.helperResponsibilities(record).some(wake => wake.id === request.id)) return
-    // The exact consumption receipt can repair wake metadata after idle. Revisit
-    // that accepted input independently, after this Helper's existing work.
+    // A late authoritative consumption observation can settle this wake after
+    // idle. Revisit only that accepted input after the existing Helper work.
     this.startMaintenance('helper-wake-retirement:' + request.id, () => this.serialWork(record.identity.workId, async () => {
       const current = this.roleRecords.get(record.identity.workId)
       if (current?.identity.executionId !== record.identity.executionId || current.sessionId !== record.sessionId) return
       if (this.helperRetirementChecked === current) this.helperRetirementChecked = undefined
-      await this.retrySettledHelperWakeRetirement(current)
+      await this.retryLoggedHelperInputRetirement(current)
     }))
   }
   private readonly reportedAdmissionDiagnostics = new Set<string>()
@@ -1742,7 +1739,7 @@ export class FrameworkRoleRuntime {
   /** Only observed committed pending wakes live here. This is an observation,
    * not a second scheduler, durable file or authorization to replace an owner. */
   private rememberAdmissionWake(key: string, wake: WakeRecord): LocalWakeAdmission | undefined {
-    if (this.helperTaskOwner(wake.request)) this.taskHelperWakes?.set(wake.request.id, wake)
+    if (wake.request.role === 'Helper') this.observedHelperWakes?.set(wake.request.id, wake)
     if (wake.delivered) { this.forgetAdmissionWake(key); return }
     let state = this.localWakeAdmissions.get(key)
     if (!state) {
@@ -2371,7 +2368,8 @@ export class FrameworkRoleRuntime {
           const createdForAdmission = !record || record.stopped || record.businessTransferred;
           if (!record || record.stopped || record.businessTransferred) {
             record = {
-              ...(request.context?.notificationClaims as Record<string, NotificationClaim> | undefined) || (!record?.completedRound && !record?.businessTransferred && record?.notificationClaims) ? { notificationClaims: { ...(!record?.completedRound && !record?.businessTransferred ? record?.notificationClaims : {}), ...(request.context?.notificationClaims as Record<string, NotificationClaim> | undefined) } } : {}, identity: {
+              ...(request.role !== 'Helper' && ((request.context?.notificationClaims as Record<string, NotificationClaim> | undefined) || (!record?.completedRound && !record?.businessTransferred && record?.notificationClaims))
+                ? { notificationClaims: { ...(!record?.completedRound && !record?.businessTransferred ? record?.notificationClaims : {}), ...(request.context?.notificationClaims as Record<string, NotificationClaim> | undefined) } } : {}), identity: {
                 workId: key,
                 executionId: randomUUID(),
                 role: request.role,
@@ -2787,20 +2785,17 @@ export class FrameworkRoleRuntime {
     if (typeof taskId !== 'string') return
     return { taskId, lifecycleId: request.lifecycleId ?? identity?.lifecycleId }
   }
-  private helperResponsibilities(record: RoleRecord, currentTaskWakes = true): RoleWake[] {
-    if (record.identity.role !== 'Helper') return []
+  private helperResponsibilities(record: RoleRecord, currentWakes = true): RoleWake[] {
+    if (record.identity.role !== 'Helper' || !currentWakes) return []
     const initial = record.delivery?.request ?? record.lastWake
-    return [...new Map([...(initial ? [initial] : []),
-      ...(currentTaskWakes ? [...this.taskHelperWakes?.values() ?? []].filter(wake => wake.delivered && wake.signalsConsumed).map(wake => wake.request) : []),
-      ...Object.values(record.notificationClaims ?? {}).flatMap(claim => claim.helperWakes ?? [])]
-      .map(request => [request.id, request] as const)).values()]
+    return [...this.observedHelperWakes.values()].filter(wake => this.helperInputKeepsWake(wake)
+      && (wake.request.id === initial?.id || wake.delivered && wake.signalsConsumed)).map(wake => wake.request)
   }
   private binding(record: RoleRecord, request: RoleWake): FrameworkRoleBinding {
     this.assertOrganizerBusiness(record, request)
     const identity = record.identity, base: FrameworkRoleBinding = {
       ...identity, owner: this.config.member, collaborationId: this.config.collaborationId,
-      ...(identity.role === 'Helper' ? { helperNotifications: this.helperResponsibilities(record) } : {}),
-      ...(record.notificationClaims ? { claimedNotifications: Object.values(record.notificationClaims).map(claim => ({ taskId: claim.taskId, signals: [...new Set([...claim.initialSignals, ...claim.sources.map(source => source.path)])] })) } : {})
+      ...(identity.role !== 'Helper' && record.notificationClaims ? { claimedNotifications: Object.values(record.notificationClaims).map(claim => ({ taskId: claim.taskId, signals: [...new Set([...claim.initialSignals, ...claim.sources.map(source => source.path)])] })) } : {})
     }
     const direct = request.sources.map((source) => ({ source, direct: parseDirectSignal(source.path.split('/').at(-1)!) })).find(value => value.direct);
     if (direct?.direct) return { ...base, direct: { inputPath: direct.direct.inputPath, signalPath: direct.source.path }, recordPath: direct.direct.recordPath }
@@ -2828,11 +2823,7 @@ export class FrameworkRoleRuntime {
       return (await this.conversation.routeForegroundSignals(
         await this.files.listDirectory(snapshot, 'state/', { namePrefix: 'Foreground_' }))).map(entry => entry.path);
     }
-    if (binding.role === 'Helper') {
-      const prefix = 'Helper_' + encodeURIComponent(this.config.member).replaceAll('_', '%5F') + '_'
-      return (await this.files.listDirectory(snapshot, 'state/', { namePrefix: prefix }))
-        .filter(entry => helperSignalWakeHash(entry.path, this.config.member)).map(entry => entry.path)
-    }
+    if (binding.role === 'Helper') return (await this.helperSignalEntries(snapshot)).map(entry => entry.path)
     if (!taskId) return []
     if (binding.role === 'Organizer') {
       const task = await readJson<TaskMetadata>(this.files, snapshot, paths.task(taskId))
@@ -2847,13 +2838,191 @@ export class FrameworkRoleRuntime {
     return (binding.role === 'Worker' && binding.workerId === undefined
       ? entries.filter(entry => signalWorkerId(entry.path.split('/').at(-1)!) === undefined) : entries).map(entry => entry.path);
   }
+  private async helperSignalEntries(snapshot: FilesSnapshot) {
+    const prefix = 'Helper_' + encodeURIComponent(this.config.member).replaceAll('_', '%5F') + '_'
+    return (await this.files.listDirectory(snapshot, 'state/', { namePrefix: prefix }))
+      .filter(entry => helperSignalWakeHash(entry.path, this.config.member))
+  }
   private addressedSignals(binding: FrameworkRoleBinding): Array<{ path: string; version: string }> {
     const record = this.roleRecords.get(binding.workId)
     if (!record || record.identity.executionId !== binding.executionId) throw new Error('Signal consumption belongs to a replaced execution.')
     const sources = (record.delivery?.request ?? record.lastWake)?.sources.filter(source => source.path.startsWith('state/') && source.path.split('/').at(-1) !== 'recovery') ?? []
     return sources
   }
-  private consumeWakeSignals(binding: FrameworkRoleBinding, settledClaims?: Map<string, string>): Promise<{ signals: string[] }> {
+  /** The readable original input is history, not completion evidence. */
+  private helperInputLog(wake: WakeRecord): { path: string; text: string } {
+    const request = wake.request, owner = this.helperTaskOwner(request)
+    const path = typeof request.context?.helperDebugPath === 'string' ? request.context.helperDebugPath
+      : helperDebugPath(owner?.taskId, new Date().toISOString().slice(0, 10))
+    const facts = { request, ...(wake.recovery ? { recovery: wake.recovery } : {}),
+      ...(wake.safetyParentWakeId ? { safetyParentWakeId: wake.safetyParentWakeId } : {}),
+      ...(wake.safetyFaults?.length ? { safetyFaults: wake.safetyFaults } : {}),
+      ...(wake.safetyAttempts?.length ? { safetyAttempts: wake.safetyAttempts } : {}),
+      ...(wake.resolvedSafetyFaultIds?.length ? { resolvedSafetyFaultIds: wake.resolvedSafetyFaultIds } : {}) }
+    return { path, text: '\n\n## Diagnostic input\n\nOriginal request and source facts; this is not a diagnosis or a completed repair.\n\n```json\n'
+      + JSON.stringify(facts, null, 2) + '\n```\n' }
+  }
+  private helperInputKeepsWake(wake: WakeRecord): boolean {
+    return !!(this.helperTaskOwner(wake.request) || wake.recovery || wake.safetyParentWakeId
+      || wake.safetyFaults?.length || wake.safetyAttempts?.length || wake.resolvedSafetyFaultIds?.length
+      || wake.request.reason === 'startup-recovery' || wake.request.context?.originalWake
+      || wake.request.context?.safetyFault || wake.request.context?.safetyFaults
+      || [...this.safetyEpisodes.values()].some(episode => episode.helperWakeId === wake.request.id))
+  }
+  /** Helper reads consume real inputs directly. Debug preserves original facts;
+   * only actual Task/recovery Wakes remain pending. No Helper claim is written. */
+  private consumeHelperRead(binding: FrameworkRoleBinding, readSnapshot?: FilesSnapshot): Promise<{ signals: string[]; helperNotifications: RoleWake[]; unchangedRead: boolean }> {
+    const workId = binding.workId
+    const operation = (this.notificationOperations.get(workId) ?? Promise.resolve()).catch(() => {}).then(async () => {
+      const owns = (record: RoleRecord | undefined) => {
+        if (this.closed || !record || record.identity.executionId !== binding.executionId || record.stopped
+          || record.released || record.stopIntent || record.stopUnknown) throw new Error('Helper input belongs to an ended or replaced execution.')
+        return record
+      }
+      const record = owns(this.roleRecords.get(workId)), initial = record.delivery?.request ?? record.lastWake
+      if (!initial) throw new Error('This Helper has no original input.')
+      const assertLive = () => { owns(this.roleRecords.get(workId)) }
+      const first = this.wakeConsumptions.get(binding.executionId)
+      const requests = new Map<string, RoleWake>()
+      if (first?.wakeId !== initial.id || !first.completed) requests.set(initial.id, initial)
+      // Only this current Helper's pre-change field is migrated. Its actual
+      // source facts enter Debug; no directory scan or new legacy index exists.
+      const legacy = new Map(Object.values(record.notificationClaims ?? {}).flatMap(claim => claim.helperWakes ?? []).map(request => [request.id, request]))
+      for (const [id, request] of legacy) requests.set(id, request)
+      let emptyObservation = false
+      const discover = async (snapshot: FilesSnapshot) => {
+        const entries = await this.helperSignalEntries(snapshot)
+        emptyObservation = !entries.length
+        for (const source of entries) {
+          const { path } = source
+          const suffix = helperSignalWakeHash(path, this.config.member)
+          if (!suffix) continue
+          const resolved: { value?: WakeRecord } = {}
+          await this.wake({ id: suffix, role: 'Helper', reason: 'notification', sources: [{ path, version: source.version }] },
+            undefined, undefined, undefined, wake => { resolved.value = wake })
+          const wake = resolved.value
+          if (!wake || wake.signalsConsumed || wake.delivered || wake.recovery || this.wakeAdmission(wake)?.executionId) continue
+          requests.set(wake.request.id, { ...wake.request,
+            sources: [...wake.request.sources.filter(item => item.path !== path), { path, version: source.version }] })
+        }
+      }
+      if (readSnapshot) await discover(readSnapshot); else await withSnapshot(this.files, discover)
+      // Only an empty, unchanged observation can replace dss_snapshot's second
+      // STATE read. New inputs still reopen Git after their atomic publication.
+      const unchangedRead = emptyObservation && !requests.size && !record.notificationClaims
+      const commandId = 'helper-read/' + hash(JSON.stringify([binding.executionId, [...requests.values()]]))
+      const notices = this.taskNoticeConsumption(binding, commandId), received: RoleWake[] = [], signals = new Set<string>()
+      const saved: WakeRecord[] = [], removed: string[] = []
+      let savedRole: RoleRecord | undefined
+      const taskOwner = this.taskCommandOwner(binding.taskId ? binding : initial)
+      const consume = async () => {
+        const prepare = async (snapshot: FilesSnapshot): Promise<{ changes: FileChange[]; logs: Array<{ path: string; text: string; append: string }>; inputs: Array<{ key: string; before: WakeRecord; after?: WakeRecord; sources: RoleWake['sources'] }> }> => {
+          assertLive(); received.length = 0; signals.clear(); saved.length = 0; removed.length = 0
+          if (binding.taskId ?? initial.taskId) await assertTaskLifecycle(this.files, snapshot, binding.taskId ?? initial.taskId!, binding)
+          const authority = this.records instanceof GitAuthorityStore ? this.records : undefined
+          const currentRole = authority ? owns(await authority.getAt<RoleRecord>(snapshot, this.roleRecordPath(workId))) : owns(this.roleRecords.get(workId))
+          const logs = new Map<string, string>(), logBases = new Map<string, string>(), inputs: Array<{ key: string; before: WakeRecord; after?: WakeRecord; sources: RoleWake['sources'] }> = []
+          for (const request of requests.values()) {
+            const key = this.prefix + 'wakes/' + hash(request.id)
+            const current = authority ? await authority.getAt<WakeRecord>(snapshot, key) : await this.records.get<WakeRecord>(key)
+            if (!current && !legacy.has(request.id)) continue
+            if (current && current.request.id !== request.id) throw new Error('Original Helper input ownership changed.')
+            if (current && request.id !== initial.id && !legacy.has(request.id)
+              && (current.recovery || this.wakeAdmission(current)?.executionId)) continue
+            if (current?.signalsConsumed && request.id !== initial.id && !legacy.has(request.id)) continue
+            const original = current ? { ...current, request: { ...current.request, sources: request.sources } } : { request }
+            const log = this.helperInputLog(original)
+            const body = logs.get(log.path) ?? await this.files.read(snapshot, log.path) ?? ''
+            if (!logBases.has(log.path)) logBases.set(log.path, body)
+            // Exact original readable content avoids duplicating a Local append
+            // whose signal deletion had not yet finished. Never parse a result.
+            logs.set(log.path, body.includes(log.text) ? body : body + log.text)
+            if (!current) continue
+            const sources = request.sources.filter(source => source.path.startsWith('state/') && source.path.split('/').at(-1) !== 'recovery')
+            for (const source of sources) signals.add(source.path)
+            if (!current.signalsConsumed) received.push(request)
+            const retain = this.helperInputKeepsWake(original) || request.id === initial.id && (!current.delivered || !!this.wakeAdmission(current)?.executionId)
+            const after = retain ? request.id === initial.id
+              ? { ...current, signalsConsumed: true }
+              : { ...original, delivered: true, signalsConsumed: true, admission: undefined } : undefined
+            inputs.push({ key, before: current, after, sources })
+          }
+          const changes: FileChange[] = []
+          for (const input of inputs) {
+            for (const source of authority ? input.sources : []) {
+              const actual = (await this.files.listDirectory(snapshot, source.path.slice(0, source.path.lastIndexOf('/') + 1), { paths: [source.path] })).find(item => item.path === source.path)
+              if (actual?.version === source.version) { notices.observe(source); changes.push({ path: source.path, content: null }) }
+            }
+            if (authority) changes.push(input.after ? authority.change(input.key, input.after) : authority.deleteChange(input.key))
+            if (input.after) saved.push(input.after); else removed.push(input.before.request.id)
+          }
+          if (record.notificationClaims) {
+            if (JSON.stringify(currentRole.notificationClaims) !== JSON.stringify(record.notificationClaims)) throw new Error('Original Helper legacy inputs changed before logging.')
+            savedRole = { ...currentRole, notificationClaims: undefined }
+            if (authority) changes.push(authority.change(this.roleRecordPath(workId), savedRole),
+              ...Object.values(record.notificationClaims).map(claim => ({ path: gitCommandReceiptPath(claim.commandId), content: null })))
+          }
+          return { changes, logs: [...logs].map(([path, text]) => ({ path, text, append: text.slice(logBases.get(path)!.length) })), inputs }
+        }
+        if (this.files instanceof PhysicalLocalFiles) {
+          const files = this.files
+          await withSnapshot(files, async snapshot => {
+            const plan = await prepare(snapshot)
+            // Local is not a multi-file transaction: preserve all source facts
+            // before consuming any of the selected exact signal observations.
+            for (const log of plan.logs) {
+              if (log.append) await files.append(log.path, log.append)
+            }
+            for (const input of plan.inputs) {
+              for (const source of input.sources) {
+                await files.deleteObserved(source.path, source.version, () => { assertLive(); notices.observe(source) }); notices.finish(source.path)
+              }
+              if (input.after) await this.updateWake(input.key, current => {
+                // The first native read may precede Host delivery confirmation.
+                // Preserve that same input's latest admission/source state.
+                if (input.before.request.id === initial.id)
+                  return current?.request.id === initial.id ? { ...current, signalsConsumed: true } : undefined
+                return JSON.stringify(current) === JSON.stringify(input.before) ? input.after : undefined
+              })
+              else {
+                const removal = (this.wakeWrites.get(input.key) ?? Promise.resolve()).catch(() => {}).then(async () => {
+                  const current = await this.records.get<WakeRecord>(input.key)
+                  if (JSON.stringify(current) === JSON.stringify(input.before)) await this.deleteRuntimeRecord(input.key, input.before)
+                })
+                this.wakeWrites.set(input.key, removal)
+                try { await removal } finally { if (this.wakeWrites.get(input.key) === removal) this.wakeWrites.delete(input.key) }
+              }
+            }
+            if (savedRole) await this.records.set(this.roleRecordPath(workId), savedRole)
+          })
+        } else await this.transactions.run(commandId, { requests: [...requests.values()] }, { reevaluate: true, beforeAttempt: assertLive, gitReplay: 'session-only', taskOwner }, async snapshot => {
+          const plan = await prepare(snapshot)
+          return [...plan.changes, ...plan.logs.map(log => ({ path: log.path, content: log.text }))]
+        })
+      }
+      if (requests.size || record.notificationClaims) {
+        if (record.notificationClaims) await this.withRoleWrite(workId, consume); else await consume()
+      }
+      notices.finish()
+      // Local updateWake/deleteRuntimeRecord already remember their actual result,
+      // not the earlier plan that preceded native admission confirmation.
+      if (this.records instanceof GitAuthorityStore) {
+        for (const id of removed) { this.observedHelperWakes.delete(id); this.forgetAdmissionWake(this.prefix + 'wakes/' + hash(id)) }
+        for (const wake of saved) this.rememberAdmissionWake(this.prefix + 'wakes/' + hash(wake.request.id), wake)
+      }
+      if (savedRole) {
+        const live = this.roleRecords.get(workId)
+        if (live?.identity.executionId === binding.executionId) this.roleRecords.set(workId, { ...live, notificationClaims: undefined })
+        if (this.records instanceof GitAuthorityStore) (this.roleBases ??= new Map()).set(workId, structuredClone(savedRole))
+      }
+      this.wakeConsumptions.set(binding.executionId, { wakeId: initial.id, promise: Promise.resolve({ signals: [...signals] }), completed: true })
+      return { signals: [...signals], helperNotifications: received, unchangedRead }
+    })
+    this.notificationOperations.set(workId, operation)
+    void operation.finally(() => { if (this.notificationOperations.get(workId) === operation) this.notificationOperations.delete(workId) }).catch(() => {})
+    return operation
+  }
+  private consumeWakeSignals(binding: FrameworkRoleBinding): Promise<{ signals: string[] }> {
     const record = this.roleRecords.get(binding.workId)
     if (!record || record.identity.executionId !== binding.executionId) return Promise.reject(new Error('Signal consumption belongs to a replaced execution.'))
     const wake = record.delivery?.request ?? record.lastWake
@@ -2871,14 +3040,12 @@ export class FrameworkRoleRuntime {
     const operation = Promise.resolve().then(async () => {
       const sources = binding.role === 'Foreground' ? await this.conversation.routeForegroundSignals(addressed) : addressed
       const signals = [...new Set(sources.map(source => source.path))].sort()
-      for (const [id, claim] of Object.entries(record.notificationClaims ?? {})) {
-        const signature = settledClaims ? JSON.stringify(claim) : undefined
+      for (const claim of Object.values(record.notificationClaims ?? {})) {
         await this.settleNotificationClaim(claim, async snapshot => {
           const current = this.records instanceof GitAuthorityStore ? await this.records.getAt<RoleRecord>(snapshot, this.roleRecordPath(binding.workId)) : this.roleRecords.get(binding.workId)
           if (!current || current.identity.executionId !== binding.executionId || current.stopped || current.released || current.businessTransferred)
             throw new Error('Signal continuation belongs to an ended or replaced execution.')
         }, assertLiveOwner, binding)
-        if (signature !== undefined) settledClaims!.set(id, signature)
       }
       if (!signals.length) return { signals }
       const originalWake = typeof wake.context?.originalWake === 'string' ? wake.context.originalWake : wake.id
@@ -2900,7 +3067,6 @@ export class FrameworkRoleRuntime {
           }
         })
         if (binding.role === 'Foreground') this.forgetForegroundNotices(binding, signals)
-        if (binding.role === 'Helper') await this.updateWake(this.prefix + 'wakes/' + hash(wake.id), current => current ? { ...current, signalsConsumed: true } : undefined)
         return { signals }
       }
       if (binding.role === 'Foreground') {
@@ -2922,7 +3088,6 @@ export class FrameworkRoleRuntime {
         return changes
       });
       notices.finish()
-      if (binding.role === 'Helper') await this.updateWake(this.prefix + 'wakes/' + hash(wake.id), current => current ? { ...current, signalsConsumed: true } : undefined)
       return { signals }
     });
     const accepted = { wakeId: wake.id, promise: operation, completed: false }
@@ -2932,12 +3097,13 @@ export class FrameworkRoleRuntime {
     return operation
   }
   private claimCurrentNotifications(binding: FrameworkRoleBinding, commandId: string): Promise<{ signals: string[]; taskId?: string; claimedNotifications?: ClaimedNotificationContext[]; helperNotifications?: RoleWake[] }> {
+    if (binding.role === 'Helper') return Promise.reject(new Error('Helper receives notifications through its ordinary reads.'))
     if (this.closed) return Promise.reject(new Error('Role runtime is closed.'))
-    if (!["Foreground", "Planner", "Worker", "Organizer", "Helper"].includes(binding.role)) return this.consumeWakeSignals(binding)
+    if (!["Foreground", "Planner", "Worker", "Organizer"].includes(binding.role)) return this.consumeWakeSignals(binding)
     if (binding.role === "Foreground" && !this.config.primary) throw new Error("Only the primary Foreground may adopt shared notifications.");
     const workId = binding.workId
-    this.notificationClaimWrites ??= new Map()
-    const operation = (this.notificationClaimWrites.get(workId) ?? Promise.resolve()).catch(() => { }).then(async () => {
+    this.notificationOperations ??= new Map()
+    const operation = (this.notificationOperations.get(workId) ?? Promise.resolve()).catch(() => { }).then(async () => {
       const owns = (record: RoleRecord | undefined) => {
         if (binding.role === "Foreground" && (this.closed || !this.config.primary)) throw new Error("Primary Foreground notification ownership is no longer active.");
         if (!record || record.identity.executionId !== binding.executionId || record.stopped || record.released || record.businessTransferred || record.completedRound || record.stopIntent || record.stopUnknown)
@@ -2959,7 +3125,7 @@ export class FrameworkRoleRuntime {
         ? await (this.records as GitAuthorityStore).getAt<RoleRecord>(snapshot, key) : this.roleRecords.get(workId))
       const result = (claim: NotificationClaim) => ({        
 signals: [...new Set([...claim.initialSignals, ...claim.sources.map(source => source.path)])],
-        ...(!binding.taskId && claim.taskId ? { taskId: claim.taskId } : {}), ...(claim.claimedNotifications?.length ? { claimedNotifications: claim.claimedNotifications } : {}), ...(binding.role === 'Helper' ? { helperNotifications: this.helperResponsibilities(record) } : {})      
+        ...(!binding.taskId && claim.taskId ? { taskId: claim.taskId } : {}), ...(claim.claimedNotifications?.length ? { claimedNotifications: claim.claimedNotifications } : {})
 })
       let record = owns(this.roleRecords.get(workId))
       if ((this.records as GitAuthorityStore) instanceof GitAuthorityStore) {
@@ -2974,12 +3140,12 @@ signals: [...new Set([...claim.initialSignals, ...claim.sources.map(source => so
       if (saved) { await this.settleNotificationClaim(saved, assertOwner, assertLiveOwner, binding); this.forgetForegroundNotices(binding, saved.sources.map(source => source.path)); return result(saved) }
       const wake = record.delivery?.request ?? record.lastWake
       if (!wake) throw new Error('This execution has no accepted wake.')
-      const taskId = binding.role === "Foreground" || binding.role === "Helper" ? void 0 : binding.taskId ?? wake.taskId;
+      const taskId = binding.role === "Foreground" ? void 0 : binding.taskId ?? wake.taskId;
       const alreadyConsumed = (this.wakeConsumptions.get(binding.executionId)?.wakeId === wake.id) || Object.values(record.notificationClaims ?? {}).some(claim => claim.wakeId === wake.id)
       // Reuse only settlements completed in this call; an authoritative reread may add or change a claim.
       const settledClaims = new Map<string, string>()
-      const initial = await this.consumeWakeSignals(binding, this.records instanceof GitAuthorityStore && binding.role === "Helper" ? settledClaims : undefined)
-      if (!taskId && !binding.direct && binding.role !== "Foreground" && binding.role !== "Helper") return initial
+      const initial = await this.consumeWakeSignals(binding)
+      if (!taskId && !binding.direct && binding.role !== "Foreground") return initial
       for (const [id, prior] of Object.entries(record.notificationClaims ?? {})) {
         const signature = JSON.stringify(prior)
         if (settledClaims.get(id) !== signature) {
@@ -2998,34 +3164,6 @@ signals: [...new Set([...claim.initialSignals, ...claim.sources.map(source => so
             : (await this.files.listDirectory(snapshot, path.slice(0, path.lastIndexOf('/') + 1), { paths: [path] })).find(item => item.path === path)
           if (source) sources.push({ path: source.path, version: source.version })
         }
-        // Earlier inputs retain their original immutable claims; a new claim
-        // stores only the Helper notifications selected by this invocation.
-        const helperWakes: RoleWake[] = []
-        if (binding.role === 'Helper') {
-          const candidates = sources.splice(0)
-          for (const source of candidates) {
-            const suffix = helperSignalWakeHash(source.path, this.config.member)
-            if (!suffix) continue
-            // Use the same Host notification path for role-authored signals.
-            // They need not have a generated wake key before discovery. Its
-            // existing owner lookup/notification deduplication supplies the
-            // original accepted request; do not invent diagnostic context.
-            const resolved: { value?: WakeRecord } = {}
-            await this.wake({ id: suffix, role: 'Helper', reason: 'notification', sources: [source] },
-              undefined, undefined, undefined, selected => { resolved.value = selected })
-            const original = resolved.value
-            if (!original || original.request.role !== 'Helper' || original.signalsConsumed || original.delivered
-              || original.recovery || this.wakeAdmission(original)?.executionId) continue
-            // Native replacement/admission is not an ordinary later claim.
-            // Its signal remains for its existing stop/confirmation path.
-            const prior = helperWakes.find(item => item.id === original.request.id)
-            const accepted = { ...original.request, sources: [...(prior?.sources ?? original.request.sources).filter(item => item.path !== source.path), source] }
-            if (prior) helperWakes[helperWakes.indexOf(prior)] = accepted
-            else helperWakes.push(accepted)
-            sources.push(source)
-            this.replaySafetyWake(original)
-          }
-        }
         const otherTasks = new Map<string | undefined, Set<string>>()
         for (const prior of Object.values(record.notificationClaims ?? {})) if (prior.taskId !== taskId) {
           const paths = otherTasks.get(prior.taskId) ?? new Set<string>()
@@ -3033,7 +3171,7 @@ signals: [...new Set([...claim.initialSignals, ...claim.sources.map(source => so
           otherTasks.set(prior.taskId, paths)
         }
         const claimedNotifications = [...otherTasks].map(([taskId, paths]) => ({ taskId, signals: [...paths].sort() }))
-        return { ...(helperWakes.length ? { helperWakes } : {}), ...(claimedNotifications.length ? { claimedNotifications } : {}), commandId: operationId, lifecycleId: binding.lifecycleId, executionId: binding.executionId, wakeId: wake.id, taskId, initialSignals: binding.role === 'Helper' ? initial.signals : [...new Set([...initial.signals, ...Object.values(record.notificationClaims ?? {}).filter(claim => claim.taskId === taskId).flatMap(claim => [...claim.initialSignals, ...claim.sources.map(source => source.path)])])], sources };
+        return { ...(claimedNotifications.length ? { claimedNotifications } : {}), commandId: operationId, lifecycleId: binding.lifecycleId, executionId: binding.executionId, wakeId: wake.id, taskId, initialSignals: [...new Set([...initial.signals, ...Object.values(record.notificationClaims ?? {}).filter(claim => claim.taskId === taskId).flatMap(claim => [...claim.initialSignals, ...claim.sources.map(source => source.path)])])], sources };
       };
       let selectedClaim: NotificationClaim = await withSnapshot(this.files, select)
       // No later notification was selected. The original wake has already been
@@ -3084,8 +3222,8 @@ executionId: binding.executionId, run: persistContext,
       this.forgetForegroundNotices(binding, selectedClaim.sources.map(source => source.path))
       return result(selectedClaim)
     });
-    this.notificationClaimWrites.set(workId, operation)
-    void operation.finally(() => { if (this.notificationClaimWrites.get(workId) === operation) this.notificationClaimWrites.delete(workId) }).catch(() => { })
+    this.notificationOperations.set(workId, operation)
+    void operation.finally(() => { if (this.notificationOperations.get(workId) === operation) this.notificationOperations.delete(workId) }).catch(() => { })
     return operation
   }
   private withRoleWrite<T>(workId: string, action: () => Promise<T>): Promise<T> {
@@ -3107,14 +3245,6 @@ executionId: binding.executionId, run: persistContext,
       ? await this.conversation.routeForegroundSignals(claim.sources) : claim.sources
     if (!selectedSources.length) return
     const notices = this.taskNoticeConsumption(binding, claim.commandId)
-    const settleHelperWakes = async () => {
-      for (const request of claim.helperWakes ?? []) {
-        const source = request.sources.find(source => selectedSources.some(selected => selected.path === source.path && selected.version === source.version))
-        if (!source) continue
-        await this.updateWake(this.prefix + 'wakes/' + hash(request.id), current => current?.request.id === request.id && !current.recovery && !this.wakeAdmission(current)?.executionId
-          ? { ...current, request: { ...current.request, sources: request.sources }, delivered: true, signalsConsumed: true, admission: undefined } : undefined)
-      }
-    }
     if (this.files instanceof PhysicalLocalFiles) {
       const files = this.files
       // The original persisted claim is the continuation fact, not a new ACK
@@ -3129,7 +3259,6 @@ executionId: binding.executionId, run: persistContext,
           notices.finish(source.path)
         }
       })
-      await settleHelperWakes()
       return
     }
     await this.transactions.run(claim.commandId, { claim }, { reevaluate: true, beforeAttempt, taskOwner: this.taskCommandOwner(claim) }, async (snapshot) => {
@@ -3143,7 +3272,16 @@ executionId: binding.executionId, run: persistContext,
       return changes
     });
     notices.finish()
-    await settleHelperWakes()
+  }
+  /** Pre-change Hosts wrote this exact receipt. Remove it only when its
+   * original Wake retires; never read it as current consumption evidence. */
+  private legacyHelperWakeReceiptPaths(request: RoleWake): string[] {
+    const signals = [...new Set(request.sources.filter(source => source.path.startsWith('state/') && source.path.split('/').at(-1) !== 'recovery').map(source => source.path))].sort()
+    if (!signals.length) return []
+    const originalWake = typeof request.context?.originalWake === 'string' ? request.context.originalWake : request.id
+    const commandId = 'consume-wake/' + hash(JSON.stringify([this.config.member, originalWake, signals]))
+    const owner = this.taskCommandOwner(request)
+    return [owner ? taskCommandReceiptPath(owner, commandId) : gitCommandReceiptPath(commandId)]
   }
   private assertWorkerBusinessLive(binding: FrameworkRoleBinding, transferring = false): void {
     if (binding.role !== 'Worker') return
@@ -3605,7 +3743,26 @@ executionId: binding.executionId, run: persistContext,
     const wakes = new Set(this.helperResponsibilities(record).map(request => request.id))
     return [...this.safetyEpisodes ?? []].filter(([, value]) => !value.settled && value.helperWakeId !== undefined && wakes.has(value.helperWakeId)).map(([id]) => id)
   }
-  private async recordSafetyAttempt(binding: FrameworkRoleBinding, input: HelperRepairAttempt, commandId: string, retired?: RoleRecord): Promise<void> {
+  /** Original successful native read results, not a second receipt store. */
+  private helperInputsFromEvents(events: readonly import('@deepseek-ai/dsh-session').SessionEvent[]): RoleWake[] {
+    const calls = new Map(events.flatMap(event => event.type === 'tool/call'
+      && ['dss_snapshot', 'dss_read', 'dss_list', 'dss_claim'].includes(event.data.name) ? [[event.data.callId, event] as const] : []))
+    const requests = new Map<string, RoleWake>()
+    for (const event of events) {
+      if (event.type !== 'tool/result' || event.data.message.isError) continue
+      const call = calls.get(event.data.message.toolCallId)
+      if (!call || call.data.turn !== event.data.turn || call.data.step !== event.data.step) continue
+      for (const block of event.data.message.content) {
+        if (block.type !== 'text') continue
+        let value: { helperNotifications?: RoleWake[] }
+        try { value = JSON.parse(block.text) } catch { continue }
+        if (!Array.isArray(value?.helperNotifications)) continue
+        for (const request of value.helperNotifications) if (request?.role === 'Helper' && typeof request.id === 'string' && Array.isArray(request.sources)) requests.set(request.id, request)
+      }
+    }
+    return [...requests.values()]
+  }
+  private async recordSafetyAttempt(binding: FrameworkRoleBinding, input: HelperRepairAttempt, commandId: string, retired?: RoleRecord, originalInputs: readonly RoleWake[] = []): Promise<void> {
     if (binding.role !== 'Helper') throw new Error('Only the owning Helper can report its repair attempt.')
     const owner = this.roleRecords.get(binding.workId)
     // Only replay of an already accepted physical publication can supply this
@@ -3614,7 +3771,8 @@ executionId: binding.executionId, run: persistContext,
       && item.executionId === retired.identity.executionId && item.sessionId === retired.sessionId)
       ? retired : owner
     if (caller?.identity.executionId !== binding.executionId) throw new Error('The Helper execution no longer owns this diagnostic responsibility.')
-    const wakes = new Set(this.helperResponsibilities(caller, caller !== retired).map(request => request.id))
+    const initial = retired?.delivery?.request ?? retired?.lastWake
+    const wakes = new Set((retired ? [...initial ? [initial] : [], ...originalInputs] : this.helperResponsibilities(caller)).map(request => request.id))
     let associated = [...this.safetyEpisodes.values()].filter(value => value.helperWakeId !== undefined && wakes.has(value.helperWakeId))
     if (!associated.length || input.faultId && !associated.some(value => value.fault.id === input.faultId)) {
       // Cold replay of this already-owned report need not wait for unrelated
@@ -3786,8 +3944,8 @@ executionId: binding.executionId, run: persistContext,
           : await this.localTaskRetirementRows<RoleRestore>('restores', task)
         if (rows.some(row => { const owner = this.restoreTaskOwner(row.value); return !row.value.complete
           && owner?.taskId === task.taskId && taskLifecycle(owner) === taskLifecycle(task) })) return
-        await this.retireReleasedTaskHelperClaims(task)
-      } catch (error) { this.ctx.logger?.('deepseek-servant').warn('Finished Task Helper claim cleanup after restoration was skipped.', error) }
+        await this.retireReleasedTaskHelperWakes(task)
+      } catch (error) { this.ctx.logger?.('deepseek-servant').warn('Finished Task Helper input cleanup after restoration was skipped.', error) }
     })
   }
   private replaySafetyRestore(row: SafetyRepairContext & { commandId: string; complete: boolean; outcome?: string }): void {
@@ -4003,7 +4161,7 @@ executionId: binding.executionId, run: persistContext,
       onError: error => this.error(error),
       recoveryWatchChanges: (binding, snapshot) => this.recoveryWatchChanges(binding, snapshot),
       consumeRecovery: (binding, consume) => this.consumeRecoveryMarker(binding, consume),
-      consumeWake: binding => this.consumeWakeSignals(binding),
+      consumeWake: (binding, snapshot) => binding.role === 'Helper' ? this.consumeHelperRead(binding, snapshot) : this.consumeWakeSignals(binding),
       claimNotifications: (binding, commandId) => this.claimCurrentNotifications(binding, commandId),
       conversation: {
         foregroundRoot: this.conversation.foregroundRoot,
@@ -4396,7 +4554,7 @@ executionId: binding.executionId, run: persistContext,
         reason: replacement?.reason ?? 'startup-recovery',
         context: {
           ...original.context, ...context,
-          ...(record.notificationClaims ? { notificationClaims: record.notificationClaims } : {}),
+          ...(record.identity.role !== 'Helper' && record.notificationClaims ? { notificationClaims: record.notificationClaims } : {}),
           originalWake: typeof original.context?.originalWake === 'string' ? original.context.originalWake : prior?.recovery?.original?.request.id ?? original.id,
           originalInput: typeof original.context?.originalInput === 'string' ? original.context.originalInput : prior?.recovery?.original?.text ?? record.delivery?.text,
           continuationInstructions: 'Continue the accepted responsibility from the saved original input and current Task, role memory, notes, replies and handoff records. Original input is context, not permission to repeat committed effects.'
@@ -4422,7 +4580,7 @@ executionId: binding.executionId, run: persistContext,
       id: replacement?.id ?? explicitId ?? nativeRecoveryWakeId(record.sessionId, inspection?.lastTurn?.turn,
         resolved.messageId ?? resolved.request.id), reason: replacement?.reason ?? 'startup-recovery',
       context: {
-        ...resolved.request.context, ...context, ...(record.notificationClaims ? { notificationClaims: record.notificationClaims } : {}),
+        ...resolved.request.context, ...context, ...(record.identity.role !== 'Helper' && record.notificationClaims ? { notificationClaims: record.notificationClaims } : {}),
         originalWake: typeof resolved.request.context?.originalWake === 'string' ? resolved.request.context.originalWake : prior?.recovery?.original?.request.id ?? resolved.request.id,
         originalInput: typeof resolved.request.context?.originalInput === 'string' ? resolved.request.context.originalInput : prior?.recovery?.original?.text ?? resolved.text,
         originalMessageId: resolved.messageId, nativeInputState: resolved.state,
@@ -4457,7 +4615,7 @@ executionId: binding.executionId, run: persistContext,
       ...original, id: 'git-continuation:' + record.identity.executionId,
       reason: 'startup-recovery', context: {
         ...original.context,
-        ...(record.notificationClaims ? { notificationClaims: record.notificationClaims } : {}),
+        ...(record.identity.role !== 'Helper' && record.notificationClaims ? { notificationClaims: record.notificationClaims } : {}),
         originalWake: typeof original.context?.originalWake === 'string' ? original.context.originalWake : original.id,
         originalInput: typeof original.context?.originalInput === 'string' ? original.context.originalInput : record.delivery?.text,
         continuationInstructions: 'Resume the accepted Git responsibility from its original input, available native session history, takeover records and committed results. Do not repeat already committed effects.'
@@ -4467,7 +4625,7 @@ executionId: binding.executionId, run: persistContext,
       && (await new DshSessionReader(this.ctx).inspect(record.sessionId)).unansweredQuestionCallIds?.length
       ? record.sessionId : undefined
     const replacement: RoleRecord = {
-      ...(record.notificationClaims ? { notificationClaims: record.notificationClaims } : {}), identity: { ...record.identity, executionId: randomUUID() },
+      ...(record.identity.role !== 'Helper' && record.notificationClaims ? { notificationClaims: record.notificationClaims } : {}), identity: { ...record.identity, executionId: randomUUID() },
       sessionId: questionSession ?? 'dss-' + randomUUID(), generation: record.generation + 1
     }
     const priorWake = record.identity.role === 'Helper' ? await this.records.get<WakeRecord>(this.prefix + 'wakes/' + hash(original.id)) : undefined
@@ -4493,7 +4651,7 @@ executionId: binding.executionId, run: persistContext,
     const unresolved = new Set<string>()
     for (const event of events) {
       if (event.seq >= actual.session.inheritedEventCount) {
-        if (helperCommands && event.type === 'turn/start') completed = new NativeCommandSuccess(new Set(['dss_record', 'dss_claim']))
+        if (helperCommands && event.type === 'turn/start') completed = new NativeCommandSuccess(new Set(['dss_record']))
         completed?.accept(event)
       }
       if (event.type === 'tool/call') unresolved.add(event.data.callId)
@@ -4512,11 +4670,6 @@ executionId: binding.executionId, run: persistContext,
       nativeFlushed = true
       await retirePhysicalPublicationsFromEvents(this.files, record.identity.executionId, events)
     }
-    if (record.identity.role === 'Helper' && !nativeFlushed
-      && completed?.callIds().some(id => record.notificationClaims?.[record.sessionId + ':' + id])) {
-      await this.ctx.sessions.flush(actual.session)
-      nativeFlushed = true
-    }
     await this.saveRole({
       ...record,
       ...(record.identity.role === 'Foreground' ? { completedRound: true } : { gitSettledWakeId: request.id })
@@ -4524,7 +4677,7 @@ executionId: binding.executionId, run: persistContext,
     if (record.identity.role === 'Helper') {
       if (!nativeFlushed) await this.ctx.sessions.flush(actual.session)
       this.scheduleCompletedHostRestoreRetirement(record, events)
-      await this.retireSettledHelperWakes(record, events)
+      await this.retireLoggedHelperInput(record, events)
     }
   }
   private async finishGitAuxiliaryRound(record: RoleRecord): Promise<void> {
@@ -4534,7 +4687,7 @@ executionId: binding.executionId, run: persistContext,
     const request = record.delivery?.request ?? record.lastWake
     if (!request) return
     if (record.gitSettledWakeId === request.id) {
-      await this.retrySettledHelperWakeRetirement(record)
+      await this.retryLoggedHelperInputRetirement(record)
       return
     }
     if (record.stopped || record.stopIntent || this.active(record)) return
@@ -4558,7 +4711,7 @@ executionId: binding.executionId, run: persistContext,
     let completed: NativeCommandSuccess | undefined
     const reportEvidence = this.records instanceof GitAuthorityStore && record.identity.role === 'Helper'
       ? (event: import('@deepseek-ai/dsh-session').SessionEvent) => {
-        if (event.type === 'turn/start') completed = new NativeCommandSuccess(new Set(['dss_record', 'dss_claim']))
+        if (event.type === 'turn/start') completed = new NativeCommandSuccess(new Set(['dss_record']))
         completed?.accept(event)
       } : undefined
     const capture = await sessions.capture(record.sessionId, reportEvidence)
@@ -4572,19 +4725,19 @@ executionId: binding.executionId, run: persistContext,
     await this.saveRole({ ...record, gitSettledWakeId: request.id }, false, undefined, record.identity.role === 'Recorder',
       completed?.callIds().map(id => record.sessionId + ':' + id))
     this.scheduleCompletedHostRestoreRetirement(record, events)
-    await this.retireSettledHelperWakes(record, events)
+    await this.retireLoggedHelperInput(record, events)
   }
   // A single Helper's last checked RoleRecord, not a durable index. New claims
   // or replacement records invalidate it; unchanged idle callbacks cost no I/O.
   private helperRetirementChecked?: RoleRecord
-  private async retrySettledHelperWakeRetirement(record: RoleRecord): Promise<void> {
+  private async retryLoggedHelperInputRetirement(record: RoleRecord): Promise<void> {
     if (record.identity.role !== 'Helper' || !record.gitSettledWakeId
       || record.gitSettledWakeId !== record.delivery?.request.id || this.helperRetirementChecked === record) return
     const events = await new DshSessionReader(this.ctx).events(record.sessionId)
     const live = this.ctx.sessions.get(SessionId(record.sessionId))
     if (live) await this.ctx.sessions.flush(live)
     this.scheduleCompletedHostRestoreRetirement(record, events)
-    await this.retireSettledHelperWakes(record, events)
+    await this.retireLoggedHelperInput(record, events)
   }
   private hostRestoreNativeEvidence?: Map<string, { workId: string; executionId: string }>
   private hostRestoreEvidenceCursor?: { sessionId: string; seq: number }
@@ -4665,103 +4818,28 @@ executionId: binding.executionId, run: persistContext,
     try { await operation }
     finally { if (this.safetyRestoreWrites.get(commandId) === operation) this.safetyRestoreWrites.delete(commandId) }
   }
-  /** Retire only plain, actually consumed Helper inputs after the existing
-   * settled-role save. Complex restore/fault/ancestry ownership stays intact.
-   * No directory scan, permanent receipt, timer, or cross-work wait is added. */
-  private async retireSettledHelperWakes(record: RoleRecord,
+  /** Retire the initial transport row after its original request is in Debug
+   * and native delivery has settled. This does not finish its business work:
+   * actual results and unfinished next steps remain in the retained Debug. */
+  private async retireLoggedHelperInput(record: RoleRecord,
     events: readonly import('@deepseek-ai/dsh-session').SessionEvent[]): Promise<void> {
     if (record.identity.role !== 'Helper' || !record.delivery?.confirmed) return
-    const initial = record.delivery.request
-    const owner = () => {
-      const current = this.roleRecords.get(record.identity.workId)
-      return current?.identity.executionId === record.identity.executionId && current.sessionId === record.sessionId
-        && current.delivery?.request.id === initial.id && current.gitSettledWakeId === initial.id
-        && !current.stopUnknown && !current.released ? current : undefined
-    }
-    const checkedOwner = owner()
-    if (!checkedOwner) return
-    // Scope restore ownership to this actual input, not the entire session.
-    // Earlier deliveries may have their own retained restores.
-    const start = events.findIndex(event => event.type === 'user/message'
-      && event.surfaceOp === 'append' && event.data.id === record.delivery!.messageId)
-    if (start < 0) return
-    const inputEvents = events.slice(start)
-    // A Host restore owns its accepted HostRestore row independently of the
-    // caller's plain wake. A targeted restore may still reference that wake.
-    if (inputEvents.some(event => event.type === 'tool/call' && event.data.name === 'dss_restore')) return
+    const request = record.delivery.request, currentOwner = this.roleRecords.get(record.identity.workId)
+    if (currentOwner?.identity.executionId !== record.identity.executionId || currentOwner.sessionId !== record.sessionId) return
     const boundary = [...events].reverse().find(event => event.type === 'turn/start' || event.type === 'turn/end')
-    if (boundary?.type !== 'turn/end' || boundary.data.reason.kind !== 'completed') return
-    const pending = new Set<string>(), calls = new Set<string>(), returned = new Map<string, RoleWake>()
-    const claims = Object.values(checkedOwner.notificationClaims ?? {})
-    // A current-delivery claim proves that this turn received the complete
-    // outstanding Helper context. Reuse each input's original immutable claim;
-    // an initial-only delivery still causes no historical wake reads.
-    const hasCurrentClaim = claims.some(claim => claim.wakeId === initial.id
-      && claim.executionId === record.identity.executionId && claim.helperWakes?.length)
-    const accepted = new Map((hasCurrentClaim ? claims : [])
-      .flatMap(claim => claim.helperWakes ?? []).map(wake => [wake.id, wake]))
-    for (const event of inputEvents) {
-      if (event.type === 'tool/call') {
-        pending.add(event.data.callId)
-        if (['dss_claim', 'dss_snapshot'].includes(event.data.name)) calls.add(event.data.callId)
-      }
-      if (event.type !== 'tool/result') continue
-      pending.delete(event.data.message.toolCallId)
-      if (event.data.message.isError || !calls.has(event.data.message.toolCallId)) continue
-      for (const block of event.data.message.content) {
-        if (block.type !== 'text') continue
-        let value: { helperNotifications?: unknown }
-        try { value = JSON.parse(block.text) } catch { continue }
-        if (!value || !Array.isArray(value.helperNotifications)) continue
-        for (const delivered of value.helperNotifications) {
-          const original = delivered && typeof delivered === 'object' ? accepted.get(delivered.id) : undefined
-          if (original && JSON.stringify(delivered) === JSON.stringify(original)) returned.set(original.id, original)
-        }
-      }
-    }
-    if (pending.size) return
-    const input = deriveNativeInputs(events, undefined, false).get(record.delivery.messageId)
-    if (input?.state !== 'consumed' || input.source !== 'deepseek-servant') return
-    returned.set(initial.id, initial)
-    let changed = false
-    for (const request of returned.values()) {
-      // Consuming/ending a native turn does not finish this Task's diagnosis.
-      // Its original WakeRecord remains the sole pending business context.
-      if (this.helperTaskOwner(request)) continue
-      const key = this.prefix + 'wakes/' + hash(request.id)
-      // All ordinary mutations of this wake use this exact existing lane.
-      const operation = (this.wakeWrites.get(key) ?? Promise.resolve()).then(async () => {
-        if (!owner()) return
-        const wake = await this.records.get<WakeRecord>(key)
-        if (!wake || !owner() || !wake.delivered || JSON.stringify(wake.request) !== JSON.stringify(request)
-          || wake.recovery || wake.safetyParentWakeId || wake.safetyFaults?.length || wake.safetyAttempts?.length
-          || wake.resolvedSafetyFaultIds?.length || request.reason === 'startup-recovery'
-          || request.context?.originalWake || request.context?.notificationClaims || request.context?.safetyFault
-          || request.context?.safetyFaults) return
-        if ((wake.helperSignal || request.sources.some(source => source.path.startsWith('state/')))
-          && !wake.signalsConsumed) return
-        // A fault already selected this original owner but has not yet written
-        // its wake body. That is live responsibility, not completed metadata.
-        if ([...this.safetyEpisodes.values()].some(episode => episode.helperWakeId === request.id)) return
-        if (this.records instanceof GitAuthorityStore) {
-          try { await this.records.compareAndDelete(key, wake) }
-          catch (error) {
-            if (!(error instanceof FilesConflictError)) throw error
-            changed = true // Retry only these known IDs on the next original entry.
-          }
-        } else if (this.records.delete) await this.records.delete(key)
-      })
-      this.wakeWrites.set(key, operation)
-      try { await operation }
-      finally { if (this.wakeWrites.get(key) === operation) this.wakeWrites.delete(key) }
-    }
-    // A native child can awaken this same session and claim more work while
-    // exact wake I/O is pending. Cache only the record actually inspected.
-    if (!changed && owner() === checkedOwner && [...accepted.keys()].every(id => returned.has(id)))
-      this.helperRetirementChecked = checkedOwner
+    if (boundary?.type !== 'turn/end' || boundary.data.reason.kind !== 'completed'
+      || deriveNativeInputs(events, undefined, false).get(record.delivery.messageId)?.state !== 'consumed') return
+    const key = this.prefix + 'wakes/' + hash(request.id)
+    const removal = (this.wakeWrites.get(key) ?? Promise.resolve()).catch(() => {}).then(async () => {
+      const wake = await this.records.get<WakeRecord>(key)
+      if (!wake || !wake.delivered || !wake.signalsConsumed || this.helperInputKeepsWake(wake)
+        || JSON.stringify(wake.request) !== JSON.stringify(request)) return
+      await this.deleteRuntimeRecord(key, wake, this.legacyHelperWakeReceiptPaths(request))
+    })
+    this.wakeWrites.set(key, removal)
+    try { await removal } finally { if (this.wakeWrites.get(key) === removal) this.wakeWrites.delete(key) }
+    if (this.roleRecords.get(record.identity.workId) === currentOwner) this.helperRetirementChecked = currentOwner
   }
-  /** Helper explicitly finishes one of its actual checks. The original marker
-   * remains Planner-owned; native turn completion does not reset this clock. */
   private async resetRecoveryCheck(binding: FrameworkRoleBinding, recoveryCheckId: string, signal: AbortSignal) {
     const currentCaller = () => {
       signal.throwIfAborted()
@@ -4928,8 +5006,8 @@ executionId: binding.executionId, run: persistContext,
     const wakes = await this.records.list<WakeRecord>(this.prefix + 'wakes/')
     // Hydrate once from the original startup inventory. Subsequent changes
     // follow updateWake/deleteRuntimeRecord, not an older in-flight poll.
-    for (const { value } of wakes) if (this.helperTaskOwner(value.request) && !this.taskHelperWakes?.has(value.request.id))
-      this.taskHelperWakes?.set(value.request.id, value)
+    for (const { value } of wakes) if (this.helperTaskOwner(value.request) && !this.observedHelperWakes?.has(value.request.id))
+      this.observedHelperWakes?.set(value.request.id, value)
     for (const { value } of wakes) if (!value.delivered && value.request.taskId && !['Foreground', 'Helper'].includes(value.request.role))
       this.workspaces.rememberRoot(value.request.taskId)
     const recovered = new Set(wakes
@@ -5033,7 +5111,7 @@ executionId: binding.executionId, run: persistContext,
       if (record.identity.role === 'Helper' && record.gitSettledWakeId
         && record.gitSettledWakeId === record.delivery?.request.id
         && !this.active(record) && !restoring.has(record.identity.executionId)) {
-        try { await this.serialWork(record.identity.workId, () => this.retrySettledHelperWakeRetirement(record)) }
+        try { await this.serialWork(record.identity.workId, () => this.retryLoggedHelperInputRetirement(record)) }
         catch (error) { this.error(error, { identity: record.identity, stage: 'startup-helper-wake-retirement' }) }
       }
       if (!record.stopped && record.stopIntent?.phase === 'disposed' && !this.active(record)) {
@@ -6169,9 +6247,9 @@ executionId: binding.executionId, run: persistContext,
           await this.deleteRuntimeRecord(row.key, current, this.restoreCommandReceiptPaths(current))
       }
     }
-    if (isTerminalTask(task) && !pendingTaskRestore) this.startMaintenance('helper-task-claims:' + taskLifecycleKey(task), async () => {
-      try { await this.retireReleasedTaskHelperClaims(task) }
-      catch (error) { this.ctx.logger?.('deepseek-servant').warn('Finished Task Helper claim cleanup was skipped; Task release continues.', error) }
+    if (isTerminalTask(task) && !pendingTaskRestore) this.startMaintenance('helper-task-wakes:' + taskLifecycleKey(task), async () => {
+      try { await this.retireReleasedTaskHelperWakes(task) }
+      catch (error) { this.ctx.logger?.('deepseek-servant').warn('Finished Task Helper input cleanup was skipped; Task release continues.', error) }
     })
     for (const member of new Set([...(task.members ?? [task.owner]), this.config.member])) await this.serialRecoveryWatch(task.taskId, member, async key => {
       const current = await this.records.get<RecoveryWatchRecord>(key)
@@ -6180,15 +6258,10 @@ executionId: binding.executionId, run: persistContext,
     if (this.files instanceof PhysicalLocalFiles) this.pendingControlStops = this.pendingControlStops.filter(target =>
       !target.awaitingTaskRetirement || !target.owner || !belongs(target.owner))
   }
-  /** Release finished Task inputs, while other Tasks retain their original
-   * WakeRecords. A consumed mixed claim is retired whole with its old receipt;
-   * no historical request body is edited or synthetic claim is created. */
-  private async retireReleasedTaskHelperClaims(task: Pick<TaskMetadata, 'taskId' | 'lifecycleId'>, nativeFinishedWakeId?: string): Promise<void> {
-    const workId = this.roleKey('Helper')
-    try { await this.notificationClaimWrites?.get(workId) } catch { return }
-    await this.withRoleWrite(workId, async () => {
-      const selected = this.roleRecords.get(workId)
-      if (!selected) return
+  /** A real Task release and finished restoration own these exact inputs.
+   * Ordinary Helper turns and diagnostic text cannot finish a running Task. */
+  private async retireReleasedTaskHelperWakes(task: Pick<TaskMetadata, 'taskId' | 'lifecycleId'>, nativeFinishedWakeId?: string): Promise<void> {
+    try { await this.notificationOperations.get(this.roleKey('Helper')) } catch { return }
       const belongs = (wake: RoleWake) => {
         const owner = this.helperTaskOwner(wake)
         return owner?.taskId === task.taskId && taskLifecycle(owner) === taskLifecycle(task)
@@ -6201,7 +6274,7 @@ executionId: binding.executionId, run: persistContext,
           && (!wake.recovery || !!wake.recovery.targetExecutionId
             && wake.recovery.confirmedStoppedExecutions?.includes(wake.recovery.targetExecutionId))
         return wake.delivered && wake.signalsConsumed && (!wake.recovery || finishedNativeInput) && !wake.safetyParentWakeId
-          && (!context?.originalWake || finishedNativeInput) && !context?.notificationClaims
+          && (!context?.originalWake || finishedNativeInput)
           // Helper self-report/idle is insufficient. Task release has already
           // committed its real resolutions; UNKNOWN operations remain unresolved.
           && faults.every(fault => this.resolvedSafetyFaultIds.has(fault.id))
@@ -6209,70 +6282,18 @@ executionId: binding.executionId, run: persistContext,
           && ![...this.safetyEpisodes.values()].some(episode => episode.helperWakeId === wake.request.id
             && !this.resolvedSafetyFaultIds.has(episode.fault.id))
       }
-      const finished = [...this.taskHelperWakes?.values() ?? []].filter(wake => belongs(wake.request) && completedInput(wake))
+      const finished = [...this.observedHelperWakes?.values() ?? []].filter(wake => belongs(wake.request) && completedInput(wake))
       if (!finished.length) return
-      const finishedIds = new Set(finished.map(wake => wake.request.id))
-      const ids = Object.entries(selected.notificationClaims ?? {}).filter(([, claim]) =>
-        claim.helperWakes?.some(wake => finishedIds.has(wake.id))).map(([id]) => id)
-      const requests = new Map([...finished.map(wake => wake.request), ...ids.flatMap(id => selected.notificationClaims![id].helperWakes ?? [])].map(wake => [wake.id, wake]))
-      const wakeKeys = [...requests.keys()].map(id => this.prefix + 'wakes/' + hash(id))
-      const key = this.roleRecordPath(workId)
-      const prune = (current: RoleRecord | undefined, rows: ReadonlyMap<string, unknown>) => {
-        if (!current || current.identity.executionId !== selected.identity.executionId) return { current, removed: [] as string[], retired: [] as WakeRecord[] }
-        const original = (request: RoleWake) => rows.get(this.prefix + 'wakes/' + hash(request.id)) as WakeRecord | undefined
-        const retired = finished.filter(wake => { const value = original(wake.request); return value && completedInput(value) && JSON.stringify(value.request) === JSON.stringify(wake.request) })
-        const retiredIds = new Set(retired.map(wake => wake.request.id))
-        const removed = ids.filter(id => {
-          const claim = current.notificationClaims?.[id]
-          return claim && JSON.stringify(claim) === JSON.stringify(selected.notificationClaims![id])
-            && claim.helperWakes?.some(wake => retiredIds.has(wake.id))
-            && claim.helperWakes.every(wake => { const value = original(wake); return value?.delivered && value.signalsConsumed && JSON.stringify(value.request) === JSON.stringify(wake) })
-            && claim.sources.every(source => claim.helperWakes!.some(wake => wake.sources.some(item => item.path === source.path && item.version === source.version)))
+      for (const wake of finished) {
+        const key = this.prefix + 'wakes/' + hash(wake.request.id)
+        const removal = (this.wakeWrites.get(key) ?? Promise.resolve()).catch(() => {}).then(async () => {
+          const current = await this.records.get<WakeRecord>(key)
+          if (!current || !completedInput(current) || JSON.stringify(current.request) !== JSON.stringify(wake.request)) return
+          await this.deleteRuntimeRecord(key, current, this.legacyHelperWakeReceiptPaths(current.request))
         })
-        const claims = { ...current.notificationClaims }
-        for (const id of removed) delete claims[id]
-        const referenced = new Set(Object.values(claims).flatMap(claim => claim.helperWakes?.map(wake => wake.id) ?? []))
-        return { current: { ...current, notificationClaims: Object.keys(claims).length ? claims : undefined }, removed,
-          retired: retired.filter(wake => !referenced.has(wake.request.id)) }
+        this.wakeWrites.set(key, removal)
+        try { await removal } finally { if (this.wakeWrites.get(key) === removal) this.wakeWrites.delete(key) }
       }
-      let saved: RoleRecord | undefined, retired: WakeRecord[] = []
-      if (this.records instanceof GitAuthorityStore) {
-        const authority = this.records
-        const result = await authority.updateWithReads<RoleRecord, ReturnType<typeof prune>>(key, wakeKeys, (current, rows) => {
-          const result = prune(current, rows)
-          const changes: FileChange[] = [
-            ...result.removed.map(id => ({ path: gitCommandReceiptPath(current!.notificationClaims![id].commandId), content: null })),
-            ...result.retired.map(wake => authority.deleteChange(this.prefix + 'wakes/' + hash(wake.request.id)))
-          ]
-          return { write: !!result.removed.length || !!changes.length, value: result.current, result, changes }
-        })
-        saved = result.current; retired = result.retired
-      } else {
-        const rows = new Map(await Promise.all(wakeKeys.map(async key => [key, await this.records.get<WakeRecord>(key)] as const)))
-        const current = await this.records.get<RoleRecord>(key), result = prune(current, rows)
-        saved = result.current
-        if (result.removed.length) await this.records.set(key, saved!)
-        for (const wake of result.retired) {
-          const wakeKey = this.prefix + 'wakes/' + hash(wake.request.id)
-          const operation = (this.wakeWrites.get(wakeKey) ?? Promise.resolve()).then(async () => {
-            const current = await this.records.get<WakeRecord>(wakeKey)
-            if (JSON.stringify(current) !== JSON.stringify(wake)) return
-            await this.deleteRuntimeRecord(wakeKey, wake)
-            retired.push(wake)
-          })
-          this.wakeWrites.set(wakeKey, operation)
-          try { await operation }
-          finally { if (this.wakeWrites.get(wakeKey) === operation) this.wakeWrites.delete(wakeKey) }
-        }
-      }
-      for (const wake of retired) this.taskHelperWakes?.delete(wake.request.id)
-      if (!saved) return
-      const live = this.roleRecords.get(workId)
-      if (live?.identity.executionId === saved.identity.executionId) {
-        this.roleRecords.set(workId, { ...live, notificationClaims: saved.notificationClaims })
-        ;(this.roleBases ??= new Map()).set(workId, structuredClone(saved))
-      }
-    })
   }
   private taskReleaseIndexes?: {
     roles: GitRecordIndex<AuthorityDiscoveryKey>
@@ -7478,7 +7499,7 @@ executionId: binding.executionId, run: persistContext,
           await this.flushForegroundProcessWrites(key);
         } catch (error) { if (!this.cancelledByShutdown(error)) failures.push(error) }
       }
-      for (const outcome of await Promise.allSettled([...(this.notificationClaimWrites?.values() ?? [])])) if (outcome.status === 'rejected' && !this.cancelledByShutdown(outcome.reason)) failures.push(outcome.reason)
+      for (const outcome of await Promise.allSettled([...(this.notificationOperations?.values() ?? [])])) if (outcome.status === 'rejected' && !this.cancelledByShutdown(outcome.reason)) failures.push(outcome.reason)
       for (const result of await Promise.allSettled([...(this.helperWakeWrites?.values() ?? []), ...this.organizerWakeWrites.values()]))
         if (result.status === 'rejected' && !this.cancelledByShutdown(result.reason)) failures.push(result.reason)
       for (const outcome of await Promise.allSettled([...(this.safetyRequests?.values() ?? [])]))

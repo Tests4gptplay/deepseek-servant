@@ -105,8 +105,8 @@ export interface FrameworkRoleServices {
   plannerWorkerExecutions?(binding: FrameworkRoleBinding): PlannerWorkerExecutions | undefined
   recoveryWatchChanges?(binding: FrameworkRoleBinding, snapshot: FilesSnapshot): Promise<readonly FileChange[]>
   consumeRecovery?(binding: FrameworkRoleBinding, consume: () => Promise<boolean>): Promise<void>
-  consumeWake?(binding: FrameworkRoleBinding): Promise<unknown>
-  claimNotifications(binding: FrameworkRoleBinding, commandId: string): Promise<{ signals: string[]; taskId?: string; claimedNotifications?: Array<{taskId?: string; signals: string[]}>; helperNotifications?: RoleWake[] }>
+  consumeWake?(binding: FrameworkRoleBinding, snapshot?: FilesSnapshot): Promise<{ signals: string[]; helperNotifications?: RoleWake[]; unchangedRead?: boolean }>
+  claimNotifications(binding: FrameworkRoleBinding, commandId: string): Promise<{ signals: string[]; taskId?: string; claimedNotifications?: Array<{taskId?: string; signals: string[]}> }>
   onError(error: unknown): void
   /** Transient display attribution from a selected View, never a write prerequisite. */
   errorTaskSelected?(taskId: string | undefined, call: Pick<ToolRunContext, 'callId' | 'rootCallId'>): void
@@ -294,9 +294,13 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
     register(name, description, schema, (input, exec) => {
       const epoch = viewEpoch
       return withReadOperation(files, async () => {
-        await services.consumeWake?.(binding)
+        const consumed = await services.consumeWake?.(binding)
         assertViewLifetime(epoch)
-        return execute(input, exec)
+        const result = await execute(input, exec)
+        if (binding.role !== 'Helper' || !consumed?.helperNotifications?.length || !result || typeof result !== 'object') return result
+        return { ...result, helperNotifications: [...new Map([
+          ...services.helper?.notifications?.(binding) ?? [], ...consumed.helperNotifications,
+        ].map(request => [request.id, request])).values()] }
       })
     })
   const assertViewLifetime = (epoch: number) => {
@@ -450,18 +454,34 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
     return { path, content: append ? (await files.read(value.snapshot, path) ?? '') + text : text }
   }
 
-  registerRead('dss_snapshot', 'Open a business read view. Git pins its immutable revision; physical Local reads the current addressed file on each read, without caching or locking its contents. Writes use current target state and do not close this view. Release it when no longer needed; remaining views close at turn end. For a bound Planner, workerExecutions is a fresh Host observation, not part of the fixed file revision.', z.object({ taskId: z.string().optional() }), async (input, exec) => {
-    if (binding.taskId && input.taskId && input.taskId !== binding.taskId) throw new Error('This execution is bound to another task.')
+  register('dss_snapshot', 'Open a business read view. Git pins its immutable revision; physical Local reads the current addressed file on each read, without caching or locking its contents. Writes use current target state and do not close this view. Release it when no longer needed; remaining views close at turn end. For a bound Planner, workerExecutions is a fresh Host observation, not part of the fixed file revision.', z.object({ taskId: z.string().optional() }), async (input, exec) => withReadOperation(files, async () => {
+    const assertSelectedTask = () => {
+      if (binding.taskId && input.taskId && input.taskId !== binding.taskId) throw new Error('This execution is bound to another task.')
+    }
+    if (binding.role === 'Helper') assertSelectedTask()
     const selected = input.taskId ?? binding.taskId
-    const { id, current, epoch } = await openView(selected)
+    const readEpoch = viewEpoch
+    let opened = binding.role === 'Helper' ? await openView(selected, readEpoch) : undefined
     try {
+      const consumed = await services.consumeWake?.(binding, opened?.current.snapshot)
+      assertViewLifetime(readEpoch)
+      if (binding.role !== 'Helper') assertSelectedTask()
+      // The empty discovery belongs to this fresh view, not a cached prior
+      // tool call. Changed Git inputs require their new committed revision.
+      if (opened && !consumed?.unchangedRead && files instanceof GitFiles) {
+        await close(opened.id); opened = undefined
+      }
+      opened ??= await openView(selected, readEpoch)
+      const { id, current, epoch } = opened
       assertViewLifetime(epoch)
       services.errorTaskSelected?.(selected, exec)
-      const notifications = await pending(current)
+      const notifications = consumed?.unchangedRead ? [] : await pending(current)
       assertViewLifetime(epoch)
-      return { snapshotId: id, revision: current.snapshot.revision, consistency: current.snapshot.consistency ?? 'revision-fixed', taskId: selected, notifications, binding, ...(binding.role === 'Foreground' && taskControlPath(selected) ? { taskControlPath: taskControlPath(selected) } : {}), ...await archiveView(current, selected), ...await workspaceView(current, selected), ...plannerExecutionFacts(), ...(binding.role === 'Helper' ? { helperRecordPath: selected ? helperDebugPath(selected, new Date().toISOString().slice(0, 10)) : binding.recordPath ?? helperDebugPath(undefined, new Date().toISOString().slice(0, 10)), safetyFaults: services.helper?.faults?.(binding) ?? [], helperNotifications: services.helper?.notifications?.(binding) ?? binding.helperNotifications ?? [] } : {}) }
-    } catch (error) { await close(id); throw error }
-  })
+      return { snapshotId: id, revision: current.snapshot.revision, consistency: current.snapshot.consistency ?? 'revision-fixed', taskId: selected, notifications, binding, ...(binding.role === 'Foreground' && taskControlPath(selected) ? { taskControlPath: taskControlPath(selected) } : {}), ...await archiveView(current, selected), ...await workspaceView(current, selected), ...plannerExecutionFacts(), ...(binding.role === 'Helper' ? { helperRecordPath: selected ? helperDebugPath(selected, new Date().toISOString().slice(0, 10)) : binding.recordPath ?? helperDebugPath(undefined, new Date().toISOString().slice(0, 10)), safetyFaults: services.helper?.faults?.(binding) ?? [], helperNotifications: [...new Map([
+        ...services.helper?.notifications?.(binding) ?? binding.helperNotifications ?? [], ...consumed?.helperNotifications ?? [],
+      ].map(request => [request.id, request])).values()] } : {}) }
+    } catch (error) { if (opened) await close(opened.id); throw error }
+  }))
   register('dss_snapshot_release', 'Release a business read view when no longer needed.', z.object(snapshotInput), async input => { await close(input.snapshotId); return { released: true } })
   if (services.attachmentStore) {
     ctx.systemPrompt.section({ name: 'deepseek-servant:attachments', order: 104, interpolate: false,
@@ -562,7 +582,7 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
       ? 'Write this Foreground’s bound memory records normally. Only at the taskControlPath returned by dss_snapshot (or the Git binding sourceLocations.taskControlPath), use append:false and strict JSON text {taskId, lifecycleId?, intent: \"paused\" | \"running\"} for an explicit user pause/resume request on the Task selected by snapshotId. This is a validated scoped control request, never replacement file contents. Copy the exact current lifecycleId; omit only for the original lifecycle. No other control fields or technical paths are writable. Keep the original tool call identity and arguments after UNKNOWN. Cancellation uses dss_task_cancel, never this entry.'
     : binding.role === 'Recorder'
       ? 'Persist actual archive progress in this Recorder’s bound Note. Append preserves earlier facts.'
-      : 'Persist actual progress or results in this role’s record. Append preserves earlier facts. Helper may optionally report an actual repair attempt with a dated debug write; choose faultId explicitly when multiple current faults are associated. Reporting does not reset or restart anything. Helper may explicitly set notifyForeground to save this report before its Foreground state signal (one Git transaction or the same original Local call continuation); New records belong under debug/helper-debug/tasks/<actual-task-id>/ or debug/helper-debug/host/ when no Task is involved, with dated filenames. Foreground_Helper_Report_<encoded-path>_<command-hash> names that complete retained file; underscores within the path are encoded as %5F. Old accepted dated/named reports keep their original signal. These are permanent diagnostic records, not temporary claim state; only user-directed deletion removes them. No signal body or extra acknowledgement is needed.', z.object({ ...snapshotInput, path: z.string(), text: z.string(), append: z.boolean().default(true), notifyForeground: z.boolean().optional(),
+      : 'Persist actual progress or results in this role’s record. Append preserves earlier facts. Helper may optionally report an actual repair attempt with a dated debug write; choose faultId explicitly when multiple current faults are associated. Reporting does not reset or restart anything. Helper may explicitly set notifyForeground to save this report before its Foreground state signal (one Git transaction or the same original Local call continuation); New records belong under debug/helper-debug/tasks/<actual-task-id>/ or debug/helper-debug/host/ when no Task is involved, with dated filenames. Foreground_Helper_Report_<encoded-path>_<command-hash> names that complete retained file; underscores within the path are encoded as %5F. Old accepted dated/named reports keep their original signal. These are permanent diagnostic records, not temporary notification state; only user-directed deletion removes them. No signal body or extra acknowledgement is needed.', z.object({ ...snapshotInput, path: z.string(), text: z.string(), append: z.boolean().default(true), notifyForeground: z.boolean().optional(),
     repairAttempt: z.object({ faultId: z.string().min(1).optional(), actionsTaken: z.string().min(1), outcome: z.enum(['repaired', 'attempted-not-repaired']), result: z.string().min(1) }).optional() }),
     async (input, exec) => {
       const controlPath = services.taskControl?.taskPath ? taskControlPath(mutationView(input.snapshotId).taskId) : services.taskControl?.path
@@ -660,14 +680,14 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
         }
       }
     })
-  register('dss_claim', 'Consume the exact ordinary state signals supplied by this wake before reading their task contents. For Foreground, Planner, Worker, Organizer, and Helper, another ordinary claim consumes later matching notifications before you read and evaluate their current contents. Foreground adopts current top-level Foreground signals across task, conversation and report sources. Helper adopts this Host’s current top-level Helper signals; helperNotifications preserves each original diagnostic input and recovery-check cycle separately. Returned signals and claimedNotifications retain accepted context; use a fresh dss_snapshot notifications list to check what remains pending. A bound Planner also receives refreshed workerExecutions facts, separate from the file snapshot.',
+  if (binding.role !== 'Helper') register('dss_claim', 'Consume the exact ordinary state signals supplied by this wake before reading their task contents. For Foreground, Planner, Worker, and Organizer, another ordinary claim consumes later matching notifications before you read and evaluate their current contents. Foreground adopts current top-level Foreground signals across task, conversation and report sources. Returned signals and claimedNotifications retain accepted context; use a fresh dss_snapshot notifications list to check what remains pending. A bound Planner also receives refreshed workerExecutions facts, separate from the file snapshot.',
     z.object({}).strict(), async (input, exec) => {
       const epoch = viewEpoch
       const consumed = await services.claimNotifications(binding, command(exec))
       const selected = consumed.taskId ?? binding.taskId
       const { id, current } = await openView(selected, epoch)
       assertViewLifetime(epoch)
-      return { signals: consumed.signals, ...(binding.role === 'Foreground' ? { helperReports: consumed.signals.flatMap(signal => { const path = helperReportRecordPath(signal); return path ? [{ signal, path }] : [] }) } : {}), snapshotId: id, consistency: current.snapshot.consistency ?? 'revision-fixed', taskId: selected, ...await archiveView(current, selected), ...await workspaceView(current, selected), binding: consumed.claimedNotifications ? {...binding, claimedNotifications: consumed.claimedNotifications} : binding, ...plannerExecutionFacts(), ...(binding.role === 'Helper' ? { safetyFaults: services.helper?.faults?.(binding) ?? [], helperNotifications: consumed.helperNotifications ?? services.helper?.notifications?.(binding) ?? binding.helperNotifications ?? [] } : {}) }
+      return { signals: consumed.signals, ...(binding.role === 'Foreground' ? { helperReports: consumed.signals.flatMap(signal => { const path = helperReportRecordPath(signal); return path ? [{ signal, path }] : [] }) } : {}), snapshotId: id, consistency: current.snapshot.consistency ?? 'revision-fixed', taskId: selected, ...await archiveView(current, selected), ...await workspaceView(current, selected), binding: consumed.claimedNotifications ? {...binding, claimedNotifications: consumed.claimedNotifications} : binding, ...plannerExecutionFacts() }
     })
 
   if (binding.role === 'Foreground') {
