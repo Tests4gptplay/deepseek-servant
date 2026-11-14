@@ -1,26 +1,38 @@
 # 安装与升级
 
-## 安装测试版 RC2
+## 当前可安装的 RC2 占位包
 
-在 DSH 的 **插件 → 添加插件 → 包名或地址** 输入固定来源：
+当前安装包暂为 **0.5.0 RC2 占位版本**，并非本次修复完成后的安装包。
+
+在 DSH 的 **插件 → 添加插件 → 包名或地址** 输入以下安装包地址，安装后启用：
 
 ```text
-github:Tests4gptplay/deepseek-servant#v0.5.0-rc.2
+https://github.com/Tests4gptplay/deepseek-servant/releases/download/v0.5.0-rc.2/deepseek-servant-0.5.0-rc.2-archive-69630b2.tgz
 ```
 
-[RC2 Release](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.0-rc.2) 提供备用安装包 [deepseek-servant-0.5.0-rc.2.tgz](https://github.com/Tests4gptplay/deepseek-servant/releases/download/v0.5.0-rc.2/deepseek-servant-0.5.0-rc.2.tgz)。可将该下载地址填入同一个输入框，或下载后填写运行 DSH 的电脑上文件的完整绝对路径，无需解压。安装后启用插件。
+也可下载后填写运行 DSH 的电脑上文件的完整绝对路径，无需解压。
 
-包内版本显示 **0.5.0**，本测试候选由固定标签 **v0.5.0-rc.2** 标识。RC1 同样显示 0.5.0，升级时应核对安装来源变为 RC2。
+包内版本显示 **0.5.0**，请以文件名中的 **archive-69630b2** 和下方校验值区分当前占位包。文件大小为 **5,565,610 字节**，SHA-256 为：
 
-**升级：** 先停止 DSS 任务并保留原数据。填写上面的 RC2 来源；若宿主提示已安装，先在插件管理中卸载该插件条目，再安装 RC2。保留 DSH 数据目录、Local 库及任务工作区，不执行记录清理或手工删除数据。按宿主提示重启；Desktop 需要时完整退出托盘进程再打开。升级后检查原设置、对话、任务记录与成果可读取。
+```text
+85b39854a14ffbfc1322d702e75db5b4711a53c2dbbb1debacbaadff59c47268
+```
+
+**安装现有 RC2：** 先停止 DSS 任务并备份数据。若宿主提示已安装，先在插件管理中卸载该插件条目，再使用上述来源安装；保留 DSH 数据目录、Local 库及任务工作区。按宿主提示重启，随后检查原设置、对话、任务记录与成果。
 
 **Web：** 在运行服务的环境停止对应 profile 后执行，再重新启动该 profile：
 
 ```sh
-dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.5.0-rc.2'
+dsh plugin --profile web add 'https://github.com/Tests4gptplay/deepseek-servant/releases/download/v0.5.0-rc.2/deepseek-servant-0.5.0-rc.2-archive-69630b2.tgz'
 ```
 
-使用 Release 资产时，将命令中的来源换成对应 TGZ 下载地址。Desktop 与 Web 分别管理安装。启用后从侧栏打开 DeepSeek Servant，详见[使用说明](USAGE.md)。模型提供者与工具权限由 DSH 管理。
+Desktop 与 Web 分别管理安装。模型提供者与工具权限由 DSH 管理。
+
+## 本次 0.5.0 更新的安装提示
+
+由于本次系统构建更新较大，建议安装前先备份数据，并彻底清理历史文件后再安装。
+
+此提示针对本次更新后的安装包；上方当前仍提供 RC2 占位包。更新说明见 [0.5.0 预发布说明](releases/0.5.0.md)。
 
 ## 历史发布版 0.4.1
 

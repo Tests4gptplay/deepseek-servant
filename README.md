@@ -1,49 +1,53 @@
 # DeepSeek Servant
 
-基于 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai/deepseek-harness) 的自主 AI 助理与多 Agent 协作插件。前台交流需求，后台协作推进任务、验收成果并整理长期知识。
-
 <p align="center">
   <img src="https://raw.githubusercontent.com/Tests4gptplay/deepseek-servant/v0.3.0/docs/images/deepseek-servant-maids-duo.webp" alt="DeepSeek Servant 短裙与长裙女仆角色设计">
 </p>
 
-## 安装测试版 RC2
+基于 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai/deepseek-harness) 的自主 AI 助理与多 Agent 协作插件。围绕持久目标进行规划、执行、成果评价、方法调整、任务接续和技能积累。当前提供 Local 持续任务模式与实验性 DSS-cah Git 模式；多 Agent 指前台、Planner 与 Worker 的角色协作。
 
-在 DSH 的 **插件 → 添加插件 → 包名或地址** 输入固定来源：
+## 技术评述与项目实践 / Review & project practice
 
-```text
-github:Tests4gptplay/deepseek-servant#v0.5.0-rc.2
-```
+**摘要：** 当 AI 从回答问题走向承担工程、研究和创作任务，系统需要解决的问题也随之变化：工作怎样跨越会话边界，成果怎样被后继执行者继承，遇到中断怎样恢复，原有方案失效后怎样重新选择路线。
 
-[RC2 Release](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.0-rc.2) 提供备用安装包 [deepseek-servant-0.5.0-rc.2.tgz](https://github.com/Tests4gptplay/deepseek-servant/releases/download/v0.5.0-rc.2/deepseek-servant-0.5.0-rc.2.tgz)。可将该下载地址填入同一个输入框，或下载后填写运行 DSH 的电脑上文件的完整绝对路径，无需解压。安装后启用插件。
+[Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness) 与 [DeepSeek Servant（DSS）](https://github.com/Tests4gptplay/deepseek-servant) 围绕这些问题形成了一条持续演进的技术路线：以持久任务为中心，将模型推理、角色协作、工作记忆、状态调度与执行环境分离。CAH 提供了长期任务和技术路线调整的实际案例，DSS 则将同一架构原则迁移到 DeepSeek Harness 的原生 Agent 环境。
 
-包内版本显示 **0.5.0**，本测试候选由固定标签 **v0.5.0-rc.2** 标识。RC1 同样显示 0.5.0，升级时应核对安装来源变为 RC2。
+两者共同探索的是：**让执行者可以更换、工作方法可以调整，而用户目标、已有成果和后续责任保持连续。**
 
-**升级：** 先停止 DSS 任务并保留原数据。填写上面的 RC2 来源；若宿主提示已安装，先在插件管理中卸载该插件条目，再安装 RC2。保留 DSH 数据目录、Local 库及任务工作区，不执行记录清理或手工删除数据。按宿主提示重启；Desktop 需要时完整退出托盘进程再打开。升级后检查原设置、对话、任务记录与成果可读取。
+**[阅读全文：让 AI 持续完成工作——CAH / DSS 的技术框架与工程实践](https://github.com/Tests4gptplay/deepseek-servant/blob/7f499a83433481844c9643be93ff3a986a65e22b/docs/reviews/CAH-DSS-TECHNICAL-FRAMEWORK.zh-CN.md)**
 
-**Web：** 在运行服务的环境停止对应 profile 后执行，再重新启动该 profile：
+## 独立实践与架构趋同 / Independent work, convergent architecture
 
-```sh
-dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.5.0-rc.2'
-```
+DSS 的 [v0.2.0（2026-10-26）](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.2.0) 已公开多角色协作、持久任务记录与异常接续，早于 DeepSeek 团队于 2026-10-31 公开的 [Super-agent 研究原型](https://github.com/deepseek-ai/dsh-superagent-prototype)。这条独立工程路线延续自 [CAH v1.0.4（2026-09-20）](https://github.com/Tests4gptplay/chat-agent-harness/releases/tag/v1.0.4) 中的 Git 任务记录与可替换 Worker。
 
-使用 Release 资产时，将命令中的来源换成对应 TGZ 下载地址。Desktop 与 Web 分别管理安装。启用后从侧栏打开 DeepSeek Servant，详见[使用说明](docs/USAGE.md)。模型提供者与工具权限由 DSH 管理。
+从双方公开实现看，交互与执行分工、任务状态持久化、中断恢复呈现**架构趋同**。DSS 的 [0.5.0-rc.2 测试版](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.0-rc.2) 沿自己的 Local／Git 协作路线采用六类原生角色；Super-agent 原型围绕 GitHub／飞书事件和 Ticket／Executor 模型运作。公开的 [CAH 运行记录](https://github.com/Tests4gptplay/chat-agent-harness-records)展示了 [Helper 恢复与 Planner 重新规划](https://github.com/Tests4gptplay/chat-agent-harness-records/blob/76646cc709375b1d8d262d809d76b3156698e796/showcase-observer/world-execute-chatgpt-20261017/backfills/2026-10-19T10-05Z-helper-image-replanning.md)的实际过程。
 
-## 统一框架能力
+DSS [v0.2.0 (2026-10-26)](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.2.0) already included multi-role collaboration, persistent task records and recovery before the DeepSeek team's [Super-agent research prototype](https://github.com/deepseek-ai/dsh-superagent-prototype) was published on 2026-10-31. This independent engineering path continues the Git-backed task records and replaceable Workers published in [CAH v1.0.4 (2026-09-20)](https://github.com/Tests4gptplay/chat-agent-harness/releases/tag/v1.0.4).
 
-- **六类原生角色**：Foreground 交流需求，Organizer 分派与总验收，Planner 规划与成员验收，Worker 执行，Recorder 整理长期记录与技能，Helper 协助恢复。角色使用 DSH 原生 Agent、Session、工具和 Jobs。
-- **Local / Git**：Local 使用 SQLite 文件库；Git 通过 GitHub API 读写私有协作仓库。前台访问与本端后台参与分别管理。
-- **持续对话**：Foreground 每轮完成后使用新会话接续，带入最近六个完整对话往返原文；历史支持上滚和日期定位；AI 可检索原文并按字符分页读取长文。
-- **成果与知识**：查看任务结果、下载已保存附件，读取旧任务完整原记录、偏好及项目事实；技能支持候选编辑与停用，并保留来源和版本。
-- **记录管理**：Local 分别提供任务历史、前台对话和工作规划记录的明确清理操作；记录搬家核验原生执行停止、复制结果和原存储身份，保留任务与会话关联。
-- **长期归档**：Recorder 编写记录，Cleaner 核对原资料与保留成果后清理临时文件；结果引用与成果附件继续可用。
+The two independently developed projects show **architectural convergence** in separating interaction from execution, persisting task state and recovering interrupted work. DSS's [0.5.0-rc.2 test release](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.0-rc.2) follows its own Local/Git collaboration path with six native roles; the Super-agent prototype centers on GitHub/Feishu events and Ticket/Executor. Public [CAH run records](https://github.com/Tests4gptplay/chat-agent-harness-records) include a [Helper recovery and Planner replanning case](https://github.com/Tests4gptplay/chat-agent-harness-records/blob/76646cc709375b1d8d262d809d76b3156698e796/showcase-observer/world-execute-chatgpt-20261017/backfills/2026-10-19T10-05Z-helper-image-replanning.md).
 
-## 开始使用
+## 核心能力
 
-从 DSH 侧栏打开 DeepSeek Servant，设置模型、预设与任务工作区，选择 Local 数据目录或 Git 仓库。保存并连接后，在对话中说明目标、交付物与验收要求。任务页查看进展和成果；参与开关控制本端后台。
+- **目标驱动的多 Agent 工作**：前台理解要求，Planner 规划与验收，Worker 在所选工作区执行，支持并行席位、评审与任务换代。
+- **Local 持续任务模式**：在当前 DSH 实例中保存任务状态，支持暂停、继续、取消、目标修订、接续恢复及最终交付。
+- **实验性 DSS-CAH 模式**：让多个参与者在各自工作区执行任务，通过私有仓库共享对话、计划、进度、成果与归档，并支持任务控制和接续。
+- **共用操作界面**：模式切换后分别显示对话和任务；模型、预设、工作区及 Worker 席位可配置。
+- **工作记忆与技能**：保存和回查任务记录、工作规划随记与知识，支持技能积累；Local 提供分类记录清理与显式任务重置。
 
-模型提供者、工具及工作区权限由 DSH 管理。Git 仓库内容对获授权的协作者共享，请选用适合协作范围的仓库。
+## 安装与使用
 
-[使用说明](docs/USAGE.md) · [Git 设置](PRIVATE_GIT.md) · [数据保留](RETENTION.md) · [实现与构建](IMPLEMENTATION.md) · [开发验证](docs/TESTING.md) · [版本历史](CHANGELOG.md)
+安装来源、Desktop / Web 操作和升级说明见 [安装与升级](docs/INSTALLATION.md)。
+
+### 第一次使用
+
+1. 安装并启用后，从侧栏打开 **DeepSeek Servant**，选择可用模型和工作区。
+2. 在对话中说明目标、交付物和验收要求。前台与你确认需求，Planner 拆分和检查工作，Worker 在指定工作区执行。
+3. 到任务页查看进度、结果和需要你补充的信息；可以继续交流、调整目标，或按需暂停、继续和取消。
+4. 需要多个参与者通过私有 Git 仓库协作时，再启用 DSS-cah 并按[协作指南](PRIVATE_GIT.md)连接仓库；标准模式不需要 Git 协作配置。
+
+[使用指南](docs/USAGE.md) · [Git 协作说明](PRIVATE_GIT.md) · [数据保留与清理](RETENTION.md) · [版本说明](docs/releases/0.5.0.md)
+
+模型提供者、工具及工作区权限由 DSH 管理。Git 仓库中的协作内容对获授权的参与者共享，请选用适合协作范围的仓库。
 
 ## 来源与开源许可
 
@@ -57,4 +61,4 @@ DeepSeek Servant 由 [Chat Agent Harness（CAH）](https://github.com/Tests4gptp
 
 ## 支持项目 / Support
 
-[GitHub Sponsors](https://github.com/sponsors/Tests4gptplay) · [Ko-fi](https://ko-fi.com/kou392350) · [Patreon](https://www.patreon.com/cw/Kou848) · [爱发电 / Afdian](https://afdian.com/a/kkt_ifd1) · [支付宝 / Alipay](SPONSOR.md)
+[GitHub Sponsors](https://github.com/sponsors/Tests4gptplay) · [Ko-fi](https://ko-fi.com/kou392350) · [支付宝 / Alipay](SPONSOR.md)
