@@ -149,7 +149,6 @@ export interface FrameworkClientApi {
   view(input: { mode?: FrameworkMode; includeArchives?: boolean; headerOnly?: boolean; panelsOnly?: boolean; refreshOriginalTasks?: boolean }, signal?: AbortSignal): Promise<FrameworkClientView>
   history(input: { mode: FrameworkMode; collaborationId: string; storageScope?: string; beforeId?: string; afterId?: string; date?: string; limit: number; live?: boolean }, signal?: AbortSignal): Promise<{ messages: FrameworkClientMessage[]; processGroups?: FrameworkClientProcessGroup[]; moreBefore?: string; moreAfter?: string; revision: string; order: string[]; selectedIds?: string[]; missingBodies?: Array<{ id: string; path: string }>; storageScope?: string; reset?: boolean; day?: string; cursor?: string }>
   send(input: FrameworkSendInput): Promise<{ storageScope: string }>
-  cancelForeground(input: { mode: FrameworkMode; storageScope: string }): Promise<{ submitted: boolean }>
   /** Settings/native lifecycle receipt only; view/history own their independent display reads. */
   configure(input: { mode: FrameworkMode; commandId: string; settings: FrameworkClientSettings; changedFields?: Array<keyof FrameworkClientSettings> }): Promise<FrameworkClientView>
   permissionCatalog?(input: { mode: FrameworkMode }): Promise<{ options: Array<{ value: string; name: string; description?: string }>; current?: string }>

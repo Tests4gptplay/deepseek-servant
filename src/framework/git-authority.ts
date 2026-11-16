@@ -2,7 +2,7 @@ import { GitRecordIndex } from './git-record-index.js'
 import type { GitReadDependencies } from '../experimental/private-git/contracts.js'
 import { createHash } from 'node:crypto'
 import type { StoragePort } from '../contracts/ports.js'
-import { FilesConflictError, FilesOutcomeUnknownError, GitFiles, withSnapshot, withWriteOperation, withFileDependencies, type FileChange, type FilesSnapshot, type FilesStore, type FilesReadRound, type GitOperationRecord, type GitOperationStore } from './transactions.js'
+import { FilesConflictError, FilesOutcomeUnknownError, GitFiles, withSnapshot, withWriteOperation, withOperationChannel, withFileDependencies, type FileChange, type FilesSnapshot, type FilesStore, type FilesReadRound, type GitOperationRecord, type GitOperationStore } from './transactions.js'
 
 const hash = (text: string) => createHash('sha256').update(text).digest('hex')
 const segment = (text: string) => encodeURIComponent(text).replaceAll('.', '%2E')
@@ -98,6 +98,14 @@ export class GitAuthorityStore implements StoragePort {
     const raw = await this.files.read(snapshot, this.path(key)); this.assertOpen()
     const value = raw === undefined ? undefined : this.decode(key, raw)
     return structuredClone(value) as T | undefined
+  }
+  /** One explicit read-only discovery round on this authority's actual files.
+   * Independent leases never borrow the Host poll or a writer's ambient view. */
+  readRound(): Pick<StoragePort, 'get'> | undefined {
+    this.assertOpen()
+    if (!(this.files instanceof GitFiles)) return
+    const round = this.files.readRound('read')
+    return { get: <T>(key: string) => withOperationChannel(this.files, 'read', () => round.withSnapshot(snapshot => this.getAt<T>(snapshot, key))) }
   }
   async get<T>(key: string): Promise<T | undefined> {
     this.assertOpen()
