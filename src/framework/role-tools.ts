@@ -1,5 +1,5 @@
 import { helperReportRecordPath, helperDebugPath, isHelperDatedRecord, isHelperWritableRecord, helperReportSignalPath } from './helper-debug-path.js'
-import { publishPhysicalHelperReport } from './physical-helper-report.js'
+import { publishPhysicalHelperReport, type HelperRepairAttempt } from './physical-helper-report.js'
 import { deliverPhysicalDirect, type DirectSignalSources } from './physical-direct-delivery.js'
 import type { RoleWake } from './host-loop.js'
 import { consumePhysicalRecovery } from './physical-recovery.js'
@@ -19,12 +19,14 @@ import type { SafetyFault } from './safety-net.js'
 import { rememberRoleErrorOrigin } from './role-error-origin.js'
 import { linkedChild, taskFamily } from './task-relations.js'
 import { readTaskReferenceIdentity } from './task-history.js'
-import { selectRecorderOutputReferences, prepareRecorderRetention, resolveChildResultReferences, resolveTaskRequirementReference, taskRequirementChain, type RetentionManifest } from './recorder-retention.js'
+import { selectRecorderOutputReferences, prepareRecorderRetention, resolveChildResultReferences, readTaskRequirementReference, taskRequirementChain, type RetentionManifest } from './recorder-retention.js'
 import { PhysicalLocalFiles } from './physical-local-files.js'
 import { publishPhysicalRecorder } from './physical-recorder-publication.js'
 import { completePhysicalTask, type PhysicalCompletionPlan } from './physical-task-terminal.js'
 import { foregroundMemoryGuide } from '../contracts/foreground-memory.js'
-import { readCleanupRecord } from './cleaner.js'
+import { readCleanupRecord, taskCleanupRecord } from './cleaner.js'
+import { taskMetadataRuntimeState } from './task-archive.js'
+import { withReevaluatedFileTarget, observedFileBytes } from './file-read-observation.js'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -44,7 +46,7 @@ import type { TaskCancellationInput, TaskCancellationResult } from './task-cance
 import { physicalWorkspaceLink, physicalWorkspaceTitle, isPhysicalWorkspaceReference, sameWorkspaceReference, type PhysicalWorkspaceReference } from './workspace-paths.js'
 import { parseTaskReference, referenceTaskId, taskReference } from './published-references.js'
 import { GitFiles, filePath, withSnapshot, withOperationChannel, withReadOperation, type FilesStore, type FilesSnapshot, type FileChange, type FileReceipt } from './transactions.js'
-import { paths, taskArchiveOwnsPath, readJson, encodeJson, taskCompletionSignals, dispatchPlannerObjective, childCompletionSignal, taskIdentity, taskLifecycle, assertTaskLifecycle, isTerminalTask, type TaskMetadata } from './task-files.js'
+import { paths, workerPaths, taskArchiveOwnsPath, readJson, encodeJson, taskCompletionSignals, dispatchPlannerObjective, childCompletionSignal, taskIdentity, taskLifecycle, assertTaskLifecycle, checkTaskLifecycle, isTerminalTask, type TaskMetadata } from './task-files.js'
 
 export interface FrameworkRoleBinding extends WorkIdentity {
   owner: string
@@ -63,7 +65,7 @@ export interface TaskRecoveryInput { recordPaths: string[]; route: 'P' | 'O'; ow
 export type HelperRestoreInput = { facts: string; hypotheses: string; actionsTaken: string; continuation: string; disposition?: 'release'; taskRecovery?: TaskRecoveryInput } &
   ({ target: WorkIdentity; wakeId?: never } | { wakeId: string; target?: never })
 
-export interface HelperRepairAttempt { faultId?: string; actionsTaken: string; outcome: 'repaired' | 'attempted-not-repaired'; result: string }
+export type { HelperRepairAttempt } from './physical-helper-report.js'
 
 /** Live Host observation, deliberately separate from a fixed business-file revision. */
 export interface PlannerWorkerExecutions {
@@ -90,9 +92,9 @@ export interface FrameworkRoleServices {
   restoreTask?(binding: FrameworkRoleBinding, input: TaskRecoveryInput & { taskId: string }, commandId: string): Promise<unknown>
   workspace?: {
     instanceUUID?: string
-    locate(taskId: string, snapshot: FilesSnapshot): Promise<TaskWorkspaceLocation | undefined>
+    locate(taskId: string, snapshot: FilesSnapshot, selected?: { value: TaskMetadata | undefined }): Promise<TaskWorkspaceLocation | undefined>
     reference(agent: Agent, taskId: string, sourcePath: string, snapshot: FilesSnapshot, signal: AbortSignal): Promise<PhysicalWorkspaceReference & { nativePath: string; bytes: number }>
-    validate(reference: PhysicalWorkspaceReference, snapshot: FilesSnapshot): Promise<void>
+    validate(reference: PhysicalWorkspaceReference, snapshot: FilesSnapshot, selected?: TaskMetadata): Promise<void>
   }
   files: FilesStore
   physicalSignalSources?: DirectSignalSources
@@ -113,7 +115,7 @@ export interface FrameworkRoleServices {
   workerBusiness?: {
     transferPath?(binding: FrameworkRoleBinding): string
     assertLive?(binding: FrameworkRoleBinding, transferring?: boolean): void
-    assert(binding: FrameworkRoleBinding, snapshot: FilesSnapshot): Promise<void>
+    assert(binding: FrameworkRoleBinding, snapshot: FilesSnapshot, selected?: TaskMetadata): Promise<void>
     transfer(binding: FrameworkRoleBinding, snapshot: FilesSnapshot, successorId: string, successorRole?: 'Worker' | 'Planner'): Promise<readonly FileChange[]>
     committed(binding: FrameworkRoleBinding): Promise<void>
   }
@@ -139,12 +141,7 @@ export interface FrameworkRoleServices {
     restoreHost(binding: FrameworkRoleBinding, input: { facts: string; hypotheses: string; actionsTaken: string; continuation: string }, commandId: string): Promise<unknown>
   }
 }
-export function workerPaths(taskId: string, member: string, childId: string) {
-  filePath(childId)
-  if (childId.includes('/')) throw new Error('Child identity must occupy one path segment.')
-  const root = paths.member(taskId, member) + '/workers/' + childId
-  return { root, contract: root + '/contract.md', notes: root + '/notes.md', reply: root + '/reply.md', handoff: root + '/handoff.json', records: root + '/records/' }
-}
+export { workerPaths } from './task-files.js'
 export const workerWakeSignal = (childId: string) => 'Worker_' + encodeURIComponent(childId).replace(/_/g, '%5F')
 export function signalWorkerId(name: string): string | undefined {
   const match = /^Worker_(.+)_Planner$/.exec(name) ?? /^Worker_(.+)$/.exec(name)
@@ -170,7 +167,7 @@ const snapshotInput = { snapshotId: z.string() }
 export const archiveRecordsPath = (task: string | Pick<TaskMetadata, 'taskId' | 'archiveFolder' | 'sourcePath'>) => paths.archive(task) + '/records.md'
 const outputFiles = z.array(z.object({ path: z.string(), text: z.string() }))
 const recorderOutputFiles = z.array(z.object({ path: z.string(), text: z.string(), baseReadId: z.string().optional().describe('For skill files only: exact complete dss_read baseline. Omit to use this Agent’s latest complete read of this path; native skill body projections are not full-file baselines.') }))
-interface View { snapshot: FilesSnapshot; taskId?: string; lifecycleId?: string; enforceLifecycle?: boolean }
+interface View { snapshot: FilesSnapshot; taskId?: string; lifecycleId?: string; enforceLifecycle?: boolean; taskMetadata?: TaskMetadata }
 interface ViewReference { revision: string; taskId?: string; lifecycleId?: string; nonce: string }
 /** An ordinary handoff continuation, caught inside the tool boundary. It is
  * neither a storage failure nor a committed empty command. */
@@ -322,23 +319,27 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
     views.set(id, current)
     return { id, current, epoch }
   }
-  const archiveView = async (current: View, selected: string | undefined) => {
+  const archiveView = async (current: View, selected: string | undefined, observed?: (task: TaskMetadata | undefined, current: TaskMetadata | undefined) => void) => {
     if (!selected || binding.direct) return {}
-    const metadata = await readTaskReferenceIdentity(files, current.snapshot, selected)
+    let live: TaskMetadata | undefined
+    const metadata = await readTaskReferenceIdentity(files, current.snapshot, selected, value => { live = value })
+    observed?.(metadata, live)
     if (!metadata) return {}
     if (metadata.taskId !== selected) throw new Error('Task archive metadata identity differs: ' + selected)
     return { archiveDirectory: paths.archive(metadata), archiveRecordsPath: archiveRecordsPath(metadata),
       ...(files instanceof GitFiles ? {} : { archiveStatePath: paths.archive(metadata) + '/state.json' }),
       retentionPath: paths.archive(metadata) + '/retention.json' }
   }
-  const workspaceView = async (current: View, selected: string | undefined) => {
+  const workspaceView = async (current: View, selected: string | undefined, known?: { reference?: TaskMetadata; current?: TaskMetadata }) => {
     if (!services.workspace) return {}
     const workspaceSource = services.workspace.instanceUUID ? { owner: binding.owner, instanceUUID: services.workspace.instanceUUID,
       linkTitle: physicalWorkspaceTitle({ owner: binding.owner, instanceUUID: services.workspace.instanceUUID }) } : undefined
     if (!selected) return { workspaceSource }
-    if (['Planner', 'Worker', 'Organizer', 'Recorder'].includes(binding.role))
-      await assertTaskLifecycle(files, current.snapshot, selected, binding)
-    const workspace = await services.workspace.locate(selected, current.snapshot)
+    if (['Planner', 'Worker', 'Organizer', 'Recorder'].includes(binding.role)) {
+      if (files instanceof GitFiles && known) await withReevaluatedFileTarget(current.snapshot, paths.task(selected), async () => checkTaskLifecycle(current.snapshot, selected, binding, known.current))
+      else await assertTaskLifecycle(files, current.snapshot, selected, binding)
+    }
+    const workspace = await services.workspace.locate(selected, current.snapshot, files instanceof GitFiles && known ? { value: known.reference } : undefined)
     return { ...(workspace ? { workspace } : {}), workspaceSource }
   }
   const view = (id: string): View => { const value = views.get(id); if (!value) throw new Error('Snapshot is released; open and read a current snapshot.'); return value }
@@ -348,11 +349,13 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
     return id
   }
   const task = async (value: View): Promise<TaskMetadata> => {
-    const current = files instanceof PhysicalLocalFiles && value.enforceLifecycle
+    const current = files instanceof GitFiles && value.taskMetadata ? value.taskMetadata : files instanceof PhysicalLocalFiles && value.enforceLifecycle
       ? await assertTaskLifecycle(files, value.snapshot, taskId(value), value)
       : await readJson<TaskMetadata>(files, value.snapshot, paths.task(taskId(value)))
-    if (value.enforceLifecycle && !(files instanceof PhysicalLocalFiles))
-      await assertTaskLifecycle(files, value.snapshot, taskId(value), value)
+    if (value.enforceLifecycle && !(files instanceof PhysicalLocalFiles)) {
+      if (files instanceof GitFiles) await withReevaluatedFileTarget(value.snapshot, paths.task(taskId(value)), async () => checkTaskLifecycle(value.snapshot, taskId(value), value, current))
+      else await assertTaskLifecycle(files, value.snapshot, taskId(value), value)
+    }
     if (!current) throw new Error('Task metadata does not exist; use the supplied direct-task paths for a short task.')
     if (!binding.direct && ['Planner', 'Worker'].includes(binding.role) && current.route !== 'P')
       throw new Error('Planner and Worker business belongs to an independent P Task. Read this O ledger through its Organizer.')
@@ -390,16 +393,27 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
         assertLive()
         if (binding.role === 'Worker' && !binding.direct) services.workerBusiness?.assertLive?.(binding, transferring)
       } }, async snapshot => {
-        if (binding.taskId && !binding.direct && ['Planner', 'Worker', 'Organizer', 'Recorder'].includes(binding.role))
+        let selected: TaskMetadata | undefined
+        const carry = files instanceof GitFiles && binding.taskId && !binding.direct && ['Planner', 'Worker'].includes(binding.role)
+        if (carry) {
+          let text: string | undefined
+          selected = await withReevaluatedFileTarget(snapshot, paths.task(binding.taskId!), async () => {
+            text = await files.read(snapshot, paths.task(binding.taskId!))
+            return checkTaskLifecycle(snapshot, binding.taskId!, binding, text === undefined ? undefined : JSON.parse(text) as TaskMetadata)
+          })
+          // Preserve the original route read's exact text observation after the
+          // lifecycle predicate, without rereading or re-encoding metadata.
+          observedFileBytes(snapshot, paths.task(binding.taskId!), text === undefined ? undefined : Buffer.from(text, 'utf8'))
+        } else if (binding.taskId && !binding.direct && ['Planner', 'Worker', 'Organizer', 'Recorder'].includes(binding.role))
           await assertTaskLifecycle(files, snapshot, binding.taskId, binding)
         if (binding.taskId && !binding.direct && ['Planner', 'Worker'].includes(binding.role)) {
-          const selected = await readJson<TaskMetadata>(files, snapshot, paths.task(binding.taskId))
+          if (!carry) selected = await readJson<TaskMetadata>(files, snapshot, paths.task(binding.taskId))
           if (selected?.route !== 'P') throw new Error('Planner and Worker mutations require their bound independent P Task.')
         }
         if (binding.role === 'Worker' && !binding.direct) {
-          await services.workerBusiness?.assert(binding, snapshot)
+          await services.workerBusiness?.assert(binding, snapshot, carry ? selected : undefined)
         }
-        return build(snapshot, { ...current, snapshot, enforceLifecycle: true })
+        return build(snapshot, { ...current, snapshot, enforceLifecycle: true, ...(carry && selected ? { taskMetadata: selected } : {}) })
       })
     } catch (error) {
       if (error instanceof PendingRoleNotifications) throw error
@@ -445,12 +459,15 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
       // Its presence/role identity, not a former archive cleanup phase, governs
       // this exact Task write. Git retains its own committed cleanup fact.
       if (files instanceof PhysicalLocalFiles) return
-      const cleanup = await readCleanupRecord(files, value.snapshot, current)
+      const cleanup = files instanceof GitFiles ? taskCleanupRecord(current, taskMetadataRuntimeState(current)) : await readCleanupRecord(files, value.snapshot, current)
       if (cleanup?.phase === 'files-cleaned' || cleanup?.phase === 'released') throw new Error('This Task runtime namespace is already cleaned; the old execution cannot recreate it.')
     }
   }
   const record = async (value: View, path: string, text: string, append = true): Promise<FileChange> => {
     await assertRecord(value, path)
+    return recordContent(value, path, text, append)
+  }
+  const recordContent = async (value: View, path: string, text: string, append = true): Promise<FileChange> => {
     return { path, content: append ? (await files.read(value.snapshot, path) ?? '') + text : text }
   }
 
@@ -485,14 +502,14 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
   register('dss_snapshot_release', 'Release a business read view when no longer needed.', z.object(snapshotInput), async input => { await close(input.snapshotId); return { released: true } })
   if (services.attachmentStore) {
     ctx.systemPrompt.section({ name: 'deepseek-servant:attachments', order: 104, interpolate: false,
-      text: 'Local conversation attachments reference the actual selected native file path and read its current contents without copying the original into DSS storage. Git attachments retain their repository references independently. Call dss_attachment_read with a current snapshot and either the actual absolute Local file path or its Local reference; Git requires its repository reference. Local images use the current Agent’s native read_image permission pipeline; other Local files retain their original paths for the Host’s existing read/processing tools. Git images/files retain their independent native ImageBlock/FileBlock delivery. A path or saved handle is not evidence of analysis. Pass the original Local path or Git reference directly to this tool. A missing or refused native image tool does not authorize a bypass; report its actual result and keep the original path. Continue to use the Host’s file tools within their existing permissions; an attachment does not grant parent-directory or adjacent-file access. Do not claim to see image pixels, video frames or audio from a text path.' })
-    register('dss_attachment_read', 'Use an actual absolute Local file path or a Local reference. Local images call the current Agent’s native read_image through Host permissions; other files return the original path without reading or checking it, for the Host’s existing tools. Git requires its scoped repository reference and independently supplies byte-verified native ImageBlock/FileBlock content. Delivery is not proof of analysis.',
+      text: 'Local conversation attachments reference the actual selected native file path and read its current contents without copying the original into DSS storage. Git attachments retain their repository references independently. Read Local images with the Host’s native read_image tool through your current executor and its existing permissions; other Local files use the Host’s existing read/processing tools. dss_attachment_read can resolve a Local reference to its actual path, but does not read file or image content. It is not needed before a native read when you already have the actual Local path. Git requires dss_attachment_read with a current snapshot and its repository reference. Git images/files retain their independent native ImageBlock/FileBlock delivery. A path or saved handle is not evidence of analysis. Preserve the actual Local path and the complete Git reference. A missing or refused native image tool does not authorize a bypass; report its actual result and keep the original path. Continue to use the Host’s file tools within their existing permissions; an attachment does not grant parent-directory or adjacent-file access. Do not claim to see image pixels, video frames or audio from a text path.' })
+    register('dss_attachment_read', 'Use an actual absolute Local file path or a Local reference. All Local files return the original path without reading or checking it. Read Local images with native read_image through your current executor; the path returned here is not image content. Git requires its scoped repository reference and independently supplies byte-verified native ImageBlock/FileBlock content. Delivery is not proof of analysis.',
       z.object({ ...snapshotInput, reference: z.unknown() }), async (input, exec) => {
         const current = view(input.snapshotId), store = services.attachmentStore!
         if (store.scope.mode === 'local') {
           const reference = typeof input.reference === 'string' ? input.reference : validateConversationAttachment(input.reference, store.scope)
           if (typeof reference !== 'string' && reference.mode !== 'local') throw new Error('Local attachment input must use its native path.')
-          return prepareNativeLocalAttachment(ctx, reference, exec)
+          return prepareNativeLocalAttachment(reference, exec.signal)
         }
         const reference = validateConversationAttachment(input.reference, store.scope)
         if (reference.mode !== 'git') throw new Error('Git attachment input must use its repository reference.')
@@ -504,7 +521,7 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
   // Logical Task references locate their actual original; they are not a Cache admission check.
   type MaterialReadContext = { task?: Promise<TaskMetadata>; chain?: Promise<TaskMetadata[]>; family?: Promise<TaskMetadata[]> }
   const resolveMaterialRead = async (current: View, requestedPath: string, located?: MaterialReadContext,
-    resolveChildren = true): Promise<{ path: string; resolvedPath: string }> => {
+    resolveChildren = true, includeBytes = false): Promise<{ path: string; resolvedPath: string; requirement?: { bytes?: Uint8Array } }> => {
     if (isConversationAttachmentPath(requestedPath)) throw new Error('Use dss_attachment_read with the complete attachment reference; a text read cannot deliver image pixels or grant attachment access.')
     const explicit = parseTaskReference(requestedPath)
     let requirement: TaskMetadata | undefined
@@ -540,7 +557,8 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
     }
     if (explicit && !requirement) throw new Error('Task reference is outside this Task requirement chain.')
     const originalPath = explicit?.original ?? requestedPath
-    const requirementPath = requirement ? await resolveTaskRequirementReference(files, current.snapshot, requirement, originalPath) : undefined
+    const requirementRead = requirement ? await readTaskRequirementReference(files, current.snapshot, requirement, originalPath, false, files instanceof GitFiles && includeBytes) : undefined
+    const requirementPath = requirementRead?.path
     // An ordinary filename already names its material. Requirement references
     // were handled above. Preserve unresolved task-references handling; only
     // another Task's working filename can need descendant relocation.
@@ -550,13 +568,13 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
         || referencedTask !== undefined && referencedTask !== (binding.taskId ?? current.taskId))
     const resolvedPath = requirementPath ?? (locateChild ? (await resolveChildResultReferences(files, current.snapshot, await task(current), [requestedPath]))[0]! : requestedPath)
     const path = requirement ? taskReference(requirement.taskId, requirement.sourcePath) : resolvedPath
-    return { path, resolvedPath }
+    return { path, resolvedPath, ...(files instanceof GitFiles && includeBytes && requirementRead ? { requirement: requirementRead } : {}) }
   }
   registerRead('dss_read', 'Read exact logical file content: at the opened immutable revision in Git, or from the current addressed physical file in Local. The returned path is a DSS logical reference usable directly in a DSS Markdown material link, not a native filesystem path; do not prepend a storage or repository directory.', z.object({ ...snapshotInput, path: z.string() }), async input => {
     const current = view(input.snapshotId)
     await services.conversation?.prepare?.(input.path)
-    const { path, resolvedPath } = await resolveMaterialRead(current, input.path)
-    const bytes = await files.readBytes(current.snapshot, resolvedPath)
+    const { path, resolvedPath, requirement } = await resolveMaterialRead(current, input.path, undefined, true, true)
+    const bytes = requirement ? requirement.bytes : await files.readBytes(current.snapshot, resolvedPath)
     if (bytes === undefined) return { path, revision: current.snapshot.revision, exists: false,
       ...(binding.role === 'Recorder' && isSkillFile(resolvedPath) ? { baseReadId: skillReads.remember(resolvedPath, current.snapshot.revision, null).id } : {}) }
     try {
@@ -687,7 +705,9 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
       const selected = consumed.taskId ?? binding.taskId
       const { id, current } = await openView(selected, epoch)
       assertViewLifetime(epoch)
-      return { signals: consumed.signals, ...(binding.role === 'Foreground' ? { helperReports: consumed.signals.flatMap(signal => { const path = helperReportRecordPath(signal); return path ? [{ signal, path }] : [] }) } : {}), snapshotId: id, consistency: current.snapshot.consistency ?? 'revision-fixed', taskId: selected, ...await archiveView(current, selected), ...await workspaceView(current, selected), binding: consumed.claimedNotifications ? {...binding, claimedNotifications: consumed.claimedNotifications} : binding, ...plannerExecutionFacts() }
+      let held: { reference?: TaskMetadata; current?: TaskMetadata } | undefined
+      const archive = await archiveView(current, selected, (reference, live) => { if (files instanceof GitFiles) held = { reference, current: live } })
+      return { signals: consumed.signals, ...(binding.role === 'Foreground' ? { helperReports: consumed.signals.flatMap(signal => { const path = helperReportRecordPath(signal); return path ? [{ signal, path }] : [] }) } : {}), snapshotId: id, consistency: current.snapshot.consistency ?? 'revision-fixed', taskId: selected, ...archive, ...await workspaceView(current, selected, held), binding: consumed.claimedNotifications ? {...binding, claimedNotifications: consumed.claimedNotifications} : binding, ...plannerExecutionFacts() }
     })
 
   if (binding.role === 'Foreground') {
@@ -988,7 +1008,7 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
           const own = family.find(task => task.taskId === reference.taskId)
           if (!own || ![own.owner, ...own.members ?? []].includes(reference.owner)) throw new Error('Physical result belongs to another task package or producer.')
           if (reference.owner === binding.owner && reference.instanceUUID === services.workspace?.instanceUUID) {
-            await services.workspace!.validate(reference, snapshot)
+            await services.workspace!.validate(reference, snapshot, files instanceof GitFiles ? own : undefined)
           } else if (!own.workspaceResults?.some(old => sameWorkspaceReference(old, reference))) {
             throw new Error('The producing Host has not delivered this exact physical result. A remote path is not a local file.')
           }
@@ -1039,7 +1059,7 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
             ...(observed ? { recovery: { path: observed.path, version: observed.version } } : {}) }
           return []
         }
-        const acceptance = await record(current, acceptancePath, input.acceptance + (recoveryChanges.length ? '\nNormal continuation reached this Planner; its member recovery marker was consumed with this accepted handoff.\n' : ''))
+        const acceptance = await (files instanceof GitFiles ? recordContent : record)(current, acceptancePath, input.acceptance + (recoveryChanges.length ? '\nNormal continuation reached this Planner; its member recovery marker was consumed with this accepted handoff.\n' : ''))
         return [acceptance, ...recoveryChanges, ...(recoveryChanges.length ? await services.recoveryWatchChanges?.(binding, snapshot) ?? [] : []), ...parentChanges, ...memberChanges, ...taskCompletionSignals(selected), { path: paths.task(selected.taskId), content: encodeJson(completed) }]
       }
       if (files instanceof PhysicalLocalFiles) {

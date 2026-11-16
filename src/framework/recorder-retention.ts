@@ -1,11 +1,11 @@
-import { readTaskArchiveIdentity, taskArchiveReadPath } from './task-archive.js'
+import { readTaskArchiveIdentity, taskArchiveReadPath, type TaskArchiveIdentity } from './task-archive.js'
 import { PhysicalLocalFiles } from './physical-local-files.js'
 import { readTaskReferenceIdentity, taskHistoryChange } from './task-history.js'
 import { materialLinks, parseTaskReference, referenceTaskId, taskReference } from './published-references.js'
 import { linkedChild, taskFamily } from './task-relations.js'
 import { fileReadFingerprint, withReevaluatedFileTarget } from './file-read-observation.js'
 import { createHash } from 'node:crypto'
-import { filePath, type FileChange, type FilesSnapshot, type FilesStore } from './transactions.js'
+import { GitFiles, filePath, type FileChange, type FilesSnapshot, type FilesStore } from './transactions.js'
 import { encodeJson, paths, taskArchiveOwnsPath, taskArchiveSelection, readJson, taskIdentity, taskLifecycle, taskWorkingRoots, type TaskMetadata } from './task-files.js'
 
 const hash = (value: string | Uint8Array) => createHash('sha256').update(value).digest('hex')
@@ -173,11 +173,12 @@ export async function prepareRecorderRetention(files: FilesStore, snapshot: File
       // State's control signals are not user artifacts, even when a legacy
       // manifest retained their parent directory. Never archive an R/Cleaner.
       if (members.some(member => taskStateSignal(member, source, value))) continue
-      const destination = paths.archive(sourceOwner) + '/retained/' + hash(source) + '/' + hash(value) + '/' + leaf
+      const digest = hash(value)
+      const destination = paths.archive(sourceOwner) + '/retained/' + hash(source) + '/' + digest + '/' + leaf
       const prior = await read(destination)
-      if (prior !== undefined && hash(prior) !== hash(value)) throw new Error('Archived retained reference already differs: ' + destination)
+      if (prior !== undefined && hash(prior) !== digest) throw new Error('Archived retained reference already differs: ' + destination)
       if (prior === undefined) changes.set(destination, { path: destination, bytes: value })
-      mapping[source] = destination; sources[destination] = { sourcePath: source, sourceRevision: snapshot.revision, sha256: hash(value) }; result.push(destination)
+      mapping[source] = destination; sources[destination] = { sourcePath: source, sourceRevision: snapshot.revision, sha256: digest }; result.push(destination)
     }
     return [...new Set(result)]
   }
@@ -191,7 +192,7 @@ export async function prepareRecorderRetention(files: FilesStore, snapshot: File
   const archiveOutputs = manifest.outputs.filter(path => !isLiveSkillReference(path))
   const retainedOriginals = [...new Set([...manifest.retainedPaths, ...linked.retainedPaths].filter(path => !isLiveSkillReference(path)))]
   const originalReferences = [...archiveOutputs, ...retainedOriginals, ...(task.resultPaths ?? [])]
-  const currentReferences = await resolveChildResultReferences(files, snapshot, task, originalReferences, true)
+  const currentReferences = await resolveChildResultReferences(files, snapshot, task, originalReferences, true, false, files instanceof GitFiles ? members : undefined)
   const outputEnd = archiveOutputs.length, retainedEnd = outputEnd + retainedOriginals.length
   const expandMany = async (references: readonly string[]): Promise<string[]> => {
     if (!originals) return [...new Set((await Promise.all(references.map(expand))).flat())]
@@ -289,8 +290,9 @@ export async function prepareRecorderRetention(files: FilesStore, snapshot: File
 
 /** Only the selected relocation is material to resolving an original. Native
  * storage dependencies still retain the full catalog for atomic publication. */
-async function readReferenceMapping(files: FilesStore, snapshot: FilesSnapshot, taskId: string, originalPath: string, historical = false): Promise<RetentionManifest | undefined> {
-  const task = await readTaskArchiveIdentity(files, snapshot, taskId)
+async function readReferenceMapping(files: FilesStore, snapshot: FilesSnapshot, taskId: string, originalPath: string, historical = false,
+  knownTask?: TaskArchiveIdentity): Promise<{ task: TaskArchiveIdentity; manifest: RetentionManifest | undefined }> {
+  const task = knownTask ?? await readTaskArchiveIdentity(files, snapshot, taskId)
   const path = (historical ? taskArchiveReadPath(task) : paths.archive(task)) + '/retention.json'
   let manifest = await withReevaluatedFileTarget(snapshot, path, () => readJson<RetentionManifest>(files, snapshot, path))
   if (!manifest?.relocatedReferences?.[originalPath]) {
@@ -306,7 +308,7 @@ async function readReferenceMapping(files: FilesStore, snapshot: FilesSnapshot, 
   fileReadFingerprint(snapshot, 'archived-reference:' + taskId + ':' + originalPath,
     hash(JSON.stringify([target ?? null, target ? manifest?.verifiedReferences?.[target] ?? null : null,
       source ? [source.sourcePath, typeof source.sourceRevision === 'string' && !!source.sourceRevision, source.sha256] : null])))
-  return manifest
+  return { task, manifest }
 }
 
 /** Exact legacy link lookup, scoped by an already-known Task identity. Never
@@ -315,7 +317,12 @@ export async function readArchivedReference(files: FilesStore, snapshot: FilesSn
   originalPath: string, historical = false): Promise<Uint8Array | undefined> {
   filePath(originalPath)
   const task = await readTaskArchiveIdentity(files, snapshot, taskId)
-  const root = historical ? taskArchiveReadPath(task) : paths.archive(task), manifest = await readReferenceMapping(files, snapshot, taskId, originalPath, historical)
+  const { manifest } = await readReferenceMapping(files, snapshot, taskId, originalPath, historical, files instanceof GitFiles ? task : undefined)
+  return readArchivedReferenceValue(files, snapshot, task, originalPath, historical, manifest)
+}
+async function readArchivedReferenceValue(files: FilesStore, snapshot: FilesSnapshot, task: TaskArchiveIdentity,
+  originalPath: string, historical: boolean, manifest: RetentionManifest | undefined): Promise<Uint8Array | undefined> {
+  const root = historical ? taskArchiveReadPath(task) : paths.archive(task)
   if (!manifest) return undefined
   const target = manifest.relocatedReferences?.[originalPath]
   if (target === undefined) return undefined
@@ -338,20 +345,26 @@ export async function readArchivedReference(files: FilesStore, snapshot: FilesSn
  * mapping within that archive. Git also verifies archived bytes/provenance;
  * physical Local reads the current mapped file. No scan or substitution. */
 export async function readTaskRequirementReference(files: FilesStore, snapshot: FilesSnapshot,
-  task: TaskMetadata, requested: string, historical = false): Promise<{ path: string; text: string | undefined } | undefined> {
+  task: TaskMetadata, requested: string, historical = false, includeBytes = false): Promise<{ path: string; text: string | undefined; bytes?: Uint8Array } | undefined> {
   const sourcePath = filePath(task.sourcePath), archive = historical ? taskArchiveReadPath(task) : paths.archive(task)
   if (requested !== sourcePath && !requested.startsWith(archive + '/')) return undefined
-  const live = requested === sourcePath ? await files.read(snapshot, sourcePath) : undefined
-  if (live !== undefined && taskIdentity(live) === task.taskId) return { path: sourcePath, text: live }
-  const retention = await readReferenceMapping(files, snapshot, task.taskId, sourcePath, historical)
-  const target = retention?.relocatedReferences?.[sourcePath]
+  const carry = files instanceof GitFiles && includeBytes
+  const liveBytes = carry && requested === sourcePath ? await files.readBytes(snapshot, sourcePath) : undefined
+  const live = requested === sourcePath ? carry
+    ? liveBytes === undefined ? undefined : new TextDecoder('utf-8', { fatal: true }).decode(liveBytes)
+    : await files.read(snapshot, sourcePath) : undefined
+  if (live !== undefined && taskIdentity(live) === task.taskId) return { path: sourcePath, text: live, ...(carry ? { bytes: liveBytes } : {}) }
+  const resolution = await readReferenceMapping(files, snapshot, task.taskId, sourcePath, historical)
+  const target = resolution.manifest?.relocatedReferences?.[sourcePath]
   if (target && (requested === sourcePath || requested === target)) {
-    const bytes = await readArchivedReference(files, snapshot, task.taskId, sourcePath, historical)
+    const bytes = files instanceof GitFiles
+      ? await readArchivedReferenceValue(files, snapshot, resolution.task, sourcePath, historical, resolution.manifest)
+      : await readArchivedReference(files, snapshot, task.taskId, sourcePath, historical)
     const text = bytes === undefined ? undefined : new TextDecoder('utf-8', { fatal: true }).decode(bytes)
     if (files instanceof PhysicalLocalFiles) return { path: target, text }
     if (text === undefined || taskIdentity(text) !== task.taskId)
       throw new Error('Archived Task requirement identity differs: ' + sourcePath)
-    return { path: target, text }
+    return { path: target, text, ...(carry ? { bytes } : {}) }
   }
   if (requested !== sourcePath) return undefined
   if (live !== undefined) throw new Error('The original Task requirement path now belongs to different material and has no verified retained original: ' + sourcePath)
@@ -367,7 +380,8 @@ export async function resolveTaskRequirementReference(files: FilesStore, snapsho
 /** Resolve only a reciprocal descendant's recorded relocation, never a
  * repository-wide alias or a sibling reached through an ancestor. */
 export async function resolveChildResultReferences(files: FilesStore, snapshot: FilesSnapshot, parent: TaskMetadata,
-  references: readonly string[], relocating = false, selectedChildOnly = false): Promise<string[]> {
+  references: readonly string[], relocating = false, selectedChildOnly = false, family?: readonly TaskMetadata[]): Promise<string[]> {
+  const knownFamily = files instanceof GitFiles ? family : undefined
   // Organizer acceptance can follow an explicitly named working Task. Recorder
   // still uses the original whole-family resolver, including directory inputs.
   // An unlocated or mixed input keeps the existing general path unchanged.
@@ -412,7 +426,7 @@ export async function resolveChildResultReferences(files: FilesStore, snapshot: 
     if (selected.every((path): path is string => path !== undefined)) return selected
   }
   if (references.some(path => path.startsWith('task-references/'))) {
-    const chain = relocating && !parent.parent ? await taskFamily(files, snapshot, parent.taskId)
+    const chain = relocating && !parent.parent ? knownFamily ?? await taskFamily(files, snapshot, parent.taskId)
       : await taskRequirementChain(files, snapshot, parent, relocating)
     references = await Promise.all(references.map(async path => {
       const reference = parseTaskReference(path)
@@ -426,7 +440,7 @@ export async function resolveChildResultReferences(files: FilesStore, snapshot: 
   }
   if (parent.route !== 'O' || !references.length) return [...references]
   const replacements = new Map<string, string>()
-  for (const child of (await taskFamily(files, snapshot, parent.taskId)).slice(1)) {
+  for (const child of (knownFamily ?? await taskFamily(files, snapshot, parent.taskId)).slice(1)) {
     const selected = references.filter(path => taskWorkingRoots(child).some(root => within(path, root)) || path === child.sourcePath)
     if (!selected.length) continue
     const retention = await readJson<RetentionManifest>(files, snapshot, paths.archive(child) + '/retention.json')

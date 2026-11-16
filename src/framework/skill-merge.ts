@@ -131,7 +131,7 @@ export class SkillMergeRequired extends Error {
 /** The caller freezes selected bases for a logical save. A CAS retry recomputes
  * against latest cumulative authority with the same original proposal/base. */
 export async function mergeSkillProposals(files: FilesStore, snapshot: FilesSnapshot,
-  proposals: readonly SkillProposal[], bases: Map<string, SkillMergeBase | undefined>): Promise<FileChange[]> {
+  proposals: readonly SkillProposal[], bases: Map<string, SkillMergeBase | undefined>, onUnchanged?: (current: FileChange) => void): Promise<FileChange[]> {
   const changes: FileChange[] = [], issues: SkillMergeIssue[] = []
   for (const proposal of proposals) {
     let base = bases.get(proposal.path)
@@ -154,6 +154,7 @@ export async function mergeSkillProposals(files: FilesStore, snapshot: FilesSnap
         base: base?.text ?? null, proposed: proposal.text, current, currentExists: bytes !== undefined,
         currentSha256: bytes === undefined ? null : createHash('sha256').update(bytes).digest('hex'), currentBytes: bytes?.byteLength ?? 0, conflicts: merged && !merged.merged ? merged.conflicts : [] })
       else if (merged.text !== current) changes.push({ path: proposal.path, content: merged.text })
+      else onUnchanged?.(bytes === undefined ? { path: proposal.path, content: null } : { path: proposal.path, bytes })
     })
   }
   if (issues.length) throw new SkillMergeRequired(issues)

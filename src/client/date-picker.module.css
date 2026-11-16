@@ -1,5 +1,6 @@
 /* Adapted from DSH ui-schedule DatePicker.module.css (MIT). Shared MenuSurface owns the material. */
-.calendar { position: fixed; z-index: 1100; display: flex; flex-direction: column; gap: 4px; width: 232px; padding: 8px; }
+.anchor { anchor-name: var(--dss-history-calendar-anchor); }
+.calendar { position-anchor: var(--dss-history-calendar-anchor); position: fixed; z-index: 1100; display: flex; flex-direction: column; gap: 4px; width: 232px; padding: 8px; }
 .head, .footer { display: flex; align-items: center; justify-content: space-between; gap: 4px; }
 .title { flex: 1 1 auto; color: var(--dsw-alias-label-primary); font: var(--dsw-font-xs-13); text-align: center; }
 .grid { display: flex; flex-direction: column; gap: 2px; }
@@ -12,3 +13,19 @@
 .selected { background: var(--dsw-alias-button-ghost-active-fill); box-shadow: inset 0 0 0 1px var(--dsw-alias-button-ghost-active-border); }
 .blank { height: 28px; }
 .footer { padding-top: 4px; }
+
+/* Same native CSS-anchor placement and viewport fallback contract as DSH rc.3 timing pickers. */
+.calendar {
+  position-area: none;
+  position-try-fallbacks: --dss-history-above, --dss-history-end, --dss-history-above-end, --dss-history-window, --dss-history-viewport;
+  top: max(12px, calc(anchor(bottom) + 4px)); bottom: 12px;
+  left: max(12px, anchor(left)); right: 12px;
+  box-sizing: border-box; height: fit-content; max-width: calc(100vw - 24px);
+  max-height: calc(100dvh - 12px - max(12px, var(--dsh-frame-overlay-top, 12px)));
+  place-self: start; margin: 0; overflow: hidden auto;
+}
+@position-try --dss-history-above { top: max(12px, var(--dsh-frame-overlay-top, 12px)); bottom: max(12px, calc(anchor(top) + 4px)); align-self: end; }
+@position-try --dss-history-end { left: 12px; right: max(12px, anchor(right)); justify-self: end; }
+@position-try --dss-history-above-end { top: max(12px, var(--dsh-frame-overlay-top, 12px)); bottom: max(12px, calc(anchor(top) + 4px)); left: 12px; right: max(12px, anchor(right)); align-self: end; justify-self: end; }
+@position-try --dss-history-window { top: max(12px, var(--dsh-frame-overlay-top, 12px)); bottom: 12px; margin: 0; align-self: safe end; }
+@position-try --dss-history-viewport { position-area: none; inset: max(12px, var(--dsh-frame-overlay-top, 12px)) 12px 12px; margin: 0; align-self: safe end; justify-self: safe end; }

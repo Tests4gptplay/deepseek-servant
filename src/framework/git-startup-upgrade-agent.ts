@@ -149,10 +149,11 @@ export class GitStartupUpgradeAgent {
         if (!wake?.pending.some(row => row.sourcePath === item.sourcePath)) return { assignedPending: false }
         const result = []
         for (const path of [folder + 'record.json', folder + 'legacy-git.json', folder + 'SKILL.md']) {
-          const bytes = await this.files.readBytes(s, path)
-          const text = bytes === undefined ? null : path.endsWith('.json')
-            ? new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
-            : await this.files.read(s, path) ?? null
+          let text: string | null
+          if (path.endsWith('.json')) {
+            const bytes = await this.files.readBytes(s, path)
+            text = bytes === undefined ? null : new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
+          } else text = await this.files.read(s, path) ?? null
           reads.remember(path, s.revision, text); result.push({ path, text })
         }
         return result

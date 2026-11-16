@@ -490,8 +490,10 @@ export class ExecutionControls {
       if (!current || current.commandId !== commandId) return { value: current }
       if (current.taskId !== target.taskId || taskLifecycle(current) !== taskLifecycle(target)) throw new Error('Stop result belongs to another Task lifecycle.')
       const value = { ...current, result: structuredClone(result) }
-      state.executions[hash(executionId)] = value
       const receipt = state.commands[hash(commandId)]
+      const encoded = JSON.stringify(value)
+      if (JSON.stringify(current) === encoded && (!receipt || JSON.stringify(receipt.value) === encoded)) return { value: current }
+      state.executions[hash(executionId)] = value
       if (receipt) receipt.value = value
       return { value, write: true }
     }, [{ executionId }])
@@ -501,8 +503,10 @@ export class ExecutionControls {
         const state = await this.localState(owner), key = hash(executionId), current = state.executions[key]
         if (!current || current.commandId !== commandId) return current
         const value = { ...current, result: structuredClone(result) }
-        state.executions[key] = value
         const receipt = state.commands[hash(commandId)]
+        const encoded = JSON.stringify(value)
+        if (JSON.stringify(current) === encoded && (!receipt || JSON.stringify(receipt.value) === encoded)) return current
+        state.executions[key] = value
         if (receipt) receipt.value = value
         await this.storage.set(this.localKey(owner), state)
         return value

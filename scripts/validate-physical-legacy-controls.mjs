@@ -137,7 +137,7 @@ const serviceDeps={PhysicalLocalFiles,physicalControlSignalSources,withSnapshot,
 const Service=new Function(...Object.keys(serviceDeps),'return class {\n'+serviceMethod+'\n}')(...Object.values(serviceDeps))
 async function serviceControl(files,action='resume'){
  const access={connection:{files,transactions,records:{get:async()=>undefined},scope:'legacy-test',identity:{instanceUUID:'instance'},prepareWrite:async()=>{}}}
- const service=Object.assign(new Service(),{running:new Map([['local',{connection:{registration:{member:'A'}}}]]),serialMode:(_m,work)=>work(),assertOpen(){},access:async()=>access,checkScope:()=>{},foreground:(_a,work)=>work(),changed(){},view:async()=>({completed:true})})
+ const service=Object.assign(new Service(),{running:new Map([['local',{connection:{registration:{member:'A'}}}]]),serialMode:(_m,work)=>work(),config:()=>({settings:{collaborationId:'legacy-test'}}),assertOpen(){},access:async()=>access,checkScope:()=>{},foreground:(_a,work)=>work(),changed(){},view:async()=>({completed:true})})
  return service.legacyControl({mode:'local',storageScope:'legacy-test',commandId:'service-'+action,migrationId:'original-import',oldTaskId:'old-task',action,waitId:'q1',answer:'Service accepted answer'})
 }
 const scratch=await fs.mkdtemp(path.join(os.tmpdir(),'dss-legacy-controls-'));let serial=0

@@ -329,7 +329,7 @@ async function restoreConversationOriginals(directory: string, collaborationId: 
             if (!part) throw new Error('The original text chunk is missing: ' + partPath)
             parts.push(part.bytes); chunkSources.push(part)
           }
-          const body = Buffer.concat(parts.map(part => Buffer.from(part))), text = decode(body)
+          const body = Buffer.concat(parts), text = decode(body)
           if (text.length !== manifest.characters || hash(body) !== manifest.sha256) throw new Error('Original chunk order/body differs from the manifest hash or character count.')
           const textPath = alreadyPhysical ? logical(entry.textPath) : entryPath.slice(0, -'entry.json'.length) + 'text.txt'
           if (!alreadyPhysical && !await publish(textPath, body)) continue

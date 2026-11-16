@@ -103,7 +103,8 @@ export class PhysicalLocalFiles implements FilesStore {
       // Archive children are skipped BEFORE recursion. A parent listing never
       // traverses an independent child's material merely to filter it afterward.
       const entries = await this.records.listMetadata(logical, recursive, selected?.archiveScope
-        ? path => matchesFileSelection(path, { archiveScope: selected.archiveScope }) : undefined)
+        ? path => matchesFileSelection(path, { archiveScope: selected.archiveScope }) : undefined,
+        !recursive && selected ? path => matchesFileSelection(path, selected) : undefined)
       this.view(snapshot)
       const result = entries.filter(entry => matchesFileSelection(entry.path, selected))
       observedFileList(snapshot, recursive ? 'list' : 'directory', logical + fileSelectionKey(selected), result)
@@ -116,7 +117,7 @@ export class PhysicalLocalFiles implements FilesStore {
     return this.own(async () => {
       this.view(snapshot)
       const logical = directoryPrefix(prefix)
-      const names = (await this.records.listDirectoryNames(logical)).filter(path => matchesFileSelection(path, selection))
+      const names = await this.records.listDirectoryNames(logical, selection ? path => matchesFileSelection(path, selection) : undefined)
       this.view(snapshot)
       fileReadFingerprint(snapshot, 'names:' + logical + fileSelectionKey(selection), JSON.stringify(names))
       return names

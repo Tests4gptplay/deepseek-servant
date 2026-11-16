@@ -178,7 +178,7 @@ export class FrameworkRecordMove {
           if (receipt.localBackend !== 'physical' && await exists(join(receipt.targetLocal!, 'dss-files.sqlite'))) await verify(receipt.targetRecords)
           else {
             const copy = await prepareLocalRecordCopy(receipt.sourceLocal, receipt.targetLocal!, signal, receipt.localBackend, {
-              state: receipt.localCopy, save: async state => { receipt.localCopy = state; await this.save(receipts, receipt.commandId) },
+              state: receipt.localCopy, fingerprint, save: async state => { receipt.localCopy = state; await this.save(receipts, receipt.commandId) },
             })
             try {
               if (copy.fingerprint !== fingerprint) throw new Error('Local records changed while preparing their physical copy.')

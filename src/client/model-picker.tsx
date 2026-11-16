@@ -124,8 +124,6 @@ export function ModelPicker({ value, models, onChange, onRefresh, disabled, labe
     if (open && showSearch) content.current?.querySelector<HTMLElement>('[data-model-highlighted="true"]')?.scrollIntoView?.({ block: 'nearest' })
   }, [open, showSearch, activeIndex, query])
   return <Menu open={open} portal autoFocus={!composer} className={css.menuAnchor} side={composer ? 'top' : 'bottom'} align={composer ? 'end' : 'start'}
-    // Menu supplies a 4px portal gap; the native composer uses 8px.
-    getAnchorRect={composer ? () => { const r = trigger.current?.getBoundingClientRect(); return r ? new window.DOMRect(r.x, r.y - 4, r.width, r.height) : null } : undefined}
     listClassName={`${css.modelMenu} ${composer ? css.composerModelMenu : ''}`} items={composer ? [] : items} selectedId={selectedId} onSelect={choose} onClose={() => setOpen(false)}
     anchor={<Button ref={trigger} type="button" variant={composer ? 'ghost' : 'outline'} size={composer ? 'sm' : undefined} disabled={disabled} aria-label={label}
       aria-expanded={open} aria-haspopup="menu" title={auto ? [caption, resolvedAutoHint].filter(Boolean).join(' — ') : composer ? caption : selectedGroup?.name}

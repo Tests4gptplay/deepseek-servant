@@ -18,8 +18,9 @@ export function taskCommandReceiptOwner(path: string): { taskId: string; lifecyc
 export function retainPendingTaskCommandProofs(deletedPaths: readonly string[], task: { taskId: string; lifecycleId?: string },
   hosts: Readonly<Record<string, { released?: true }>> | undefined): string[] {
   const released = new Set(Object.entries(hosts ?? {}).filter(([, facts]) => facts && typeof facts === 'object' && !Array.isArray(facts) && facts.released === true).map(([key]) => hash(key)))
+  let lifecycleHash: string | undefined
   return [...new Set(deletedPaths)].filter(path => {
     const owner = taskCommandReceiptOwner(path)
-    return owner?.taskId === task.taskId && owner.lifecycleHash === hash(taskLifecycle(task)) && !released.has(owner.hostHash)
+    return owner?.taskId === task.taskId && owner.lifecycleHash === (lifecycleHash ??= hash(taskLifecycle(task))) && !released.has(owner.hostHash)
   }).sort()
 }

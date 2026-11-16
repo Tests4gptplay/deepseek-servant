@@ -1,8 +1,8 @@
-import { planTaskArchiveCleanup, readTaskArchiveState, taskArchiveCleanup } from './task-archive.js'
+import { planTaskArchiveCleanup, planTaskMetadataCleanup, readTaskArchiveState, taskArchiveCleanup, type TaskArchiveState } from './task-archive.js'
 import { PhysicalLocalFiles } from './physical-local-files.js'
 import { taskFamily } from './task-relations.js'
 import { FrameworkTransactions } from './command-transactions.js'
-import { filePath, FilesOutcomeUnknownError, withWriteOperation, type FileChange, type FilesSnapshot, type FilesStore } from './transactions.js'
+import { GitFiles, filePath, FilesOutcomeUnknownError, withWriteOperation, type FileChange, type FilesSnapshot, type FilesStore } from './transactions.js'
 import { paths, readJson, taskIdentity, taskLifecycle, taskLifecycleKey, taskWorkingRoots, type TaskMetadata } from './task-files.js'
 
 export interface CleanupRecord {
@@ -14,11 +14,15 @@ export interface CleanupRecord {
 }
 export type CleanupResult = { status: 'not-requested' } | { status: 'awaiting-observation' } | { status: 'released' | 'deleted'; record: CleanupRecord }
 /** One lifecycle's derived view of the sole program state, not another record. */
-export async function readTaskCleanupRecord(files: FilesStore, snapshot: FilesSnapshot, selected: TaskMetadata | string): Promise<CleanupRecord & { historyCleared?: true } | undefined> {
+export async function readTaskCleanupRecord(files: FilesStore, snapshot: FilesSnapshot, selected: TaskMetadata | string,
+  onCurrent?: (current: TaskMetadata | undefined) => void): Promise<CleanupRecord & { historyCleared?: true } | undefined> {
   const task = typeof selected === 'string' ? await readJson<TaskMetadata>(files, snapshot, paths.task(selected)) : selected
   if (!task) return undefined
   if (typeof selected === 'string' && task.taskId !== selected) throw new Error('Task cleanup metadata identity differs: ' + selected)
-  const cleanup = taskArchiveCleanup(await readTaskArchiveState(files, snapshot, task), task)
+  return taskCleanupRecord(task, await readTaskArchiveState(files, snapshot, task, onCurrent))
+}
+export function taskCleanupRecord(task: TaskMetadata, state: TaskArchiveState | undefined): CleanupRecord & { historyCleared?: true } | undefined {
+  const cleanup = taskArchiveCleanup(state, task)
   if (!cleanup) return undefined
   return { version: 1, taskId: task.taskId, ...(task.lifecycleId ? { lifecycleId: task.lifecycleId } : {}),
     phase: cleanup.phase, deletedPaths: cleanup.deletedPaths ?? [], ...(cleanup.historyCleared ? { historyCleared: true as const } : {}) }
@@ -62,12 +66,13 @@ export async function observeCleanup(files: FilesStore, snapshot: FilesSnapshot,
     }
     const recordPath = paths.task(task.taskId)
     await files.prefetch?.(snapshot, { files: [recordPath, ...(allowPlanning ? [cleaner] : [])] })
-    const saved = await readCleanupRecord(files, snapshot, task)
+    let readCurrent: { value: TaskMetadata | undefined } | undefined
+    const saved = await readCleanupRecord(files, snapshot, task, value => { readCurrent = { value } })
     // Only committed deletion facts support continuation without a new signal.
     // Everything else leaves the existing Recorder signal as the sole trigger.
     const record = saved && ['files-cleaned', 'released'].includes(saved.phase) ? saved as CleanupRecord : undefined
     if (!record && (!allowPlanning || await files.read(snapshot, cleaner) === undefined)) return observed
-    const current = await readJson<TaskMetadata>(files, snapshot, paths.task(task.taskId))
+    const current = readCurrent ? readCurrent.value : await readJson<TaskMetadata>(files, snapshot, paths.task(task.taskId))
     if (!current || current.taskId !== task.taskId || current.owner !== task.owner) throw new Error('Cleanup target must match the notified Task and its principal.')
     assertCleanupLifecycle(task, current); observed.task = current
     const family = await taskFamily(files, snapshot, current.taskId)
@@ -96,7 +101,8 @@ export async function observeCleanup(files: FilesStore, snapshot: FilesSnapshot,
     // This is the existing Task command retirement fact, in the same commit as
     // deletion. It is not a Cleaner role state or a saved file-by-file inventory.
     const facts = await Promise.all(observed.family.map(member =>
-      planTaskArchiveCleanup(files, snapshot, member, { phase: 'files-cleaned' })))
+      files instanceof GitFiles ? planTaskMetadataCleanup(member, { phase: 'files-cleaned' })
+        : planTaskArchiveCleanup(files, snapshot, member, { phase: 'files-cleaned' })))
     observed.status = 'delete'; observed.record = cleanup
     observed.publication = { id: 'cleanup:' + taskLifecycleKey(current) + ':files:' + snapshot.revision,
       request: { taskId: task.taskId, owner: task.owner }, changes: [...changes, ...facts], record: cleanup }

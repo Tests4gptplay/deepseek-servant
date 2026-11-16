@@ -559,7 +559,7 @@ export class InstanceRegistration {
         }
         return output
       }
-      return await (borrowed ? inspect(borrowed) : withSnapshot(this.files, inspect))
+      return await (borrowed ? withReadOperation(this.files, () => inspect(borrowed)) : withSnapshot(this.files, inspect))
     } catch (error) { this.interrupted = true; throw error }
   }
 }

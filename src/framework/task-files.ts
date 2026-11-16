@@ -37,6 +37,10 @@ export const taskLifecycleKey = (task: { taskId: string; lifecycleId?: string })
 export async function assertTaskLifecycle(store: FilesStore, snapshot: FilesSnapshot, taskId: string, expected: { lifecycleId?: string }): Promise<TaskMetadata | undefined> {
   const path = paths.task(taskId)
   const task = await withReevaluatedFileTarget(snapshot, path, () => readJson<TaskMetadata>(store, snapshot, path))
+  return checkTaskLifecycle(snapshot, taskId, expected, task)
+}
+/** Pure derivation from this evaluation's existing Task read. */
+export function checkTaskLifecycle(snapshot: FilesSnapshot, taskId: string, expected: { lifecycleId?: string }, task: TaskMetadata | undefined): TaskMetadata | undefined {
   // Missing legacy Tasks and an empty lifecycle have the same existing predicate.
   // Other readers of this metadata still observe the fields they actually use.
   if (task && taskLifecycle(task) !== taskLifecycle(expected) || !task && taskLifecycle(expected))
@@ -76,6 +80,12 @@ export const paths = {
     if (leaf !== id && !leaf.endsWith('_' + id)) throw new Error('Task archive directory must retain its own Task identity.')
     return 'archives/' + folder
   },
+}
+export function workerPaths(taskId: string, member: string, childId: string) {
+  filePath(childId)
+  if (childId.includes('/')) throw new Error('Child identity must occupy one path segment.')
+  const root = paths.member(taskId, member) + '/workers/' + childId
+  return { root, contract: root + '/contract.md', notes: root + '/notes.md', reply: root + '/reply.md', handoff: root + '/handoff.json', records: root + '/records/' }
 }
 /** Archive operations belong to this Task, not every Task physically nested
  * below it. Direct child identities are already in this Task's own metadata. */

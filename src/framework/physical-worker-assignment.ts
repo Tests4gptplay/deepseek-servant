@@ -62,13 +62,14 @@ export async function assignPhysicalWorker(files: PhysicalLocalFiles, input: Phy
     const noteStage = input.workerRoot + '/.assignment-memory.stage'
     const signalStage = input.workerRoot + '/.assignment-signal.stage'
     const persist = (value: Assignment) => files.replace(factPath, encodeJson(value))
-    const retireStages = async () => {
+    const retireStages = async (contractConsumed = false, noteConsumed = false, signalConsumed = false) => {
       await files.delete(decisionPath)
-      await files.delete(noteStage)
-      await files.delete(contractStage)
-      await files.delete(signalStage)
+      if (!noteConsumed) await files.delete(noteStage)
+      if (!contractConsumed) await files.delete(contractStage)
+      if (!signalConsumed) await files.delete(signalStage)
     }
     const publishCurrent = async (fact: Assignment) => {
+      let contractConsumed = false, noteConsumed = false
       await assertLive()
       if (!fact.contractPublished) {
         if (typeof fact.contractPrepared?.version !== 'string')
@@ -78,6 +79,7 @@ export async function assignPhysicalWorker(files: PhysicalLocalFiles, input: Phy
           if (!current || !sameStageFile(fact.contractPrepared.version, current.version))
             throw new Error('The prepared Local publication is unavailable and its result is not confirmed: ' + input.contractPath)
         }
+        contractConsumed = true
         fact.contractPublished = true
         await persist(fact)
       }
@@ -93,6 +95,7 @@ export async function assignPhysicalWorker(files: PhysicalLocalFiles, input: Phy
           await files.appendPrepared(input.plannerMemoryPath, noteStage, decision, fact.decisionPrepared,
             async prepared => { fact.decisionPrepared = prepared; await persist(fact) })
         }
+        noteConsumed = true
         fact.decisionPublished = true
         await persist(fact)
       }
@@ -113,7 +116,7 @@ export async function assignPhysicalWorker(files: PhysicalLocalFiles, input: Phy
       await persist(fact)
       // Only the small current assignment fact remains until Task cleanup. No
       // command history, copied contract or stage is retained after publication.
-      await retireStages()
+      await retireStages(contractConsumed, noteConsumed, true)
     }
     if (fact && (fact.taskId !== input.taskId || fact.lifecycleId !== (input.lifecycleId ?? '')))
       throw new Error('This Worker assignment belongs to a different Task lifecycle.')

@@ -1,3 +1,435 @@
+/* node_modules/@deepseek-ai/dsh-client-ui-attachment/src/AttachmentRail.module.css */
+.AttachmentRail_root {
+  position: relative;
+  min-width: 0;
+}
+.AttachmentRail_rail {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+}
+.AttachmentRail_rail::-webkit-scrollbar {
+  display: none;
+}
+.AttachmentRail_item {
+  flex: none;
+  height: 64px;
+}
+.AttachmentRail_thumbnail {
+  width: 64px;
+  height: 64px;
+  padding: 0;
+  overflow: hidden;
+  border: 0.5px solid var(--dsw-alias-border-l2-darkmode-thin);
+  border-radius: var(--dsw-radius-xl);
+  background: var(--dsw-alias-interactive-bg-hover);
+  cursor: zoom-in;
+}
+.AttachmentRail_thumbnail img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.AttachmentRail_remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  corner-shape: round;
+  background: var(--dsw-alias-button-contrast-fill);
+  color: var(--dsw-alias-label-primary-inverted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s ease-in-out;
+}
+.AttachmentRail_remove:focus-visible {
+  opacity: 1;
+}
+@media (hover: hover) {
+  .AttachmentRail_item:hover .AttachmentRail_remove {
+    opacity: 1;
+  }
+}
+@media (hover: none), (pointer: coarse) {
+  .AttachmentRail_remove {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .AttachmentRail_remove {
+    transition: none;
+  }
+}
+.AttachmentRail_arrow {
+  position: absolute;
+  top: 50%;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  --dsw-elevation-stroke-color: var(--dsw-alias-border-l2-darkmode-thin);
+  border-radius: 999px;
+  corner-shape: round;
+  background: var(--dsw-specific-input-major);
+  color: var(--dsw-alias-label-secondary);
+  box-shadow: var(--dsw-elevation-panel);
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+@media (hover: hover) {
+  .AttachmentRail_arrow:hover {
+    background: var(--dsw-alias-interactive-bg-hover-solid);
+  }
+}
+.AttachmentRail_arrowLeft {
+  left: 4px;
+}
+.AttachmentRail_arrowRight {
+  right: 4px;
+}
+
+/* node_modules/@deepseek-ai/dsh-client-ui-attachment/src/DropOverlay.module.css */
+.DropOverlay_mask {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background-color: var(--dsw-alias-bg-mask-drop);
+  backdrop-filter: blur(10px);
+  animation: DropOverlay_fade-in 160ms ease-out;
+}
+@keyframes DropOverlay_fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .DropOverlay_mask {
+    animation: none;
+  }
+}
+.DropOverlay_wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-top: -3%;
+  padding: 0 40px;
+  color: var(--dsw-alias-label-primary);
+  text-align: center;
+}
+.DropOverlay_illustration {
+  width: 115px;
+  height: 84px;
+}
+.DropOverlay_title {
+  margin-top: 16px;
+  font: var(--dsw-font-l-20);
+}
+.DropOverlay_desc {
+  margin-top: 16px;
+  font: var(--dsw-font-s-14);
+  color: var(--dsw-alias-label-tertiary);
+  white-space: pre-wrap;
+}
+
+/* node_modules/@deepseek-ai/dsh-client-ui-attachment/src/FileCard.module.css */
+.FileCard_card {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  width: 240px;
+  height: 64px;
+  padding: 0 12px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-lg);
+  background: var(--dsw-specific-input-major, transparent);
+  box-sizing: border-box;
+  text-align: left;
+}
+.FileCard_failed {
+  border-color: var(--dsw-alias-state-error-primary);
+}
+.FileCard_icon {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+}
+.FileCard_spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  corner-shape: round;
+  animation: FileCard_file-card-spin 0.8s linear infinite;
+}
+@keyframes FileCard_file-card-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.FileCard_body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  padding: 8px 0;
+}
+.FileCard_retry {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.FileCard_name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--dsw-alias-label-primary);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+}
+.FileCard_meta {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 15px;
+}
+.FileCard_metaFailed {
+  color: var(--dsw-alias-state-error-primary);
+}
+.FileCard_remove {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  corner-shape: round;
+  background: var(--dsw-alias-button-contrast-fill);
+  color: var(--dsw-alias-label-primary-inverted);
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 0.2s ease-in-out;
+}
+.FileCard_remove:focus-visible {
+  opacity: 1;
+}
+@media (hover: hover) {
+  .FileCard_card:hover .FileCard_remove {
+    opacity: 1;
+  }
+}
+@media (hover: none), (pointer: coarse) {
+  .FileCard_remove {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .FileCard_remove {
+    transition: none;
+  }
+}
+.FileCard_card:focus-within .FileCard_name {
+  padding-right: 18px;
+}
+@media (hover: hover) {
+  .FileCard_card:hover .FileCard_name {
+    padding-right: 18px;
+  }
+}
+.FileCard_removeFailed {
+  background: var(--dsw-alias-state-error-primary);
+  color: var(--dsw-alias-label-on-color);
+  opacity: 1;
+}
+.FileCard_progressTrack {
+  position: absolute;
+  right: 12px;
+  bottom: 5px;
+  left: 12px;
+  overflow: hidden;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--dsw-specific-file-upload-track);
+}
+.FileCard_progressBar {
+  display: block;
+  width: 35%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--dsw-alias-brand-primary);
+  animation: FileCard_file-card-progress 1.2s ease-in-out infinite alternate;
+}
+.FileCard_progressBar[style] {
+  animation: none;
+}
+@keyframes FileCard_file-card-progress {
+  from {
+    transform: translateX(-70%);
+  }
+  to {
+    transform: translateX(220%);
+  }
+}
+@media (hover: none), (pointer: coarse) {
+  .FileCard_remove {
+    opacity: 1;
+  }
+}
+
+/* node_modules/@deepseek-ai/dsh-client-ui-attachment/src/client/ComposerAttachments.module.css */
+.ComposerAttachments_rail {
+  min-width: 0;
+  padding: 2px 10px 0;
+  margin-bottom: -6px;
+}
+.ComposerAttachments_imageItem {
+  position: relative;
+  width: 64px;
+  height: 64px;
+}
+.ComposerAttachments_thumbnail {
+  width: 64px;
+  height: 64px;
+  padding: 0;
+  overflow: hidden;
+  border: 0.5px solid var(--dsw-alias-border-l2-darkmode-thin);
+  border-radius: var(--dsw-radius-xl);
+  background: var(--dsw-alias-interactive-bg-hover);
+  cursor: zoom-in;
+}
+.ComposerAttachments_thumbnail img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.ComposerAttachments_thumbnailFailed {
+  border-color: var(--dsw-alias-state-error-primary);
+  cursor: pointer;
+}
+.ComposerAttachments_thumbnailFailed img {
+  opacity: 0.4;
+}
+.ComposerAttachments_thumbnailRefused {
+  cursor: default;
+}
+.ComposerAttachments_failureGlyph {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--dsw-alias-state-error-primary);
+}
+.ComposerAttachments_progressTrack {
+  position: absolute;
+  right: 8px;
+  bottom: 6px;
+  left: 8px;
+  overflow: hidden;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--dsw-specific-file-upload-track);
+  pointer-events: none;
+}
+.ComposerAttachments_progressBar {
+  display: block;
+  width: 35%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--dsw-alias-brand-primary);
+  animation: ComposerAttachments_image-upload-progress 1.2s ease-in-out infinite alternate;
+}
+.ComposerAttachments_progressBar[style] {
+  animation: none;
+}
+@keyframes ComposerAttachments_image-upload-progress {
+  from {
+    transform: translateX(-70%);
+  }
+  to {
+    transform: translateX(220%);
+  }
+}
+.ComposerAttachments_remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  corner-shape: round;
+  background: var(--dsw-alias-button-contrast-fill);
+  color: var(--dsw-alias-label-primary-inverted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s ease-in-out;
+}
+.ComposerAttachments_remove:focus-visible {
+  opacity: 1;
+}
+@media (hover: hover) {
+  .ComposerAttachments_imageItem:hover .ComposerAttachments_remove {
+    opacity: 1;
+  }
+}
+@media (hover: none), (pointer: coarse) {
+  .ComposerAttachments_remove {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ComposerAttachments_remove {
+    transition: none;
+  }
+  .ComposerAttachments_progressBar {
+    animation: none;
+  }
+}
+
 /* src/client/page.module.css */
 .page_page {
   position: relative;
@@ -1324,6 +1756,43 @@
   border-radius: 50%;
   background: currentColor;
 }
+.page_composerTools {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.page_composerAdd {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 999px;
+  background: var(--dsw-specific-selector);
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+.page_composerAdd:disabled {
+  opacity: .5;
+  cursor: default;
+}
+@media (hover: hover) {
+  .page_composerAdd:hover:not(:disabled) {
+    background: var(--dsw-alias-interactive-bg-hover-solid);
+  }
+}
+.page_nativeAttachments {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.page_nativeAttachmentFiles {
+  min-width: 0;
+  padding: 0 10px;
+}
 
 /* src/client/conversation-turn-navigator.module.css */
 .conversation_turn_navigator_slot {
@@ -1434,7 +1903,11 @@
 }
 
 /* src/client/date-picker.module.css */
+.date_picker_anchor {
+  anchor-name: var(--dss-history-calendar-anchor);
+}
 .date_picker_calendar {
+  position-anchor: var(--dss-history-calendar-anchor);
   position: fixed;
   z-index: 1100;
   display: flex;
@@ -1508,4 +1981,55 @@
 }
 .date_picker_footer {
   padding-top: 4px;
+}
+.date_picker_calendar {
+  position-area: none;
+  position-try-fallbacks:
+    --dss-history-above,
+    --dss-history-end,
+    --dss-history-above-end,
+    --dss-history-window,
+    --dss-history-viewport;
+  top: max(12px, calc(anchor(bottom) + 4px));
+  bottom: 12px;
+  left: max(12px, anchor(left));
+  right: 12px;
+  box-sizing: border-box;
+  height: fit-content;
+  max-width: calc(100vw - 24px);
+  max-height: calc(100dvh - 12px - max(12px, var(--dsh-frame-overlay-top, 12px)));
+  place-self: start;
+  margin: 0;
+  overflow: hidden auto;
+}
+@position-try --dss-history-above {
+  top: max(12px, var(--dsh-frame-overlay-top, 12px));
+  bottom: max(12px, calc(anchor(top) + 4px));
+  align-self: end;
+}
+@position-try --dss-history-end {
+  left: 12px;
+  right: max(12px, anchor(right));
+  justify-self: end;
+}
+@position-try --dss-history-above-end {
+  top: max(12px, var(--dsh-frame-overlay-top, 12px));
+  bottom: max(12px, calc(anchor(top) + 4px));
+  left: 12px;
+  right: max(12px, anchor(right));
+  align-self: end;
+  justify-self: end;
+}
+@position-try --dss-history-window {
+  top: max(12px, var(--dsh-frame-overlay-top, 12px));
+  bottom: 12px;
+  margin: 0;
+  align-self: safe end;
+}
+@position-try --dss-history-viewport {
+  position-area: none;
+  inset: max(12px, var(--dsh-frame-overlay-top, 12px)) 12px 12px;
+  margin: 0;
+  align-self: safe end;
+  justify-self: safe end;
 }

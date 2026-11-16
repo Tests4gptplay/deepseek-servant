@@ -154,6 +154,19 @@ export class LocalStartupUpgradeAgent {
       return { ...result(detail ? 'pending' : 'complete', completed.report), sourceAudit: completed.sourceAudit,
         ...(completed.retainedSpecialStages?.length ? { retainedSpecialStages: completed.retainedSpecialStages } : {}), ...(detail ? { detail } : {}) }
     }
+    // A verified prior run only needs its own retirement. Do not awaken another
+    // model or repeat SQL export merely because Host stopped before compacting.
+    if (prior?.status === 'verified') {
+      const wake = prior
+      if (!wake.result || wake.result.status !== 'complete') throw new Error('Verified upgrade has no completed mechanical report; its wake was retained.')
+      if (wake.sessionId && this.gateway.hasLiveOwner(wake.sessionId)) throw new Error('The verified upgrade execution still has a live native owner; its wake was retained until that owner closes.')
+      if (!wake.assessment || wake.assessment.pending.length) throw new Error('The verified upgrade has no full conversion assessment; its wake was retained.')
+      const completed: LocalUpgradeCompleted = { kind: 'dss-local-upgrade-result', directory, operationId: wake.operationId, completedAt: new Date().toISOString(), report: wake.result, cleanup: wake.assessment.cleanup, sourceAudit: wake.sourceAudit,
+        ...(wake.assessment.retainedSpecialStages?.length ? { retainedSpecialStages: wake.assessment.retainedSpecialStages } : {}) }
+      const detail = await retireLocalUpgradeRecords(this.storage, completed, key)
+      return { ...result(detail ? 'pending' : 'complete', wake.result), sourceAudit: wake.sourceAudit,
+        ...(completed.retainedSpecialStages?.length ? { retainedSpecialStages: completed.retainedSpecialStages } : {}), ...(detail ? { detail } : {}) }
+    }
     const initial = await inspectLocalStartupUpgrade(directory, this.storage, { signal })
     if (initial.issues.some(issue => issue.code === 'source-missing'))
       return { ...result('pending', initial), detail: 'The assigned original SQL source is unavailable. Published physical records remain usable; the existing conversion responsibility and remaining files were retained.' }
@@ -169,18 +182,6 @@ export class LocalStartupUpgradeAgent {
     this.config.onOldSourceFound?.()
     const wake: UpgradeWake = prior ?? { kind: 'dss-once-local-upgrade', operationId: randomUUID(), directory, status: 'pending' }
     const save = () => this.storage.set(key, structuredClone(wake))
-    // A verified prior run only needs its own retirement. Do not awaken another
-    // model or repeat SQL export merely because Host stopped before compacting.
-    if (wake.status === 'verified') {
-      if (!wake.result || wake.result.status !== 'complete') throw new Error('Verified upgrade has no completed mechanical report; its wake was retained.')
-      if (wake.sessionId && this.gateway.hasLiveOwner(wake.sessionId)) throw new Error('The verified upgrade execution still has a live native owner; its wake was retained until that owner closes.')
-      if (!wake.assessment || wake.assessment.pending.length) throw new Error('The verified upgrade has no full conversion assessment; its wake was retained.')
-      const completed: LocalUpgradeCompleted = { kind: 'dss-local-upgrade-result', directory, operationId: wake.operationId, completedAt: new Date().toISOString(), report: wake.result, cleanup: wake.assessment.cleanup, sourceAudit: wake.sourceAudit,
-        ...(wake.assessment.retainedSpecialStages?.length ? { retainedSpecialStages: wake.assessment.retainedSpecialStages } : {}) }
-      const detail = await retireLocalUpgradeRecords(this.storage, completed, key)
-      return { ...result(detail ? 'pending' : 'complete', wake.result), sourceAudit: wake.sourceAudit,
-        ...(completed.retainedSpecialStages?.length ? { retainedSpecialStages: completed.retainedSpecialStages } : {}), ...(detail ? { detail } : {}) }
-    }
     const inventory = initialInventory ?? await inspectLegacyLocalInventory(directory, { signal })
     this.skillInputs.clear()
     for (const file of inventory.files) if (/^skills\/(?:[^/]+\/)+(?:SKILL\.md|record\.json|legacy-git\.json)$/.test(file.path)) {

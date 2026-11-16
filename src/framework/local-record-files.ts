@@ -825,7 +825,7 @@ export class LocalRecordFiles {
     catch (error) { if (missing(error)) return false; throw error }
   }
 
-  private async entries(prefix: string, recursive: boolean, descend?: (path: string) => boolean): Promise<LocalRecordMetadata[]> {
+  private async entries(prefix: string, recursive: boolean, descend?: (path: string) => boolean, select?: (path: string) => boolean): Promise<LocalRecordMetadata[]> {
     const logical = prefix === '' ? '' : localRecordPath(prefix.replace(/\/$/, ''))
     const directory = logical ? this.target(logical) : this.root
     if (!await this.directory(directory, false)) return []
@@ -839,6 +839,7 @@ export class LocalRecordFiles {
         const path = relative ? relative + '/' + entry.name : entry.name
         // External names that cannot be addressed safely are never traversed.
         try { localRecordPath(path) } catch { continue }
+        if (!recursive && select && !select(path)) continue
         const target = join(current, entry.name)
         let info
         try { info = await fs.lstat(target, { bigint: true }) }
@@ -855,12 +856,12 @@ export class LocalRecordFiles {
     await visit(directory, logical)
     return result.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
   }
-  listMetadata(prefix = '', recursive = false, descend?: (path: string) => boolean): Promise<LocalRecordMetadata[]> { return this.entries(prefix, recursive, descend) }
+  listMetadata(prefix = '', recursive = false, descend?: (path: string) => boolean, select?: (path: string) => boolean): Promise<LocalRecordMetadata[]> { return this.entries(prefix, recursive, descend, select) }
   async list(prefix = '', descend?: (path: string) => boolean): Promise<LocalRecordEntry[]> {
     return (await this.entries(prefix, true, descend)).map(({ version: _observation, ...entry }) => entry)
   }
-  async listDirectory(prefix = ''): Promise<LocalRecordEntry[]> {
-    return (await this.entries(prefix, false)).map(({ version: _observation, ...entry }) => entry)
+  async listDirectory(prefix = '', select?: (path: string) => boolean): Promise<LocalRecordEntry[]> {
+    return (await this.entries(prefix, false, undefined, select)).map(({ version: _observation, ...entry }) => entry)
   }
-  async listDirectoryNames(prefix = ''): Promise<string[]> { return (await this.listDirectory(prefix)).map(entry => entry.path) }
+  async listDirectoryNames(prefix = '', select?: (path: string) => boolean): Promise<string[]> { return (await this.listDirectory(prefix, select)).map(entry => entry.path) }
 }

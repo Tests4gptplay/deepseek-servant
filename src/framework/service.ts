@@ -1,3 +1,4 @@
+import { uploadNativeLocalAttachment } from './native-local-attachment-upload.js'
 import { GitStartupUpgrade } from './git-startup-upgrade.js'
 import { convertedLocalSkillPath } from './local-upgrade-mapping.js'
 import { localUpgradeView } from './local-upgrade-view.js'
@@ -59,7 +60,7 @@ import { GitAuthorityStore } from './git-authority.js'
 import { taskArchiveHostKey } from './task-archive.js'
 const model = z.object({ provider: z.string(), model: z.string(), reasoningEffort: z.string().optional() });
 const settingsSchema = z.object({ name: z.string(), userName: z.string(), localDirectory: z.string(), ownerRepo: z.string(), repositoryDirectory: z.string(),
-    collaborationId: z.string().min(1), workerSeats: z.number().int().nonnegative(), workspace: z.string(), presetId: z.string().optional(),
+    collaborationId: z.string().min(1), workerSeats: z.number().int().nonnegative(), workspace: z.string(), presetId: z.string().optional(), permissionPreset: z.string().optional(),
     foreground: model.optional(), background: model.optional(), showCornerCharacter: z.boolean().optional(), swapPageIllustrations: z.boolean().optional() });
 interface Saved {
     revision: string;
@@ -783,7 +784,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             runtime = new FrameworkRoleRuntime(this.ctx, connection.files, connection.records, {
                 scope: connection.scope, member: connection.registration.member, instanceUUID: connection.registration.instanceUUID, primary: connection.registration.primary, workspace: workspace.directory,
                 workerSeats: settings.workerSeats, mode, collaborationId: settings.collaborationId, presetId: settings.presetId,
-                foreground: settings.foreground, background: settings.background,
+                foreground: settings.foreground, background: settings.background, permissionPreset: settings.permissionPreset,
             }, { ...(connection.files instanceof PhysicalLocalFiles ? { beforeTaskUse: (taskId: string, wait?: boolean) => this.beforeLocalTaskUse(connection, taskId, wait) } : {}), initialization: connection.initialization, beforeTaskDiscovery: task => this.beforeLocalTaskDiscovery(connection, task), sharedRecords: connection.sharedRecords, members: () => resource.resources.map(row => row.member), resources: () => resource.resources, capacity: createRecorderCapacity(connection.files),
                 changed: change => this.changed(change), resolved: target => this.resolveRoleErrors(mode, connection.scope, target),
                 oldLocalControlRecovered: taskId => this.clearLegacyLocalControlIssue(connection.scope, taskId),
@@ -1135,7 +1136,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 if (!runtime && access) runtime = new FrameworkRoleRuntime(this.ctx, access.connection.files, access.connection.records, {
                     scope: access.connection.scope, member: access.connection.identity.login, instanceUUID: access.connection.identity.instanceUUID, primary: mode === 'local',
                     workspace: settings.workspace, workerSeats: settings.workerSeats, mode, collaborationId: settings.collaborationId,
-                    presetId: settings.presetId, foreground: settings.foreground, background: settings.background,
+                    presetId: settings.presetId, foreground: settings.foreground, background: settings.background, permissionPreset: settings.permissionPreset,
                 }, { sharedRecords: access.connection.sharedRecords, observationRecords: access.connection.records, members: () => [], resources: () => [], heartbeat: async () => {}, ...this.safetyCallbacks(mode), error: (error, origin, safety) => { this.report(mode, error, access.connection.scope, undefined, origin, safety); }, resolved: target => this.resolveRoleErrors(mode, access.connection.scope, target), oldLocalControlRecovered: taskId => this.clearLegacyLocalControlIssue(access.connection.scope, taskId), changed: change => this.changed(change), cancelPending: reason => access.connection.cancelPending(reason) });
                 if (active) await this.stopManualCleanup(active);
                 if (runtime) { this.relocationOwners.set(mode, runtime); await runtime.settleForStorageMove(); }
@@ -1167,9 +1168,8 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                         // from today's location. Return the current observation
                         // without repeating a move or inventing its old outcome.
                         const directory = (this.storage as StoragePort & RecordMovePhysicalStore).storageView().directory;
-                        const view = await this.view({ mode: 'local', includeArchives: true, panelsOnly: true }, undefined, 'foreground-read');
-                        return { ...view, recordMoveOutcome: { status: 'current-location' as const, commandId: input.commandId,
-                            requestedDirectory: input.directory, directory } };
+                        return { status: 'current-location' as const, commandId: input.commandId,
+                            requestedDirectory: input.directory, directory };
                     }
                     const access = await this.access('local'); this.checkScope(access, input.storageScope);
                     if (!(access.connection.files instanceof PhysicalLocalFiles)) throw new Error('Record relocation requires Local files.');
@@ -1182,16 +1182,18 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 this.pendingRecordMove = undefined;
                 this.clearResolvedErrors('local', input.commandId); this.changed();
                 const directory = (this.storage as StoragePort & RecordMovePhysicalStore).storageView().directory;
-                const view = await this.view({ mode: 'local', includeArchives: true, panelsOnly: true }, undefined, 'foreground-read');
-                return { ...view, recordMoveOutcome: { status: 'applied' as const, commandId: input.commandId,
-                    requestedDirectory: input.directory, directory, ...(applied.sourceCleanup ? { sourceCleanup: applied.sourceCleanup } : { retainedSource: applied.sourceRecords }) } };
+                return { status: 'applied' as const, commandId: input.commandId,
+                    requestedDirectory: input.directory, directory, ...(applied.sourceCleanup ? { sourceCleanup: applied.sourceCleanup } : { retainedSource: applied.sourceRecords }) };
             } catch (error) {
                 try { this.pendingRecordMove = await mover.pendingReceipt() ?? this.pendingRecordMove; } catch { /* Keep the already-owned intent if locator reconciliation remains unknown. */ }
                 this.report('local', error, input.storageScope, input.commandId); throw error;
             }
             finally { if (this.recordMoveController === controller) this.recordMoveController = undefined; }
         }, undefined, true);
-        return operation;
+        return operation.then(async recordMoveOutcome => {
+            const view = await this.view({ mode: 'local', includeArchives: true, panelsOnly: true }, undefined, 'foreground-read');
+            return { ...view, recordMoveOutcome };
+        });
     }
     async maintenanceView(input: Parameters<FrameworkClientApi['maintenanceView']>[0]) {
         const access = await this.access(input.mode); this.checkScope(access, input.storageScope);
@@ -1310,7 +1312,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         const runtime = active ?? new FrameworkRoleRuntime(this.ctx, access.connection.files, access.connection.records, {
             scope: access.connection.scope, member: access.connection.identity.login, instanceUUID: access.connection.identity.instanceUUID, primary: true,
             workspace: settings.workspace, workerSeats: settings.workerSeats, mode: 'local', collaborationId: settings.collaborationId,
-            presetId: settings.presetId, foreground: settings.foreground, background: settings.background,
+            presetId: settings.presetId, foreground: settings.foreground, background: settings.background, permissionPreset: settings.permissionPreset,
         }, { members: () => [], resources: () => [], heartbeat: async () => {}, ...this.safetyCallbacks('local'), error: (error, origin, safety) => { this.report('local', error, access.connection.scope, undefined, origin, safety); }, resolved: target => this.resolveRoleErrors('local', access.connection.scope, target), oldLocalControlRecovered: taskId => this.clearLegacyLocalControlIssue(access.connection.scope, taskId), changed: change => this.changed(change) });
         if (runtime.config.scope !== access.connection.scope) throw new Error('Cleanup belongs to another Local storage scope.');
         const cleanup = new FrameworkManualCleanup(access.connection.files, access.connection.transactions, access.conversation, runtime);
@@ -1456,14 +1458,29 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             });
         });
     }
+    async cancelForeground(input: { mode: FrameworkMode; storageScope: string }): Promise<{ submitted: boolean }> {
+        this.assertOpen();
+        if (this.moveError(input.mode)) throw this.moveError(input.mode);
+        const active = this.running.get(input.mode);
+        if (!active) return { submitted: false };
+        if (input.storageScope !== active.connection.scope) throw new Error('Foreground cancellation belongs to a different storage scope.');
+        return active.runtime.cancelForeground();
+    }
     async stopExecution(input: { mode: FrameworkMode; storageScope?: string; commandId: string; workId: string; executionId: string }): Promise<FrameworkExecutionStopSubmission> {
-        const access = await this.access(input.mode);
-        this.checkScope(access, input.storageScope);
+        // Git stop belongs to the already admitted runtime, not the independent
+        // read-only access connection. Local keeps its released-execution ack.
+        const access = input.mode === 'git' ? undefined : await this.access(input.mode);
+        if (access) this.checkScope(access, input.storageScope);
+        else {
+            if (this.moveError(input.mode)) throw this.moveError(input.mode);
+            this.assertOpen();
+        }
         const active = this.running.get(input.mode);
         if (!active) throw new Error('This Host does not own a running backend for the selected execution.');
+        if (!access) this.checkScope(active, input.storageScope);
         return withOperationChannel(active.connection.files, 'foreground-write', async () => {
             await active.runtime.requestExecutionStop(input.commandId, input.workId, input.executionId,
-                input.mode === 'local' && access.connection.files instanceof PhysicalLocalFiles
+                input.mode === 'local' && access && access.connection.files instanceof PhysicalLocalFiles
                     && active.connection.files instanceof PhysicalLocalFiles
                     && access.connection.scope === active.connection.scope
                     && access.connection.files.directory === active.connection.files.directory
@@ -1482,7 +1499,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         return withOperationChannel(access.connection.files, 'foreground-read', () => running && running.connection.files !== access.connection.files
             ? withOperationChannel(running.connection.files, 'foreground-read', operation) : operation());
     }
-    private checkScope(access: Access, expected?: string): void {
+    private checkScope(access: { connection: { scope: string } }, expected?: string): void {
         if (expected !== undefined && expected !== access.connection.scope) throw new Error('Storage destination changed; retained input belongs to its original scope.');
     }
     async history(input: Parameters<FrameworkClientApi['history']>[0], signal?: AbortSignal) {
@@ -1544,11 +1561,18 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         await controller.openWorkspacePath({ path: reference.path }, signal);
         return { path: reference.path };
     }
-    async uploadAttachment(input: ConversationAttachmentUpload & { storageScope?: string }, source: AsyncIterable<Uint8Array>, signal?: AbortSignal) {
-        const mode = z.literal('git').parse(input.mode);
+    async uploadAttachment(input: Omit<ConversationAttachmentUpload, 'mode'> & { mode: FrameworkMode; storageScope?: string }, source: AsyncIterable<Uint8Array>, signal?: AbortSignal) {
+        const mode = z.enum(['local', 'git']).parse(input.mode);
         const active = await this.access(mode);
         this.checkScope(active, input.storageScope);
         if (input.collaborationId !== this.config(mode).settings.collaborationId) throw new Error('Conversation selection changed before attachment upload.');
+        if (mode === 'local') {
+            const body = z.object({ name: z.string(), mimeType: z.string() }).parse(input);
+            const attachments = this.ctx.get('attachments');
+            if (!attachments) throw new Error('This Host has no native attachment storage.');
+            const attachment = await uploadNativeLocalAttachment(attachments, { ...body, collaborationId: input.collaborationId }, source, signal);
+            return { attachment, storageScope: active.connection.scope };
+        }
         const body = z.object({ uploadId: z.string().min(1), name: z.string().min(1), mimeType: z.string(), bytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER) }).parse(input);
         const attachment = await withOperationChannel(active.connection.files, 'foreground-write', async () => {
             signal?.throwIfAborted(); await active.connection.prepareWrite();
@@ -1593,6 +1617,31 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             }, cancel: close,
         });
         return { reference, stream };
+    }
+    async permissionCatalog(input: { mode: FrameworkMode }) {
+        const mode = z.enum(['local', 'git']).parse(input.mode);
+        const native = this.ctx.get('permissionPresets')!;
+        return { options: native.catalog().options, current: this.config(mode).settings.permissionPreset };
+    }
+    permissionSelect(input: { mode: FrameworkMode; storageScope?: string; preset: string }): Promise<FrameworkClientView> {
+        const mode = z.enum(['local', 'git']).parse(input.mode), preset = z.string().min(1).parse(input.preset);
+        this.ctx.get('permissionPresets')!.resolve(preset);
+        return this.serialMode(mode, async () => {
+            this.assertOpen();
+            const runtime = this.running.get(mode)?.runtime;
+            if (input.storageScope !== undefined) {
+                let scope = this.running.get(mode)?.connection.scope;
+                const access = this.accesses.get(mode);
+                if (!scope && access && !this.accessOpening.has(mode)) scope = (await access).connection.scope;
+                if (scope !== input.storageScope) throw new Error('The DSS scope changed; select permissions in the current view.');
+            }
+            const stored = await this.storage.get<Saved>('framework-settings/' + mode) ?? this.config(mode);
+            if (stored.settings.permissionPreset !== preset)
+                await this.persistSettings(mode, { revision: randomUUID(), settings: { ...stored.settings, permissionPreset: preset } });
+            await runtime?.setPermissionPreset(preset);
+            this.changed();
+            return this.settingsView(mode);
+        });
     }
     foregroundModel(input: Parameters<FrameworkClientApi['foregroundModel']>[0]): Promise<FrameworkClientView> {
         let mode: FrameworkMode, route: FrameworkClientSettings['foreground'];
@@ -1814,7 +1863,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         if (!access.connection.invite) throw new Error('GitHub member operations are unavailable.');
         return access.connection.invite(input.username);
     }
-    legacyControl(input: Parameters<FrameworkClientApi['legacyControl']>[0]): Promise<FrameworkClientView> {
+    legacyControl(input: Parameters<FrameworkClientApi['legacyControl']>[0]): ReturnType<FrameworkClientApi['legacyControl']> {
         const operation = this.serialMode(input.mode, async () => {
             this.assertOpen();
             const access = await this.access(input.mode);
@@ -1833,7 +1882,9 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 else if (input.action === 'answer') await answerLegacyTask(access.connection.files, access.connection.transactions, input.commandId, { ...target, waitId: z.string().min(1).parse(input.waitId), answer: z.string().parse(input.answer) }, sources);
                 else throw new Error('Unknown legacy control action.');
                 this.changed();
-                return this.view({ mode: input.mode, panelsOnly: true }, undefined, 'foreground-read');
+                // Existing change reception refreshes the full panels. Their
+                // independent read must not own this durable control receipt.
+                return { submitted: true as const, commandId: input.commandId };
             });
         });
         return operation;

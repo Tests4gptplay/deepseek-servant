@@ -51,9 +51,11 @@ export async function readTaskHistoryIdentity(files: FilesStore, snapshot: Files
 }
 /** User-visible references only. Host/task admission must keep reading current
  * tasks/<id>.json and must never use archived facts to restart an execution. */
-export async function readTaskReferenceIdentity(files: FilesStore, snapshot: FilesSnapshot, taskId: string): Promise<TaskMetadata | TaskHistoryIdentity | undefined> {
+export async function readTaskReferenceIdentity(files: FilesStore, snapshot: FilesSnapshot, taskId: string,
+  onCurrent?: (current: TaskMetadata | undefined) => void): Promise<TaskMetadata | TaskHistoryIdentity | undefined> {
   const current = await readJson<TaskMetadata>(files, snapshot, paths.task(taskId))
   if (current && current.taskId !== taskId) throw new Error('Task reference identity differs: ' + taskId)
+  onCurrent?.(current)
   return current ?? readTaskHistoryIdentity(files, snapshot, taskId)
 }
 type CachedHistory = { version: string; value: TaskHistoryIdentity }

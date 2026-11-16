@@ -1,3 +1,4 @@
+import type {} from '@deepseek-ai/dsh-tool-executor-ptc/types'
 import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import type { StreamChunk, ToolResultMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-tools'
@@ -61,7 +62,8 @@ function conversationSendSucceeded(result: Pick<ToolResultMessage, 'isError' | '
 }
 export class DshForegroundProcessTracker {
   constructor(readonly sessionId: string, events: readonly ProcessSessionEvent[] = []) {
-    for (const event of events) this.acceptSession(event);
+    for (const event of events) this.applySession(event);
+    if (events.length) this.rebuild();
   }
   private nodes = new Map<string, ProcessNode>();
   private ends = new Map<number, string>();
@@ -141,6 +143,10 @@ export class DshForegroundProcessTracker {
       this.assistant(turn, step, kind, [...attempt.blocks.values()].some((block) => block.kind === kind && block.visible), order, time, tentative);
   }
   acceptSession(event: ProcessSessionEvent): boolean {
+    this.applySession(event);
+    return this.rebuild();
+  }
+  private applySession(event: ProcessSessionEvent): void {
     this.cursor = Math.max(this.cursor, event.seq);
     this.transient = 0;
     if (event.type === "turn/start") {
@@ -218,7 +224,6 @@ export class DshForegroundProcessTracker {
       this.ends.set(event.data.turn, event.data.reason.kind);
       this.attempt = void 0;
     }
-    return this.rebuild();
   }
   private response(messageId: string, turn: number, step: number, order: number, time: number): void {
     this.put({ key: `response:${messageId}`, turn, step, order, time, kind: "response", messageId });

@@ -230,11 +230,11 @@ export class FrameworkKnowledge {
           { reevaluate: true, ...(selectedKind === 'markdown' ? { gitReplay: 'session-only' as const } : {}) }, async snapshot => {
             // Resolve an original UNKNOWN before evaluating or converting its input.
             if (selectedKind !== 'markdown') throw new OriginalSkillTransition()
-            const changes = await mergeSkillProposals(this.files, snapshot, [{ path: input.path, text: input.body }], new Map([[input.path, base()]]))
+            let unchanged: FileChange | undefined
+            const changes = await mergeSkillProposals(this.files, snapshot, [{ path: input.path, text: input.body }], new Map([[input.path, base()]]), current => { unchanged = current })
             // Derive from current authority even for an already-included edit.
             // The exact definition and shared catalog participate in the same CAS.
-            const bytes = changes.length ? undefined : await this.files.readBytes(snapshot, input.path)
-            const current: FileChange = changes[0] ?? (bytes === undefined ? { path: input.path, content: null } : { path: input.path, bytes })
+            const current = changes[0] ?? unchanged!
             const index = await prepareFrameworkSkillIndex(this.files, snapshot, [current], { skipUnchanged: true })
             issues = index.issues
             return [...changes, ...index.changes]

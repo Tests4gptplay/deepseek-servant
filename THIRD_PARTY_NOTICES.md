@@ -28,6 +28,13 @@ anchors, uses the existing left page gutter with right-opening previews, and doe
 not import the private component or replace the Host sidebar. It retains the
 following DeepSeek MIT license.
 
+The browser bundle directly imports the unmodified `FileCard.tsx`, `AttachmentRail.tsx`
+and their CSS modules from the public `src/*` exports of
+`@deepseek-ai/dsh-client-ui-attachment` `0.2.2-rc.3` under the MIT license below.
+Image previews, the lightbox and drop handling directly import the official
+ComposerAttachments public source, using the Host's shared primitives, locale
+and file-drag service. No native slot declaration is replaced.
+
 The referenced DSH source is licensed as follows:
 
 MIT License
@@ -79,14 +86,14 @@ Covered files: `icon.png`, `assets/page-icon.png`, `assets/statusbar-mask.webp`,
 `assets/welcome-character.png`,
 `assets/task-empty-character.png`, and
 `docs/images/deepseek-servant-mascot.png`, including their copies embedded in the
-built client. The user-selected navy whale-tail maid icon was supplied on
-2026-10-25. The plugin adaptation scales it to 256 × 256 pixels and preserves
+built client. The navy whale-tail maid icon adaptation scales it to
+256 × 256 pixels and preserves
 its original silhouette and transparency in the plugin list and page heading.
 The sidebar alpha mask and welcome illustration retain their existing artwork.
 The sidebar mask is a lossless conversion of the original icon transparency;
 its visible color and size now follow the Host's sidebar rather than fixed-color PNGs.
-The task-page illustration uses the additional user-supplied full-body artwork
-from 2026-10-25, adapted by removing its background and ground shadow.
+The task-page illustration adapts the full-body artwork by removing its
+background and ground shadow.
 
 Character reference and source index:
 [AI-gijinka character atlas](https://github.com/Tests4gptplay/ai-gijinka-art-world/blob/main/CHARACTER_ATLAS.md).

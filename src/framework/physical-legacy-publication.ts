@@ -9,8 +9,7 @@ import type { DirectSignalSources } from './physical-direct-delivery.js'
 import type { PreparedLocalAppend } from './local-record-files.js'
 import { readTaskHistoryIdentity, readTaskReferenceIdentity } from './task-history.js'
 import { taskSourceName, taskWorkspaceFolder } from './workspace-paths.js'
-import { paths, encodeJson, readJson, taskLifecycle, taskInitializationFiles, type TaskMetadata, type TaskRoute } from './task-files.js'
-import { workerPaths } from './role-tools.js'
+import { paths, workerPaths, encodeJson, readJson, taskLifecycle, taskInitializationFiles, type TaskMetadata, type TaskRoute } from './task-files.js'
 import { filePath, withSnapshot, type FilesSnapshot } from './transactions.js'
 
 type Action = LegacyControlInput & { commandId: string; action: 'resume' | 'answer'; taskId: string; waitId?: string; answer?: string }

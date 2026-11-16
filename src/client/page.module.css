@@ -1323,3 +1323,21 @@
   border-radius: 50%;
   background: currentColor;
 }
+
+/* Native DSH InputBar add-control dimensions and theme tokens (MIT); the
+   public Menu keeps its keyboard/dismiss behavior, File uses this composer. */
+.composerTools { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.composerAdd {
+  display: grid; place-items: center; flex: none;
+  width: 28px; height: 28px; border: none; border-radius: 999px;
+  background: var(--dsw-specific-selector); color: var(--dsw-alias-label-primary); cursor: pointer;
+}
+.composerAdd:disabled { opacity: .5; cursor: default; }
+@media (hover: hover) {
+  .composerAdd:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover-solid); }
+}
+
+/* Official ComposerAttachments pulls its row back by 6px and expects the
+   native input card's 12px row gap. Preserve that geometry for both real rails. */
+.nativeAttachments { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.nativeAttachmentFiles { min-width: 0; padding: 0 10px; }

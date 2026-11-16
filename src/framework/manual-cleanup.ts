@@ -139,12 +139,12 @@ export class FrameworkManualCleanup {
       const receipt = { revision: await withSnapshot(files, async snapshot => snapshot.revision), replay: true }
       return plan ? this.result(plan, receipt) : { cleared: true, receipt, deletedPaths: [], preservedPaths: preview.preservedPaths }
     }
-    await files.updateAsync(path, async bytes => {
+    const plan = await files.updateAsync(path, async bytes => {
       if (bytes !== undefined) {
         const plan = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as Plan
         if (plan.kind !== 'tasks' || plan.scope !== this.scope || json(plan.taskSignatures) !== json(Object.fromEntries(preview.tasks.map(task => [task.taskId, task.signature]))))
           throw new Error('Cleanup command plan belongs to another reviewed selection.')
-        return { value: undefined }
+        return { value: plan }
       }
       const plan = await withSnapshot(files, async snapshot => {
         const candidates = await this.candidates(snapshot, false, new Set(preview.tasks.map(task => task.taskId))), selected: Candidate[] = []
@@ -165,9 +165,8 @@ export class FrameworkManualCleanup {
           legacySelections: selected.flatMap(task => task.legacySelections), historyHashes,
           messagePaths: [], preservedPaths: unique(selected.flatMap(task => task.preservedPaths)) }
       })
-      return { value: undefined, content: json(plan) }
+      return { value: plan, content: json(plan) }
     })
-    const plan = await withSnapshot(files, snapshot => readJson<Plan>(files, snapshot, path))
     if (!plan || plan.kind !== 'tasks' || plan.scope !== this.scope) throw new Error('Confirmed Task history selection is unavailable.')
     for (const taskId of plan.taskIds) await this.lifecycle.prepareTaskCleanup(taskId)
     await withSnapshot(files, async snapshot => {
@@ -563,7 +562,8 @@ export class FrameworkManualCleanup {
   }
   private async version(snapshot: FilesSnapshot, path: string): Promise<string | null> {
     filePath(path)
-    return (await this.files.listDirectory(snapshot, path.slice(0, path.lastIndexOf('/') + 1))).find(entry => entry.path === path)?.version ?? null
+    return (await this.files.listDirectory(snapshot, path.slice(0, path.lastIndexOf('/') + 1),
+      this.files instanceof PhysicalLocalFiles ? { paths: [path] } : undefined)).find(entry => entry.path === path)?.version ?? null
   }
   private async taskCleanupReady(task: TaskMetadata, cleanup: CleanupRecord | undefined): Promise<boolean> {
     if (this.files instanceof PhysicalLocalFiles && 'kind' in task && task.kind === 'task-history')
@@ -647,10 +647,10 @@ export class FrameworkManualCleanup {
       // Current physical results are named in this Task's retained identity.
       // For old imported artifact records, look up the manifest of each actual
       // selected archive file. Never enumerate every Task's manifest catalog.
-      for (const entry of entries.values()) if (entry.path.startsWith(paths.archive(task ?? taskId) + '/')) {
+      for (const entry of entries.values()) if (entry.path.startsWith(paths.archive(task ?? taskId) + '/') && !preservedPaths.includes(entry.path)) {
         const manifest = await readJson<{ taskId: string; path: string }>(this.files, snapshot,
           'technical/artifacts/manifests/' + hash(entry.path) + '.json')
-        if (manifest?.taskId === taskId && manifest.path === entry.path && !preservedPaths.includes(entry.path)) preservedPaths.push(entry.path)
+        if (manifest?.taskId === taskId && manifest.path === entry.path) preservedPaths.push(entry.path)
       }
       preservedPaths.sort()
       if (task) {
@@ -676,7 +676,8 @@ export class FrameworkManualCleanup {
       }
       for (const entry of entries.values()) if ((!task || entry.path !== taskArchiveStatePath(task)) && !preserve(entry.path)) targets.push({ path: entry.path, version: entry.version, action: 'delete' })
       const all = [...entries.values(), ...guards].sort((a, b) => a.path.localeCompare(b.path))
-      const identity: unknown[] = [taskId, all.map(({ path, version }) => [path, version]), mergeTargets(targets), preservedPaths]
+      const guardPaths = new Set(guards.map(entry => entry.path))
+      const identity: unknown[] = [taskId, all.map(({ path, version }) => priorPlan || !preserve(path) || guardPaths.has(path) ? [path, version] : [path]), mergeTargets(targets), preservedPaths]
       const signature = hash(json(identity))
       result.push({ taskId, legacySelections, targets: mergeTargets(targets), guards, preservedPaths, signature,
         bytes: [...entries.values()].filter(entry => (!task || entry.path !== taskArchiveStatePath(task)) && !preserve(entry.path)).reduce((sum, entry) => sum + (entry.bytes ?? 0), 0) })
