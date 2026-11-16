@@ -81,10 +81,10 @@ export function ManualCleanupPanel({ api, storageScope, tr, changed }: {
     <h3>{tr('长期记录管理', 'Long-term records')}</h3>
     <p>{tr('记录保留到你明确清理。只作用于当前 Local 存储；不会自动按年龄或容量删除。', 'Records remain until you explicitly clear them. These actions affect this Local storage only; there is no age or capacity based deletion.')}</p>
     <Button disabled={busy} onClick={() => void inspect()}>{tr('查看记录容量与目录', 'Inspect record usage and directories')}</Button>
-    <Button disabled={busy} onClick={() => void open('records')}>{tr('打开记录目录', 'Open records directory')}</Button>
-    <Button disabled={busy} onClick={() => void open('native-logs')}>{tr('打开宿主会话日志目录', 'Open Host session log directory')}</Button>
+    <Button onClick={() => void open('records')}>{tr('打开记录目录', 'Open records directory')}</Button>
+    <Button onClick={() => void open('native-logs')}>{tr('打开宿主会话日志目录', 'Open Host session log directory')}</Button>
     <Button disabled={busy} onClick={() => void inspectDebug()}>{tr('查看调试记录', 'View debug records')}</Button>
-    {usage?.debugDirectory && <Button disabled={busy} onClick={() => void open('debug')}>{tr('打开调试记录目录', 'Open debug records directory')}</Button>}
+    {usage?.debugDirectory && <Button onClick={() => void open('debug')}>{tr('打开调试记录目录', 'Open debug records directory')}</Button>}
     {debug && <div><p>{tr('调试记录', 'Debug records')}: {debug.files.length} · {debug.bytes} bytes</p>
       {debug.files.map(file => <Button key={file.path} disabled={busy} onClick={() => void readDebug(file.path)}>{file.path} · {file.bytes} bytes</Button>)}
       {debugRecord && <div><h4>{debugRecord.path}</h4><pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{debugRecord.text}</pre></div>}

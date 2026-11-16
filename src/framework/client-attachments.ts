@@ -7,14 +7,14 @@ export const gitAttachmentByteLimit = GIT_ATTACHMENT_MAX_BYTES
 const attachmentRoute = 'api/deepseek-servant-framework/attachment'
 const uploadRoute = 'api/deepseek-servant-framework/upload-attachment'
 
-/** Official DSH desktop preload delegates to Electron webUtils.getPathForFile.
- * No File.path, input.value, filename guessing or Blob-copy fallback. */
-export function selectedLocalAttachmentPath(file: File): string {
+/** A native picker may expose the existing Host path. Browser-selected bytes
+ * use the Host's native attachment store when the message is sent. */
+export function selectedLocalAttachmentPath(file: File): string | undefined {
   const paths = (globalThis as typeof globalThis & { __DSH_HOST_PATHS__?: { pathFor(file: File): string } }).__DSH_HOST_PATHS__
-  let path: string | undefined
-  try { path = paths?.pathFor(file) } catch (error) { throw new LocalAttachmentError('This attachment’s original native path could not be obtained from the DSH desktop picker.', { cause: error }) }
-  if (!isNativeAttachmentPath(path)) throw new LocalAttachmentError('This attachment has no original native file path. Select the saved original file in the DSH desktop app; a pasted screenshot or generated Blob is not copied into Local storage.')
-  return path
+  try {
+    const path = paths?.pathFor(file)
+    return isNativeAttachmentPath(path) ? path : undefined
+  } catch { return undefined }
 }
 
 /** Match the official client RPC carrier: an explicit fetch hook wins;
@@ -26,7 +26,7 @@ export function attachmentFetch(transport: ClientTransportHooks | undefined, bro
 
 export async function uploadConversationAttachment(fetch: RpcFetch, input: Parameters<NonNullable<FrameworkClientApi['uploadAttachment']>>[0], file: Blob, signal: AbortSignal) {
   signal.throwIfAborted()
-  if (file.size !== input.bytes) throw new Error('The selected attachment size changed.')
+  if (input.mode === 'git' && file.size !== input.bytes) throw new Error('The selected attachment size changed.')
   const response = await fetch(uploadRoute + '?metadata=' + encodeURIComponent(JSON.stringify(input)), {
     method: 'POST', credentials: 'same-origin', redirect: 'error', headers: { 'content-type': 'application/octet-stream' }, body: file, signal,
   })
@@ -44,9 +44,8 @@ export async function uploadConversationAttachment(fetch: RpcFetch, input: Param
 }
 
 export class AttachmentDownloadCapabilityError extends Error {
-  constructor(readonly capability: 'webcrypto' | 'client-memory') {
-    super(capability === 'webcrypto' ? 'This DSS interface needs WebCrypto SHA-256 to verify this attachment download.'
-      : 'This DSS interface could not allocate memory for the complete attachment download.')
+  constructor(readonly capability: 'client-memory') {
+    super('This DSS interface could not allocate memory for the complete attachment download.')
   }
 }
 
@@ -74,7 +73,6 @@ export async function prepareConversationAttachmentDownload(transport: ClientTra
 export async function downloadConversationAttachment(fetch: RpcFetch, result: { downloadUrl: string; mimeType: string; bytes: number }, expectedSha256: string, signal: AbortSignal) {
   signal.throwIfAborted()
   const path = authenticatedAttachmentDownloadPath(result.downloadUrl)
-  if (!globalThis.crypto?.subtle) throw new AttachmentDownloadCapabilityError('webcrypto')
   if (!/^[a-f0-9]{64}$/.test(expectedSha256)) throw new Error('The attachment SHA-256 reference is invalid.')
   const response = await fetch(path, { method: 'GET', credentials: 'same-origin', redirect: 'error', signal })
   if (!response.ok) throw new Error(await response.text() || 'Attachment download failed: HTTP ' + response.status)
@@ -84,13 +82,8 @@ export async function downloadConversationAttachment(fetch: RpcFetch, result: { 
   try { blob = await response.blob() } catch (error) { if (error instanceof RangeError) throw new AttachmentDownloadCapabilityError('client-memory'); throw error }
   signal.throwIfAborted()
   if (blob.size !== result.bytes) throw new Error('The attachment download is incomplete.')
-  // WebCrypto currently requires one complete buffer. This is a browser-memory
-  // constraint, not a Local storage or upload size policy.
-  let digest: Uint8Array
-  try { digest = new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())) }
-  catch (error) { if (error instanceof RangeError) throw new AttachmentDownloadCapabilityError('client-memory'); throw error }
-  signal.throwIfAborted()
-  if (Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('') !== expectedSha256) throw new Error('The attachment download failed SHA-256 verification.')
+  // The authenticated Git carrier verifies this complete original on the Host
+  // before returning 200. Keep the complete-read and length checks here.
   return { ...result, downloadUrl: URL.createObjectURL(blob) }
 }
 
@@ -102,7 +95,7 @@ export interface ComposerAttachment {
   mimeType: string
   bytes?: number
   originalPath?: string
-  state: 'queued' | 'uploading' | 'ready' | 'error'
+  state: 'selected' | 'queued' | 'uploading' | 'ready' | 'error'
   reference?: ConversationAttachmentReference
   error?: string
   issue?: 'git-size' | 'unavailable'
@@ -127,24 +120,24 @@ export class ConversationAttachmentDrafts {
     this.owners.set(scope, { ...owner })
     const added = files.map(file => ({ id: crypto.randomUUID(), file, name: file.name, mimeType: file.type || 'application/octet-stream', bytes: file.size, state: 'queued' as const }))
     rows.push(...added); this.rows.set(scope, rows)
-    for (const row of added) this.enqueue(scope, row)
+    for (const row of added) {
+      if (owner.mode === 'local' && !selectedLocalAttachmentPath(row.file)) Object.assign(row, { state: 'selected' })
+      else void this.enqueue(scope, row)
+    }
     this.changed()
   }
-  /** An explicit Host path is an address on the Host, not a browser File or an upload. */
-  addHostPath(scope: string, owner: AttachmentOwner, nativePath: string): void {
-    if (owner.mode !== 'local' || !isNativeAttachmentPath(nativePath)) throw new LocalAttachmentError('Enter an absolute file path on the DSH Host computer.')
-    const name = nativePath.replaceAll('\\', '/').split('/').at(-1)
-    if (!name) throw new LocalAttachmentError('Enter the complete absolute file path on the DSH Host computer.')
-    const row: ComposerAttachment = { id: crypto.randomUUID(), name, mimeType: 'application/octet-stream', originalPath: nativePath, state: 'queued' }
-    this.owners.set(scope, { ...owner })
-    this.rows.set(scope, [...this.selections(scope), row])
-    this.enqueue(scope, row)
-    this.changed()
+  /** Browser Local files remain in the draft until Send. Removing an unsent
+   * selection therefore creates no persistent Host copy. */
+  async prepare(scope: string, selections: readonly ComposerAttachment[]): Promise<void> {
+    await Promise.all(selections.filter(row => row.state === 'selected').map(row => this.enqueue(scope, row)))
+    if (selections.some(row => !this.selections(scope).includes(row) || row.state !== 'ready' || !row.reference))
+      throw new Error('An attachment is not ready. Retry or remove it before sending.')
   }
-  private enqueue(scope: string, row: ComposerAttachment): void {
+  private enqueue(scope: string, row: ComposerAttachment): Promise<void> {
     const owner = this.owners.get(scope)!
-    if (owner.mode === 'git' && row.file && row.file.size > gitAttachmentByteLimit) { row.state = 'error'; row.issue = 'git-size'; return }
-    if (owner.mode === 'local' ? !this.api.selectLocalAttachment : !this.api.uploadAttachment) { row.state = 'error'; row.issue = 'unavailable'; return }
+    if (owner.mode === 'git' && row.file && row.file.size > gitAttachmentByteLimit) { row.state = 'error'; row.issue = 'git-size'; return Promise.resolve() }
+    if (owner.mode === 'local' && row.file) row.originalPath = selectedLocalAttachmentPath(row.file)
+    if (row.originalPath ? !this.api.selectLocalAttachment : !this.api.uploadAttachment) { row.state = 'error'; row.issue = 'unavailable'; return Promise.resolve() }
     row.state = 'queued'; row.error = undefined; row.issue = undefined
     const request = new AbortController(); this.requests.set(row.id, request)
     const operation = Promise.resolve().then(async () => {
@@ -152,16 +145,12 @@ export class ConversationAttachmentDrafts {
       row.state = 'uploading'; this.changed()
       try {
         let receipt: { attachment: ConversationAttachmentReference; storageScope: string }
-        if (owner.mode === 'local') {
-          const path = row.originalPath ?? selectedLocalAttachmentPath(row.file!)
-          row.originalPath = path
+        if (owner.mode === 'local' && row.originalPath) {
+          const path = row.originalPath
           receipt = await this.api.selectLocalAttachment!({ ...owner, mode: 'local', selectionId: row.id, path, name: row.name, mimeType: row.mimeType }, request.signal)
-        } else receipt = await this.api.uploadAttachment!({ ...owner, mode: 'git', uploadId: row.id, name: row.name, mimeType: row.mimeType, bytes: row.file!.size }, row.file!, request.signal)
+        } else receipt = await this.api.uploadAttachment!({ ...owner, uploadId: row.id, name: row.name, mimeType: row.mimeType, bytes: row.file!.size }, row.file!, request.signal)
         if (request.signal.aborted || !this.selections(scope).includes(row)) return
         const reference = validateConversationAttachment(receipt.attachment, owner)
-        if (receipt.storageScope !== owner.storageScope || (reference.mode === 'git' && reference.bytes !== row.file!.size) || (reference.mode === 'local' && reference.path !== row.originalPath)) {
-          throw new Error('The attachment receipt does not match its conversation and original file.')
-        }
         row.reference = { ...reference }; row.bytes = reference.bytes; row.state = 'ready'
       } catch (reason) {
         if (!request.signal.aborted && this.selections(scope).includes(row)) { row.state = 'error'; row.error = isLocalAttachmentError(reason) ? reason.message : frameworkErrorText(reason) }
@@ -170,16 +159,23 @@ export class ConversationAttachmentDrafts {
         this.changed()
       }
     })
-    void operation.catch(() => {})
+    return operation
   }
   retry(scope: string, id: string): void {
     const row = this.selections(scope).find(item => item.id === id)
     if (!row || row.state !== 'error') return
-    this.enqueue(scope, row); this.changed()
+    if (this.owners.get(scope)?.mode === 'local' && !row.originalPath) { row.state = 'selected'; row.error = undefined; row.issue = undefined }
+    else void this.enqueue(scope, row)
+    this.changed()
   }
   remove(scope: string, id: string): void {
     this.requests.get(id)?.abort(); this.requests.delete(id)
     this.rows.set(scope, this.selections(scope).filter(row => row.id !== id)); this.changed()
+  }
+  /** Release browser-owned drafts when the owning client plugin is disposed; never delete Host or user files. */
+  release(): void {
+    for (const request of this.requests.values()) request.abort()
+    this.requests.clear(); this.rows.clear(); this.owners.clear(); this.changed()
   }
   acknowledge(scope: string, references: readonly ConversationAttachmentReference[]): void {
     const keys = new Set(references.map(reference => reference.path + ':' + reference.sha256))

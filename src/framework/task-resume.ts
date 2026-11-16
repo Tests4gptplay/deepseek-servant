@@ -29,8 +29,9 @@ export async function publishTaskResume(access: { files: FilesStore; controls: E
             for (const recipient of selected.members ?? [selected.owner]) {
                 if (access.active && recipient === access.member) continue;
                 const status = await readMemberStatus(access.files, snapshot, paths.memberStatus(selected.taskId, recipient));
+                if (status?.state === 'complete') continue;
                 const inbox = await access.files.read(snapshot, paths.inbox(selected.taskId, recipient));
-                if (status?.state === 'complete' || !inbox?.length) continue;
+                if (!inbox?.length) continue;
                 changes.push({ path: paths.state(recipient, selected.taskId) + '/Planner_UserResume_' + suffix, content: '' });
             }
         }
@@ -87,8 +88,9 @@ async function publishPhysicalResume(access: Parameters<typeof publishTaskResume
           for (const recipient of selected.members ?? [selected.owner]) {
             if (access.active && recipient === access.member) continue
             const status = await readMemberStatus(access.files, snapshot, paths.memberStatus(selected.taskId, recipient))
+            if (status?.state === 'complete') continue
             const inbox = await access.files.read(snapshot, paths.inbox(selected.taskId, recipient))
-            if (status?.state === 'complete' || !inbox?.length) continue
+            if (!inbox?.length) continue
             add(selected, paths.state(recipient, selected.taskId) + '/Planner_UserResume_' + suffix)
           }
         }

@@ -1,3 +1,4 @@
+import type {} from '@deepseek-ai/dsh-tool-executor-ptc/types'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-tools'
 

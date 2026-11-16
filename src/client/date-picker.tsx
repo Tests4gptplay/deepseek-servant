@@ -1,9 +1,9 @@
 /** DSH schedule calendar layout, adapted for history queries (MIT; see THIRD_PARTY_NOTICES.md). */
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
+import { useEffect, useId, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 import {
   Button, MenuSurface, IconChevronLeftOutlineRegular, IconChevronRightOutlineRegular,
-  useAnchoredPosition, useDismissOnOutsidePointer,
+  useDismissOnOutsidePointer,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { daysIn, isoOf, shiftMonth, viewOf } from './calendar.js'
@@ -20,7 +20,8 @@ export function HistoryDatePicker({ value, disabled, onPick, t }: {
   const anchor = useRef<HTMLButtonElement>(null)
   const panel = useRef<HTMLDivElement>(null)
   const cells = useRef(new Map<number, HTMLDivElement>())
-  const position = useAnchoredPosition({ open, anchorRef: anchor, panelRef: panel, gap: 4, margin: 12 })
+  const anchorName = `--dss-history-calendar-${useId().replaceAll(':', '')}`
+  const anchorStyle = { '--dss-history-calendar-anchor': anchorName } as CSSProperties
   useDismissOnOutsidePointer(anchor, open, setOpen, panel)
   const today = viewOf('')
   const todayIso = isoOf(today, today.day)
@@ -42,13 +43,13 @@ export function HistoryDatePicker({ value, disabled, onPick, t }: {
   }).format(Date.UTC(view.year, view.month, 1))
 
   return <>
-    <Button ref={anchor} size="sm" variant="outline" disabled={disabled} aria-label={t('conversation.date')}
+    <Button ref={anchor} className={css.anchor} style={anchorStyle} size="sm" variant="outline" disabled={disabled} aria-label={t('conversation.date')}
       aria-haspopup="dialog" aria-expanded={open} onClick={() => {
         if (!open) setView(viewOf(value))
         setOpen(current => !current)
       }}>{value ? value.replaceAll('-', '/') : t('conversation.date')}</Button>
     {open && createPortal(<MenuSurface ref={panel} className={css.calendar} role="dialog" aria-label={t('conversation.date')}
-      style={position ?? { visibility: 'hidden', left: 0, top: 0 }}
+      style={anchorStyle}
       onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close() } }}
       onClick={event => event.stopPropagation()}>
       <div className={css.head}>

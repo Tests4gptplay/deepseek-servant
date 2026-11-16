@@ -8,8 +8,8 @@ import { createHash } from 'node:crypto'
 import { registerHooks, stripTypeScriptTypes } from 'node:module'
 
 // Production Local file and attachment modules against real Linux scratch
-// originals. Native DSH image persistence and UI carrier are controlled ports;
-// this checks their input/output contract, not actual DSH visual projection.
+// originals. Local reference resolution deliberately performs no native image
+// dispatch. Git persistence and UI carriers are controlled ports, not model vision.
 const root = new URL('../src/', import.meta.url), loaded = new Map()
 const schema = `const s=new Proxy(function(){},{get(_t,k){if(k==='parse')return v=>v;return s},apply(){return s}});export const z=s;`
 const hooks = registerHooks({
@@ -45,8 +45,7 @@ const rejects = async (name, action, match) => { await assert.rejects(action, ma
 const noStore = new Proxy({}, { get(_target, key) { return () => { throw new Error('Local must not access DSS stored bytes: ' + String(key)) } } })
 const local = new ConversationAttachments(noStore, noStore, { mode: 'local', collaborationId: 'c' })
 const selection = filename => ({ mode: 'local', collaborationId: 'c', selectionId: 's', path: filename, name: path.basename(filename), mimeType: 'text/plain' })
-const noNative = { get: () => undefined }
-const execution = () => ({ agent: { id: 'actual-current-agent' }, signal: new AbortController().signal, token: Symbol('current-tool'), rootCallId: 'root-call', callId: 'attachment-call', deferContext() {}, concludeTurn() {} })
+const signal = () => new AbortController().signal
 try {
   // Official Desktop rc.5 supplies ownsHost/streamBaseUrl but no fetch hook.
   // Its relative HTTP bridge is the same route used by the native client RPC.
@@ -76,14 +75,14 @@ try {
   check('Local reference is exact original path', ref.path, textPath)
   check('Local reference format has no hash/version lock', [ref.version, ref.sha256], [2, undefined])
   await local.initialize(); await local.validateReferences(snapshot, [ref]); names.push('Local select/initialize/send-validation perform no DSS writes or manifest reads')
-  let response = await prepareNativeLocalAttachment(noNative, ref, execution())
+  let response = await prepareNativeLocalAttachment(ref, signal())
   check('Local ordinary file returns exact path for existing Host tools', [response.delivery, JSON.parse(response.content[1].text).path], ['local-file-path', textPath])
   await fs.writeFile(textPath, 'edited original with more bytes')
-  response = await prepareNativeLocalAttachment(noNative, ref, execution())
+  response = await prepareNativeLocalAttachment(ref, signal())
   check('Normal edit keeps original path without claiming an unread current size', JSON.parse(response.content[1].text), { path: textPath })
   await fs.writeFile(path.join(sandbox, 'replacement'), 'atomic replacement')
   await fs.rename(path.join(sandbox, 'replacement'), textPath)
-  response = await prepareNativeLocalAttachment(noNative, ref, execution())
+  response = await prepareNativeLocalAttachment(ref, signal())
   check('Atomic replacement keeps original path without version gate or extra read', JSON.parse(response.content[1].text), { path: textPath })
   check('Returned grant remains exact original reference', response.reference, ref)
   const spacedPath = path.join(sandbox, ' saved original ')
@@ -91,7 +90,7 @@ try {
   const spaced = await local.selectLocal(selection(spacedPath))
   check('Native filename is preserved without Git filename sanitization', validateConversationAttachment(spaced).name, ' saved original ')
   await fs.writeFile(textPath, Buffer.from([0, 255, 1, 2]))
-  response = await prepareNativeLocalAttachment(noNative, ref, execution())
+  response = await prepareNativeLocalAttachment(ref, signal())
   check('Binary file stays original-path delivery, no FileBlock copy', response.delivery, 'local-file-path')
   check('Binary result exposes only exact selected path', JSON.parse(response.content[1].text).path, textPath)
   const realFakepathDirectory = path.join(sandbox, 'fakepath')
@@ -106,32 +105,20 @@ try {
   assert.throws(() => validateConversationAttachment({ ...ref, version: 1, source: 'conversation-attachment' }), LocalAttachmentError); names.push('Old Local attachment compatibility is absent')
   const cancelled = new AbortController(); cancelled.abort(new Error('cancelled'))
   await rejects('Cancellation preserves AbortSignal reason', () => local.selectLocal(selection(textPath), cancelled.signal), /cancelled/)
-  let images = 0, files = 0, imageBytes
-  const native = { imageLimits: { maxImageBytes: 1024 }, saveImage: async input => { images++; imageBytes = input.data; return { attachmentId: 'native:image', bytes: input.data.byteLength, mediaType: input.mediaType } }, saveFileStream: async () => { files++; throw new Error('No Local file copy') } }
-  // Controlled official read_image boundary; host policy/model/decoder tests are
-  // separate from this scratch-original routing check.
-  const ctx = { get: name => name === 'attachments' ? native : undefined, tools: { execute: async input => {
-    assert.equal(input.name, 'read_image'); assert.equal(input.agent.id, 'actual-current-agent')
-    assert.equal(typeof input.parent, 'symbol'); assert.equal(input.rootCallId, 'root-call')
-    try {
-      const data = await fs.readFile(input.arguments.file_path)
-      if (data.byteLength > native.imageLimits.maxImageBytes) throw new Error('actual image provider limit')
-      const image = await native.saveImage({ data, mediaType: 'image/png' })
-      return { isError: false, value: { path: input.arguments.file_path }, content: [{type:'text',text:'Actual native controlled result'}, {type:'image',attachment:image}] }
-    } catch (error) { return { isError:true, error:{message:error.message}, content:[{type:'text',text:error.message}] } }
-  } } }
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7XkAAAAASUVORK5CYII=', 'base64')
   const imagePath = path.join(sandbox, 'image.png'); await fs.writeFile(imagePath, png)
   const imageRef = await local.selectLocal({ ...selection(imagePath), mimeType: 'image/png' })
-  response = await prepareNativeLocalAttachment(ctx, imageRef, execution())
-  check('Local image reaches current Host tool with actual original bytes', Buffer.from(imageBytes), png)
-  check('Local image emits native ImageBlock, not URI text', [response.delivery, response.content[1].type, response.content[1].attachment.attachmentId], ['image-content', 'image', 'native:image'])
-  check('Local native route does not saveFileStream', [images, files], [1, 0])
-  native.imageLimits.maxImageBytes = 16
-  await rejects('Actual current provider image byte limit is enforced', () => prepareNativeLocalAttachment(ctx, imageRef, execution()), /actual image provider limit/)
-  await rejects('Absent native image provider fails this image only', () => prepareNativeLocalAttachment(noNative, imageRef, execution()), LocalAttachmentError)
+  response = await prepareNativeLocalAttachment(imageRef, signal())
+  check('Local image returns actual original path, not fabricated image content', [response.delivery, JSON.parse(response.content[1].text).path, response.content.every(block => block.type === 'text')], ['local-file-path', imagePath, true])
+  check('Local image response explicitly says unread and uses current native executor', response.note.includes('has not read or checked') && response.note.includes('native read_image') && response.note.includes('through your current executor'), true)
+  check('Resolving image reference leaves original bytes unchanged', await fs.readFile(imagePath), png)
   await fs.unlink(imagePath)
-  await rejects('Deleted original preserves native missing-file result without fallback', () => prepareNativeLocalAttachment(ctx, imageRef, execution()), /ENOENT/)
+  response = await prepareNativeLocalAttachment(imageRef, signal())
+  check('Reference resolution does not pre-read even a missing image; native read owns actual failure', JSON.parse(response.content[1].text).path, imagePath)
+  response = await prepareNativeLocalAttachment(imagePath, signal())
+  check('A raw Local image path uses the same honest unresolved delivery', response.delivery, 'local-file-path')
+  await rejects('Local resolution preserves cancellation before returning a path', () => prepareNativeLocalAttachment(imageRef, cancelled.signal), /cancelled/)
+  await rejects('Relative path is still not an actual Local path', () => prepareNativeLocalAttachment('relative.png', signal()), LocalAttachmentError)
   let faults = 0; const uninstall = installClientErrorReporter(() => faults++)
   check('Per-attachment failure remains visible', frameworkErrorText(new LocalAttachmentError('select original')), 'select original')
   check('Per-attachment failure does not trigger global reporter', faults, 0); uninstall()
@@ -139,14 +126,14 @@ try {
   const file = new File(['text'], 'source.txt', { type: 'text/plain' }), pasted = new File(['pixels'], 'image.png', { type: 'image/png' })
   globalThis.__DSH_HOST_PATHS__ = { pathFor: f => f === file ? textPath : '' }
   check('Client consumes official desktop pathFor only', selectedLocalAttachmentPath(file), textPath)
-  assert.throws(() => selectedLocalAttachmentPath(pasted), LocalAttachmentError); names.push('Pathless pasted File fails only that selection')
+  check('Pathless pasted File is available for browser upload', selectedLocalAttachmentPath(pasted), undefined)
   const receipt = { attachment: ref, storageScope: 'scope' }, calls = []
   const drafts = new ConversationAttachmentDrafts({ selectLocalAttachment: async input => { calls.push(input); return receipt } })
   drafts.add('local', { mode: 'local', collaborationId: 'c', storageScope: 'scope' }, [file, pasted])
   for (let i=0; i<30 && drafts.selections('local').some(r => r.state === 'queued' || r.state === 'uploading'); i++) await new Promise(resolve => setTimeout(resolve, 2))
-  check('Local selection works on RPC-only API with no raw uploader', drafts.selections('local').map(row => row.state), ['ready', 'error'])
+  check('Local selection works on RPC-only API with no raw uploader', drafts.selections('local').map(row => row.state), ['ready', 'selected'])
   check('Client sends only path metadata, no Blob payload', [calls.length, calls[0].path, 'bytes' in calls[0]], [1, textPath, false])
-  check('No path selection error is visible on its own row', !!drafts.selections('local')[1].error, true)
+  check('Browser file stays in draft until Send', !!drafts.selections('local')[1].error, false)
   // Local RPCs run independently, while the row order remains the selection order.
   const secondFile = new File(['other'], 'second.txt', {type:'text/plain'})
   globalThis.__DSH_HOST_PATHS__ = {pathFor:f=>f===file?textPath:f===secondFile?path.join(sandbox,'second.txt'):''}
@@ -218,5 +205,5 @@ try {
   const gitNative = { imageLimits:{maxImageBytes:1024}, saveFileStream: async input => { let data=Buffer.alloc(0); for await(const chunk of input.data)data=Buffer.concat([data,chunk]); return { bytes:data.length, attachmentId:'sha256:'+createHash('sha256').update(data).digest('hex') } } }
   response = await prepareNativeConversationAttachment({get:()=>gitNative},git,snapshot,gitRef,new AbortController().signal)
   check('Git continues actual native FileBlock contract', response.content[1].type, 'file')
-  console.log(JSON.stringify({ passed: names.length, checks: names, limits: ['Linux temporary files only', 'Controlled native saveImage/FileBlock port, not real DSH decoder or model vision', 'No installed desktop UI or Windows file picker verification', 'No full dependency typecheck or build'], loaded: Object.fromEntries(loaded) }, null, 2))
+  console.log(JSON.stringify({ passed: names.length, checks: names, limits: ['Linux temporary files only', 'Local path-only resolution and controlled Git FileBlock port, not real DSH decoder or model vision', 'No installed desktop UI or Windows file picker verification', 'No full dependency typecheck or build'], loaded: Object.fromEntries(loaded) }, null, 2))
 } finally { await fs.rm(sandbox, { recursive: true, force: true }); hooks.deregister() }

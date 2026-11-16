@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session, TurnEndReason } from '@deepseek-ai/dsh-session'
-import type { ProjectionDefinition, SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
+import type { ProjectionDefinition, ProjectionHandle } from '@deepseek-ai/dsh-session-projection'
 import { z } from 'zod'
 
 /** Native turn metadata only. This does not assert that a message is visible or an Agent is running. */
@@ -12,13 +12,7 @@ export interface DshForegroundActivity {
 }
 export const foregroundActivityProjectionKey = 'deepseek-servant/foreground-activity' as const
 
-declare module '@deepseek-ai/dsh-session-projection/types' {
-  interface SessionProjectionStateMap {
-    'deepseek-servant/foreground-activity': DshForegroundActivity | null
-  }
-}
-
-export const foregroundActivityProjection: ProjectionDefinition<typeof foregroundActivityProjectionKey> = {
+export const foregroundActivityProjection: ProjectionDefinition<typeof foregroundActivityProjectionKey, DshForegroundActivity | null> = {
   key: foregroundActivityProjectionKey,
   stateVersion: 1,
   // End reasons are an official merge-extensible sum type; do not freeze its current list here.
@@ -45,17 +39,16 @@ export interface DshForegroundActivityReader {
  * No private global registry, event-body cache, polling or synthetic business events.
  */
 export function ensureForegroundActivity(ctx: Context): DshForegroundActivityReader {
-  let registry: SessionProjectionRegistry | undefined
+  let handle: ProjectionHandle<DshForegroundActivity | null> | undefined
   let disposed = false
-  const fiber = ctx.inject(['sessionProjections'], scope => {
-    const active = scope.sessionProjections
-    const unregister = active.register(foregroundActivityProjection)
-    registry = active
-    return () => { if (registry === active) registry = undefined; unregister() }
+  const fiber = ctx.inject(['sessionProjections'], async scope => {
+    const active = await scope.sessionProjections.register(foregroundActivityProjection)
+    handle = active
+    return () => { if (handle === active) handle = undefined }
   })
   return {
-    read: session => disposed ? undefined : registry?.stateOf(session, foregroundActivityProjectionKey),
-    available: () => !disposed && registry !== undefined,
-    async dispose() { if (disposed) return; disposed = true; registry = undefined; await fiber.dispose() },
+    read: session => disposed ? undefined : handle?.stateOf(session),
+    available: () => !disposed && handle !== undefined,
+    async dispose() { if (disposed) return; disposed = true; handle = undefined; await fiber.dispose() },
   }
 }

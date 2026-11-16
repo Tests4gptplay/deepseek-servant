@@ -182,8 +182,10 @@ export class ExecutionObservations {
           progressAt: due.state.lastProgressAt,
         } : undefined)
         if (!pending) return
-        const next: StoredExecutionObservation = { ...saved, observation: due?.state ?? saved.observation, pending }
-        await this.store.set(binding.identity.workId, next, saved)
+        if (!saved.pending) {
+          const next: StoredExecutionObservation = { ...saved, observation: due?.state ?? saved.observation, pending }
+          await this.store.set(binding.identity.workId, next, saved)
+        }
         if (this.current(binding) && this.active(binding)) return pending
       })
       if (!pending) return

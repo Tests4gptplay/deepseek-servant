@@ -191,12 +191,12 @@ export interface PreparedLocalRecordCopy {
  */
 export async function prepareLocalRecordCopy(sourceDirectory: string, destinationDirectory: string,
   signal?: AbortSignal, backend: LocalRecordBackend = 'sqlite',
-  continuation?: { state?: RecordTreeCopyState; save(state: RecordTreeCopyState): Promise<void> }): Promise<PreparedLocalRecordCopy> {
+  continuation?: { state?: RecordTreeCopyState; fingerprint?: string; save(state: RecordTreeCopyState): Promise<void> }): Promise<PreparedLocalRecordCopy> {
   signal?.throwIfAborted()
   if (!isAbsolute(sourceDirectory) || !isAbsolute(destinationDirectory)) throw new Error('Choose absolute record directory paths.')
   if (backend === 'physical') {
     if (!continuation) throw new Error('A physical record move requires its accepted copy continuation.')
-    const fingerprint = await recordTreeFingerprint(sourceDirectory, signal)
+    const fingerprint = continuation.fingerprint ?? await recordTreeFingerprint(sourceDirectory, signal)
     let disposed = false, publishing: Promise<void> | undefined
     return { source: sourceDirectory, destination: destinationDirectory, fingerprint,
       publish: () => {

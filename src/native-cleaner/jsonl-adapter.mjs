@@ -120,7 +120,6 @@ export class ExactJsonlAdapter {
         await unlink(path);
       }
       if(pinned)await pinned.sync();
-      await this.store.write(life.header,'logs-removed',{inheritedEventCount:life.inheritedEventCount});
       if(await this.backend.stat(life.id)!==undefined)throw new Error('Log still visible after exact removal');
       outcome={status:'removed',files:targets.length,bytes:windowsPlan?(windowsPlan.bytes>BigInt(Number.MAX_SAFE_INTEGER)?String(windowsPlan.bytes):Number(windowsPlan.bytes)):targets.reduce((n,t)=>n+t.info.size,0),preservedArtifacts,
         ...(windowsPlan?{namespaceDurability:'unverified'}:{})};

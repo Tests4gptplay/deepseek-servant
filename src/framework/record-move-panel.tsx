@@ -36,8 +36,6 @@ export function RecordMovePanel({ api, storageScope, settingsRevision, pendingRe
         attempt.confirmed = true
       }
       if (!active.current) return
-      await changed()
-      if (!active.current) return
       retained.delete(storageScope); setPending(undefined); setDirectory('')
       const outcome = attempt.outcome
       setResult(outcome?.status === 'current-location'
@@ -50,6 +48,7 @@ export function RecordMovePanel({ api, storageScope, settingsRevision, pendingRe
                 + outcome.sourceCleanup.retained.map(item => item.directory + ' (' + item.reason + ')').join('; ')
               : tr(' 本次搬迁确认的旧 DSS 副本已删除。', ' The confirmed old DSS copies from this move were removed.')
             : outcome?.retainedSource ? tr(' 本次未删除原目录：', ' Source directory not deleted by this move: ') + outcome.retainedSource : ''))
+      void changed().catch(reason => { if (active.current) setError(frameworkErrorText(reason)) })
     } catch (reason) {
       if (isRecordMoveNotStarted(reason)) {
         retained.delete(storageScope)

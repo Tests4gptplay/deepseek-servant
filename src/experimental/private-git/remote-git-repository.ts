@@ -50,6 +50,7 @@ interface Session { token?: ResolvedToken; scope: Scope; cache: ObjectCache; sig
 interface State { observedHead: boolean; publicationSequence: number; scope: Scope; cache: ObjectCache; signal?: AbortSignal; loaded: Set<string>; pathErrors: Map<string, unknown> }
 const oid = (value: string) => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value)
 const sha256 = (value: string | Uint8Array) => createHash('sha256').update(value).digest('hex')
+type CapturedGitChange = { path: string; deleteTree?: true } & ({ content: null; bytes?: never } | { bytes: Buffer; content?: never })
 const changeBytes = (change: GitChange): Buffer | null => {
   if (change.deleteTree !== undefined && (change.deleteTree !== true || change.content !== null)) throw new Error('A directory deletion must explicitly carry null content.')
   if (change.bytes !== undefined) {
@@ -865,7 +866,7 @@ export class RemoteGitRepository implements GitRepository {
     this.validateOperation(operation)
     // Capture before queueing. A caller cannot mutate an already submitted
     // operation or its byte buffers while another Git publication finishes.
-    const capturedChanges: GitChange[] = changes.map(change => {
+    const capturedChanges: CapturedGitChange[] = changes.map(change => {
       const bytes = changeBytes(change)
       return bytes === null ? { path: change.path, content: null, ...(change.deleteTree ? { deleteTree: true as const } : {}) } : { path: change.path, bytes }
     })
@@ -906,10 +907,10 @@ export class RemoteGitRepository implements GitRepository {
       if (owner?.preparation.dispatched) reportDispatch()
     }
   }
-  private async commitPreparedNow(base: GitSnapshot, changes: readonly GitChange[], message: string, operation: GitCommitOperation, onDispatch: () => void, isUndispatched?: () => boolean): Promise<GitReceipt> {
+  private async commitPreparedNow(base: GitSnapshot, changes: readonly CapturedGitChange[], message: string, operation: GitCommitOperation, onDispatch: () => void, isUndispatched?: () => boolean): Promise<GitReceipt> {
     const owner = this.readers.getStore()
     if (owner) owner.reusable = false
-    const captured = changes.map(changeBytes), writes = this.writes(changes, captured), state = this.state(base)
+    const captured = changes.map(change => change.bytes ?? null), writes = this.writes(changes, captured), state = this.state(base)
     this.validateOperation(operation)
     const preparedHere = operation
     operation = { ...operation, writes: operation.writes.map(write => ({ ...write })) }

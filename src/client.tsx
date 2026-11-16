@@ -1,3 +1,6 @@
+import type { NativeImageAttachments } from './client/native-attachment-owner.js'
+import { ComposerAttachments } from '@deepseek-ai/dsh-client-ui-attachment/src/client/ComposerAttachments.tsx'
+import type {} from '@deepseek-ai/dsh-client-ui-file-drag/client'
 import { isLocalAttachmentError, LocalAttachmentError } from './framework/conversation-attachment-reference.js'
 import { createClientFaults } from './framework/client-faults.js'
 import { frameworkErrorText, frameworkRpcError, installClientErrorReporter } from './framework/client-error.js'
@@ -8,7 +11,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createForegroundModelPublication, selectedForegroundModel } from './client/foreground-model-publication.js';
 import type { Context } from '@deepseek-ai/cordis';
 import type { ClientTransportHooks, ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client';
-import { attachmentFetch, uploadConversationAttachment, prepareConversationAttachmentDownload } from './framework/client-attachments.js';
+import { attachmentFetch, uploadConversationAttachment, prepareConversationAttachmentDownload, getConversationAttachmentDrafts } from './framework/client-attachments.js';
 import type {} from '@deepseek-ai/dsh-client-locale/client';
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client';
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client';
@@ -25,14 +28,18 @@ import { en, zh, NS } from './client/locales.js';
 import css from './client/page.module.css';
 import { FrameworkPage } from './framework/client-page.js';
 import type { FrameworkClientApi, FrameworkClientModel } from './framework/client-contracts.js';
-import { createNativeQuestionClient, NativeQuestionRegion } from './client/native-questions.js'
+import { createNativeInteractionClient, registerNativeInteractions, NativeInteractions, NativeTaskPending, type NativeInteractionSlots } from './client/native-interactions.js'
+import { cancelForeground } from './client/foreground-cancel.js'
+import { PermissionPicker } from './client/permission-picker.js'
+
 declare const __SERVANT_CLIENT_CSS__: string;
 declare const __SERVANT_STATUS_ICON_DATA_URI__: string;
 export const name = 'deepseek-servant-client';
-export const inject = ['slots', 'locale', 'connection', 'sessions', 'workspaces', 'remote', 'remote.agentPresets'];
+export const inject = ['slots', 'locale', 'connection', 'sessions', 'workspaces', 'remote', 'remote.agentPresets', 'fileDrag'];
 const PANEL_ID = 'deepseek-servant' as MainPanelId;
 export function apply(ctx: Context): void {
-    const nativeQuestions = createNativeQuestionClient(ctx);
+    const nativeQuestions = createNativeInteractionClient(ctx);
+    registerNativeInteractions(ctx);
     ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dss.locales');
     ctx.effect(() => { const style = document.createElement('style'); style.dataset.deepseekServant = 'client'; style.textContent = typeof __SERVANT_CLIENT_CSS__ === 'undefined' ? '' : __SERVANT_CLIENT_CSS__; document.head.append(style); return () => style.remove(); }, 'dss.styles');
     const connection = ctx.get('connection', true) as unknown as ConnectionHandle, requests = createRequestLifecycle(), t = ctx.locale.bind(NS);
@@ -83,8 +90,10 @@ export function apply(ctx: Context): void {
                 const sha256 = input.reference.sha256
                 return rawAttachmentRequest('attachmentDownload', input, signal, async owned => prepareConversationAttachmentDownload(attachmentTransport, await call('attachment', input, owned), sha256, owned))
             },
-        } satisfies Partial<FrameworkClientApi>), clientFault: input => call('clientFault', input), maintenanceView: input => call('maintenanceView', input), openMaintenancePath: input => call('openMaintenancePath', input), keepCurrentLocalUpgradeTarget: input => call('keepCurrentLocalUpgradeTarget', input), exportRecords: input => call('exportRecords', input), cleanupPreview: input => call('cleanupPreview', input), cleanupRecords: input => call('cleanupRecords', input), knowledgeList: input => call('knowledgeList', input), knowledgeRead: input => call('knowledgeRead', input), knowledgeEdit: input => call('knowledgeEdit', input), knowledgeStatus: input => call('knowledgeStatus', input), view: (input, signal) => call('view', input, signal), history: (input, signal) => call('history', input, signal), send: input => call('send', input), configure: input => call('configure', input), foregroundModel: input => call('foregroundModel', input), taskControl: input => call('taskControl', input), stopExecution: input => call('stopExecution', input), gitMembers: input => call('gitMembers', input), gitMemberAction: input => call('gitMemberAction', input), invite: input => call('invite', input), moveRecords: input => call('moveRecords', input), legacyRecords: input => call('legacyRecords', input), legacyControl: input => call('legacyControl', input), participation: input => call('participation', input), selectMode: input => call('selectMode', input), readFile: input => call('readFile', input), openWorkspaceFile: input => call('openWorkspaceFile', input),
+        } satisfies Partial<FrameworkClientApi>), clientFault: input => call('clientFault', input), maintenanceView: input => call('maintenanceView', input), openMaintenancePath: input => call('openMaintenancePath', input), keepCurrentLocalUpgradeTarget: input => call('keepCurrentLocalUpgradeTarget', input), exportRecords: input => call('exportRecords', input), cleanupPreview: input => call('cleanupPreview', input), cleanupRecords: input => call('cleanupRecords', input), knowledgeList: input => call('knowledgeList', input), knowledgeRead: input => call('knowledgeRead', input), knowledgeEdit: input => call('knowledgeEdit', input), knowledgeStatus: input => call('knowledgeStatus', input), view: (input, signal) => call('view', input, signal), history: (input, signal) => call('history', input, signal), send: input => call('send', input), configure: input => call('configure', input), foregroundModel: input => call('foregroundModel', input), permissionCatalog: input => call('permissionCatalog', input), permissionSelect: input => call('permissionSelect', input), taskControl: input => call('taskControl', input), cancelForeground: input => call('cancelForeground', input), stopExecution: input => call('stopExecution', input), gitMembers: input => call('gitMembers', input), gitMemberAction: input => call('gitMemberAction', input), invite: input => call('invite', input), moveRecords: input => call('moveRecords', input), legacyRecords: input => call('legacyRecords', input), legacyControl: input => call('legacyControl', input), participation: input => call('participation', input), selectMode: input => call('selectMode', input), readFile: input => call('readFile', input), openWorkspaceFile: input => call('openWorkspaceFile', input),
         subscribeChanged: (listener, availability) => subscribeEventStreams<import('./framework/client-contracts.js').FrameworkClientChange>(['api/deepseek-servant-framework/events'], change => { if (change?.domain === 'safety') { browserFaults.observeOccurrence(change.occurrence, change.owner); } listener(change); }, requests.subscribeReset, undefined, availability, connection.state) };
+    const attachmentDrafts = getConversationAttachmentDrafts(api);
+    ctx.effect(() => () => attachmentDrafts.release(), 'dss.attachment-drafts');
     const controller = getFrameworkClientController(api), notices = createFrameworkClientNotices({ completionToast: completionToastEnabled });
     ctx.effect(() => {
         const off = installClientErrorReporter(error => browserFaults.capture(error, faultContext('client')));
@@ -148,14 +157,14 @@ export function apply(ctx: Context): void {
     const connectionState = connection.state;
     const subscribeConnection = (listener: () => void) => connectionState?.subscribe(listener) ?? (() => {});
     const connectionSnapshot = () => connectionState?.getSnapshot();
-    function Page({ onConversationVisible, settingsOnly }: { onConversationVisible?: (visible: boolean) => void; settingsOnly?: boolean }) {
+    function Page({ onConversationVisible, settingsOnly, nativeAttachments, approvalSlots }: { onConversationVisible?: (visible: boolean) => void; settingsOnly?: boolean; nativeAttachments?: NativeImageAttachments; approvalSlots?: NativeInteractionSlots }) {
         const transportState = useSyncExternalStore(subscribeConnection, connectionSnapshot);
         const locale = useSyncExternalStore(subscribeLocale, localeSnapshot);
         const modelView = useSyncExternalStore(models.source.subscribe, models.source.getSnapshot);
         const picker = (globalThis as typeof globalThis & { __DSH_DIRECTORY_PICKER__?: { pick(): Promise<string | null> } }).__DSH_DIRECTORY_PICKER__;
-        return <FrameworkPage nativeQuestions={(executions, zh) => <NativeQuestionRegion client={nativeQuestions} executions={executions} zh={zh}/>} api={api} settingsOnly={settingsOnly} onConversationVisible={onConversationVisible} transportConnected={connectionState ? transportState === 'connected' : undefined} language={locale.active.toLowerCase().startsWith('zh') ? 'zh' : 'en'} onViewed={view => notices.ackLocal({ mode: view.activeMode, collaborationId: view.collaborationId, storageScope: view.storageScope })} onPickDirectory={picker ? async () => { const occurrence = browserFaults.begin(), context = faultContext('directoryPicker'); try { return await picker.pick(); } catch (error) { browserFaults.capture(error, context, occurrence); throw error; } } : undefined} modelControl={(value, onChange, label, options) => <ModelPicker {...options} value={value ?? {}} models={modelView} onRefresh={models.refresh} label={label} t={t} onChange={route => onChange(route.provider && route.model ? route as FrameworkClientModel : undefined)}/>} presetControl={(value, onChange) => <PresetPicker value={value ?? 'standard'} onLoad={onLoadPresets} onChange={onChange} t={t}/>}/>;
+        return <FrameworkPage nativeAttachments={nativeAttachments} onStopForeground={view => cancelForeground(api, view)} permissionControl={(view, zh) => <PermissionPicker key={view.activeMode + ":" + view.storageScope} ctx={ctx} api={api} view={view} zh={zh}/>} nativePending={(view, zh, onOpen, onForeground) => <NativeTaskPending client={nativeQuestions} tasks={view.tasks} foreground={(view.executions ?? []).filter(row => row.role === 'Foreground')} zh={zh} onOpen={onOpen} onForeground={onForeground}/> } nativeInteractions={approvalSlots ? (executions, zh, onlyPending) => <NativeInteractions onlyPending={onlyPending} ctx={ctx} client={nativeQuestions} {...approvalSlots} executions={executions} zh={zh}/> : undefined} api={api} settingsOnly={settingsOnly} onConversationVisible={onConversationVisible} transportConnected={connectionState ? transportState === 'connected' : undefined} language={locale.active.toLowerCase().startsWith('zh') ? 'zh' : 'en'} onViewed={view => notices.ackLocal({ mode: view.activeMode, collaborationId: view.collaborationId, storageScope: view.storageScope })} onPickDirectory={picker ? async () => { const occurrence = browserFaults.begin(), context = faultContext('directoryPicker'); try { return await picker.pick(); } catch (error) { browserFaults.capture(error, context, occurrence); throw error; } } : undefined} modelControl={(value, onChange, label, options) => <ModelPicker {...options} value={value ?? {}} models={modelView} onRefresh={models.refresh} label={label} t={t} onChange={route => onChange(route.provider && route.model ? route as FrameworkClientModel : undefined)}/>} presetControl={(value, onChange) => <PresetPicker value={value ?? 'standard'} onLoad={onLoadPresets} onChange={onChange} t={t}/>}/>;
     }
-    function MainPage() {
+    function MainPage(approvalSlots: NativeInteractionSlots) {
         const [conversationVisible, setConversationVisible] = useState(false);
         const [documentVisible, setDocumentVisible] = useState(document.visibilityState === 'visible');
         const state = useSyncExternalStore(controller.subscribe, controller.snapshot);
@@ -180,9 +189,9 @@ export function apply(ctx: Context): void {
         useEffect(() => {
             publication.current?.update(conversationVisible && documentVisible && panel?.activePanelId === PANEL_ID, selection);
         }, [conversationVisible, documentVisible, panel?.activePanelId, selection?.provider, selection?.model, selection?.reasoningEffort]);
-        return <Page onConversationVisible={setConversationVisible}/>;
+        return <Page approvalSlots={approvalSlots} onConversationVisible={setConversationVisible} nativeAttachments={documentVisible && panel?.activePanelId === PANEL_ID ? owner => <ComposerAttachments {...owner} t={ctx.locale.bind('conversation')} readFileDrag={ctx.fileDrag.read}/> : undefined}/>;
     }
-    ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID, locale: NS, inject: () => ({}) }, MainPage));
+    ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID, locale: NS, children: { 'deepseek-servant.interaction': { kind: 'single', scope: 'session' } }, inject: () => ({}) }, MainPage));
     const settings = ctx.slots as unknown as {
         inject(name: 'settings.section', register: () => unknown): void;
         register(options: any, component: typeof Page): unknown;

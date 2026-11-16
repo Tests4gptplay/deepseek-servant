@@ -69,8 +69,7 @@ export function conversationSnapshot(events: readonly SessionEvent[]): Foregroun
         ...(reason.kind === 'interrupted' || reason.kind === 'aborted' && ['disposed', 'parent'].includes(reason.reason.kind) ? { interrupted: true } : {}),
         messageIds: messages.filter(message => message.turn === event.data.turn).map(message => message.id),
         ...(event.data.reason.kind === 'error' ? { message: event.data.reason.error.message } : {}) }
-      if (finished) turns.push({ turn: event.data.turn, at: new Date(event.time).toISOString(),
-        messageIds: messages.filter(message => message.turn === event.data.turn).map(message => message.id) })
+      if (finished) turns.push({ turn: event.data.turn, at: ended.at, messageIds: [...ended.messageIds] })
       current = undefined
     }
     if (event.type === 'agent/inbox/spliced') {

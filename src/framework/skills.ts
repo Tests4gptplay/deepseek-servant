@@ -238,8 +238,9 @@ export async function refreshPhysicalFrameworkSkillIndex(files: import('./physic
   const relevant = [...new Set(changedPaths.filter(isSkillFile))]
   if (!relevant.length) return []
   return files.updateAsync(frameworkSkillIndexPath, async bytes => withSnapshot(files, async snapshot => {
-    const rebuilt = parseCatalog(bytes) ? undefined : await rebuildCatalog(files, snapshot)
-    const entries = new Map((parseCatalog(bytes) ?? rebuilt!.index).entries.map(entry => [entry.path, entry]))
+    const parsedCatalog = parseCatalog(bytes)
+    const rebuilt = parsedCatalog ? undefined : await rebuildCatalog(files, snapshot)
+    const entries = new Map((parsedCatalog ?? rebuilt!.index).entries.map(entry => [entry.path, entry]))
     const issues = [...rebuilt?.issues ?? []]
     for (const path of relevant) {
       entries.delete(path)

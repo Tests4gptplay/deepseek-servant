@@ -18,9 +18,17 @@ const clientOptions = {
   entryPoints: ['src/client.tsx'], outfile: 'lib/client.js', bundle: true,
   // DSH's browser loader resolves shared modules through its factory require.
   // A plain ESM bundle cannot register with the native module graph.
-  format: 'cjs', platform: 'browser', target: 'es2022', sourcemap: false,
+  format: 'cjs', platform: 'browser', target: 'es2022', sourcemap: false, jsx: 'automatic',
   external: ['@deepseek-ai/*', 'react', 'react/*', 'react-dom', 'react-dom/*'],
-  alias: { '@deepseek-ai/dsh-agent-preset-registry/display': fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-agent-preset-registry/display')) },
+  alias: {
+    '@deepseek-ai/dsh-agent-preset-registry/display': fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-agent-preset-registry/display')),
+    '@deepseek-ai/dsh-util-file-drag': fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-util-file-drag')),
+    // Public source exports are bundled once; React and shared DSH services stay external.
+    ...Object.fromEntries(['FileCard', 'AttachmentRail', 'client/ComposerAttachments'].map(name => {
+      const spec = `@deepseek-ai/dsh-client-ui-attachment/src/${name}.tsx`
+      return [spec, fileURLToPath(import.meta.resolve(spec))]
+    })),
+  },
   define: {
     __SERVANT_STATUS_ICON_DATA_URI__: JSON.stringify(statusIcon),
     __SERVANT_ICON_DATA_URI__: JSON.stringify(pageIcon),

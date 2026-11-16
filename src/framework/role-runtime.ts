@@ -1,3 +1,4 @@
+import { DshRolePermissions } from '../adapters/dsh/permissions.js'
 import { taskCommandReceiptPath } from './task-command-paths.js'
 import { helperDebugPath } from './helper-debug-path.js'
 import { DshStorageAdapter } from '../adapters/dsh/storage.js'
@@ -61,7 +62,8 @@ import { localUpgradeMappingKey, type LocalUpgradeMapping } from './local-upgrad
 import type { ManualConversationCleanupPreview } from './manual-cleanup.js'
 import { FrameworkHostLoop, helperSignalWakeHash, type RoleWake, type TaskRoleNotification, type DirectRoleNotification } from './host-loop.js'
 import { installFrameworkRoleTools, parseDirectSignal, signalWorkerId, workerPaths, type FrameworkRoleBinding, type FrameworkRoleServices, type PlannerWorkerExecutions, type HelperRestoreInput, type HelperRepairAttempt } from './role-tools.js'
-import { foregroundTaskSignal, parseForegroundTaskSignal, taskArchiveOwnsPath, taskArchiveSelection, paths, readJson, readMemberStatus, taskIdentity, taskLifecycle, taskLifecycleKey, assertTaskLifecycle, isTerminalTask, encodeJson, type TaskMetadata, type MemberStatus } from './task-files.js'
+import { withReevaluatedFileTarget } from './file-read-observation.js'
+import { foregroundTaskSignal, parseForegroundTaskSignal, taskArchiveOwnsPath, taskArchiveSelection, paths, readJson, readMemberStatus, taskIdentity, taskLifecycle, taskLifecycleKey, assertTaskLifecycle, checkTaskLifecycle, isTerminalTask, encodeJson, type TaskMetadata, type MemberStatus } from './task-files.js'
 import { FilesConflictError, FilesOutcomeUnknownError, GitFiles, withOperationChannel, withSnapshot, type FileChange, type FilesStore, type FilesSnapshot, type FilesReadRound } from './transactions.js'
 import {
   scanMemberRecovery, memberRecoveryEligible, createRecoveryWatch, dueRecoveryWatch,
@@ -102,6 +104,7 @@ export interface RuntimeConfiguration {
   primary: boolean
   workspace: string
   presetId?: string
+  permissionPreset?: string
   model?: DshModelRoute
   foreground?: DshModelRoute
   background?: DshModelRoute
@@ -140,6 +143,7 @@ export interface RuntimeEnvironment {
 
 /** Host composition of durable scheduling, real native Agents and authoritative task files. */
 export class FrameworkRoleRuntime {
+  private readonly permissions: DshRolePermissions
   constructor(private readonly ctx: Context, readonly files: FilesStore, private readonly records: StoragePort,
     readonly config: RuntimeConfiguration, private readonly environment: RuntimeEnvironment) {
     this.taskStateObservation = new FrameworkTaskStateObservation(update => {
@@ -154,6 +158,7 @@ export class FrameworkRoleRuntime {
     this.transactions = new FrameworkTransactions(files, records)
     this.conversation = new FrameworkConversation(files, this.transactions, { mode: config.mode, collaborationId: config.collaborationId }, path => this.physicalSignalSources(path),
       () => prepareLocalConversation(files, config.collaborationId, records))
+    this.permissions = new DshRolePermissions(ctx, () => this.config.permissionPreset)
     this.gateway = new DshAgentGateway(ctx)
     this.workspaces = new TaskWorkspaces(files, config.workspace, config.member, config.instanceUUID, this.archiveHostKey());
     this.observationStore = new DurableObservationStore(environment.observationRecords ?? records, config.scope,
@@ -319,7 +324,7 @@ export class FrameworkRoleRuntime {
   private readonly admissionCancellations = new Map<string, unknown>()
   // Read-through view of existing Helper WakeRecords; no extra file or poll.
   private readonly observedHelperWakes = new Map<string, WakeRecord>()
-  private readonly wakeWriteOwners = new Map<string, RoleWake>()
+  private readonly wakeWriteOwners = new Map<string, { request: RoleWake; write: Promise<void> }>()
   private readonly roleWriteOwners = new Map<string, WorkIdentity>()
   private readonly wakeWrites = new Map<string, Promise<unknown>>()
   private admissionNow = () => Date.now()
@@ -1400,6 +1405,17 @@ export class FrameworkRoleRuntime {
     if (excluding) occupied.delete(excluding)
     return occupied.size
   }
+  cancelForeground(): { submitted: boolean } {
+    const record = [...this.roleRecords.values()].find(row => row.identity.role === 'Foreground')
+    if (this.closed || !record || record.released || record.stopped) return { submitted: false }
+    const owned = this.native.get(record.identity.workId, record.identity.executionId)
+    if (!owned || owned !== this.native.get(record.identity.workId) || owned.sessionId !== record.sessionId
+      || String(owned.actualAgent.session.id) !== record.sessionId || owned.actualAgent.status !== 'running') return { submitted: false }
+    // The same native cancel verb preserves queued input. No await can replace
+    // this exact owned Agent between selection and the user command.
+    owned.actualAgent.cancel({ kind: 'user' }, { keepInbox: true })
+    return { submitted: true }
+  }
   async foregroundProcessing(): Promise<{ executionId: string; turnId: string; startedAt?: number } | undefined> {
     const record = [...this.roleRecords.values()].find(row => row.identity.role === 'Foreground')
     if (this.closed || !record || record.released || record.stopped) return;
@@ -1564,7 +1580,7 @@ export class FrameworkRoleRuntime {
       ? [{ key: helperKey!, value: exact }]
       // Role-authored notifications have no generated-wake key; preserve their
       // existing pending source ownership rather than inventing a second index.
-      : await this.admissionWakes()
+      : await this.admissionWakes(undefined, true)
     let owner: { key: string; value: WakeRecord } | undefined
     if (helperSource) for (const row of helperRows) {
       const wake = row.value
@@ -1701,7 +1717,7 @@ export class FrameworkRoleRuntime {
         const accepted = await authority.updateOwned<WakeRecord, boolean>(key, JSON.stringify([key, 'wake']), async (previous, snapshot) => {
           let next = await update(previous, snapshot)
           if (!next) return { write: false, result: false }
-          this.wakeWriteOwners.set(key, next.request)
+          this.wakeWriteOwners.set(key, { request: next.request, write: operation })
           if (await this.taskRuntimeReleased(next.request, snapshot)) {
             return { write: false, result: false }
           }
@@ -1713,7 +1729,7 @@ export class FrameworkRoleRuntime {
       }
       const previous = await this.records.get<WakeRecord>(key)
       let next = await update(previous)
-      if (next) this.wakeWriteOwners.set(key, next.request)
+      if (next) this.wakeWriteOwners.set(key, { request: next.request, write: operation })
       if (next && await this.taskRuntimeReleased(next.request)) {
         return
       }
@@ -2065,11 +2081,16 @@ export class FrameworkRoleRuntime {
       })
     }
   }
-  private admissionWakes(round?: FilesReadRound): Promise<Array<{ key: string; value: WakeRecord }>> {
+  private admissionWakes(round?: FilesReadRound, helperOnly = false): Promise<Array<{ key: string; value: WakeRecord }>> {
     if (!(this.files instanceof PhysicalLocalFiles) || !(this.records instanceof DshStorageAdapter))
       return listAuthorityInRound<WakeRecord>(this.records, this.prefix + 'wakes/', round)
     const receipts = new Set<string>()
-    for (const [key, request] of this.wakeWriteOwners) {
+    for (const [key, owner] of this.wakeWriteOwners) {
+      // A queued update/removal replaces wakeWrites before it owns a value.
+      // Its predecessor's identity must not exempt that unknown successor.
+      if (owner.write !== this.wakeWrites.get(key)) continue
+      const request = owner.request
+      if (helperOnly && request.role !== 'Helper') { receipts.add(key); continue }
       const receipt = this.admissions?.get('retired-wake:' + key)
       if (!receipt || this.wakeWrites.get(key) !== receipt) continue
       const current = this.roleRecords.get(this.requestKey(request))
@@ -2082,7 +2103,9 @@ export class FrameworkRoleRuntime {
       // previously committed value. No pending input or successor write qualifies.
       receipts.add(key)
     }
-    return this.records.listWithoutRetiredWakeReceiptWait<WakeRecord>(this.prefix + 'wakes/', receipts)
+    return helperOnly
+      ? this.records.listWithoutUnrelatedWakeWriteWait<WakeRecord>(this.prefix + 'wakes/', receipts)
+      : this.records.listWithoutRetiredWakeReceiptWait<WakeRecord>(this.prefix + 'wakes/', receipts)
   }
   private startOwnedPump(round?: FilesReadRound): void {
     if (this.closed || this.queueing) return
@@ -2154,7 +2177,7 @@ export class FrameworkRoleRuntime {
     const operations: Promise<void>[] = []
     const admissions = this.admissions ??= new Map<string, Promise<void>>()
     const startedWork = new Set<string>()
-    const queued = await this.admissionWakes(round)
+    const queued = await this.admissionWakes(round, helperOnly)
     this.replaySafetyWakes(queued.map(row => row.value))
     const continuationOwners = new Set(queued.filter(row => !row.value.delivered && row.value.recovery)
       .map(row => this.requestKey(row.value.request)))
@@ -2199,7 +2222,7 @@ export class FrameworkRoleRuntime {
         if (!await this.beforeTaskUse(currentWake.request.taskId) || this.closed) return
         row.value = currentWake
         if (this.requestKey(currentWake.request) !== workId) return
-        if ((await this.admissionWakes()).some(item =>
+        if ((await this.admissionWakes(undefined, helperOnly)).some(item =>
           !item.value.delivered && this.requestKey(item.value.request) === workId
           && item.value.recovery?.replacesUnadmittedWake === currentWake.request.id)) return
         const confirmedInput = this.roleRecords.get(workId)?.delivery
@@ -2452,6 +2475,7 @@ export class FrameworkRoleRuntime {
             model: (request.role === 'Foreground' ? this.config.foreground : this.config.background ?? this.config.foreground) ?? this.config.model,
             resume,
             setup: (scope, actual) => {
+              this.permissions.attach(scope, actual, request.role);
               const errorTurn = createRoleErrorTurnContext(record.identity);
               let safetyOccurrence = this.environment.safetyOccurrence?.() ?? 0
               const process2 = request.role === 'Foreground' ? new DshForegroundProcessTracker(record.sessionId, actual.session.snapshotEvents()) : void 0;
@@ -3302,8 +3326,11 @@ executionId: binding.executionId, run: persistContext,
       || transferring && (current.identity.role !== 'Worker' || current.stopUnknown || current.stopIntent))
       throw new Error('This Worker execution has transferred or ended its business responsibility.')
   }
-  private async assertWorkerOwnsBusiness(binding: FrameworkRoleBinding, snapshot: FilesSnapshot): Promise<void> {
-    if (binding.taskId) await assertTaskLifecycle(this.files, snapshot, binding.taskId, binding);
+  private async assertWorkerOwnsBusiness(binding: FrameworkRoleBinding, snapshot: FilesSnapshot, selected?: TaskMetadata): Promise<void> {
+    if (binding.taskId) {
+      if (this.files instanceof GitFiles && selected) await withReevaluatedFileTarget(snapshot, paths.task(binding.taskId), async () => checkTaskLifecycle(snapshot, binding.taskId!, binding, selected))
+      else await assertTaskLifecycle(this.files, snapshot, binding.taskId, binding)
+    }
     this.assertWorkerBusinessLive(binding)
     if (binding.role !== 'Worker') return
     await assertWorkerBusiness(this.files, snapshot, this.workerBusinessScope(), binding)
@@ -3625,7 +3652,7 @@ executionId: binding.executionId, run: persistContext,
         && !!(record.delivery?.request ?? record.lastWake)
         && (!admissionWakeId || (record.delivery?.request ?? record.lastWake)?.id === admissionWakeId)
         && (!fault.admissionTimeout || (record.delivery?.request ?? record.lastWake)?.id === fault.admissionTimeout.context.wakeId) : this.active(record) && matches(record.delivery?.request ?? record.lastWake!)));
-      const waiting = active ? undefined : (await this.records.list<WakeRecord>(this.prefix + 'wakes/')).find(row =>
+      const waiting = active ? undefined : (await this.admissionWakes(undefined, true)).find(row =>
         (!row.value.delivered || exactDiagnostic || !!admissionWakeId) && matches(row.value.request))
       if (helperFault && !active && !waiting) throw new Error('Original Helper is unavailable for diagnostic delivery; preserve its existing recovery responsibility.')
       const priorTimeout = fault.admissionTimeout && !active && !waiting
@@ -4160,7 +4187,7 @@ executionId: binding.executionId, run: persistContext,
       workerBusiness: {
         transferPath: binding => workerTransferPath(this.workerBusinessScope(), binding.executionId),
         assertLive: (binding, transferring) => this.assertWorkerBusinessLive(binding, transferring),
-        assert: (binding, snapshot) => this.assertWorkerOwnsBusiness(binding, snapshot),
+        assert: (binding, snapshot, selected) => this.assertWorkerOwnsBusiness(binding, snapshot, selected),
         transfer: async (binding, snapshot, successorId, successorRole) => {
           if (binding.taskId) await assertTaskLifecycle(this.files, snapshot, binding.taskId, binding);
           const record = this.roleRecords.get(binding.workId)
@@ -4307,12 +4334,12 @@ executionId: binding.executionId, run: persistContext,
       },
       workspace: {
         instanceUUID: this.config.instanceUUID,
-        locate: (taskId, snapshot) => this.workspaces.locate(taskId, snapshot, true),
+        locate: (taskId, snapshot, selected) => this.workspaces.locate(taskId, snapshot, true, selected),
         reference: async (agent, taskId, sourcePath, snapshot, signal) => {
           const cwd = await this.ctx.workingDirectory.ensure(agent, signal);
           return this.workspaces.reference(taskId, sourcePath, cwd, snapshot);
         },
-        validate: (reference, snapshot) => this.workspaces.validate(reference, snapshot)
+        validate: (reference, snapshot, selected) => this.workspaces.validate(reference, snapshot, selected)
       },
       artifacts: {
         preserve: async (agent, input, binding, commandId, options) => {
@@ -4451,6 +4478,10 @@ executionId: binding.executionId, run: persistContext,
     signal.throwIfAborted()
     const result = await this.observations.reset(record!.identity, probeId, issued.pending.cycleStartedAt);
     return { ...result, probeId }
+  }
+  async setPermissionPreset(preset: string): Promise<void> {
+    this.config.permissionPreset = preset
+    await this.permissions.select(preset)
   }
   setForegroundModel(model: DshModelRoute | undefined): void {
     this.config.foreground = model ? { ...model } : undefined
@@ -4691,7 +4722,7 @@ executionId: binding.executionId, run: persistContext,
     if (!request || record.completedRound || record.gitSettledWakeId === request.id) return
     const actual = owned.actualAgent, events = actual.session.snapshotEvents()
     if ((record.identity.role === 'Foreground' || !!record.identity.taskId && (record.identity.role === 'Planner' || record.identity.role === 'Worker' || record.identity.role === 'Recorder'))
-      && this.ctx.get('sessionProjections')?.stateOf(actual.session, 'userQuestions')?.questions.active.length) return
+      && this.ctx.get('sessionProjections')?.snapshot(actual.session, ['userQuestions']).values.userQuestions?.active.length) return
     const boundary = [...events].reverse().find(event => event.type === 'turn/start' || event.type === 'turn/end')
     if (boundary?.type !== 'turn/end' || boundary.data.reason.kind !== 'completed'
       || actual.inbox.nextTurn.length || actual.inbox.nextStep.length) {
@@ -4749,7 +4780,7 @@ executionId: binding.executionId, run: persistContext,
     if (!!record.identity.taskId && (record.identity.role === 'Planner' || record.identity.role === 'Worker' || record.identity.role === 'Recorder')) {
       const live = this.ctx.sessions.get(SessionId(record.sessionId))
       const questions = live
-        ? this.ctx.get('sessionProjections')?.stateOf(live, 'userQuestions')?.questions.active.length
+        ? this.ctx.get('sessionProjections')?.snapshot(live, ['userQuestions']).values.userQuestions?.active.length
         : (await sessions.inspect(record.sessionId)).unansweredQuestionCallIds?.length
       if (questions) return
     }
@@ -6253,7 +6284,7 @@ executionId: binding.executionId, run: persistContext,
       ...[...this.roleWriteOwners.values()].filter(belongs).map(identity => identity.workId)])]
     await this.observations.releaseTask(task.taskId, task.lifecycleId, observationWorkIds)
     await Promise.all([...this.roleWriteOwners].filter(([, identity]) => belongs(identity)).map(([key]) => this.roleWrites?.get(key)))
-    await Promise.all([...this.wakeWriteOwners].filter(([, identity]) => belongs(identity)).map(([key]) => this.wakeWrites.get(key)))
+    await Promise.all([...this.wakeWriteOwners].filter(([, owner]) => belongs(owner.request)).map(([key]) => this.wakeWrites.get(key)))
     const roleRows = this.records instanceof GitAuthorityStore
       ? (await this.taskReleaseRuntimeRows<RoleRecord>('roles', task)).filter(row => belongs(row.value.identity))
         .map(row => ({ key: row.key, workId: row.value.identity.workId }))
@@ -6414,7 +6445,13 @@ executionId: binding.executionId, run: persistContext,
     })
   }
   private async taskReleaseWakes(taskId: string, lifecycleId?: string): Promise<Array<{ key: string; value: WakeRecord }>> {
-    if (!(this.records instanceof GitAuthorityStore)) return this.records.list<WakeRecord>(this.prefix + 'wakes/')
+    if (!(this.records instanceof GitAuthorityStore)) {
+      const prefix = this.prefix + 'wakes/'
+      if (!(this.files instanceof PhysicalLocalFiles) || !(this.records instanceof DshStorageAdapter)) return this.records.list<WakeRecord>(prefix)
+      const keys = [...this.wakeWriteOwners].filter(([key, owner]) => owner.write === this.wakeWrites.get(key)
+        && (owner.request.taskId !== taskId || taskLifecycle(owner.request) !== taskLifecycle({ lifecycleId }))).map(([key]) => key)
+      return this.records.listWithoutUnrelatedTaskRetirementWriteWait<WakeRecord>(prefix, new Set(keys))
+    }
     const authority = this.records
     return withSnapshot(this.files, async snapshot => {
       const candidates = await this.releaseIndexes().wakes.at(snapshot, taskLifecycleKey({ taskId, lifecycleId }))
@@ -7136,11 +7173,13 @@ executionId: binding.executionId, run: persistContext,
           const changes = [];
           if (previous.workspaceFolder !== workspaceFolder || (previous.workspaceRootTaskId ?? taskId) !== retainedWorkspace.rootTaskId) changes.push({ path: paths.task(taskId), content: encodeJson({ ...previous, workspaceFolder, ...retainedWorkspace.rootTaskId !== taskId ? { workspaceRootTaskId: retainedWorkspace.rootTaskId } : { workspaceRootTaskId: void 0 } }) });
           const statusPath2 = paths.memberStatus(taskId, this.config.member), inboxPath = paths.inbox(taskId, this.config.member);
-          if (await this.files.read(snapshot, statusPath2) === void 0) changes.push({ path: statusPath2, content: encodeJson({ state: "running" }) });
           const handoff = "Recovery from retained current records, not a fabricated original instruction.\n" + recovery.continuation + "\n" + materialHandoff + "\nRetained records:\n" + references.join("\n");
-          if (await this.files.read(snapshot, inboxPath) === void 0) changes.push({ path: inboxPath, content: handoff });
-          if (await this.files.read(snapshot, previous.sourcePath) === void 0) changes.push({ path: previous.sourcePath, content: "Task ID: " + taskId + "\n" + handoff });
-          if (await this.files.read(snapshot, paths.cache(taskId)) === void 0) changes.push({ path: paths.cache(taskId), content: encodeJson({ version: 1, links: [previous.sourcePath, paths.task(taskId), ...references].map((path) => ({ kind: "file", path: path })) }) });
+          if (!(this.files instanceof PhysicalLocalFiles)) {
+            if (await this.files.read(snapshot, statusPath2) === void 0) changes.push({ path: statusPath2, content: encodeJson({ state: "running" }) });
+            if (await this.files.read(snapshot, inboxPath) === void 0) changes.push({ path: inboxPath, content: handoff });
+            if (await this.files.read(snapshot, previous.sourcePath) === void 0) changes.push({ path: previous.sourcePath, content: "Task ID: " + taskId + "\n" + handoff });
+            if (await this.files.read(snapshot, paths.cache(taskId)) === void 0) changes.push({ path: paths.cache(taskId), content: encodeJson({ version: 1, links: [previous.sourcePath, paths.task(taskId), ...references].map((path) => ({ kind: "file", path: path })) }) });
+          }
           if (this.files instanceof PhysicalLocalFiles) physicalPlan = {
             task: { ...previous, workspaceFolder, ...retainedWorkspace.rootTaskId !== taskId ? { workspaceRootTaskId: retainedWorkspace.rootTaskId } : { workspaceRootTaskId: undefined } },
             ...(await this.files.fileInfo(statusPath2) ? {} : { memberStatus: { path: statusPath2, text: encodeJson({ state: 'running' }), fillOnly: true } }),

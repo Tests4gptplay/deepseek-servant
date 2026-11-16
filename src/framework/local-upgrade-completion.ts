@@ -54,12 +54,14 @@ export async function assessLocalUpgradeCompletion(directory: string, storage: S
   const root = await canonicalLocalLocation(directory, true)
   const report = await inspectLocalStartupUpgrade(root, storage, { signal }), pending: LocalUpgradePending[] = [], cleanup: LocalUpgradeAssessment['cleanup'] = []
   const specialStageChoices: LocalUpgradeSpecialStageChoice[] = [], retainedSpecialStages: LocalUpgradeSpecialStageDecision[] = []
+  const cleanupKeys = new Set<string>()
   if (report.status !== 'complete') return { report, pending: report.issues.map(issue => ({ path: issue.path ?? report.sourcePath, reason: issue.message })), cleanup }
   const inventory = await inspectLegacyLocalInventory(root, { signal })
   const capture = async (key: string, owner?: LocalUpgradeSpecialStageOwner) => {
     const value = await storage.get<{ kind?: string; operationId?: string; directory?: string; status?: string;
       taskId?: string; collaborationId?: string; sourcePath?: string; retainedStages?: RetainedLocalUpgradeStage[] }>(key)
-    if (value?.directory !== root || !value.kind || !value.operationId || cleanup.some(item => item.key === key)) return
+    if (value?.directory !== root || !value.kind || !value.operationId || cleanupKeys.has(key)) return
+    cleanupKeys.add(key)
     cleanup.push({ key, kind: value.kind, operationId: value.operationId })
     const exactSpecial = owner && value.status === 'complete' && (
       owner.kind === 'task' && value.kind === 'dss-once-task-layout' && value.taskId === owner.id
@@ -132,8 +134,9 @@ export async function retireLocalUpgradeRecords(storage: StoragePort, completed:
   const resultKey = localUpgradeResultKey(completed.directory)
   await storage.set(resultKey, completed)
   const retainedSourceMappings = [...completed.retainedSourceMappings ?? []]
+  const retainedSourceKeys = new Set(retainedSourceMappings.map(item => item.key))
   for (const owned of completed.cleanup ?? []) {
-    if (owned.kind === 'dss-once-source-mapping') { if (!retainedSourceMappings.some(item => item.key === owned.key)) retainedSourceMappings.push(owned); continue }
+    if (owned.kind === 'dss-once-source-mapping') { if (!retainedSourceKeys.has(owned.key)) { retainedSourceKeys.add(owned.key); retainedSourceMappings.push(owned) } continue }
     const actual = await storage.get<{ kind?: string; operationId?: string; directory?: string }>(owned.key)
     if (!actual) continue
     if (actual.kind !== owned.kind || actual.operationId !== owned.operationId || actual.directory !== completed.directory)

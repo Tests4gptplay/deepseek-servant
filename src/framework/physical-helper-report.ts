@@ -1,13 +1,14 @@
 import { helperReportSignalPath, isHelperDatedRecord, isHelperWritableRecord } from './helper-debug-path.js'
 import { createHash } from 'node:crypto'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import type { HelperRepairAttempt } from './role-tools.js'
 import type { PreparedLocalReport } from './local-record-files.js'
 import type { DirectSignalSources } from './physical-direct-delivery.js'
 import { PhysicalLocalFiles } from './physical-local-files.js'
 import { publishPreparedPhysicalFile } from './physical-publication-evidence.js'
 import { encodeJson, readJson } from './task-files.js'
 import { withSnapshot } from './transactions.js'
+
+export interface HelperRepairAttempt { faultId?: string; actionsTaken: string; outcome: 'repaired' | 'attempted-not-repaired'; result: string }
 
 export interface PhysicalHelperReportInput {
   commandId: string

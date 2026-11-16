@@ -1,3 +1,4 @@
+import { NativeAttachmentOwner, type NativeImageAttachments } from '../client/native-attachment-owner.js'
 import { LocalUpgradeStatus, OriginalTaskReadStatus } from './client-upgrade-status.js'
 import { taskCancellationNotice } from './client-contracts.js'
 import { frameworkErrorText } from './client-error.js'
@@ -17,7 +18,7 @@ import { ManualCleanupPanel } from './manual-cleanup-panel.js'
 import { KnowledgeRecordView } from './knowledge-records.js'
 import type { SkillMergeIssue } from './skill-merge.js'
 import { Fragment, useMemo, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
-import { Button, Input, Modal, Menu, SegmentedControl, StateDot, IconSettingsOutlineRegular, IconChevronDownOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Input, Modal, Menu, SegmentedControl, StateDot, IconSettingsOutlineRegular, IconChevronDownOutlineRegular, IconPlusOutlineMedium, IconPaperclipOutlineRegular, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import { FrameworkClientController, getFrameworkClientController, frameworkScopeKey, type FrameworkClientExecution, type FrameworkClientApi, type FrameworkClientSettings, type FrameworkClientModel, type FrameworkClientView, type FrameworkClientRole, type FrameworkLegacyTask, type FrameworkClientProcessGroup } from './client-contracts.js'
 import css from '../client/page.module.css'
 
@@ -25,7 +26,11 @@ declare const __SERVANT_ICON_DATA_URI__: string
 declare const __SERVANT_WELCOME_CHARACTER_DATA_URI__: string
 declare const __SERVANT_TASK_EMPTY_CHARACTER_DATA_URI__: string
 export interface FrameworkPageProps {
-  nativeQuestions?: (executions: readonly FrameworkClientExecution[], zh: boolean) => ReactNode
+  nativeAttachments?: NativeImageAttachments
+  onStopForeground?: (view: FrameworkClientView) => Promise<void>
+  permissionControl?: (view: FrameworkClientView, zh: boolean) => ReactNode
+  nativeInteractions?: (executions: readonly FrameworkClientExecution[], zh: boolean, onlyPending?: boolean) => ReactNode
+  nativePending?: (view: FrameworkClientView, zh: boolean, onOpen: (taskId: string) => void, onForeground: () => void) => ReactNode
   api: FrameworkClientApi
   settingsOnly?: boolean
   transportConnected?: boolean
@@ -54,23 +59,24 @@ export function FrameworkPage(props: FrameworkPageProps) {
   const [error, setError] = useState('')
   const [exported, setExported] = useState('')
   const [selectedTask, setSelectedTask] = useState<string>()
-  const [draft, setDraft] = useState('')
-  const draftText = useRef('')
-  const [recipient, setRecipient] = useState<'ai' | 'human'>('ai')
+  const scope = view ? frameworkScopeKey(view.activeMode, view.collaborationId, view.storageScope) : ''
+  const draftsByScope = controller.composerDrafts
+  const savedDraft = draftsByScope.get(scope)
+  const draft = savedDraft?.text ?? '', recipient = savedDraft?.recipient ?? 'ai', replyTo = savedDraft?.replyTo
+  const draftText = useRef(draft); draftText.current = draft
   const [modelOperations, setModelOperations] = useState<Record<string, { input: Parameters<FrameworkClientApi['foregroundModel']>[0]; pending: boolean }>>({})
-  const [replyTo, setReplyTo] = useState<string>()
   const [document, setDocument] = useState<Omit<Awaited<ReturnType<FrameworkClientApi['readFile']>>, 'path'> & { path?: string; label?: string; reference?: PhysicalWorkspaceReference }>()
   const [documentLoading, setDocumentLoading] = useState(false)
   const documentRequest = useRef(0)
   const closeDocument = () => { documentRequest.current++; setDocument(undefined); setDocumentLoading(false) }
   const documentTitle = document?.label ?? document?.path ?? tr('读取资料', 'Reading document')
   const [historyBusy, setHistoryBusy] = useState(false)
-  const [historyDate, setHistoryDate] = useState('')
-  const scope = view ? frameworkScopeKey(view.activeMode, view.collaborationId, view.storageScope) : ''
+  const historyDate = view?.historyDate ?? ''
   const modelOperation = modelOperations[scope], modelAttempt = modelOperation?.input, modelSaving = modelOperation?.pending ? modelAttempt?.commandId : undefined
-  const draftsByScope = useRef(new Map<string, { text: string; replyTo?: string; recipient: 'ai' | 'human' }>())
-  const hostPathDrafts = useRef(new Map<string, string>())
-  const [hostPath, setHostPath] = useState('')
+  const [, renderAttachmentSend] = useState(0)
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false)
+  const attachmentSend = useRef(new Set<string>())
+  const preparingAttachments = attachmentSend.current.has(scope)
   const attachmentDrafts = getConversationAttachmentDrafts(props.api)
   useSyncExternalStore(attachmentDrafts.subscribe, attachmentDrafts.snapshot)
   const selectedAttachments = attachmentDrafts.selections(scope)
@@ -79,7 +85,7 @@ export function FrameworkPage(props: FrameworkPageProps) {
   const composerSending = controller.pendingDrafts().some(item => item.state === 'sending'
     && item.input.text === draft && item.input.recipient === recipient && item.input.replyTo === replyTo
     && sameAttachmentReferences(item.input.attachments, selectedAttachments.map(row => row.reference!).filter(Boolean)))
-  const [attachmentDownload, setAttachmentDownload] = useState<{ reference: ConversationAttachmentReference; downloadUrl?: string; failed?: boolean; capability?: 'webcrypto' | 'client-memory' }>()
+  const [attachmentDownload, setAttachmentDownload] = useState<{ reference: ConversationAttachmentReference; downloadUrl?: string; failed?: boolean; capability?: 'client-memory' }>()
   const attachmentRequest = useRef<AbortController>()
   const closeAttachment = () => { attachmentRequest.current?.abort(); attachmentRequest.current = undefined; setAttachmentDownload(undefined) }
   useEffect(() => () => { attachmentRequest.current?.abort() }, [])
@@ -101,82 +107,92 @@ export function FrameworkPage(props: FrameworkPageProps) {
     if (previousScope.current === scope) return
     const resolvedHeader = previous && view && !previous.storageScope && !!view.storageScope
       && previous.activeMode === view.activeMode && previous.collaborationId === view.collaborationId && previous.revision === view.revision
-    const saved = (resolvedHeader ? draftsByScope.current.get(previousScope.current) : undefined) ?? draftsByScope.current.get(scope) ?? (previousScope.current === '' ? draftsByScope.current.get('') : undefined)
-    if (resolvedHeader && saved) { draftsByScope.current.set(scope, saved); draftsByScope.current.delete(previousScope.current) }
-    if (resolvedHeader && hostPathDrafts.current.has(previousScope.current)) {
-      hostPathDrafts.current.set(scope, hostPathDrafts.current.get(previousScope.current)!)
-      hostPathDrafts.current.delete(previousScope.current)
-    }
-    draftText.current = saved?.text ?? ''
-    setDraft(saved?.text ?? ''); setReplyTo(saved?.replyTo); setRecipient(saved?.recipient ?? 'ai'); setHostPath(hostPathDrafts.current.get(scope) ?? '')
+    const saved = (resolvedHeader ? draftsByScope.get(previousScope.current) : undefined) ?? draftsByScope.get(scope) ?? (previousScope.current === '' ? draftsByScope.get('') : undefined)
+    if (resolvedHeader && saved) draftsByScope.delete(previousScope.current)
+    if (saved && draftsByScope.get(scope) !== saved) controller.rememberComposerDraft(scope, saved)
     setExported(''); setDocument(undefined); documentRequest.current++; setDocumentLoading(false); setSelectedTask(undefined)
+    setAttachmentMenuOpen(false)
     previousScope.current = scope
   }, [scope, view?.revision])
-  const remember = (text: string, reply = replyTo, target = recipient) => { draftText.current = text; setDraft(text); setReplyTo(reply); setRecipient(target); draftsByScope.current.set(scope, { text, replyTo: reply, recipient: target }) }
+  const remember = (text: string, reply = replyTo, target = recipient) => { draftText.current = text; controller.rememberComposerDraft(scope, { text, replyTo: reply, recipient: target }) }
   const run = (operation: Promise<unknown>) => { setError(''); void operation.catch(reason => setError(frameworkErrorText(reason))) }
   // The controller owns read errors by generation. Do not copy an obsolete
   // read rejection into page-local errors after navigation withdrew that read.
   const refresh = (archives = false, originals = false) => { setError(''); void controller.refresh(archives, false, originals).catch(() => {}) }
   useEffect(() => {
     if (!groupChat && recipient === 'human') {
-      setRecipient('ai'); draftsByScope.current.set(scope, { text: draftText.current, replyTo, recipient: 'ai' })
+      controller.rememberComposerDraft(scope, { text: draftText.current, replyTo, recipient: 'ai' })
     }
   }, [groupChat, recipient, scope, replyTo])
-  const localPickerAvailable = typeof (globalThis as typeof globalThis & { __DSH_HOST_PATHS__?: { pathFor?: (file: File) => string } }).__DSH_HOST_PATHS__?.pathFor === 'function'
-  const canSelectAttachments = view?.activeMode === 'local' ? !!props.api.selectLocalAttachment && localPickerAvailable : !!props.api.uploadAttachment
-  const chooseAttachments = (files: readonly File[]) => {
+  const canSelectAttachments = !!props.api.uploadAttachment || (!!props.api.selectLocalAttachment
+    && typeof (globalThis as typeof globalThis & { __DSH_HOST_PATHS__?: { pathFor?: unknown } }).__DSH_HOST_PATHS__?.pathFor === 'function')
+  const chooseAttachments = (files: readonly File[], directories: ReadonlySet<File> = new Set()) => {
     const current = controller.snapshot().value
     if (!view?.storageScope || !current || changingMode || !canSelectAttachments
       || frameworkScopeKey(current.activeMode, current.collaborationId, current.storageScope) !== scope) return
     remember(draftText.current)
-    attachmentDrafts.add(scope, { mode: view.activeMode, collaborationId: view.collaborationId, storageScope: view.storageScope }, files)
+    attachmentDrafts.add(scope, { mode: view.activeMode, collaborationId: view.collaborationId, storageScope: view.storageScope }, files.filter(file => !directories.has(file)))
+    if (directories.size) setError(tr('请选择文件，暂不支持文件夹附件。', 'Choose files; folder attachments are not supported.'))
   }
-  const addHostPath = () => {
-    const current = controller.snapshot().value
-    if (!view?.storageScope || !current || view.activeMode !== 'local' || changingMode || !props.api.selectLocalAttachment
-      || frameworkScopeKey(current.activeMode, current.collaborationId, current.storageScope) !== scope) return
-    const nativePath = hostPathDrafts.current.get(scope) ?? ''
-    try {
-      attachmentDrafts.addHostPath(scope, { mode: 'local', collaborationId: view.collaborationId, storageScope: view.storageScope }, nativePath)
-      hostPathDrafts.current.delete(scope); setHostPath(''); setError('')
-    } catch (reason) { setError(frameworkErrorText(reason)) }
+  // Match DSH's native file intake: preserve all file types and identify actual
+  // directories via the entry API, rather than confusing them with empty files.
+  const chooseTransferredAttachments = (transfer: DataTransfer) => {
+    const files: File[] = []
+    let directory = false
+    for (const item of Array.from(transfer.items)) {
+      if (item.kind !== 'file') continue
+      const file = item.getAsFile()
+      if (!file) continue
+      if (typeof item.webkitGetAsEntry === 'function' && item.webkitGetAsEntry()?.isDirectory) directory = true
+      else files.push(file)
+    }
+    if (files.length) chooseAttachments(files)
+    if (directory) setError(tr('请选择文件，暂不支持文件夹附件。', 'Choose files; folder attachments are not supported.'))
   }
   const send = () => {
     const current = controller.snapshot().value
     const selections = attachmentDrafts.selections(scope)
-    if (!view || !current || changingMode
+    if (!view || !current || changingMode || attachmentSend.current.has(scope)
       || frameworkScopeKey(current.activeMode, current.collaborationId, current.storageScope) !== scope
-      || (!draftText.current.trim() && !selections.length) || selections.some(row => row.state !== 'ready' || !row.reference)) return
-    const attachments = selections.map(row => row.reference!)
-    const now = new Date()
-    const target = groupChat ? recipient : 'ai' as const
-    const retry = controller.pendingDrafts().find(item => item.input.text === draftText.current
-      && item.input.recipient === target && item.input.replyTo === replyTo && sameAttachmentReferences(item.input.attachments, attachments))
-    if (retry?.state === 'sending') return
-    const input = retry ? retry.input : { mode: view.activeMode, collaborationId: view.collaborationId, storageScope: view.storageScope, id: crypto.randomUUID(), createdAt: now.toISOString(), timezoneOffsetMinutes: -now.getTimezoneOffset(), text: draftText.current, recipient: target, replyTo, device: 'dsh-web', ...(attachments.length ? { attachments } : {}) }
-    setError('')
-    const sentDraft = draftsByScope.current.get(scope) ?? { text: input.text, replyTo: input.replyTo, recipient: target }
-    draftsByScope.current.set(scope, sentDraft)
+      || (!draftText.current.trim() && !selections.length) || selections.some(row => row.state !== 'ready' && row.state !== 'selected')) return
+    const text = draftText.current
+    const retainedDrafts = controller.pendingDrafts()
     const sameComposer = () => {
       const latest = controller.snapshot().value
       return latest?.activeMode === view.activeMode && latest.collaborationId === view.collaborationId
         && (latest.storageScope === view.storageScope || (view.storageScope === undefined && latest.revision === view.revision))
     }
+    attachmentSend.current.add(scope); renderAttachmentSend(revision => revision + 1); setError('')
+    void (async () => {
+    if (selections.some(row => row.state === 'selected')) await attachmentDrafts.prepare(scope, selections)
+    const attachments = selections.map(row => row.reference!)
+    const now = new Date()
+    const target = groupChat ? recipient : 'ai' as const
+    const retry = retainedDrafts.find(item => item.input.text === text
+      && item.input.recipient === target && item.input.replyTo === replyTo && sameAttachmentReferences(item.input.attachments, attachments))
+    if (retry?.state === 'sending') return
+    const input = retry ? retry.input : { mode: view.activeMode, collaborationId: view.collaborationId, storageScope: view.storageScope, id: crypto.randomUUID(), createdAt: now.toISOString(), timezoneOffsetMinutes: -now.getTimezoneOffset(), text, recipient: target, replyTo, device: 'dsh-web', ...(attachments.length ? { attachments } : {}) }
+    setError('')
+    const sentDraft = draftsByScope.get(scope) ?? { text: input.text, replyTo: input.replyTo, recipient: target }
+    draftsByScope.set(scope, sentDraft)
     // Keep both text and selected originals until the durable conversation ack.
     // A late ack can clear only its own saved draft, never another selection.
-    void controller.send(input).then(() => {
-      const saved = draftsByScope.current.get(scope)
+    await controller.send(input).then(() => {
+      const saved = draftsByScope.get(scope)
       // Acknowledge the original selections, not a later upload of the same file.
       for (const row of selections) attachmentDrafts.remove(scope, row.id)
       if (saved === sentDraft && saved?.text === input.text && saved.replyTo === input.replyTo && saved.recipient === target) {
-        draftsByScope.current.set(scope, { text: '', recipient: target })
+        controller.rememberComposerDraft(scope, { text: '', recipient: target })
         if (sameComposer() && draftText.current === input.text) {
-          draftText.current = ''; setDraft(''); setReplyTo(undefined)
+          draftText.current = ''
           const latest = controller.snapshot().value!
-          draftsByScope.current.set(frameworkScopeKey(latest.activeMode, latest.collaborationId, latest.storageScope), { text: '', recipient: target })
+          controller.rememberComposerDraft(frameworkScopeKey(latest.activeMode, latest.collaborationId, latest.storageScope), { text: '', recipient: target })
         }
       }
-    }, reason => { if (sameComposer()) setError(frameworkErrorText(reason)) })
+    })
+    })().catch(reason => { if (sameComposer()) setError(frameworkErrorText(reason)) }).finally(() => {
+      attachmentSend.current.delete(scope); renderAttachmentSend(revision => revision + 1)
+    })
   }
   const prepareAttachment = async (reference: ConversationAttachmentReference) => {
     if (!view?.storageScope || !props.api.attachment || reference.mode !== view.activeMode || reference.collaborationId !== view.collaborationId) return
@@ -408,7 +424,7 @@ export function FrameworkPage(props: FrameworkPageProps) {
   };
   useLayoutEffect(() => {
     historyOperation.current = undefined; prepend.current = undefined; followBottom.current = true; previousTop.current = 0
-    setHistoryBusy(false); setHistoryDate(''); setActiveTurnId(undefined)
+    setHistoryBusy(false); setActiveTurnId(undefined)
   }, [scope])
   useLayoutEffect(() => {
     const element = messages.current
@@ -440,13 +456,13 @@ export function FrameworkPage(props: FrameworkPageProps) {
   const keepCurrentUpgrade = view?.storageScope ? async (path: string, operationId: string) => {
     await props.api.keepCurrentLocalUpgradeTarget({ mode: 'local', storageScope: view.storageScope!, operationId, path,
       confirmation: 'keep-current-with-original-unexported' })
-    await controller.refresh(true)
+    void controller.refresh(true).catch(() => {})
   } : undefined
   const keepRetainedStage = view?.storageScope ? async (path: string, operationId: string, stageOwner?: Parameters<FrameworkClientApi['keepCurrentLocalUpgradeTarget']>[0]['stageOwner']) => {
     await props.api.keepCurrentLocalUpgradeTarget({ mode: 'local', storageScope: view.storageScope!, operationId, path,
       ...(stageOwner ? { stageOwner } : {}),
       confirmation: 'keep-retained-stage-without-cleanup' })
-    await controller.refresh(true)
+    void controller.refresh(true).catch(() => {})
   } : undefined
   const settingsContent = <>
       {!view && <p role="status">{tr('正在读取设置…', 'Loading settings…')}</p>}
@@ -493,13 +509,14 @@ export function FrameworkPage(props: FrameworkPageProps) {
     {(error || snapshot.error || view?.connection.detail) && <div className={css.notice} role="alert">{error || snapshot.error || view?.connection.detail}</div>}
     {view?.activeMode === 'local' && !settingsOpen && <LocalUpgradeStatus value={view.localUpgrade} tr={tr} className={css.notice} onKeepCurrent={keepCurrentUpgrade} />}
     {exported && <p className={css.notice} role="status" style={{ flexShrink: 0, minWidth: 0, overflowWrap: 'anywhere' }}>{tr('记录已导出到', 'Records exported to')}: {exported}</p>}
+    <Fragment key={scope}>{!changingMode && props.transportConnected !== false && view && props.nativePending?.(view, zh, taskId => { setSelectedTask(taskId); setTab('tasks') }, () => setTab('conversation'))}{!changingMode && props.transportConnected !== false && props.nativeInteractions?.((view?.executions ?? []).filter(row => row.role !== 'Foreground' && !view?.tasks.some(task => task.executions.some(item => item.sessionId === row.sessionId))), zh, true)}</Fragment>
     <div className={`${css.content} ${corner ? css.contentWithCorner : ''}`}>
       {tab === 'conversation' && <div className={css.conversation}>
         <nav className={css.historyNavigation} aria-label={t('conversation.history')}>
           <Button size="sm" disabled={historyBusy || !view?.pageBefore} onClick={loadOlder}>{t('conversation.older')}</Button>
           {view?.pageAfter && <Button size="sm" disabled={historyBusy} onClick={() => history(() => controller.navigateHistory({ date: view.historyDate, afterId: view.pageAfter, limit: 50 }))}>{t('conversation.newer')}</Button>}
-          <HistoryDatePicker value={historyDate} disabled={!view} t={t} onPick={date => { setHistoryDate(date); history(() => date ? controller.navigateHistory({ date, limit: 50 }) : controller.latest()) }} />
-          {view?.historyWindow && <Button size="sm" onClick={() => { setHistoryDate(''); history(() => controller.latest()) }}>{t('conversation.latest')}</Button>}
+          <HistoryDatePicker value={historyDate} disabled={!view} t={t} onPick={date => history(() => date ? controller.navigateHistory({ date, limit: 50 }) : controller.latest())} />
+          {view?.historyWindow && <Button size="sm" onClick={() => history(() => controller.latest())}>{t('conversation.latest')}</Button>}
         </nav>
         <div className={css.conversationTranscript} data-conversation-transcript>
         {!!view?.missingBodies?.length && <div className={css.notice} role="alert" data-missing-conversation-bodies>
@@ -537,35 +554,41 @@ export function FrameworkPage(props: FrameworkPageProps) {
         {props.transportConnected !== false && !changingMode && !snapshot.error && view?.foregroundProcessing && <ForegroundProcessing
           key={scope + ':' + view.foregroundProcessing.executionId + ':' + view.foregroundProcessing.turnId}
           processing={view.foregroundProcessing} name={view.settings.name || 'DeepSeek Servant'} zh={zh} />}
-        <Fragment key={scope}>{!changingMode && props.transportConnected !== false && props.nativeQuestions?.(view?.executions ?? [], zh)}</Fragment>
-        <div className={css.composer}><textarea aria-label={tr('消息', 'Message')} placeholder={t('conversation.placeholder')} value={draft} onChange={event => remember(event.target.value)}
-          onPaste={event => { const files = Array.from(event.clipboardData.items).filter(item => item.kind === 'file' && item.type.startsWith('image/')).map(item => item.getAsFile()).filter((file): file is File => !!file); if (files.length && canSelectAttachments && view?.storageScope && !changingMode) { event.preventDefault(); chooseAttachments(files) } }}
-          onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); send() } }} />
+        <Fragment key={scope}>{!changingMode && props.transportConnected !== false && props.nativeInteractions?.((view?.executions ?? []).filter(row => row.role === 'Foreground'), zh)}</Fragment>
+        <div className={css.composer} data-composer-card
+          onDragOver={event => { if (!props.nativeAttachments && event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = canSelectAttachments && !!view?.storageScope && !changingMode ? 'copy' : 'none' } }}
+          onDrop={event => { if (!props.nativeAttachments && event.dataTransfer.types.includes('Files')) { event.preventDefault(); if (canSelectAttachments && view?.storageScope && !changingMode) chooseTransferredAttachments(event.dataTransfer) } }}><textarea aria-label={tr('消息', 'Message')} placeholder={t('conversation.placeholder')} value={draft} onChange={event => remember(event.target.value)}
+          onPaste={event => { if (canSelectAttachments && view?.storageScope && !changingMode) chooseTransferredAttachments(event.clipboardData) /* Keep the textarea's native text/plain insertion, including mixed text + files. */ }}
+          onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); if (!event.repeat) send() } }} />
           <input ref={attachmentInput} type="file" multiple hidden aria-label={tr('选择图片、视频或文件', 'Choose images, videos or files')} disabled={!view?.storageScope || !canSelectAttachments || changingMode} onChange={event => { if (attachmentPickerScope.current === undefined || attachmentPickerScope.current === scope) chooseAttachments(Array.from(event.currentTarget.files ?? [])); else setError(tr('会话已切换，请重新选择附件。', 'The conversation changed. Please select your attachments again.')); attachmentPickerScope.current = undefined; event.currentTarget.value = '' }} />
-          {!!selectedAttachments.length && <div aria-label={tr('待发送附件', 'Selected attachments')} style={{ maxHeight: 180, overflowY: 'auto' }}>{selectedAttachments.map(row => <div key={row.id} data-selected-attachment data-upload-state={row.state} className={css.artifact} style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
-            <span>{attachmentLabel(row.reference?.mimeType ?? row.mimeType)} · {row.name}{row.bytes === undefined ? '' : ' · ' + attachmentByteLabel(row.bytes)}</span>
-            <span role="status">{row.state === 'ready' ? view?.activeMode === 'local' ? tr('已引用原文件，等待发送', 'Original selected, ready to send') : tr('已上传，等待发送', 'Uploaded, ready to send') : row.state === 'uploading' ? view?.activeMode === 'local' ? tr('正在读取原路径', 'Reading original path') : tr('正在上传', 'Uploading') : row.state === 'queued' ? view?.activeMode === 'local' ? tr('等待引用原文件', 'Waiting to select original') : tr('等待上传', 'Waiting to upload') : row.issue === 'git-size' ? tr('Git 每个文件不得超过 104,857,600 字节（100 MiB）', 'Git files cannot exceed 104,857,600 bytes (100 MiB)') : row.issue === 'unavailable' ? tr('当前接入端不支持附件上传', 'This connection does not support attachment uploads') : view?.activeMode === 'local' ? tr('此附件尚未就绪；请查看原因或重新选择原文件', 'This attachment is not ready; check its error or select the original again') : tr('上传尚未确认；原文件已保留，可按原标识重试', 'Upload not confirmed; original retained for retry with the same identity')}</span>
-            {row.originalPath && <span>{row.originalPath}</span>}
-            {row.error && <p role="alert">{row.error}</p>}
-            {row.state === 'error' && !row.issue && <Button size="sm" onClick={() => attachmentDrafts.retry(scope, row.id)}>{view?.activeMode === 'local' ? tr('重试引用', 'Retry selection') : tr('重试上传', 'Retry upload')}</Button>}
-            <Button size="sm" onClick={() => { remember(draftText.current); attachmentDrafts.remove(scope, row.id) }}>{tr('移除', 'Remove')}</Button>
-          </div>)}</div>}
-          {replyTo && <p className={css.replyPreview} data-reply-selection>{tr('回复', 'Reply to')} {replyPreview(replyTo)} <Button size="sm" onClick={() => { setReplyTo(undefined); draftsByScope.current.set(scope, { text: draft, recipient }) }}>{tr('取消引用', 'Clear reply')}</Button></p>}
-          <div className={css.composerFooter}>{groupChat ? <SegmentedControl id="framework-recipient" label={tr('收件方', 'Recipient')} value={recipient} onChange={target => remember(draft, replyTo, target)} options={[{ value: 'ai', label: 'AI' }, { value: 'human', label: tr('群聊', 'People') }]} /> : <span className={css.composerHint}>{t('conversation.keyboard')}</span>}
+          <NativeAttachmentOwner rows={selectedAttachments} renderImages={!settingsOpen && !changingMode ? props.nativeAttachments : undefined}
+            canAcceptDrop={!!view?.storageScope && canSelectAttachments && !changingMode} onAddFiles={chooseAttachments}
+            onRemove={id => { remember(draftText.current); attachmentDrafts.remove(scope, id) }}
+            onRetry={id => attachmentDrafts.retry(scope, id)} zh={zh} />
+          {replyTo && <p className={css.replyPreview} data-reply-selection>{tr('回复', 'Reply to')} {replyPreview(replyTo)} <Button size="sm" onClick={() => controller.rememberComposerDraft(scope, { text: draft, recipient })}>{tr('取消引用', 'Clear reply')}</Button></p>}
+          <div className={css.composerFooter}>
+            <div className={css.composerTools}>
+              <Menu open={attachmentMenuOpen} side="top" align="start" portal
+                items={[{ id: 'file', label: tr('文件', 'File'), icon: <IconPaperclipOutlineRegular size={16} /> }]}
+                onClose={() => setAttachmentMenuOpen(false)}
+                onSelect={() => { setAttachmentMenuOpen(false); attachmentPickerScope.current = scope; attachmentInput.current?.click() }}
+                anchor={<Tooltip label={tr('添加', 'Add')} side="top" delayMs={500} portal>
+                  <button type="button" className={css.composerAdd} aria-label={tr('添加', 'Add')} aria-haspopup="menu" aria-expanded={attachmentMenuOpen}
+                    disabled={!view?.storageScope || !canSelectAttachments || changingMode}
+                    onClick={() => setAttachmentMenuOpen(value => !value)}><IconPlusOutlineMedium size={14} /></button>
+                </Tooltip>} />
+              {groupChat && <SegmentedControl id="framework-recipient" label={tr('收件方', 'Recipient')} value={recipient} onChange={target => remember(draft, replyTo, target)} options={[{ value: 'ai', label: 'AI' }, { value: 'human', label: tr('群聊', 'People') }]} />}
+            </div>
             <div className={css.composerActions}>
-              <Button size="sm" disabled={!view?.storageScope || !canSelectAttachments || changingMode} title={view?.activeMode === 'local' && !localPickerAvailable ? tr('此浏览器文件选择器不能提供 Host 原路径；请使用下方 Host 文件路径入口。', 'This browser picker cannot provide the original Host path. Use the Host file path field below.') : !canSelectAttachments ? tr('当前接入端不支持此模式的附件选择', 'This connection does not support attachment selection in this mode') : tr('选择图片、视频或文件', 'Choose images, videos or files')} onClick={() => { attachmentPickerScope.current = scope; attachmentInput.current?.click() }}>{tr('添加附件', 'Attach files')}</Button>
+              {view && props.permissionControl?.(view, zh)}
               {view && props.modelControl && <fieldset disabled={!!modelSaving || changingMode} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }} aria-label={tr('前台模型', 'Foreground model')}
                 title={tr('下轮对话使用；后台设为“跟随前台”时，后续后台任务沿用此选择。', 'Used for the next conversation turn. Future background tasks set to Follow Foreground follow this choice.')}>
                 {props.modelControl(view.settings.foreground, model => saveForegroundModel({ mode: view.activeMode, storageScope: view.storageScope,
                   commandId: crypto.randomUUID(), model }), tr('前台模型', 'Foreground model'), { composer: true, disabled: !!modelSaving || changingMode })}
               </fieldset>}
-              <Button variant="primary" disabled={!view || changingMode || composerSending || (!draft.trim() && !selectedAttachments.length) || selectedAttachments.some(row => row.state !== 'ready')} onClick={send}>{tr('发送', 'Send')}</Button>
+              {view && view.storageScope !== undefined && props.onStopForeground && <Button aria-label={tr('停止前台当前回复', 'Stop current foreground reply')} onClick={() => run(props.onStopForeground!(view))}>{tr('停止', 'Stop')}</Button>}
+              <Button variant="primary" disabled={!view || changingMode || composerSending || preparingAttachments || (!draft.trim() && !selectedAttachments.length) || selectedAttachments.some(row => row.state !== 'ready' && row.state !== 'selected')} onClick={send}>{tr('发送', 'Send')}</Button>
             </div></div>
-          {view?.activeMode === 'local' && <div className={css.composerFooter}>
-            <label className={css.field}><span>{tr('以 Host 电脑为准的绝对文件路径；远程浏览器文件不会自动上传', 'Absolute file path on the Host computer; a remote browser file is not uploaded automatically')}</span>
-              <Input value={hostPath} disabled={!view.storageScope || !props.api.selectLocalAttachment || changingMode} onChange={event => { const value = event.target.value; hostPathDrafts.current.set(scope, value); setHostPath(value) }} /></label>
-            <Button size="sm" disabled={!view.storageScope || !props.api.selectLocalAttachment || changingMode || !hostPath} onClick={addHostPath}>{tr('引用 Host 文件', 'Attach Host file')}</Button>
-          </div>}
           {modelAttempt && !modelSaving && view && modelAttempt.mode === view.activeMode && modelAttempt.storageScope === view.storageScope
             && <Button size="sm" onClick={() => saveForegroundModel(modelAttempt)}>{tr('核对并重试模型设置', 'Resolve and retry model setting')}</Button>}
         </div><p className={css.footnote}>{t('conversation.background')}</p>
@@ -581,6 +604,7 @@ export function FrameworkPage(props: FrameworkPageProps) {
           {task.originalSource === 'local-sql' && <p role="status">{tr('正在显示原有记录。任务操作会等待该任务自己的转换，其他任务照常进行。', 'Showing the original record. Task controls wait only for this task’s restoration; other tasks continue.')}</p>}
           <section className={css.section}><h3>{tr('成员', 'Members')}</h3>{task.members.map(member => <div key={member.name} className={css.child}>{member.name} · {frameworkMemberStatus(member.status, zh)}</div>)}</section>
           {view && <TaskControls key={scope + task.taskId} task={task} view={view} controller={controller} tr={tr} />}
+          {props.transportConnected !== false && props.nativeInteractions?.(task.executions.filter(row => row.role !== 'Foreground'), zh)}
           <RoleExecutions executions={task.executions} tr={tr} controller={controller} view={view} />
           <section className={css.section}><h3>{tr('成果与证据', 'Results and evidence')}</h3>{task.resultPaths.map(path => <button key={path} className={css.artifact} title={path} onClick={() => { setError(''); void open(path, undefined, task.originalSource === 'local-sql' ? task.taskId : undefined) }}><code>{path}</code></button>)}{task.workspaceResults?.map(workspaceResult)}</section>
         </section>}</div>}
@@ -601,7 +625,7 @@ export function FrameworkPage(props: FrameworkPageProps) {
     <Modal open={!!attachmentDownload} onClose={closeAttachment} title={attachmentDownload?.reference.name ?? tr('附件', 'Attachment')} closeLabel={tr('关闭', 'Close')}>
       {attachmentDownload && <div style={{ overflowWrap: 'anywhere' }}>
         <p>{attachmentLabel(attachmentDownload.reference.mimeType)} · {attachmentDownload.reference.name} · {attachmentByteLabel(attachmentDownload.reference.bytes)}</p>
-        {attachmentDownload.downloadUrl ? <a href={attachmentDownload.downloadUrl} download={attachmentDownload.reference.name}>{tr('下载原文件', 'Download original')}</a> : attachmentDownload.failed ? <p role="alert">{attachmentDownload.capability === 'webcrypto' ? tr('当前 DSS 界面缺少 WebCrypto SHA-256，无法校验此次附件下载。', 'This DSS interface lacks WebCrypto SHA-256 and cannot verify this attachment download.') : attachmentDownload.capability === 'client-memory' ? tr('当前 DSS 界面无法为完整附件分配内存，此次下载未完成。', 'This DSS interface could not allocate memory for the complete attachment; this download did not finish.') : tr('附件读取失败，请关闭后重试。', 'The attachment could not be read. Close and try again.')}</p> : <p role="status">{tr('正在准备原文件下载', 'Preparing original download')}</p>}
+        {attachmentDownload.downloadUrl ? <a href={attachmentDownload.downloadUrl} download={attachmentDownload.reference.name}>{tr('下载原文件', 'Download original')}</a> : attachmentDownload.failed ? <p role="alert">{attachmentDownload.capability === 'client-memory' ? tr('当前 DSS 界面无法为完整附件分配内存，此次下载未完成。', 'This DSS interface could not allocate memory for the complete attachment; this download did not finish.') : tr('附件读取失败，请关闭后重试。', 'The attachment could not be read. Close and try again.')}</p> : <p role="status">{tr('正在准备原文件下载', 'Preparing original download')}</p>}
         {attachmentDownload.downloadUrl?.startsWith('blob:') && <p className={css.muted}>{tr('当前客户端在内存中准备完整文件并用 WebCrypto 校验；大文件受客户端内存限制。', 'This client prepares the complete file in memory and verifies it with WebCrypto. Large files depend on client memory.')}</p>}
       </div>}
     </Modal>
@@ -844,12 +868,17 @@ function KnowledgePanel({ api, view, tr, open }: { api: FrameworkClientApi; view
   const refresh = async () => { const value = await api.knowledgeList(scope); if (active.current) setCatalog(value) }
   const run = (action: () => Promise<unknown>) => { setBusy(true); setError(''); setNotice(''); void action().catch(error => { if (active.current) setError(frameworkErrorText(error)) }).finally(() => { if (active.current) setBusy(false) }) }
   useEffect(() => { active.current = true; run(refresh); return () => { active.current = false; reading.current++ } }, [])
-  const read = (path: string) => run(async () => {
-    const request = ++reading.current, result = await api.knowledgeRead({ ...scope, path })
-    if (!active.current || request !== reading.current) return
-    setSelected(result); setEdit(result.edit ? { ...result.edit } : undefined); setStatus(undefined); setReason(''); editAttempt.current = undefined; statusAttempt.current = undefined
-  })
+  const openReadOnly = (path: string) => { void open(path).catch(error => { if (active.current) setError(frameworkErrorText(error)) }) }
+  const read = (path: string) => {
+    const request = ++reading.current
+    setError('')
+    void api.knowledgeRead({ ...scope, path }).then(result => {
+      if (!active.current || request !== reading.current) return
+      setSelected(result); setEdit(result.edit ? { ...result.edit } : undefined); setStatus(undefined); setReason(''); editAttempt.current = undefined; statusAttempt.current = undefined
+    }, error => { if (active.current && request === reading.current) setError(frameworkErrorText(error)) })
+  }
   const submit = async (operation: KnowledgePending) => {
+    const selection = reading.current
     operations.set(operation.input.commandId, operation); redraw(value => value + 1)
     const result = operation.kind === 'edit' ? await api.knowledgeEdit(operation.input) : await api.knowledgeStatus(operation.input)
     if ('saved' in result && !result.saved) {
@@ -872,15 +901,15 @@ function KnowledgePanel({ api, view, tr, open }: { api: FrameworkClientApi; view
       // Advance this editor to actual current authority after its own save.
       // Repeated edits must not keep a pre-save baseline; a newer selection or
       // a remounted retained operation must not replace an unrelated draft.
-      if (selected?.path === operation.input.path && selected.revision === operation.input.expectedRevision && edit?.body === operation.input.body) {
-        const request = reading.current
+      if (selection === reading.current && selected?.path === operation.input.path && selected.revision === operation.input.expectedRevision && edit?.body === operation.input.body) {
+        const request = selection
         try {
           const current = await api.knowledgeRead({ mode: operation.input.mode, storageScope: operation.input.storageScope, path: operation.input.path })
           if (active.current && request === reading.current) {
             setSelected(current); setEdit(current.edit ? { ...current.edit } : undefined)
             editAttempt.current = undefined; statusAttempt.current = undefined
           }
-        } catch (error) { if (active.current) setError(tr('正文已保存，但重读失败；再次编辑前请重读：', 'Skill saved, but reload failed. Reload before editing again: ') + frameworkErrorText(error)) }
+        } catch (error) { if (active.current && request === reading.current) setError(tr('正文已保存，但重读失败；再次编辑前请重读：', 'Skill saved, but reload failed. Reload before editing again: ') + frameworkErrorText(error)) }
       }
     }
     // A committed write is complete. Refresh has its own read error and never
@@ -901,16 +930,17 @@ function KnowledgePanel({ api, view, tr, open }: { api: FrameworkClientApi; view
     const fingerprint = JSON.stringify([scope, selected.path, expectedRevision, status, reason])
     if (statusAttempt.current?.fingerprint !== fingerprint) statusAttempt.current = { fingerprint, input: { ...scope, commandId: crypto.randomUUID(), path: selected.path, expectedRevision, status, reason, updatedAt: new Date().toISOString() } }
     const input = statusAttempt.current.input
-    run(async () => { const confirmed = await submit({ kind: 'status', input }); if (active.current && confirmed) { setStatus(undefined); setNotice(tr('状态已保存，原文保留。', 'Status saved; original body retained.')) } })
+    const selection = reading.current
+    run(async () => { const confirmed = await submit({ kind: 'status', input }); if (active.current && selection === reading.current && confirmed) { setStatus(undefined); setNotice(tr('状态已保存，原文保留。', 'Status saved; original body retained.')) } })
   }
   return <section className={css.knowledge}><div className={css.actions}><h2>{tr('知识管理', 'Knowledge management')}</h2><Button disabled={busy} onClick={() => run(refresh)}>{tr('刷新知识', 'Refresh knowledge')}</Button></div>
     {error && <p role="alert" className={css.errorDetail}>{error}</p>}{notice && <p role="status">{notice}</p>}
-    {[...operations.values()].filter(operation => operation.input.mode === scope.mode && operation.input.storageScope === scope.storageScope).map(operation => <article key={operation.input.commandId} className={css.knowledgeCard}><p>{operation.kind === 'edit' && operation.conflicts?.length ? tr('编辑冲突，草稿已保留', 'Edit conflict; draft retained') : tr('尚未确认的原操作', 'Unconfirmed original operation')} · {operation.kind}</p><code>{operation.input.path}</code>{operation.kind === 'edit' && <details><summary>{tr('查看保留的草稿', 'View retained draft')}</summary>{Object.entries(operation.input).filter(([key, value]) => ['title', 'description', 'applicability', 'body'].includes(key) && value !== undefined).map(([key, value]) => <div key={key}><strong>{key}</strong><pre>{value}</pre></div>)}</details>}{operation.kind === 'edit' && operation.conflicts?.map(issue => <details key={issue.path}><summary>{tr('查看同文件修改冲突', 'Review concurrent skill edit conflict')}</summary><p>{issue.reason}</p><strong>{tr('当前正文', 'Current skill')}</strong><pre>{issue.current ?? tr('文件已不存在', 'File no longer exists')}</pre></details>)}{operation.convertedPath && <Button disabled={busy} onClick={() => run(() => open(operation.convertedPath!))}>{tr('查看转换后的文件', 'Open converted file')} · {operation.convertedPath}</Button>}<Button disabled={busy} onClick={() => run(() => submit(operation))}>{tr('核对并重试原知识操作', 'Resolve and retry original knowledge operation')}</Button></article>)}
+    {[...operations.values()].filter(operation => operation.input.mode === scope.mode && operation.input.storageScope === scope.storageScope).map(operation => <article key={operation.input.commandId} className={css.knowledgeCard}><p>{operation.kind === 'edit' && operation.conflicts?.length ? tr('编辑冲突，草稿已保留', 'Edit conflict; draft retained') : tr('尚未确认的原操作', 'Unconfirmed original operation')} · {operation.kind}</p><code>{operation.input.path}</code>{operation.kind === 'edit' && <details><summary>{tr('查看保留的草稿', 'View retained draft')}</summary>{Object.entries(operation.input).filter(([key, value]) => ['title', 'description', 'applicability', 'body'].includes(key) && value !== undefined).map(([key, value]) => <div key={key}><strong>{key}</strong><pre>{value}</pre></div>)}</details>}{operation.kind === 'edit' && operation.conflicts?.map(issue => <details key={issue.path}><summary>{tr('查看同文件修改冲突', 'Review concurrent skill edit conflict')}</summary><p>{issue.reason}</p><strong>{tr('当前正文', 'Current skill')}</strong><pre>{issue.current ?? tr('文件已不存在', 'File no longer exists')}</pre></details>)}{operation.convertedPath && <Button onClick={() => openReadOnly(operation.convertedPath!)}>{tr('查看转换后的文件', 'Open converted file')} · {operation.convertedPath}</Button>}<Button disabled={busy} onClick={() => run(() => submit(operation))}>{tr('核对并重试原知识操作', 'Resolve and retry original knowledge operation')}</Button></article>)}
     {catalog?.items.map(item => <article className={css.knowledgeCard} key={item.path}><h3>{item.name}</h3><p>{item.description}</p><code>{item.path}</code><p>{item.kind === 'project-fact' ? tr('项目事实 · 只读', 'Project fact · Read only') : item.kind === 'preference' ? tr('偏好 · 只读', 'Preference · Read only') : <>{frameworkStateLabel(item.status, tr)} · {item.indexed ? tr('已索引', 'Indexed') : tr('未索引', 'Not indexed')}</>}</p>
       {item.error && <p role="alert">{item.error}</p>}
-      {item.candidates.map(candidate => <p key={candidate.path}>{tr('候选', 'Candidate')} · {candidate.createdAt}<Button disabled={busy} onClick={() => run(() => open(candidate.path))}>{candidate.path}</Button></p>)}
-      {item.resources?.map(path => <p key={path}><Button disabled={busy} onClick={() => run(() => open(path))}>{path}</Button></p>)}
-      <Button disabled={busy} onClick={() => read(item.path)}>{item.readOnly || item.kind === 'project-fact' || item.kind === 'preference' ? tr('查看原记录', 'Read original record') : tr('查看与编辑', 'Read and edit')}</Button></article>)}
+      {item.candidates.map(candidate => <p key={candidate.path}>{tr('候选', 'Candidate')} · {candidate.createdAt}<Button onClick={() => openReadOnly(candidate.path)}>{candidate.path}</Button></p>)}
+      {item.resources?.map(path => <p key={path}><Button onClick={() => openReadOnly(path)}>{path}</Button></p>)}
+      <Button onClick={() => read(item.path)}>{item.readOnly || item.kind === 'project-fact' || item.kind === 'preference' ? tr('查看原记录', 'Read original record') : tr('查看与编辑', 'Read and edit')}</Button></article>)}
     {selected && <section className={css.formCard}><h3>{selected.path}</h3>{selected.record ? <KnowledgeRecordView record={selected.record} tr={tr} /> : !edit ? <><p>{tr('原记录只读。', 'Original record is read only.')}</p><pre>{selected.text}</pre></> : <>
       <label className={css.field}><span>{tr('知识正文', 'Knowledge body')}</span><textarea disabled={busy} value={edit.body} onChange={event => setEdit({ ...edit, body: event.target.value })} /></label>
       <Button disabled={busy} onClick={save}>{tr('保存技能正文', 'Save skill definition')}</Button>

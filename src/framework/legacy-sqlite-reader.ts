@@ -138,6 +138,7 @@ export async function withLegacySqliteSnapshot<T>(databasePath: string,
     try { return read() } catch (cause) { throw failure(cause) }
   }
   try {
+    let hasBinary = false
     try {
       db = new DatabaseSync(databasePath, { readOnly: true, allowExtension: false })
       db.exec('PRAGMA query_only=ON; BEGIN')
@@ -148,11 +149,11 @@ export async function withLegacySqliteSnapshot<T>(databasePath: string,
       if (!['path', 'content', 'version', 'bytes'].every(name => columns.some(column => column.name === name))) {
         throw new LegacySqliteReadError('DSS_LEGACY_SCHEMA_UNSUPPORTED', 'The source files table is missing required legacy columns. No schema was created or changed.')
       }
+      hasBinary = columns.some(column => column.name === 'binary')
       const encoding = db.prepare('PRAGMA encoding').get()?.encoding
       if (encoding !== 'UTF-8') throw new LegacySqliteReadError('DSS_LEGACY_SCHEMA_UNSUPPORTED', 'The source uses a text encoding other than the v44 UTF-8 schema. Its bytes were not silently transcoded.')
       assertOpen()
     } catch (cause) { throw failure(cause) }
-    const hasBinary = db.prepare('PRAGMA table_info(files)').all().some(column => column.name === 'binary')
     const sql = 'SELECT path, typeof(path) AS path_type, CAST(path AS BLOB) AS path_bytes, '
       + 'typeof(content) AS content_type, CAST(content AS BLOB) AS text_bytes, '
       + (hasBinary ? 'binary, typeof(binary)' : "NULL AS binary, 'null'") + ' AS binary_type, '

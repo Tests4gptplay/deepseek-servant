@@ -329,7 +329,8 @@ export async function retirePhysicalTaskRequirement(files: PhysicalLocalFiles, t
     if (fact) await retire(files, fact)
     // Success evidence also permits finishing a prior interrupted retirement
     // after the fact itself was removed. No arbitrary child is traversed.
-    for (const name of ['input.txt', 'decision.txt', 'source.stage', 'inbox.stage', 'decision.stage', 'signal.stage', 'prepared.json', 'publication.json'])
+    for (const name of fact ? ['prepared.json', 'publication.json']
+      : ['input.txt', 'decision.txt', 'source.stage', 'inbox.stage', 'decision.stage', 'signal.stage', 'prepared.json', 'publication.json'])
       await files.delete(root(ref) + '/' + name)
     for (const path of [root(ref), paths.run(taskId) + '/.requirements']) {
       try { await files.removeEmptyDirectory(path) }

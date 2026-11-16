@@ -215,7 +215,8 @@ export class DshStorageAdapter implements StoragePort {
       try {
         move.copy = await copyRecordTree(sourceTree, targetTree, move.copy, async copy => {
           move.copy = copy
-          await this.location.table('settings').put('record-move', { directory: this.directory, move: structuredClone(move) })
+          const { copy: _copy, ...metadata } = move
+          await this.location.table('settings').put('record-move', { directory: this.directory, move: { ...structuredClone(metadata), copy } })
         }, signal)
         target = await openTree(this.ctx, targetTree)
         assertSameRecords(this.records.table, target.table)
@@ -305,6 +306,12 @@ export class DshStorageAdapter implements StoragePort {
   /** Task retirement may bypass exact writes proven owned by another Task.
    * This preserves the full committed view and the ordinary read contract. */
   listWithoutUnrelatedTaskRetirementWriteWait<T>(prefix: string, unrelatedKeys: ReadonlySet<string>): Promise<Array<{ key: string; value: T }>> {
+    return this.read(prefix, true, () => this.listedRecords<T>(prefix), unrelatedKeys)
+  }
+  /** Helper discovery may read committed rows while exact non-Helper writes
+   * remain pending. The caller proves the current writer; barriers and unknown
+   * or Helper writes retain their ordinary wait. */
+  listWithoutUnrelatedWakeWriteWait<T>(prefix: string, unrelatedKeys: ReadonlySet<string>): Promise<Array<{ key: string; value: T }>> {
     return this.read(prefix, true, () => this.listedRecords<T>(prefix), unrelatedKeys)
   }
   delete(key: string): Promise<void> { return this.write(key, async () => { this.records.files?.assertReadable(key); await this.records.table.delete(key); this.oldLocalConfigurations.delete(key) }) }

@@ -5,6 +5,8 @@ import { JsonStorageBackend } from '@deepseek-ai/dsh-storage-json'
 
 type KvFacet = JsonStorageBackend['kv']
 type KvUnit = Awaited<ReturnType<KvFacet['open']>>
+// Internal single-record view used by openTree, not a registered StorageBackend.
+type RecordTreeUnit = Pick<KvUnit, 'loadAll' | 'putRecord' | 'deleteRecord' | 'setGlobal' | 'close'>
 const descriptor = { name: 'record', version: 1, tables: ['records'], hasGlobal: false } as const
 const LAYOUT = { format: 'deepseek-servant-record-folders', version: 2 } as const
 const PREVIOUS_LAYOUT = { format: 'deepseek-servant-record-folders', version: 1 } as const
@@ -160,7 +162,7 @@ export class RecordFilesBackend {
   }
   private closing?: Promise<void>
   constructor(private readonly directory: string) {}
-  readonly kv: KvFacet = {
+  readonly kv: { open(input: Parameters<KvFacet['open']>[0]): Promise<RecordTreeUnit> } = {
     open: async input => {
       this.assertOpen()
       if (this.opened) throw new Error('Servant record tree is already open.')
@@ -172,7 +174,10 @@ export class RecordFilesBackend {
         putRecord: async (table, key, value) => {
           this.assertTable(table)
           if (this.faults.has(recordFolder(key))) await this.readRecord(recordFolder(key))
-          const file = await this.openFile(recordFolder(key))
+          const relative = recordFolder(key)
+          // Recreate an externally removed parent before native writes, including cached handles.
+          await mkdir(path.join(this.directory, relative), { recursive: true })
+          const file = await this.openFile(relative)
           await file.unit.putRecord('records', key, value)
         },
         deleteRecord: async (table, key) => {
@@ -204,9 +209,6 @@ export class RecordFilesBackend {
   }
   private async openFile(relative: string): Promise<OpenFile> {
     this.assertOpen()
-    // The handle may outlive a folder removed in Explorer. Recreate its parent
-    // before the native atomic JSON write, including for cached handles.
-    await mkdir(path.join(this.directory, relative), { recursive: true })
     const existing = this.files.get(relative)
     if (existing) return existing
     const backend = new JsonStorageBackend(path.join(this.directory, relative))

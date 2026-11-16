@@ -122,9 +122,10 @@ async function stageBody(files: PhysicalLocalFiles, snapshot: FilesSnapshot, pen
   // the first captured bytes. No copy is overwritten or inferred from absence.
   await files.createIfAbsent(stage, bytes)
   const captured = await files.readBytes(snapshot, stage)
-  if (captured === undefined || hash(captured) !== hash(bytes)) throw new Error('Recorder stage differs from its accepted original: ' + key)
+  const capturedHash = captured === undefined ? undefined : hash(captured)
+  if (capturedHash === undefined || capturedHash !== hash(bytes)) throw new Error('Recorder stage differs from its accepted original: ' + key)
   const previous = await files.fingerprint(path)
-  const body: ArchiveBody = { path, stage, sha256: hash(captured), previous: previous?.sha256 ?? null }
+  const body: ArchiveBody = { path, stage, sha256: capturedHash, previous: previous?.sha256 ?? null }
   await files.replace(descriptor, encodeJson(body))
   return body
 }

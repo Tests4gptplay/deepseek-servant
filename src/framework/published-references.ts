@@ -91,15 +91,16 @@ export async function preservePhysicalPublishedReferences(files: PhysicalLocalFi
         const pending = record.pending
         if (pending.original !== original || !pending.target.startsWith(paths.archive(task) + '/published/'))
           throw new Error('Unfinished published reference belongs to another original.')
-        let target = await files.readBytes(snapshot, pending.target)
+        let target = await files.readBytes(snapshot, pending.target), targetHash: string | undefined
         if (target === undefined) {
           const source = await files.readBytes(snapshot, original)
-          if (source === undefined || hash(source) !== pending.sha256)
+          targetHash = source === undefined ? undefined : hash(source)
+          if (targetHash === undefined || targetHash !== pending.sha256)
             throw new Error('The original of an unfinished published reference is no longer available: ' + original)
-          await files.replace(pending.target, source)
-          target = source
+          await files.replace(pending.target, source!)
+          target = source!
         }
-        if (hash(target) !== pending.sha256) throw new Error('Unfinished published reference integrity differs: ' + original)
+        if ((targetHash ?? hash(target)) !== pending.sha256) throw new Error('Unfinished published reference integrity differs: ' + original)
         await files.replace(index, encodeJson(pending))
         record = pending
       }

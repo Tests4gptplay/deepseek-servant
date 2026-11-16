@@ -112,20 +112,9 @@ export class DshAgentGateway {
       if (presets !== undefined && presetId !== undefined) await presets.mount(agentCtx, presetId)
       waitingForUser = observeNativeQuestionWait(agentCtx, agent, () => { for (const listener of questionListeners) listener() })
       request.signal?.throwIfAborted()
-      // A resumed Auto execution retains its admitted route; a new execution
-      // captures the current Host default. Couple prompt and request selection.
-      const loggedHeader = request.resume && request.model === undefined
-        ? agent.session.requestHeader() : undefined
-      const selected = loggedHeader?.config ?? route
-      // Adapter defaults are resolved again; only restore an actual effort choice.
-      const reasoningEffort = loggedHeader?.adapterDefaults?.reasoningEffort === true
-        ? undefined : selected?.reasoningEffort
-      const provider = selected?.provider, model = selected?.model
-      if (provider && model) agentCtx.effect(() => installModelSelection(agentCtx, {
-        current: { provider, model, ...(reasoningEffort === undefined ? {} : {
-          reasoningEffort: reasoningEffort as ReasoningEffortId,
-        }) }, assembled: undefined,
-      }))
+      // Native AgentModel owns pending/last-used selection and options fallback.
+      // This official hook only publishes a notice when the actual route changes.
+      installModelSelection(agentCtx)
       if (request.taskWorkspace) {
         const working = this.ctx.workingDirectory
         const root = await this.ctx.fs.resolve(request.taskWorkspace, { signal: request.signal })

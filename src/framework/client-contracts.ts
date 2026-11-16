@@ -40,6 +40,7 @@ export interface FrameworkClientSettings {
   workerSeats: number
   workspace: string
   presetId?: string
+  permissionPreset?: string
   foreground?: FrameworkClientModel
   background?: FrameworkClientModel
   showCornerCharacter?: boolean
@@ -129,7 +130,7 @@ export interface FrameworkSendInput {
 export interface FrameworkClientApi {
   selectLocalAttachment?(input: { mode: 'local'; collaborationId: string; storageScope?: string; selectionId: string; path: string; name: string; mimeType: string }, signal?: AbortSignal): Promise<{ attachment: ConversationAttachmentReference; storageScope: string }>
   openLocalAttachment?(input: { mode: 'local'; collaborationId: string; storageScope?: string; reference: ConversationAttachmentReference }, signal?: AbortSignal): Promise<{ path: string }>
-  uploadAttachment?(input: { mode: 'git'; collaborationId: string; storageScope?: string; uploadId: string; name: string; mimeType: string; bytes: number }, file: Blob, signal?: AbortSignal): Promise<{ attachment: ConversationAttachmentReference; storageScope: string }>
+  uploadAttachment?(input: { mode: FrameworkMode; collaborationId: string; storageScope?: string; uploadId: string; name: string; mimeType: string; bytes: number }, file: Blob, signal?: AbortSignal): Promise<{ attachment: ConversationAttachmentReference; storageScope: string }>
   attachment?(input: { mode: FrameworkMode; collaborationId: string; storageScope?: string; reference: ConversationAttachmentReference }, signal?: AbortSignal): Promise<{ downloadUrl: string; mimeType: string; bytes: number }>
 
   clientFault?(input: { mode: FrameworkMode; storageScope?: string; source: string; message: string; code?: string; target?: string; occurrence?: number; displayOwner?: string }): Promise<SafetyPresentation | undefined>
@@ -148,12 +149,15 @@ export interface FrameworkClientApi {
   view(input: { mode?: FrameworkMode; includeArchives?: boolean; headerOnly?: boolean; panelsOnly?: boolean; refreshOriginalTasks?: boolean }, signal?: AbortSignal): Promise<FrameworkClientView>
   history(input: { mode: FrameworkMode; collaborationId: string; storageScope?: string; beforeId?: string; afterId?: string; date?: string; limit: number; live?: boolean }, signal?: AbortSignal): Promise<{ messages: FrameworkClientMessage[]; processGroups?: FrameworkClientProcessGroup[]; moreBefore?: string; moreAfter?: string; revision: string; order: string[]; selectedIds?: string[]; missingBodies?: Array<{ id: string; path: string }>; storageScope?: string; reset?: boolean; day?: string; cursor?: string }>
   send(input: FrameworkSendInput): Promise<{ storageScope: string }>
+  cancelForeground(input: { mode: FrameworkMode; storageScope: string }): Promise<{ submitted: boolean }>
   /** Settings/native lifecycle receipt only; view/history own their independent display reads. */
   configure(input: { mode: FrameworkMode; commandId: string; settings: FrameworkClientSettings; changedFields?: Array<keyof FrameworkClientSettings> }): Promise<FrameworkClientView>
+  permissionCatalog?(input: { mode: FrameworkMode }): Promise<{ options: Array<{ value: string; name: string; description?: string }>; current?: string }>
+  permissionSelect?(input: { mode: FrameworkMode; storageScope?: string; preset: string }): Promise<FrameworkClientView>
   foregroundModel(input: { mode: FrameworkMode; storageScope?: string; commandId: string; model?: FrameworkClientModel }): Promise<FrameworkClientView>
   moveRecords(input: { mode: 'local'; storageScope: string; expectedRevision: string; commandId: string; directory: string }): Promise<FrameworkClientView>
   legacyRecords(input: { mode: FrameworkMode; storageScope?: string; migrationId: string; oldTaskId: string }): Promise<{ text: string; revision: string }>
-  legacyControl(input: { mode: FrameworkMode; storageScope?: string; commandId: string; migrationId: string; oldTaskId: string; action: 'resume' | 'answer'; waitId?: string; answer?: string }): Promise<FrameworkClientView>
+  legacyControl(input: { mode: FrameworkMode; storageScope?: string; commandId: string; migrationId: string; oldTaskId: string; action: 'resume' | 'answer'; waitId?: string; answer?: string }): Promise<{ submitted: true; commandId: string }>
   invite(input: { mode: 'git'; storageScope?: string; username: string }): Promise<{ status: 'pending' | 'accepted' }>
   knowledgeList(input: { mode: FrameworkMode; storageScope?: string }): ReturnType<FrameworkKnowledge['list']>
   knowledgeRead(input: { mode: FrameworkMode; storageScope?: string; path: string }): ReturnType<FrameworkKnowledge['read']>
@@ -180,6 +184,13 @@ export const frameworkScopeKey = (mode: FrameworkMode, collaborationId: string, 
  * It does not persist remote conversation bodies or cancel Host sends on unmount.
  */
 export class FrameworkClientController {
+  /** Unsent composer state follows its conversation, not a mounted page. */
+  readonly composerDrafts = new Map<string, { text: string; replyTo?: string; recipient: 'ai' | 'human' }>()
+  rememberComposerDraft(scope: string, draft: { text: string; replyTo?: string; recipient: 'ai' | 'human' }): void {
+    this.composerDrafts.set(scope, draft)
+    this.current = { ...this.current }
+    for (const listener of this.listeners) listener()
+  }
   private taskStateUpdates?: { key: string; cursor: FrameworkTaskStateCursor; updates: Map<string, FrameworkTaskStateUpdate> }
   private current: FrameworkClientSnapshot = { loading: false, drafts: [] }
   private readonly listeners = new Set<() => void>()
@@ -520,7 +531,7 @@ export class FrameworkClientController {
     return { key, signal, mode, collaborationId, storageScope, current }
   }
   private messageRead<T>(owner: NonNullable<ReturnType<FrameworkClientController['messageOwner']>>, operation: () => Promise<T>, history: boolean | 'latest-selection' = false): Promise<T | undefined> {
-    const lane = history ? owner.key + ':' + (history === true ? 'history' : history) : owner.key
+    const lane = history ? owner.key + ':' + (history === true ? 'history' : history) + ':' + this.historyGeneration : owner.key
     const prior = this.messageLanes.get(lane)
     const pending = Promise.resolve(prior).catch(() => {}).then(async () => {
       if (!owner.current()) return undefined
@@ -748,7 +759,11 @@ export class FrameworkClientController {
     // Periodic Host projections report native state independently of this call.
     await this.api.stopExecution(input)
   }
-  legacyControl = (input: Parameters<FrameworkClientApi['legacyControl']>[0]): Promise<void> => this.load(() => this.api.legacyControl(input), input.mode)
+  legacyControl = async (input: Parameters<FrameworkClientApi['legacyControl']>[0]): Promise<void> => {
+    // The action's button owns its pending/error state. Existing change
+    // reception retains the full View contract and refreshes it independently.
+    await this.api.legacyControl(input)
+  }
   private settingsResult(result: FrameworkClientView): FrameworkClientView {
     const current = this.current.value
     const destination = (value: FrameworkClientView) => JSON.stringify([value.activeMode, value.collaborationId,

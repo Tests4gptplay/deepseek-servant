@@ -91,19 +91,19 @@ export class TaskWorkspaces {
     })
   }
 
-  async locate(taskId: string, snapshot?: FilesSnapshot, omitUnknownTerminal = false): Promise<TaskWorkspaceLocation | undefined> {
-    return (snapshot ? await this.locateSelected(taskId, snapshot, true, undefined, undefined, omitUnknownTerminal) : await withSnapshot(this.files, view => this.locateSelected(taskId, view, true, undefined, undefined, omitUnknownTerminal)))
+  async locate(taskId: string, snapshot?: FilesSnapshot, omitUnknownTerminal = false, selected?: { value: TaskMetadata | undefined }): Promise<TaskWorkspaceLocation | undefined> {
+    return (snapshot ? await this.locateSelected(taskId, snapshot, true, this.files instanceof GitFiles ? selected : undefined, undefined, omitUnknownTerminal) : await withSnapshot(this.files, view => this.locateSelected(taskId, view, true, undefined, undefined, omitUnknownTerminal)))
   }
-  private async locateSelected(taskId: string, snapshot: FilesSnapshot, historical: boolean, knownSelected?: TaskMetadata, bindRoot?: string, omitUnknownTerminal = false, observed?: (task: TaskMetadata) => void): Promise<TaskWorkspaceLocation | undefined> {
+  private async locateSelected(taskId: string, snapshot: FilesSnapshot, historical: boolean, knownSelected?: TaskMetadata | { value: TaskMetadata | undefined }, bindRoot?: string, omitUnknownTerminal = false, observed?: (task: TaskMetadata) => void): Promise<TaskWorkspaceLocation | undefined> {
     const read = async (id: string) => {
       const value = historical ? await readTaskReferenceIdentity(this.files, snapshot, id)
         : await readJson<TaskMetadata>(this.files, snapshot, paths.task(id))
       if (!historical && value) observed?.(value as TaskMetadata)
       return value
     }
-    const selected = knownSelected ?? await read(taskId)
+    const selected = knownSelected ? 'value' in knownSelected ? knownSelected.value : knownSelected : await read(taskId)
     if (!selected || selected.taskId !== taskId) throw new Error('Task workspace metadata is unavailable: ' + taskId)
-    if (!historical && knownSelected) observed?.(knownSelected)
+    if (!historical && knownSelected) observed?.(selected as TaskMetadata)
     let task = selected
     const visited = new Set([taskId])
     while (task.parent && !(task.workspaceRootTaskId && task.workspaceFolder)) {
@@ -200,17 +200,17 @@ export class TaskWorkspaces {
   }
 
   /** Publication checks task ownership and its boundary; later reads need no live Task. */
-  async validate(reference: PhysicalWorkspaceReference, snapshot?: FilesSnapshot): Promise<void> {
-    await this.validateReference(reference, snapshot)
+  async validate(reference: PhysicalWorkspaceReference, snapshot?: FilesSnapshot, selected?: TaskMetadata): Promise<void> {
+    await this.validateReference(reference, snapshot, selected)
   }
-  private async validateReference(reference: PhysicalWorkspaceReference, snapshot?: FilesSnapshot): Promise<Stats> {
+  private async validateReference(reference: PhysicalWorkspaceReference, snapshot?: FilesSnapshot, knownSelected?: TaskMetadata): Promise<Stats> {
     if (!snapshot) return withSnapshot(this.files, view => this.validateReference(reference, view))
     // This records a verified physical location, not an immutable native-file
     // snapshot. Task ownership and directory ancestry below are ordinary tracked
     // Git/Local reads; unrelated storage writes do not invalidate this location.
     if (!this.owner || reference.owner !== this.owner) throw new Error('Physical result producer differs from this Host member.')
     if (!reference.taskId) throw new Error('Recording a physical result requires its Task association.')
-    const selected = await readJson<TaskMetadata>(this.files, snapshot, paths.task(reference.taskId))
+    const selected = this.files instanceof GitFiles && knownSelected ? knownSelected : await readJson<TaskMetadata>(this.files, snapshot, paths.task(reference.taskId))
     if (!selected || selected.taskId !== reference.taskId || ![selected.owner, ...selected.members ?? []].includes(reference.owner))
       throw new Error('Physical result ownership does not match its Task.')
     const location = (await this.locateSelected(reference.taskId, snapshot, false, selected))!

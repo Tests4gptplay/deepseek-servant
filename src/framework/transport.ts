@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { ModeEvents } from '../mode-router/events.js';
 import { FilesConflictError, FilesOutcomeUnknownError } from './transactions.js';
 import type { FrameworkService } from './service.js';
-const methods = ['clientFault', 'maintenanceView', 'openMaintenancePath', 'keepCurrentLocalUpgradeTarget', 'openWorkspaceFile', 'exportRecords', 'cleanupPreview', 'cleanupRecords', 'knowledgeList', 'knowledgeRead', 'knowledgeEdit', 'knowledgeStatus', 'view', 'history', 'send', 'foregroundModel', 'configure', 'moveRecords', 'legacyRecords', 'legacyControl', 'invite', 'gitMembers', 'gitMemberAction', 'taskControl', 'stopExecution', 'participation', 'selectMode', 'readFile', 'attachment', 'selectLocalAttachment', 'openLocalAttachment'] as const;
+const methods = ['clientFault', 'maintenanceView', 'openMaintenancePath', 'keepCurrentLocalUpgradeTarget', 'openWorkspaceFile', 'exportRecords', 'cleanupPreview', 'cleanupRecords', 'knowledgeList', 'knowledgeRead', 'knowledgeEdit', 'knowledgeStatus', 'view', 'history', 'send', 'foregroundModel', 'permissionCatalog', 'permissionSelect', 'configure', 'moveRecords', 'legacyRecords', 'legacyControl', 'invite', 'gitMembers', 'gitMemberAction', 'taskControl', 'cancelForeground', 'stopExecution', 'participation', 'selectMode', 'readFile', 'attachment', 'selectLocalAttachment', 'openLocalAttachment'] as const;
 
 /** One existing error contract for RPC and raw-byte requests. */
 function frameworkFailure(service: FrameworkService, method: string, error: unknown) {

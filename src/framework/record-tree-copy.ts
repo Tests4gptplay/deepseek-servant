@@ -37,9 +37,10 @@ async function fileHash(path: string, signal?: AbortSignal): Promise<{ bytes: nu
     if (!before.isFile()) throw new Error('Record copy does not follow links or special files: ' + path)
     const hash = createHash('sha256'), buffer = Buffer.allocUnsafe(windowSize)
     let bytes = 0
-    for (;;) {
+    const length = Number(before.size)
+    while (bytes < length) {
       signal?.throwIfAborted()
-      const r = await handle.read(buffer, 0, buffer.length, bytes)
+      const r = await handle.read(buffer, 0, Math.min(buffer.length, length - bytes), bytes)
       if (!r.bytesRead) break
       hash.update(buffer.subarray(0, r.bytesRead)); bytes += r.bytesRead
     }
@@ -133,9 +134,9 @@ export async function copyRecordTree(sourceDirectory: string, destinationDirecto
       if (!before.isFile()) throw new Error('Record source is not an ordinary file: ' + original)
       const buffer = Buffer.allocUnsafe(windowSize), compared = Buffer.allocUnsafe(windowSize), hash = createHash('sha256')
       let position = 0
-      for (;;) {
+      while (position < entry.bytes!) {
         signal?.throwIfAborted()
-        const r = await input.read(buffer, 0, buffer.length, position)
+        const r = await input.read(buffer, 0, Math.min(buffer.length, entry.bytes! - position), position)
         if (!r.bytesRead) break
         hash.update(buffer.subarray(0, r.bytesRead))
         const prefix = Math.max(0, Math.min(r.bytesRead, existing - position))

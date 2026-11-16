@@ -66,12 +66,14 @@ export function taskMetadataRuntimeState(task: TaskMetadata): TaskArchiveState |
   if (!validRecord(task.runtimeState) || !validRecord(task.runtimeState.lifecycles)) throw new Error('Task runtime state format differs: ' + task.taskId)
   return { version: 1, taskId: task.taskId, lifecycles: task.runtimeState.lifecycles }
 }
-export async function readTaskArchiveState(files: FilesStore, snapshot: FilesSnapshot, task: TaskArchiveIdentity | string): Promise<TaskArchiveState | undefined> {
+export async function readTaskArchiveState(files: FilesStore, snapshot: FilesSnapshot, task: TaskArchiveIdentity | string,
+  onCurrent?: (current: TaskMetadata | undefined) => void): Promise<TaskArchiveState | undefined> {
   if (files instanceof GitFiles) {
     const id = typeof task === 'string' ? task : task.taskId
     // Read this snapshot, not a caller's cached Task object. No archive fallback.
     const current = await readJson<TaskMetadata>(files, snapshot, paths.task(id))
     if (current && current.taskId !== id) throw new Error('Task runtime metadata identity differs: ' + id)
+    onCurrent?.(current)
     return current ? taskMetadataRuntimeState(current) : undefined
   }
   const identity = await readTaskArchiveIdentity(files, snapshot, task)
@@ -149,6 +151,14 @@ export function compactTaskArchiveCleanup(state: TaskArchiveState, task: Pick<Ta
   const { deletedPaths: _deleted, ...compact } = cleanup
   state.lifecycles = { ...state.lifecycles, [key]: { ...lifecycle, cleanup: { ...compact, ...(pending.length ? { deletedPaths: pending } : {}) } } }
   return state
+}
+/** Derive the existing Git cleanup write from the family read in this evaluation. */
+export function planTaskMetadataCleanup(task: TaskMetadata, cleanup: TaskArchiveCleanup): FileChange {
+  const current = structuredClone(taskMetadataRuntimeState(task) ?? { version: 1 as const, taskId: task.taskId, lifecycles: {} })
+  const key = taskLifecycle(task), lifecycle = taskArchiveLifecycle(current, task) ?? {}, prior = taskArchiveCleanup(current, task)
+  current.lifecycles = { ...current.lifecycles, [key]: { ...lifecycle, cleanup: { phase: 'files-cleaned',
+    ...(prior?.historyCleared || cleanup.historyCleared ? { historyCleared: true as const } : {}) } } }
+  return { path: paths.task(task.taskId), content: encodeJson({ ...task, runtimeState: { lifecycles: current.lifecycles } }) }
 }
 export async function planTaskArchiveCleanup(files: FilesStore, snapshot: FilesSnapshot, task: TaskArchiveIdentity,
   cleanup: TaskArchiveCleanup): Promise<FileChange> {
