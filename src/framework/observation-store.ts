@@ -35,6 +35,12 @@ export class DurableObservationStore implements ExecutionObservationStore {
     if (!(this.storage instanceof GitAuthorityStore)) await localObservationWrites.get(this.storage)?.get(key)
     return this.storage.get(key)
   }
+  readRound(): Pick<ExecutionObservationStore, 'get'> | undefined {
+    const storage = this.storage
+    if (!(storage instanceof GitAuthorityStore)) return
+    const round = storage.readRound()
+    if (round) return { get: workId => round.get<StoredExecutionObservation>(this.key(workId)) }
+  }
   async set(workId: string, value: StoredExecutionObservation, expected: StoredExecutionObservation | undefined): Promise<void> {
     const key = this.key(workId)
     if (this.storage instanceof GitAuthorityStore) return this.storage.updateIndexed<StoredExecutionObservation, void>(key, async (current, snapshot) => {

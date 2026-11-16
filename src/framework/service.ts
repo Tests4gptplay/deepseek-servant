@@ -1458,14 +1458,6 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             });
         });
     }
-    async cancelForeground(input: { mode: FrameworkMode; storageScope: string }): Promise<{ submitted: boolean }> {
-        this.assertOpen();
-        if (this.moveError(input.mode)) throw this.moveError(input.mode);
-        const active = this.running.get(input.mode);
-        if (!active) return { submitted: false };
-        if (input.storageScope !== active.connection.scope) throw new Error('Foreground cancellation belongs to a different storage scope.');
-        return active.runtime.cancelForeground();
-    }
     async stopExecution(input: { mode: FrameworkMode; storageScope?: string; commandId: string; workId: string; executionId: string }): Promise<FrameworkExecutionStopSubmission> {
         // Git stop belongs to the already admitted runtime, not the independent
         // read-only access connection. Local keeps its released-execution ack.

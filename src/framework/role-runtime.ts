@@ -1405,17 +1405,6 @@ export class FrameworkRoleRuntime {
     if (excluding) occupied.delete(excluding)
     return occupied.size
   }
-  cancelForeground(): { submitted: boolean } {
-    const record = [...this.roleRecords.values()].find(row => row.identity.role === 'Foreground')
-    if (this.closed || !record || record.released || record.stopped) return { submitted: false }
-    const owned = this.native.get(record.identity.workId, record.identity.executionId)
-    if (!owned || owned !== this.native.get(record.identity.workId) || owned.sessionId !== record.sessionId
-      || String(owned.actualAgent.session.id) !== record.sessionId || owned.actualAgent.status !== 'running') return { submitted: false }
-    // The same native cancel verb preserves queued input. No await can replace
-    // this exact owned Agent between selection and the user command.
-    owned.actualAgent.cancel({ kind: 'user' }, { keepInbox: true })
-    return { submitted: true }
-  }
   async foregroundProcessing(): Promise<{ executionId: string; turnId: string; startedAt?: number } | undefined> {
     const record = [...this.roleRecords.values()].find(row => row.identity.role === 'Foreground')
     if (this.closed || !record || record.released || record.stopped) return;

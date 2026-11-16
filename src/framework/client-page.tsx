@@ -586,7 +586,7 @@ export function FrameworkPage(props: FrameworkPageProps) {
                 {props.modelControl(view.settings.foreground, model => saveForegroundModel({ mode: view.activeMode, storageScope: view.storageScope,
                   commandId: crypto.randomUUID(), model }), tr('前台模型', 'Foreground model'), { composer: true, disabled: !!modelSaving || changingMode })}
               </fieldset>}
-              {view && view.storageScope !== undefined && props.onStopForeground && <Button aria-label={tr('停止前台当前回复', 'Stop current foreground reply')} onClick={() => run(props.onStopForeground!(view))}>{tr('停止', 'Stop')}</Button>}
+              {view?.foregroundProcessing && props.onStopForeground && <Button aria-label={tr('停止前台当前回复', 'Stop current foreground reply')} onClick={() => run(props.onStopForeground!(view))}>{tr('停止', 'Stop')}</Button>}
               <Button variant="primary" disabled={!view || changingMode || composerSending || preparingAttachments || (!draft.trim() && !selectedAttachments.length) || selectedAttachments.some(row => row.state !== 'ready' && row.state !== 'selected')} onClick={send}>{tr('发送', 'Send')}</Button>
             </div></div>
           {modelAttempt && !modelSaving && view && modelAttempt.mode === view.activeMode && modelAttempt.storageScope === view.storageScope
@@ -728,19 +728,22 @@ function FrameworkSettingsForm(props: FrameworkPageProps & { controller: Framewo
 function LegacyTasks({ tasks, controller, mode, storageScope, open, openRecords, exportRecords, tr }: { tasks: FrameworkLegacyTask[]; controller: FrameworkClientController; mode: 'local' | 'git'; storageScope?: string; open: (path: string) => Promise<void>; openRecords: (task: FrameworkLegacyTask) => Promise<void>; exportRecords: (task: FrameworkLegacyTask) => Promise<void>; tr: (cn: string, en: string) => string }) {
   const [answers, setAnswers] = useState<Record<string, string>>({}), [busy, setBusy] = useState<ReadonlySet<string>>(() => new Set()), [error, setError] = useState('')
   const attempts = useRef(new Map<string, { fingerprint: string; commandId: string; pending: boolean }>())
+  const [notice, setNotice] = useState<{ key: string; action: 'resume' | 'answer' }>()
   const act = (task: FrameworkLegacyTask, action: 'resume' | 'answer', waitId?: string) => {
     const key = JSON.stringify([mode, storageScope, task.migrationId, task.oldTaskId, waitId]), answer = action === 'answer' ? answers[key] ?? '' : undefined
     const fingerprint = JSON.stringify([key, action, answer]), prior = attempts.current.get(key)
     if (prior?.pending) return
     const commandId = prior?.fingerprint === fingerprint ? prior.commandId : crypto.randomUUID()
-    const attempt = { fingerprint, commandId, pending: true }; attempts.current.set(key, attempt); setBusy(current => new Set(current).add(key)); setError('')
+    const attempt = { fingerprint, commandId, pending: true }; attempts.current.set(key, attempt); setBusy(current => new Set(current).add(key)); setError(''); setNotice(undefined)
     void controller.legacyControl({ mode, storageScope, commandId, migrationId: task.migrationId, oldTaskId: task.oldTaskId, action, waitId, answer })
+      .then(() => setNotice({ key: JSON.stringify([mode, storageScope, task.migrationId, task.oldTaskId]), action }))
       .catch(reason => setError(frameworkErrorText(reason))).finally(() => { attempt.pending = false; setBusy(current => { const next = new Set(current); next.delete(key); return next }) })
   }
   if (!tasks?.length) return null
   return <section className={css.knowledge}><h3>{tr('迁入的历史与接续', 'Imported history and continuation')}</h3>{error && <p className={css.errorDetail} role="alert">{error}</p>}
     {tasks.map(task => { const key = JSON.stringify([mode, storageScope, task.migrationId, task.oldTaskId]); return <section className={css.knowledgeCard} key={key}>
       <div className={css.rowBetween}><h4>{task.oldTaskId}</h4><span className={css.badge}>{frameworkStateLabel(task.continuation, tr)}</span></div><code>{task.taskId}</code>
+      {notice?.key === key && <p role="status">{notice.action === 'resume' ? tr('继续请求已接受。显示更新独立进行，可刷新页面查看最新状态。', 'Resume request accepted. Display updates independently; refresh the page for the latest status.') : tr('答复已接受。显示更新独立进行，可刷新页面查看最新状态。', 'Answer accepted. Display updates independently; refresh the page for the latest status.')}</p>}
       {task.issues?.map((issue, index) => <p key={index} className={css.errorDetail}>{issue}</p>)}
       {task.recordPath && <button className={css.artifact} onClick={() => { void open(task.recordPath!) }}>{tr('原任务资料', 'Original task data')}<code>{task.recordPath}</code></button>}
       {task.recordsAvailable && <Button onClick={() => { void openRecords(task) }}>{tr('完整原记录', 'Complete original records')}</Button>}
@@ -859,23 +862,25 @@ function KnowledgePanel({ api, view, tr, open }: { api: FrameworkClientApi; view
   const [status, setStatus] = useState<'disabled' | 'retired'>(), [reason, setReason] = useState('')
   const editAttempt = useRef<{ fingerprint: string; input: Parameters<FrameworkClientApi['knowledgeEdit']>[0] }>()
   const statusAttempt = useRef<{ fingerprint: string; input: Parameters<FrameworkClientApi['knowledgeStatus']>[0] }>()
-  const active = useRef(true), reading = useRef(0)
+  const active = useRef(true), reading = useRef(0), editorOperation = useRef(false)
   const [, redraw] = useState(0)
   let pending = knowledgePending.get(api)
   if (!pending) { pending = new Map(); knowledgePending.set(api, pending) }
   const operations = pending
   const scope = { mode: view.activeMode, storageScope: view.storageScope }
   const refresh = async () => { const value = await api.knowledgeList(scope); if (active.current) setCatalog(value) }
-  const run = (action: () => Promise<unknown>) => { setBusy(true); setError(''); setNotice(''); void action().catch(error => { if (active.current) setError(frameworkErrorText(error)) }).finally(() => { if (active.current) setBusy(false) }) }
+  const run = (action: () => Promise<unknown>) => { if (editorOperation.current) return; editorOperation.current = true; setBusy(true); setError(''); setNotice(''); void action().catch(error => { if (active.current) setError(frameworkErrorText(error)) }).finally(() => { editorOperation.current = false; if (active.current) setBusy(false) }) }
   useEffect(() => { active.current = true; run(refresh); return () => { active.current = false; reading.current++ } }, [])
   const openReadOnly = (path: string) => { void open(path).catch(error => { if (active.current) setError(frameworkErrorText(error)) }) }
   const read = (path: string) => {
+    if (editorOperation.current) return
     const request = ++reading.current
-    setError('')
-    void api.knowledgeRead({ ...scope, path }).then(result => {
+    // Editor reads share the existing write lane; pure previews stay independent.
+    run(async () => {
+      const result = await api.knowledgeRead({ ...scope, path })
       if (!active.current || request !== reading.current) return
       setSelected(result); setEdit(result.edit ? { ...result.edit } : undefined); setStatus(undefined); setReason(''); editAttempt.current = undefined; statusAttempt.current = undefined
-    }, error => { if (active.current && request === reading.current) setError(frameworkErrorText(error)) })
+    })
   }
   const submit = async (operation: KnowledgePending) => {
     const selection = reading.current
@@ -940,7 +945,7 @@ function KnowledgePanel({ api, view, tr, open }: { api: FrameworkClientApi; view
       {item.error && <p role="alert">{item.error}</p>}
       {item.candidates.map(candidate => <p key={candidate.path}>{tr('候选', 'Candidate')} · {candidate.createdAt}<Button onClick={() => openReadOnly(candidate.path)}>{candidate.path}</Button></p>)}
       {item.resources?.map(path => <p key={path}><Button onClick={() => openReadOnly(path)}>{path}</Button></p>)}
-      <Button onClick={() => read(item.path)}>{item.readOnly || item.kind === 'project-fact' || item.kind === 'preference' ? tr('查看原记录', 'Read original record') : tr('查看与编辑', 'Read and edit')}</Button></article>)}
+      <Button disabled={busy} onClick={() => read(item.path)}>{item.readOnly || item.kind === 'project-fact' || item.kind === 'preference' ? tr('查看原记录', 'Read original record') : tr('查看与编辑', 'Read and edit')}</Button></article>)}
     {selected && <section className={css.formCard}><h3>{selected.path}</h3>{selected.record ? <KnowledgeRecordView record={selected.record} tr={tr} /> : !edit ? <><p>{tr('原记录只读。', 'Original record is read only.')}</p><pre>{selected.text}</pre></> : <>
       <label className={css.field}><span>{tr('知识正文', 'Knowledge body')}</span><textarea disabled={busy} value={edit.body} onChange={event => setEdit({ ...edit, body: event.target.value })} /></label>
       <Button disabled={busy} onClick={save}>{tr('保存技能正文', 'Save skill definition')}</Button>

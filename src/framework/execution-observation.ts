@@ -28,6 +28,8 @@ export interface ObservationResetResult {
 /** Host-owned durable metadata, not business body storage or a new role signal. */
 export interface ExecutionObservationStore {
   get(workId: string): Promise<StoredExecutionObservation | undefined>
+  /** Explicit initial reads for one tick; writes and later checks still use fresh get(). */
+  readRound?(): Pick<ExecutionObservationStore, 'get'> | undefined
   set(workId: string, value: StoredExecutionObservation, expected: StoredExecutionObservation | undefined): Promise<void>
   list(): Promise<StoredExecutionObservation[]>
   delete?(workId: string, expected: StoredExecutionObservation): Promise<void>
@@ -45,6 +47,7 @@ export class ExecutionObservations {
   private readonly tails = new Map<string, Promise<void>>()
   private readonly arrangements = new Map<string, Promise<void>>()
   private readonly checks = new Map<string, Promise<void>>()
+  private readGeneration?: object
   /** An unresolved publication may have committed remotely. Keep its failure
    * until that exact responsibility is durably accepted, including shutdown. */
   private readonly arrangementFailures = new Map<string, unknown>()
@@ -121,9 +124,9 @@ export class ExecutionObservations {
       throw error
     }
   }
-  private async synchronize(binding: Binding): Promise<StoredExecutionObservation | undefined> {
+  private async synchronize(binding: Binding, initialRead?: () => Promise<StoredExecutionObservation | undefined>): Promise<StoredExecutionObservation | undefined> {
     if (!this.current(binding)) return
-    const saved = await this.store.get(binding.identity.workId)
+    const saved = await (initialRead ? initialRead() : this.store.get(binding.identity.workId))
     if (!this.current(binding) || !saved || saved.observation.identity.executionId !== binding.identity.executionId) return
     const executing = this.active(binding)
     const progress = binding.progress
@@ -168,12 +171,25 @@ export class ExecutionObservations {
   /** Each work publishes as soon as its own observation is ready. A slow
    * producer does not hold another work's binding, progress or scheduler. */
   async tick(waitForArrangement = true): Promise<void> {
+    const generation = this.readGeneration = {}
+    const round = this.store.readRound?.()
     const operations = [...this.bindings.values()].map(binding => {
       const workId = binding.identity.workId, existing = this.checks.get(workId)
       if (existing) return existing
+      // A prior status/bind/reset publication can finish after another work pins
+      // this tick's H. Read after that work's queue, not from the earlier round.
+      // Unqueued works still share H; existing immutable snapshots stay intact.
+      const initialRead = this.tails.has(workId) ? undefined : round
       const operation = (async () => {
       const pending = await this.queue(binding.identity.workId, async () => {
-        const saved = await this.synchronize(binding)
+        const saved = await this.synchronize(binding, initialRead && (async () => {
+          // A queued or stalled work can outlive this tick. Never retain its old
+          // H across a later tick or a replacement execution; other works proceed.
+          if (this.readGeneration !== generation) return this.store.get(workId)
+          const value = await initialRead.get(workId)
+          if (!this.current(binding)) return
+          return this.readGeneration === generation ? value : this.store.get(workId)
+        }))
         if (binding.identity.role === 'Foreground' || !this.current(binding) || !saved?.executing || saved.observation.identity.executionId !== binding.identity.executionId) return
         const due = saved.pending ? undefined : dueObservation(saved.observation, this.now())
         const pending = saved.pending ?? (due?.action ? {
