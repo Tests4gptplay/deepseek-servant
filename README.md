@@ -71,7 +71,7 @@ github:Tests4gptplay/deepseek-servant#main
 
 Python 解释器使用 DSH 配置或环境中已有版本。Node 依赖由 DSH 官方安装流程处理，包括 koffi。
 
-Dulwich **1.2.21** 与 urllib3 **2.8.0** 随包提供，并保留上游许可及发行信息。前者按 Apache-2.0 许可分发，后者采用 MIT 许可。Python 低于 3.12 时另需满足 `typing_extensions` 条件依赖。
+Git 能力使用开源项目 **Dulwich**。Dulwich **1.2.21** 与 urllib3 **2.8.0** 随包提供，分别按 Apache-2.0 和 MIT 许可分发；随包第三方组件保留各自的版权及许可声明，详见[第三方声明](THIRD_PARTY_NOTICES.md)。Python 低于 3.12 时另需满足 `typing_extensions` 条件依赖。
 
 已测环境与覆盖范围见[测试记录](docs/testing/0.5.0.md)。
 
