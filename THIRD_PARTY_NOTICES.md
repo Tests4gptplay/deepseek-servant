@@ -1432,6 +1432,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ## Default resident memory Git transport
 
-Dulwich 1.2.21 is distributed under the choice Apache-2.0 OR GPL-2.0-or-later. This integration selects Apache-2.0 and preserves the upstream full notice in `python/licenses/Dulwich-COPYING`. urllib3 2.8.0 is MIT; its notice is preserved in `python/licenses/urllib3-LICENSE.txt`. Python dependencies are explicitly installed into a user-selected environment, not embedded or installed automatically. See `docs/MEMORY_GIT.md`.
+Dulwich 1.2.21 is distributed under the choice Apache-2.0 OR GPL-2.0-or-later. This integration selects Apache-2.0 and preserves the upstream full notice in `python/licenses/Dulwich-COPYING`. urllib3 2.8.0 is MIT; its notice is preserved in `python/licenses/urllib3-LICENSE.txt`. Dulwich 1.2.21 and urllib3 2.8.0 are included as package-owned offline dependencies. Upstream wheel metadata and complete licenses are retained under python/vendor/common; exact official wheel and vendored-file SHA-256 values are recorded in python/vendor/manifest.json. Native extensions are selected only for a matching supported ABI; other interpreters retain their existing dependencies. No install script or runtime download installs Python packages. See `docs/MEMORY_GIT.md`.
 
 Upstream license sources for the pinned releases: [Dulwich 1.2.21 COPYING](https://github.com/dulwich/dulwich/blob/dulwich-1.2.21/COPYING) and [urllib3 2.8.0 LICENSE](https://github.com/urllib3/urllib3/blob/2.8.0/LICENSE.txt).

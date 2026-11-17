@@ -1,6 +1,6 @@
 # DeepSeek Servant
 
-[简体中文](https://github.com/Tests4gptplay/deepseek-servant/blob/release/0.5.0-rc.3/README.md)
+[简体中文](https://github.com/Tests4gptplay/deepseek-servant/blob/release/0.5.0-rc.5/README.md)
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Tests4gptplay/deepseek-servant/v0.3.0/docs/images/deepseek-servant-maids-duo.webp" alt="DeepSeek Servant character artwork">
@@ -33,7 +33,7 @@ The two independently developed projects show **architectural convergence** in s
 
 ## Installation & use
 
-In DSH, choose **Plugins → Add plugin** and enter `github:Tests4gptplay/deepseek-servant#v0.5.0-rc.3`.
+In DSH, choose **Plugins → Add plugin** and enter `github:Tests4gptplay/deepseek-servant#v0.5.0-rc.5`.
 
 See [Installation & upgrade](docs/INSTALLATION.md) for installation sources, Desktop / Web instructions and upgrade guidance. The linked guide is in Chinese.
 
@@ -44,7 +44,7 @@ See [Installation & upgrade](docs/INSTALLATION.md) for installation sources, Des
 3. Use the task page to follow progress, inspect results and see requests for more information. Continue the conversation, adjust the goal, or pause, resume and cancel as needed.
 4. Enable DSS-cah only when you need collaboration through a private Git repository, then follow the [collaboration guide](PRIVATE_GIT.md). Local mode does not require Git collaboration setup.
 
-[User guide](docs/USAGE.md) · [Git collaboration](PRIVATE_GIT.md) · [Data retention & cleanup](RETENTION.md) · [Release notes](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.0-rc.3)
+[User guide](docs/USAGE.md) · [Git collaboration](PRIVATE_GIT.md) · [Data retention & cleanup](RETENTION.md) · [Release notes](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.0-rc.5)
 
 These linked guides are in Chinese. Model providers, tools and workspace permissions are managed by DSH. Repository content is shared with authorized collaborators, so choose a repository appropriate for the intended collaboration.
 
@@ -61,3 +61,16 @@ See [NOTICE](NOTICE) for project copyright notices and [THIRD_PARTY_NOTICES.md](
 ## Support
 
 [GitHub Sponsors](https://github.com/sponsors/Tests4gptplay) · [Ko-fi](https://ko-fi.com/kou392350) · [Alipay](SPONSOR.md)
+
+## Bundled Python dependencies
+
+The following upstream dependencies for Git collaboration are included in the plugin. Installing them does not require pip or a network download:
+
+| Dependency | Version | Upstream source | License | Purpose |
+| --- | --- | --- | --- | --- |
+| Dulwich | 1.2.21 | [dulwich/dulwich](https://github.com/dulwich/dulwich), [PyPI](https://pypi.org/project/dulwich/1.2.21/) | Dual-licensed Apache-2.0 / GPL-2.0-or-later; this distribution selects Apache-2.0 | Git objects, protocols and repository operations, with platform-specific native acceleration |
+| urllib3 | 2.8.0 | [urllib3/urllib3](https://github.com/urllib3/urllib3), [PyPI](https://pypi.org/project/urllib3/2.8.0/) | MIT | Git HTTP transport |
+
+Complete upstream licenses and distribution metadata remain under `python/vendor/` and `python/licenses/`. See `python/vendor/manifest.json` for file and official wheel checksums, and [Third-party notices](THIRD_PARTY_NOTICES.md) for attribution. The Python interpreter comes from the existing DSH configuration or environment. The plugin does not install system packages, add a postinstall hook, or download these dependencies at runtime. Node dependencies remain managed by the official DSH installation flow.
+
+Bundled native extensions target CPython 3.12/3.13 on Windows x86/x64/ARM64, macOS x64/ARM64, and Linux glibc 2.28+ x64/ARM64. Linux x64 is runtime-tested; other platforms are subject to their native loader checks. Unmatched ABIs use dependencies in the existing Python environment. No Python interpreter is bundled; koffi is handled by DSH’s official Node dependency installation flow.

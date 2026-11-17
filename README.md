@@ -1,6 +1,6 @@
 # DeepSeek Servant
 
-[English](https://github.com/Tests4gptplay/deepseek-servant/blob/release/0.5.0-rc.3/README.en.md)
+[English](https://github.com/Tests4gptplay/deepseek-servant/blob/release/0.5.0-rc.5/README.en.md)
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Tests4gptplay/deepseek-servant/v0.3.0/docs/images/deepseek-servant-maids-duo.webp" alt="DeepSeek Servant 短裙与长裙女仆角色设计">
@@ -35,7 +35,7 @@ DSS 的 [v0.2.0（2026-10-26）](https://github.com/Tests4gptplay/deepseek-serva
 
 ## 安装与使用
 
-在 DSH 中打开 **插件 → 添加插件**，输入 `github:Tests4gptplay/deepseek-servant#v0.5.0-rc.3`。
+在 DSH 中打开 **插件 → 添加插件**，输入 `github:Tests4gptplay/deepseek-servant#v0.5.0-rc.5`。
 
 安装来源、Desktop / Web 操作和升级说明见 [安装与升级](docs/INSTALLATION.md)。
 
@@ -46,7 +46,7 @@ DSS 的 [v0.2.0（2026-10-26）](https://github.com/Tests4gptplay/deepseek-serva
 3. 到任务页查看进度、结果和需要你补充的信息；可以继续交流、调整目标，或按需暂停、继续和取消。
 4. 需要多个参与者通过私有 Git 仓库协作时，再启用 DSS-cah 并按[协作指南](PRIVATE_GIT.md)连接仓库；标准模式不需要 Git 协作配置。
 
-[使用指南](docs/USAGE.md) · [Git 协作说明](PRIVATE_GIT.md) · [数据保留与清理](RETENTION.md) · [版本说明](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.0-rc.3)
+[使用指南](docs/USAGE.md) · [Git 协作说明](PRIVATE_GIT.md) · [数据保留与清理](RETENTION.md) · [版本说明](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.0-rc.5)
 
 模型提供者、工具及工作区权限由 DSH 管理。Git 仓库中的协作内容对获授权的参与者共享，请选用适合协作范围的仓库。
 
@@ -63,3 +63,16 @@ DeepSeek Servant 由 [Chat Agent Harness（CAH）](https://github.com/Tests4gptp
 ## 支持项目 / Support
 
 [GitHub Sponsors](https://github.com/sponsors/Tests4gptplay) · [Ko-fi](https://ko-fi.com/kou392350) · [支付宝 / Alipay](SPONSOR.md)
+
+## 随包 Python 依赖
+
+Git 协作所需的下列上游依赖随插件提供，安装时无需通过 pip 联网下载：
+
+| 依赖 | 版本 | 上游来源 | 许可证 | 用途 |
+| --- | --- | --- | --- | --- |
+| Dulwich | 1.2.21 | [dulwich/dulwich](https://github.com/dulwich/dulwich)、[PyPI](https://pypi.org/project/dulwich/1.2.21/) | 上游 Apache-2.0 / GPL-2.0-or-later 双许可，本包选择 Apache-2.0 | Git 对象、协议及仓库读写，附对应平台原生加速扩展 |
+| urllib3 | 2.8.0 | [urllib3/urllib3](https://github.com/urllib3/urllib3)、[PyPI](https://pypi.org/project/urllib3/2.8.0/) | MIT | Git HTTP 网络传输 |
+
+完整上游许可证与发行元数据保留于 `python/vendor/` 和 `python/licenses/`；文件及官方 wheel 校验记录见 `python/vendor/manifest.json`，总声明见 [第三方声明](THIRD_PARTY_NOTICES.md)。Python 解释器沿用 DSH 配置或现有环境，插件不安装系统包、不新增 postinstall，也不在运行时下载这些依赖。Node 依赖仍由 DSH 官方安装流程处理。
+
+随包原生扩展适配 CPython 3.12/3.13：Windows x86/x64/ARM64、macOS x64/ARM64、Linux glibc 2.28+ x64/ARM64。已实测 Linux x64；其他平台须通过平台加载器校验。未匹配 ABI 时使用既有 Python 环境中的依赖。插件不随包提供 Python 解释器；koffi 由 DSH 官方 Node 依赖安装流程处理。

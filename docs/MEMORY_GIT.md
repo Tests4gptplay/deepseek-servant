@@ -2,37 +2,15 @@
 
 This source tree uses one product Git transport: Dulwich, beneath the existing repository authorization, transactions and receipts. There is no Native Git client, backend choice or disk fallback.
 
-## Install prerequisites explicitly
+## Offline dependencies and normal DSH installation
 
-- Python with the TLS support required by its installed packages. Required packages: Dulwich and urllib3.
-- Use an existing supported Python or install official Python yourself: https://www.python.org/downloads/ . DSS never installs Python, packages, drivers, certificates, or OS settings on the user's machine.
-- Product Git content transport and object operations do not require a Git executable. The existing `gh` login and permission provider remains required; this change does not uninstall Git or gh.
+Install DSS through DSH's plugin page. Dulwich 1.2.21, urllib3 2.8.0 and typing_extensions 4.15.0 are included as offline package files. There is no postinstall, pip invocation, runtime download, system Python change or venv requirement. Koffi remains an npm dependency managed by DSH; approve its build script through the native DSH prompt if requested.
 
-Create a dedicated virtual environment and install the dependencies from the official Python package index:
+A Python interpreter and the existing authenticated `gh` provider are still required for Git mode. Configure `gitPythonExecutable` with an existing interpreter, including the path returned by DSH's official `load_workspace_dependencies`, or retain the existing `python`/`python3` default. Local mode does not start the Git helper.
 
-```sh
-python3 -m venv .dss-git-venv
-.dss-git-venv/bin/python -m pip install -r python/requirements.txt
-.dss-git-venv/bin/python -m pip check
-```
+Bundled native extensions cover standard CPython 3.12/3.13 on Windows x64/ARM64/x86, macOS x64/ARM64, and glibc 2.28+ Linux x64/ARM64. The helper selects matching platform, Python version and extension suffix; it loads package-owned Python modules and native extensions under `-I`. An unmatched ABI or rejected native loader retains the configured interpreter's existing dependencies instead of silently using a bundled pure-Python implementation. Previously configured external environments therefore remain usable. External dependency preparation uses python/requirements.txt; the package never installs into those environments automatically.
 
-Windows PowerShell, after official Python is installed:
-
-```powershell
-py -3 -m venv .dss-git-venv
-.\.dss-git-venv\Scripts\python.exe -m pip install -r python/requirements.txt
-.\.dss-git-venv\Scripts\python.exe -m pip check
-```
-
-pip resolves the dependencies required by the selected Python and upstream packages. Official package information: https://pypi.org/project/dulwich/ and https://pypi.org/project/urllib3/ .
-
-Configure the existing DSH plugin entry:
-
-```yaml
-gitPythonExecutable: /absolute/path/to/.dss-git-venv/bin/python
-```
-
-Use the absolute Windows `.venv\Scripts\python.exe` path there on Windows. Omitting the executable uses `python3` on POSIX or `python` on Windows; no argument string or shell is accepted. Configure Python and the dependencies before Git use. Missing imports or unavailable runtime interfaces report their actual operation error. There is no disk fallback.
+The DNS resolver child uses only Python's standard library and exits before dependency loading. No application interpreter or PyPI network access is needed to unpack the plugin. Official wheel SHA-256 hashes and every shipped dependency-file hash are in python/vendor/manifest.json; upstream licenses and distribution metadata are preserved in python/vendor/common.
 
 ## Lifecycle and authority
 
