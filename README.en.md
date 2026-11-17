@@ -1,6 +1,6 @@
 # DeepSeek Servant
 
-[简体中文](https://github.com/Tests4gptplay/deepseek-servant/blob/release/0.5.0-rc.5/README.md)
+[简体中文](https://github.com/Tests4gptplay/deepseek-servant/blob/release/0.5.0-rc.5.1/README.md)
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Tests4gptplay/deepseek-servant/v0.3.0/docs/images/deepseek-servant-maids-duo.webp" alt="DeepSeek Servant character artwork">
@@ -33,7 +33,7 @@ The two independently developed projects show **architectural convergence** in s
 
 ## Installation & use
 
-In DSH, choose **Plugins → Add plugin** and enter `github:Tests4gptplay/deepseek-servant#v0.5.0-rc.5`.
+In DSH, choose **Plugins → Add plugin** and enter `github:Tests4gptplay/deepseek-servant#v0.5.0-rc.5.1`.
 
 See [Installation & upgrade](docs/INSTALLATION.md) for installation sources, Desktop / Web instructions and upgrade guidance. The linked guide is in Chinese.
 
@@ -44,7 +44,7 @@ See [Installation & upgrade](docs/INSTALLATION.md) for installation sources, Des
 3. Use the task page to follow progress, inspect results and see requests for more information. Continue the conversation, adjust the goal, or pause, resume and cancel as needed.
 4. Enable DSS-cah only when you need collaboration through a private Git repository, then follow the [collaboration guide](PRIVATE_GIT.md). Local mode does not require Git collaboration setup.
 
-[User guide](docs/USAGE.md) · [Git collaboration](PRIVATE_GIT.md) · [Data retention & cleanup](RETENTION.md) · [Release notes](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.0-rc.5)
+[User guide](docs/USAGE.md) · [Git collaboration](PRIVATE_GIT.md) · [Data retention & cleanup](RETENTION.md) · [Release notes](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.0-rc.5.1)
 
 These linked guides are in Chinese. Model providers, tools and workspace permissions are managed by DSH. Repository content is shared with authorized collaborators, so choose a repository appropriate for the intended collaboration.
 

@@ -1,6 +1,6 @@
 # DeepSeek Servant
 
-[English](https://github.com/Tests4gptplay/deepseek-servant/blob/release/0.5.0-rc.5/README.en.md)
+[English](https://github.com/Tests4gptplay/deepseek-servant/blob/release/0.5.0-rc.5.1/README.en.md)
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Tests4gptplay/deepseek-servant/v0.3.0/docs/images/deepseek-servant-maids-duo.webp" alt="DeepSeek Servant 短裙与长裙女仆角色设计">
@@ -35,7 +35,7 @@ DSS 的 [v0.2.0（2026-10-26）](https://github.com/Tests4gptplay/deepseek-serva
 
 ## 安装与使用
 
-在 DSH 中打开 **插件 → 添加插件**，输入 `github:Tests4gptplay/deepseek-servant#v0.5.0-rc.5`。
+在 DSH 中打开 **插件 → 添加插件**，输入 `github:Tests4gptplay/deepseek-servant#v0.5.0-rc.5.1`。
 
 安装来源、Desktop / Web 操作和升级说明见 [安装与升级](docs/INSTALLATION.md)。
 
@@ -46,7 +46,7 @@ DSS 的 [v0.2.0（2026-10-26）](https://github.com/Tests4gptplay/deepseek-serva
 3. 到任务页查看进度、结果和需要你补充的信息；可以继续交流、调整目标，或按需暂停、继续和取消。
 4. 需要多个参与者通过私有 Git 仓库协作时，再启用 DSS-cah 并按[协作指南](PRIVATE_GIT.md)连接仓库；标准模式不需要 Git 协作配置。
 
-[使用指南](docs/USAGE.md) · [Git 协作说明](PRIVATE_GIT.md) · [数据保留与清理](RETENTION.md) · [版本说明](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.0-rc.5)
+[使用指南](docs/USAGE.md) · [Git 协作说明](PRIVATE_GIT.md) · [数据保留与清理](RETENTION.md) · [版本说明](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.0-rc.5.1)
 
 模型提供者、工具及工作区权限由 DSH 管理。Git 仓库中的协作内容对获授权的参与者共享，请选用适合协作范围的仓库。
 
