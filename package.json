@@ -51,7 +51,9 @@
     "python/SHA256SUMS",
     "python/licenses/Dulwich-COPYING",
     "python/licenses/urllib3-LICENSE.txt",
-    "upgrades/g09-skills-once.json"
+    "upgrades/g09-skills-once.json",
+    "python/bundled_runtime.py",
+    "python/vendor"
   ],
   "dsh": {
     "bundle": {

@@ -2,18 +2,18 @@
 
 ## 安装
 
-在 DSH 的 **插件 → 添加插件 → 包名或地址** 中填写 `github:Tests4gptplay/deepseek-servant#v0.5.0-rc.3`，与 README 的固定版本入口一致。安装后启用插件，按宿主提示重启。
+在 DSH 的 **插件 → 添加插件 → 包名或地址** 中填写 `github:Tests4gptplay/deepseek-servant#v0.5.0-rc.5`，与 README 的固定版本入口一致。安装后启用插件，按宿主提示重启。
 
-已有插件 TGZ 时，也可填写 `deepseek-servant-0.5.0-rc.3.tgz` 在运行 DSH 的电脑上的完整绝对路径，无需解压。
+已有插件 TGZ 时，也可填写 `deepseek-servant-0.5.0-rc.5.tgz` 在运行 DSH 的电脑上的完整绝对路径，无需解压。
 
 **升级与资料保留：** 先正常停止 DSS 执行并保留原数据备份，通过相同的包名或地址入口更新，按宿主实际提示操作。保留 DSH 数据目录、Local 库及任务工作区，不手工删除记录或数据。Desktop 需要时完整退出托盘进程后再打开；升级后检查设置、对话、任务记录与成果可读取。
 
 **Web：** 先停止对应 profile，在运行该服务的环境执行，之后重启：
 
 ```sh
-dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.5.0-rc.3'
+dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.5.0-rc.5'
 # 已有 TGZ 时改用其实际绝对路径：
-# dsh plugin --profile web add '/absolute/path/deepseek-servant-0.5.0-rc.3.tgz'
+# dsh plugin --profile web add '/absolute/path/deepseek-servant-0.5.0-rc.5.tgz'
 ```
 
 使用 TGZ 入口时，将示例替换为安装包在运行 DSH 的电脑上的实际绝对路径。Desktop 与 Web 分别管理安装。模型提供者与工具权限仍由 DSH 管理。
@@ -26,25 +26,13 @@ Cleaner 初始化失败会报告实际错误并保留普通缓存与 DSS 的使�
 
 ## Git 身份与连接
 
-当前产品仅使用 **Dulwich 常驻内存 Git 后端**。运行 DSH 的环境需要 **Python、Dulwich 和 urllib3**，以及已登录授权账号的 **GitHub CLI（`gh`）**。内容读写仍走标准 Git HTTPS；连接身份与显式成员管理使用必要的平台 API。插件不会自行安装依赖，也不会在 Python 缺失时静默切换到磁盘或 Native 后端。仅使用 Local 模式不启动 Git helper。
+当前产品仅使用 **Dulwich 常驻内存 Git 后端**。Git 模式需要 Python 解释器与已登录授权账号的 GitHub CLI（`gh`）。Dulwich 1.2.21、urllib3 2.8.0 已随 DSS 安装包交付，无需 DSH 自动 pip、用户虚拟环境或额外联网安装。Local 模式不启动 Python helper。
 
-建议使用官方 Python 的受支持版本建立独立虚拟环境。请从 [Python 官网](https://www.python.org/downloads/) 安装解释器，随后在源码或解压的包目录执行：
+**正常从 DSH 界面安装本插件。** `koffi` 是 npm 依赖，由 DSH 原生安装器处理；若出现构建权限提示，使用界面的“允许这些脚本并重试”。本插件不增加 postinstall、不预写批准、不修改系统 Python。
 
-```sh
-python3 -m venv .dss-git-venv
-.dss-git-venv/bin/python -m pip install -r python/requirements.txt
-.dss-git-venv/bin/python -m pip check
-```
+包内原生加速覆盖标准 CPython 3.12/3.13：Windows x64/ARM64/x86、macOS x64/ARM64、Linux glibc 2.28+ x64/ARM64。按解释器 ABI 和原生扩展后缀匹配，不以纯 Python 悄悄替代加速。其他 Python/平台或不兼容系统保持使用原有解释器及依赖，不改变既有可用配置；缺包时仍需在选定解释器环境准备 requirements.txt 所列依赖。`gitPythonExecutable` 可配置已有 Python 的完整路径，默认仍用 Windows 的 `python` 或 POSIX 的 `python3`。
 
-Windows PowerShell：
-
-```powershell
-py -3 -m venv .dss-git-venv
-.\.dss-git-venv\Scripts\python.exe -m pip install -r python/requirements.txt
-.\.dss-git-venv\Scripts\python.exe -m pip check
-```
-
-在 DSH 的本插件配置中将 `gitPythonExecutable` 设为上述虚拟环境 Python 的**完整绝对路径**；不再选择第二套 Git 后端。pip 会按所选 Python 和上游包的声明安装所需依赖。许可和代理配置见 [内存 Git 安装与实现](MEMORY_GIT.md)。
+安装包不包含 Python 解释器本体；可使用 DSH 官方 `load_workspace_dependencies` 返回的内置解释器（将路径配置到 `gitPythonExecutable`）或已有官方 Python。执行时以 `-I` 隔离加载可信包内依赖，不依靠 PYTHONPATH，不写全局环境、不在任务中下载。详细许可与选择机制见 [内存 Git](MEMORY_GIT.md)。
 
 helper 在已有 Git 操作生命周期内按需启动，不阻塞插件注册；缺依赖会先报告，不重复花费账号/仓库 REST 查询。确认依赖修复后再次连接即可。每个仓库/authority 实例分别有后台读写、前台读写、界面刷新、Host 固定轮询和周期心跳发布七条独立通道，每条按约 40MiB 原始对象内容触发清理。活动快照和 UNKNOWN 写入仍受保护，40MiB 不是进程 RSS 或整个 Host 总内存上限；前台访问与后台连接可各有独立实例。
 

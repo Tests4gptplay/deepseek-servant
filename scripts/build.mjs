@@ -49,6 +49,6 @@ for (const name of ["plugin", "coordinator", "jsonl-adapter", "cache-domain", "r
 // The resident helper is package-owned code, launched only by authorized Git use.
 await copyFile('src/experimental/private-git/dulwich-helper.py', 'lib/dulwich-helper.py')
 // Hash the actual shipped helper and dependency inputs after this build.
-const gitRuntimeFiles = ['lib/dulwich-helper.py', 'python/requirements.txt', 'python/licenses/Dulwich-COPYING', 'python/licenses/urllib3-LICENSE.txt']
+const gitRuntimeFiles = ['lib/dulwich-helper.py', 'python/requirements.txt', 'python/bundled_runtime.py', 'python/vendor/manifest.json', 'python/licenses/Dulwich-COPYING', 'python/licenses/urllib3-LICENSE.txt']
 const hashes = await Promise.all(gitRuntimeFiles.map(async path => `${createHash('sha256').update(await readFile(path)).digest('hex')}  ${path}`))
 await writeFile('python/SHA256SUMS', hashes.join('\n') + '\n')

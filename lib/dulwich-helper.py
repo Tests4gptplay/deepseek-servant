@@ -22,6 +22,18 @@ if __name__ == '__main__' and sys.argv[1:] == ['--resolve']:
     sys.stdout.flush()
     os._exit(0)
 
+# Load only package-owned dependency code. The DNS child exits above and uses
+# only Python's standard library, so it needs no third-party import or network setup.
+from pathlib import Path
+import importlib.util
+_runtime_path = Path(__file__).resolve().parent.parent / 'python' / 'bundled_runtime.py'
+_dependency_source = 'configured-environment'
+if _runtime_path.is_file():
+    _runtime_spec = importlib.util.spec_from_file_location('_dss_bundled_runtime', _runtime_path)
+    _runtime = importlib.util.module_from_spec(_runtime_spec)
+    _runtime_spec.loader.exec_module(_runtime)
+    _dependency_source = _runtime.activate()
+
 import json
 import io
 import zlib
