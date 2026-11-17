@@ -1,0 +1,106 @@
+.slot {
+  position: absolute;
+  inset: 0 auto 0 -28px;
+  width: 28px;
+  display: flex;
+  align-items: center;
+  pointer-events: none;
+  z-index: 2;
+}
+.frame {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 28px;
+  max-height: min(100%, 420px);
+  pointer-events: auto;
+}
+.scroller {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+.scroller::-webkit-scrollbar {
+  display: none;
+}
+.marks {
+  padding-block: 6px;
+}
+.mark {
+  display: block;
+  position: relative;
+  width: 28px;
+  height: 10px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+}
+.mark::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 50%;
+  width: 20px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--dsw-alias-border-l4);
+  transform: translateY(-50%) scaleX(.6);
+  transform-origin: left;
+  transition: transform .14s, background-color .14s;
+}
+.mark:hover::before {
+  background: var(--dsw-alias-label-tertiary);
+  transform: translateY(-50%) scaleX(.9);
+}
+.mark.active::before,
+.mark:focus-visible::before {
+  background: var(--dsw-alias-label-primary);
+  transform: translateY(-50%) scaleX(1);
+}
+.mark:focus-visible {
+  outline: 1px solid var(--dsw-focus-ring-color);
+  outline-offset: -1px;
+}
+.preview {
+  position: fixed;
+  z-index: 1000;
+  box-sizing: border-box;
+  max-height: 100px;
+  overflow: hidden;
+  padding: 10px 12px;
+  border-radius: var(--dsw-radius-lg);
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-1);
+  box-shadow: var(--dsw-elevation-panel);
+  pointer-events: none;
+}
+.previewPrompt,
+.previewResponse {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.previewPrompt {
+  font: var(--dsw-font-xs-strong-13);
+  -webkit-line-clamp: 1;
+}
+.previewResponse {
+  color: var(--dsw-alias-label-caption);
+  font: var(--dsw-font-xxs-12);
+  -webkit-line-clamp: 3;
+  margin-top: 4px;
+}
+@container (max-width: 760px) {
+  .slot {
+    display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mark::before {
+    transition: none;
+  }
+}

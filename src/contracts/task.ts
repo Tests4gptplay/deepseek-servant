@@ -156,8 +156,6 @@ export interface ActionPayload {
   planRevision?: number
   childId?: string
   executionId?: string
-  /** A normal handoff cannot dispatch until this exact physical owner is gone. */
-  predecessorExecutionId?: string
   recoveryIncidentId?: string
   assignmentVersion?: number
   resultIds?: string[]
@@ -273,6 +271,5 @@ export type TaskCommand = CommandBase & (
   | PurgeArchiveCommand
 )
 
-export interface KernelEnvironment { now: string; fingerprint: string; reviewEvery: number }
 export interface Transition { task?: Task; receipt: CommandReceipt; changed: boolean }
 

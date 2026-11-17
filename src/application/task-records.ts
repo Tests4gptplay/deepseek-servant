@@ -1,7 +1,6 @@
-import { createHash } from 'node:crypto'
-import type { CommandSource, Task } from '../contracts/task.js'
-import type { RecordAppend, RecordEntry, RecordKind } from '../contracts/records.js'
-import { canonicalJson, RecordJournal } from './record-journal.js'
+import type { Task } from '../contracts/task.js'
+import type { RecordAppend, RecordEntry } from '../contracts/records.js'
+import { RecordJournal } from './record-journal.js'
 
 const fields = ['goal', 'goalHistory', 'plannerNote', 'plan', 'children', 'reports', 'executions', 'pendingActions', 'receipts', 'waits', 'incidents', 'decisions'] as const
 type Field = typeof fields[number]
@@ -13,52 +12,9 @@ export interface PreparedTask { schemaVersion: 1; expectedRevision: number; root
 export function isSeparatedTask(value: unknown): value is StoredTask {
   return !!value && typeof value === 'object' && (value as StoredTask).recordsLayout?.version === 1
 }
-function values(task: Task | undefined, field: Field): Map<string, unknown> {
-  const value = task?.[field]
-  if (value === undefined) return new Map()
-  if (scalar.has(field)) return new Map([['current', value]])
-  if (arrays.has(field)) return new Map((value as Array<{ commandId: string }>).map(entry => [entry.commandId, entry]))
-  return new Map(Object.entries(value))
-}
-function recordKind(field: Field): RecordKind {
-  if (field === 'goal' || field === 'goalHistory') return 'task-origin'
-  if (field === 'plannerNote') return 'planner-note'
-  if (field === 'decisions') return 'planner-memory'
-  if (field === 'reports') return 'worker-reply'
-  return field === 'waits' || field === 'incidents' ? 'recovery' : 'execution'
-}
-
-/** Versioned cold records publish through one small Task root. Pending commits resume before reads. */
+/** Retained legacy reader and pending-write replay for separated Task roots. */
 export class TaskRecords {
   constructor(readonly journal: RecordJournal) {}
-
-  prepare(task: Task, previous?: Task): PreparedTask {
-    const root = JSON.parse(JSON.stringify(task)) as StoredTask
-    const storedFields = fields.filter(field => task[field] !== undefined)
-    root.recordsLayout = { version: 1, fields: storedFields,
-      counts: Object.fromEntries(storedFields.map(field => [field, values(task, field).size])) }
-    const writes: RecordAppend[] = []
-    for (const field of fields) {
-      const before = values(previous, field), after = values(task, field)
-      for (const id of new Set([...before.keys(), ...after.keys()])) {
-        const old = before.get(id), value = after.get(id)
-        if (previous && canonicalJson(old) === canonicalJson(value)) continue
-        const text = canonicalJson(value)
-        const hash = createHash('sha256').update(text).digest('hex')
-        const report = field === 'reports' ? (value ?? old) as Task['reports'][string] : undefined
-        const binding = report ? task.executions[report.executionId] : undefined
-        const source: CommandSource = binding
-          ? { kind: 'agent', id: binding.agentId, executionId: binding.executionId, sessionId: binding.sessionId, role: binding.role }
-          : field === 'goal' ? task.source : { kind: 'runtime', id: 'deepseek-servant-records' }
-        writes.push({ scope: { kind: recordKind(field), taskId: task.id, ...(report ? { childId: report.childId } : {}) },
-          commandId: 'capture:' + task.revision + ':' + field + ':' + id + ':' + hash,
-          text, source, createdAt: task.updatedAt,
-          metadata: { field, recordKey: id, taskRevision: task.revision, deleted: value === undefined } })
-      }
-      delete root[field]
-    }
-    return { schemaVersion: 1, expectedRevision: previous?.revision ?? 0, root, writes }
-  }
 
   async write(prepared: PreparedTask): Promise<void> {
     for (const entry of prepared.writes) await this.journal.append(entry)

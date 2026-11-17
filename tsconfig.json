@@ -19,6 +19,7 @@
     ]
   },
   "include": [
-    "src"
+    "src/host.ts",
+    "src/experimental/private-git/protocol.ts"
   ]
 }
