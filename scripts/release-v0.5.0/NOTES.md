@@ -1,0 +1,58 @@
+# DeepSeek Servant 0.5.0
+
+[首页](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.5.0/README.md)　/　[测试记录](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.5.0/docs/testing/0.5.0.md)
+
+本次更新改进任务交付、历史回看与记录清理，完善 DSS-cah，并修复 Windows 启动兼容性问题。
+
+## 本次更新
+
+### 减少任务推进中的等待
+
+- **成果交付独立推进**：任务完成后先交付成果，记录整理随后继续。
+- **统一整理相关任务**：子任务完成后交接成果，由总任务统一收尾，避免逐个子任务重复整理。
+- **执行收尾与目录清理分开**：释放已结束工作的运行资源，与清理对应任务目录分别推进。
+
+这些改动集中在任务交接、交付与收尾环节。具体场景的响应时间见[测试记录](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.5.0/docs/testing/0.5.0.md)。
+
+### 更好地回看历史
+
+完善对话原文保留、按日期回看和任务历史查看。修正部分内容更新后仍显示旧记录的问题，让补充信息和已有成果更容易查找。
+
+### 按需清理，保留积累
+
+细分任务历史、对话和临时记录等清理范围。保留需要长期使用的技能与成果。
+
+### DSS-cah （实验性）
+
+本次完善远程作业中的数据读写与状态更新；验证范围见测试记录。
+
+### 改善 Windows 启动兼容性
+
+默认 Python 不可用时，可以利用已有的可用环境恢复启动。保持用户已有的解释器配置，不修改系统 PATH。
+
+## 升级要点
+
+- 升级前保存重要成果与配置，并确认当前任务状态。
+- 通过 DSH 插件界面安装或更新；选择 0.5.0 版本。
+- Python 使用已有解释器；Node 依赖由 DSH 安装流程处理。Dulwich 和 urllib3 随包提供。
+- 试用 DSS-cah 需要可访问的 Git 仓库，请确认仓库权限与共享范围。
+
+[安装步骤 →](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.5.0/README.md#安装与使用)
+
+## 验证情况
+
+Linux 完成了 Local 的补充与取消场景，以及双实例 DSS-cah 混合 P/O 任务；Windows 完成了 Local 和真实 GitHub 的消息保存与历史读取。Windows 启动兼容性另有专项回归。
+
+完整任务测试与存储测试的范围不同，实际测试版本、阶段耗时及待补测项目均列在测试页。
+
+[查看任务内容与测量结果 →](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.5.0/docs/testing/0.5.0.md)
+
+---
+
+以上为相较 **0.4.1** 的主要变化。
+
+## 下载与安装
+
+在 DSH 的插件安装界面输入 `github:Tests4gptplay/deepseek-servant#v0.5.0`，或下载 `deepseek-servant-0.5.0.tgz` 后使用本地文件路径安装。
+
+`SHA256SUMS.txt` 提供安装包与源码归档的校验值，`MANIFEST.json` 记录安装包内容校验信息。

@@ -1,7 +1,5 @@
 # DeepSeek Servant
 
-> 0.5.0 · main 分支；正式 Release 尚未创建。
-
 **基于 DeepSeek Harness 的自主 AI 助理与多 Agent 持续任务插件。**
 
 围绕长期任务协调规划、执行与成果评价，保存进展、成果和经验，支持后续接续与方法调整。
@@ -52,10 +50,10 @@ DSS 是独立安装的社区插件，使用 [DeepSeek Harness（DSH）](https://
 
 ## 安装与使用
 
-在 DSH 中打开 **插件 → 添加插件**，输入当前 main 分支安装来源：
+在 DSH 中打开 **插件 → 添加插件**，输入以下安装来源：
 
 ```text
-github:Tests4gptplay/deepseek-servant#main
+github:Tests4gptplay/deepseek-servant#v0.5.0
 ```
 
 ### 第一次使用
@@ -65,7 +63,7 @@ github:Tests4gptplay/deepseek-servant#main
 3. 在任务页查看进度、结果和需要补充的信息；继续交流、调整目标，或按需暂停、继续和取消。
 4. 使用 DSS-cah 进行远程作业时，按操作指南连接仓库。
 
-[Desktop / Web 安装与升级](https://github.com/Tests4gptplay/deepseek-servant/blob/main/docs/INSTALLATION.md) · [使用指南](https://github.com/Tests4gptplay/deepseek-servant/blob/main/docs/USAGE.md) · [发布列表](https://github.com/Tests4gptplay/deepseek-servant/releases)
+[Desktop / Web 安装与升级](https://github.com/Tests4gptplay/deepseek-servant/blob/main/docs/INSTALLATION.md) · [使用指南](https://github.com/Tests4gptplay/deepseek-servant/blob/main/docs/USAGE.md) · [下载 0.5.0](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.0)
 
 ### 环境与依赖
 
