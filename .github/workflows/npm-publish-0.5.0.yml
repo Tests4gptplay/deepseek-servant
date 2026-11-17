@@ -1,6 +1,9 @@
 name: Publish deepseek-servant 0.5.0 to npm
 on:
   workflow_dispatch:
+  push:
+    branches: ['main']
+    paths: ['.github/workflows/npm-publish-0.5.0.yml']
 permissions:
   contents: read
 concurrency:
