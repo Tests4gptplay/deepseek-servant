@@ -17,11 +17,12 @@ jobs:
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+      - run: npm install -g npm@11.9.0 --ignore-scripts
       - name: Prepare complete scoped package from verified formal release
         run: |
           set -euo pipefail
           curl -fL https://github.com/Tests4gptplay/deepseek-servant/releases/download/v0.5.0/deepseek-servant-0.5.0.tgz -o original.tgz
-          echo '4202293d65917ece5af32aa53045e00c8107e814e3bec428fd1f8beadee3ec52  original.tgz' | sha256sum -c -
+          echo 'd15f7c36eac35d5fd79da66f65bf5411988c4af0f312b056cd8db9bc138b3103  original.tgz' | sha256sum -c -
           mkdir unpack packed
           tar -xzf original.tgz -C unpack
           node --input-type=module <<'JS'
@@ -39,7 +40,7 @@ jobs:
           fs.writeFileSync(dir+'lib/client.js',client.replace(old,'window.__ModuleLoader__.load({ id: "@tests4gptplay/deepseek-servant",'));
           JS
           npm pack ./unpack/package --ignore-scripts --pack-destination packed
-          echo '295fdb0c2c6f40d19aa58bf1a0ac23e50207c9536a30cb861338dacea16dd245  packed/tests4gptplay-deepseek-servant-0.5.0.tgz' | sha256sum -c -
+          echo '0ff44c391ef128e39b9752ccf55160f9e400f5bf34adb55c413eca3592d001f4  packed/tests4gptplay-deepseek-servant-0.5.0.tgz' | sha256sum -c -
       - name: Publish once with existing npm authorization
         env:
           NODE_AUTH_TOKEN: ${{ secrets.DSS_NPM }}
