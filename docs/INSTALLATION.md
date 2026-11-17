@@ -2,7 +2,7 @@
 
 ## 安装
 
-在 DSH 的 **插件 → 添加插件 → 包名或地址** 中填写 `github:Tests4gptplay/deepseek-servant#main`，与 README 的 main 分支入口一致。安装后启用插件，按宿主提示重启。
+在 DSH 的 **插件 → 添加插件 → 包名或地址** 中填写 `github:Tests4gptplay/deepseek-servant#v0.5.0`，与 README 的 固定版本入口一致。安装后启用插件，按宿主提示重启。
 
 已有插件 TGZ 时，也可填写 `deepseek-servant-0.5.0.tgz` 在运行 DSH 的电脑上的完整绝对路径，无需解压。
 
@@ -11,7 +11,7 @@
 **Web：** 先停止对应 profile，在运行该服务的环境执行，之后重启：
 
 ```sh
-dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#main'
+dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.5.0'
 # 已有 TGZ 时改用其实际绝对路径：
 # dsh plugin --profile web add '/absolute/path/deepseek-servant-0.5.0.tgz'
 ```

@@ -1,7 +1,5 @@
 # DeepSeek Servant
 
-> 0.5.0 on main. A formal release has not yet been created.
-
 [简体中文](https://github.com/Tests4gptplay/deepseek-servant/blob/main/README.md)
 
 <p align="center">
@@ -35,7 +33,7 @@ The two independently developed projects show **architectural convergence** in s
 
 ## Installation & use
 
-In DSH, choose **Plugins → Add plugin** and enter `github:Tests4gptplay/deepseek-servant#main`.
+In DSH, choose **Plugins → Add plugin** and enter `github:Tests4gptplay/deepseek-servant#v0.5.0`.
 
 See [Installation & upgrade](docs/INSTALLATION.md) for installation sources, Desktop / Web instructions and upgrade guidance. The linked guide is in Chinese.
 
