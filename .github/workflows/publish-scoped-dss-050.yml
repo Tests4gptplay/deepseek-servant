@@ -1,9 +1,6 @@
 name: Publish scoped DSS 0.5.0
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths: ['.github/workflows/publish-scoped-dss-050.yml']
 permissions:
   contents: read
 concurrency:
