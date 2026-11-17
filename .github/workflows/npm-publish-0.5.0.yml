@@ -62,7 +62,7 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$NODE_AUTH_TOKEN" || { echo "DSS_NPM has not been configured."; exit 1; }
-          npm publish packed/deepseek-servant-0.5.0.tgz --access public --ignore-scripts --registry https://registry.npmjs.org
+          npm publish ./packed/deepseek-servant-0.5.0.tgz --access public --ignore-scripts --registry https://registry.npmjs.org
       - name: Verify published package
         shell: bash
         run: |
