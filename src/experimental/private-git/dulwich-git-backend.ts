@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { probePython, windowsDefaultPython, windowsPythonFallback } from './windows-python-fallback.js'
 import { gitRuntimeEnvironment } from './git-runtime-environment.js'
 import type { GitCommandOptions } from './git-object-backend.js'
 import { GitBackendError, type GitBackendErrorKind, type GitBackendFailureDetails, type GitObjectBackend, type GitObjectCommand } from './git-object-backend.js'
@@ -41,20 +42,50 @@ class ResidentHelper {
   private initialized = false
   private startingOwners = 0
   private stopped?: Promise<void>
+  private interpreterUnavailable = false
+  private abandoned = false
+  private startupExitCode?: number | null
   constructor(private readonly options: DulwichGitOptions) {}
   retain(): void { this.handles++ }
   private start(): Promise<void> {
-    if (this.failure) return Promise.reject(this.failure)
+    if (this.failure && (this.initialized || this.abandoned)) return Promise.reject(this.failure)
     if (this.ready) return this.ready
+    if (this.failure) return Promise.reject(this.failure)
+    const executable = this.options.pythonExecutable ?? (process.platform === 'win32' ? windowsDefaultPython() : 'python3')
+    this.ready = this.launch(executable).catch(async error => {
+      // Retry only an unavailable default Windows interpreter, before any store
+      // operation. Dependency, protocol and initialized-helper errors stay errors.
+      if (process.platform !== 'win32' || this.options.pythonExecutable !== undefined || !this.failure || error.kind === 'cancelled') throw error
+      await this.stopped
+      if (!this.interpreterUnavailable) throw error
+      // A real helper can itself return 9009. Confirm the interpreter is not
+      // usable before treating that code as a WindowsApps alias failure.
+      if (this.startupExitCode === 9009 && await probePython({ executable, args: [] }, process.env)) throw error
+      let fallbackExecutable: string
+      try { fallbackExecutable = await windowsPythonFallback() }
+      catch (cause) { throw new GitBackendError('fatal', (cause as Error).message) }
+      if (this.abandoned || this.handles === 0) throw this.failure ?? error
+      this.failure = undefined
+      this.interpreterUnavailable = false
+      return this.launch(fallbackExecutable)
+    })
+    return this.ready
+  }
+  private launch(executable: string): Promise<void> {
     const env = gitRuntimeEnvironment(process.env)
     // -I ignores PYTHONPATH/user site; -B prevents .pyc writes. No shell, secret
     // arguments, credential files, object directories or disk fallback.
-    const child = this.child = spawn(this.options.pythonExecutable ?? (process.platform === 'win32' ? 'python' : 'python3'),
+    const child = this.child = spawn(executable,
       ['-I', '-B', this.options.helperPath ?? fileURLToPath(new URL('./dulwich-helper.py', import.meta.url))],
       { env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
     this.stopped = new Promise(resolve => child.once('close', () => resolve()))
-    child.on('error', () => this.fail(new GitBackendError('fatal', 'Memory Git helper could not start. Check the configured Python and the required Dulwich and urllib3 packages.')))
-    child.on('close', () => {
+    child.on('error', (error: NodeJS.ErrnoException) => {
+      this.interpreterUnavailable = error.code === 'ENOENT'
+      this.fail(new GitBackendError('fatal', 'Memory Git Python interpreter could not start. Check that the executable exists and is runnable.'))
+    })
+    child.on('close', (code) => {
+      this.startupExitCode = code
+      this.interpreterUnavailable ||= code === 9009
       this.fail(new GitBackendError('fatal', this.initialized
         ? 'Memory Git helper stopped. Obtain a fresh snapshot; unresolved writes must be reconciled with their original operation.'
         : 'Memory Git helper startup failed. Check Python and the Dulwich and urllib3 packages in the configured environment.'))
@@ -65,8 +96,7 @@ class ResidentHelper {
     child.stderr.resume()
     child.stdout.on('data', (chunk: Buffer) => this.receive(chunk))
     try { this.options.onHelperEvent?.({ status: 'started', pid: child.pid }) } catch { /* Diagnostics cannot change lifecycle. */ }
-    this.ready = this.send({ op: 'hello' }).then(() => { this.initialized = true })
-    return this.ready
+    return this.send({ op: 'hello' }).then(() => { this.initialized = true })
   }
   private fail(error: GitBackendError): void {
     if (this.failure) return
@@ -205,7 +235,10 @@ class ResidentHelper {
       signal?.throwIfAborted()
     } finally {
       this.startingOwners--
-      if (!this.initialized && !this.startingOwners && signal?.aborted) this.fail(new GitBackendError('cancelled', 'Memory Git startup was cancelled by its last waiting owner.'))
+      if (!this.initialized && !this.startingOwners && signal?.aborted) {
+        this.abandoned = true
+        this.fail(new GitBackendError('cancelled', 'Memory Git startup was cancelled by its last waiting owner.'))
+      }
     }
   }
   async request(message: Record<string, unknown>, signal?: AbortSignal, input?: Buffer): Promise<unknown> {
@@ -217,6 +250,7 @@ class ResidentHelper {
       if (!this.failure && this.child) await this.request({ op: 'release', store }).catch(() => {})
       return
     }
+    this.abandoned = true
     this.fail(new GitBackendError('fatal', 'Memory Git helper was released.'))
     await this.stopped
   }
