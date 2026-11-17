@@ -1,0 +1,56 @@
+name: Publish scoped DSS 0.5.0
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-scoped-dss-050.yml']
+permissions:
+  contents: read
+concurrency:
+  group: npm-scoped-dss-050
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Prepare complete scoped package from verified formal release
+        run: |
+          set -euo pipefail
+          curl -fL https://github.com/Tests4gptplay/deepseek-servant/releases/download/v0.5.0/deepseek-servant-0.5.0.tgz -o original.tgz
+          echo '4202293d65917ece5af32aa53045e00c8107e814e3bec428fd1f8beadee3ec52  original.tgz' | sha256sum -c -
+          mkdir unpack packed
+          tar -xzf original.tgz -C unpack
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          const dir='unpack/package/';const p=JSON.parse(fs.readFileSync(dir+'package.json'));
+          if(p.name!=='deepseek-servant'||p.version!=='0.5.0')throw Error('Unexpected release identity');
+          p.name='@tests4gptplay/deepseek-servant';delete p.private;p.publishConfig={access:'public'};
+          fs.writeFileSync(dir+'package.json',JSON.stringify(p,null,2)+'\n');
+          let patch=fs.readFileSync(dir+'cordis.patch.yml','utf8');
+          patch=patch.replace('name: deepseek-servant/cleaner',"name: '@tests4gptplay/deepseek-servant/cleaner'").replace('name: deepseek-servant\n',"name: '@tests4gptplay/deepseek-servant'\n");
+          if(!patch.includes("name: '@tests4gptplay/deepseek-servant'"))throw Error('Patch identity mismatch');
+          fs.writeFileSync(dir+'cordis.patch.yml',patch);
+          const old='window.__ModuleLoader__.load({ id: "deepseek-servant",';let client=fs.readFileSync(dir+'lib/client.js','utf8');
+          if(client.split(old).length!==2)throw Error('Unexpected client registration');
+          fs.writeFileSync(dir+'lib/client.js',client.replace(old,'window.__ModuleLoader__.load({ id: "@tests4gptplay/deepseek-servant",'));
+          JS
+          npm pack ./unpack/package --ignore-scripts --pack-destination packed
+          echo '295fdb0c2c6f40d19aa58bf1a0ac23e50207c9536a30cb861338dacea16dd245  packed/tests4gptplay-deepseek-servant-0.5.0.tgz' | sha256sum -c -
+      - name: Publish once with existing npm authorization
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.DSS_NPM }}
+        run: |
+          set -euo pipefail
+          test -n "$NODE_AUTH_TOKEN" || { echo 'DSS_NPM is not configured'; exit 1; }
+          npm publish ./packed/tests4gptplay-deepseek-servant-0.5.0.tgz --access public --ignore-scripts
+      - name: Verify registry visibility without republishing
+        run: |
+          for attempt in $(seq 1 30); do
+            if npm view @tests4gptplay/deepseek-servant@0.5.0 name version dist.integrity --json; then exit 0; fi
+            sleep 10
+          done
+          echo 'npm accepted publish; registry visibility still pending. Do not republish.'
