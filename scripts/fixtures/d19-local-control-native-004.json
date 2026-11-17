@@ -1,0 +1,37 @@
+{
+  "unit": {
+    "name": "record",
+    "version": 1
+  },
+  "global": null,
+  "tables": {
+    "records": {
+      "framework-user-controls/880f616d1b6c64f5e022523963b58083dd254b09bb24a47c3cad14da0567b2b4": {
+        "key": "framework-user-controls/880f616d1b6c64f5e022523963b58083dd254b09bb24a47c3cad14da0567b2b4",
+        "value": {
+          "version": 1,
+          "tasks": {
+            "c08864ff49f2210ae0b2a27e16713a96e88a8f562559697df41c28f6e53f538d": {
+              "taskId": "60000000-0000-4000-8000-000000000022",
+              "intent": "cancelled",
+              "commandId": "old-ui-cancel",
+              "requestedAt": "2026-11-04T00:00:00Z"
+            }
+          },
+          "executions": {},
+          "commands": {
+            "2a9a9f31d35c017b8a2c043f79d6c90ed6a70fb22cf7aaf455407f9ed4d56440": {
+              "signature": "[\"task\",\"60000000-0000-4000-8000-000000000022\",\"cancelled\"]",
+              "value": {
+                "taskId": "60000000-0000-4000-8000-000000000022",
+                "intent": "cancelled",
+                "commandId": "old-ui-cancel",
+                "requestedAt": "2026-11-04T00:00:00Z"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

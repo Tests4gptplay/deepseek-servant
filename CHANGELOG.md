@@ -1,6 +1,10 @@
 # 版本与验收摘要
 
-当前版本：`0.4.1`。安装方式见[安装指南](docs/INSTALLATION.md)。
+当前 main：**0.5.0**；最新正式 Release：**0.4.1**。
+
+## 0.5.0
+
+[更新说明](docs/releases/0.5.0.md) · [测试记录](docs/testing/0.5.0.md) · [安装与升级](docs/INSTALLATION.md)
 
 ## 0.4.1 — 2026-10-30
 
@@ -172,4 +176,4 @@
 
 ## 早期基线
 
-alpha.1–alpha.3 的 Linux 原生运行、16 批任务、技能复用和当时清理结果保留在[实现记录](IMPLEMENTATION.md#历史版本验证结果)及[历史清理数据](RETENTION.md#历史版本实测)。原始架构和旧 Helper 契约保留于 [docs/history](https://github.com/Tests4gptplay/deepseek-servant/blob/d28a4d8538abc966608761bcfd60d568dec11cc9/docs/history/architecture-20261024.md)。
+alpha.1–alpha.3 的 Linux 原生运行、16 批任务、技能复用和当时清理结果保留在[实现记录](https://github.com/Tests4gptplay/deepseek-servant/blob/d28a4d8538abc966608761bcfd60d568dec11cc9/IMPLEMENTATION.md#历史版本验证结果)及[历史清理数据](https://github.com/Tests4gptplay/deepseek-servant/blob/d28a4d8538abc966608761bcfd60d568dec11cc9/RETENTION.md#历史版本实测)。原始架构和旧 Helper 契约保留于 [docs/history](https://github.com/Tests4gptplay/deepseek-servant/blob/d28a4d8538abc966608761bcfd60d568dec11cc9/docs/history/architecture-20261024.md)。

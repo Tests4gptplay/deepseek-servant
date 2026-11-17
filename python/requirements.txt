@@ -1,0 +1,4 @@
+# For explicitly configured external Python environments; bundled CPython 3.12/3.13 uses offline package dependencies.
+dulwich==1.2.21
+urllib3==2.8.0
+typing_extensions==4.15.0; python_version < "3.12"

@@ -1,14 +1,22 @@
+import { observeNativeQuestionWait } from './native-questions.js'
+import { DshAgentAdmissionClosed, DshAgentCreationCancelled } from './host-types.js'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentOptions } from '@deepseek-ai/dsh-agent'
+import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
+import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { MessageId, freezeMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { SessionId, deriveEventMessage, isAppendSurfaceEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-tools'
-import type { DshAgentRequest, ExecutionPermission, OwnedDshAgent } from './host-types.js'
+import type {} from '@deepseek-ai/dsh-working-directory'
+import type {} from '@deepseek-ai/dsh-fs'
+import type { DshAgentRequest, DshModelRoute, ExecutionPermission, OwnedDshAgent } from './host-types.js'
 import { deriveNativeInputs } from './sessions.ts'
+import { observeDshProgress } from './progress.js'
+import { registerNativeSessionCleanup, recordNativeSessionClose, type NativeSessionRegistration } from './native-cleaner.js'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -31,7 +39,15 @@ export class DshAgentGateway {
     if (current !== undefined) return Promise.resolve(current)
     const pending = this.opening.get(request.sessionId)
     if (pending !== undefined) return pending
-    const operation = this.createOwned(request).finally(() => this.opening.delete(request.sessionId))
+    const acquisition = { dispatched: false, closed: false }
+    const operation = this.createOwned(request, acquisition).catch(error => {
+      const disposition = acquisition.closed ? 'closed' : !acquisition.dispatched ? 'not-dispatched' : undefined
+      if (disposition && request.creationFailure) {
+        try { request.creationFailure({ sessionId: request.sessionId, disposition }) }
+        catch (observationError) { this.ctx.logger?.('deepseek-servant').warn('Native acquisition failure observation failed.', observationError) }
+      }
+      throw error
+    }).finally(() => this.opening.delete(request.sessionId))
     this.opening.set(request.sessionId, operation)
     return operation
   }
@@ -51,7 +67,9 @@ export class DshAgentGateway {
     return persistence !== undefined && await persistence.stat(id) !== undefined
   }
 
-  private async createOwned(request: DshAgentRequest): Promise<OwnedDshAgent> {
+  private async createOwned(request: DshAgentRequest, acquisition: { dispatched: boolean; closed: boolean }): Promise<OwnedDshAgent> {
+    const checkBeforeNative = () => { if (request.signal?.aborted) throw new DshAgentCreationCancelled(true, request.signal.reason) }
+    checkBeforeNative()
     const sessionId = SessionId(request.sessionId)
     if (this.ctx.agents.get(sessionId) !== undefined) {
       throw new Error(`Servant cannot acquire an Agent already owned by another runtime: ${sessionId}`)
@@ -60,8 +78,13 @@ export class DshAgentGateway {
     if (request.presetId !== undefined && presets === undefined) {
       throw new Error('The selected Servant preset requires the DSH agent preset registry.')
     }
-    const presetId = presets === undefined ? undefined : (await presets.resolve(request.presetId)).id
-    const route = request.model
+    let presetId: string | undefined
+    try { presetId = presets === undefined ? undefined : (await presets.resolve(request.presetId)).id }
+    catch (error) { checkBeforeNative(); throw error }
+    checkBeforeNative()
+    // Native prompt variables read Agent.options before the request waterfall.
+    // Resolve Auto through the Host's default selection before creating the scope.
+    const route: DshModelRoute | undefined = request.model ?? this.ctx.get('agentDefaultModel')?.currentSelection()
     const agentOptions: AgentOptions = {
       ...(route?.provider === undefined ? {} : { provider: route.provider }),
       ...(route?.model === undefined ? {} : { model: route.model }),
@@ -69,45 +92,99 @@ export class DshAgentGateway {
       ...(route?.maxTokens === undefined ? {} : { maxTokens: route.maxTokens }),
     }
     let lastError: { message: string; turn: number; step: number } | undefined
+    const questionListeners = new Set<() => void>()
+    let waitingForUser = () => false
+    let setupEntered = false, setupReturned = false
+    let cleanupRegistration: NativeSessionRegistration | undefined
+    // The factory can detach pre-setup persistence on abort and return before its
+    // handle cleanup settles. Keep that acquisition owned. Setup is the phase
+    // we can fence ourselves; after setup, await the actual handle and dispose it.
+    const creation = new AbortController()
+    const cancelSetup = () => { if (setupEntered && !setupReturned) creation.abort(request.signal?.reason) }
+    request.signal?.addEventListener('abort', cancelSetup, { once: true })
     const setup = async (agentCtx: Context, agent: Agent) => {
+      cleanupRegistration = registerNativeSessionCleanup(this.ctx, agent)
+      setupEntered = true
+      request.signal?.throwIfAborted()
       agentCtx.on('agent/error', event => {
         if (event.agent === agent) lastError = { message: errorChain(event.error), turn: event.turn, step: event.step }
       })
       if (presets !== undefined && presetId !== undefined) await presets.mount(agentCtx, presetId)
-      // DSH rc.2 reuses the last request header after the first request.
-      // Keep this owned execution on its captured route, including after resume.
-      const provider = route?.provider, model = route?.model
-      if (provider && model) agentCtx.on('agent/request', async ({ agent: owner }, next) => {
-        const previous = await next()
-        if (owner !== agent) return previous
-        const config = { ...previous, provider, model }
-        if (route.reasoningEffort === undefined) delete config.reasoningEffort
-        else config.reasoningEffort = route.reasoningEffort as ReasoningEffortId
-        return config
-      })
-      return await request.setup?.(agentCtx, agent)
+      waitingForUser = observeNativeQuestionWait(agentCtx, agent, () => { for (const listener of questionListeners) listener() })
+      request.signal?.throwIfAborted()
+      // Native AgentModel owns pending/last-used selection and options fallback.
+      // This official hook only publishes a notice when the actual route changes.
+      installModelSelection(agentCtx)
+      if (request.taskWorkspace) {
+        const working = this.ctx.workingDirectory
+        const root = await this.ctx.fs.resolve(request.taskWorkspace, { signal: request.signal })
+        const current = await this.ctx.fs.resolve(working.get(agent.session), { signal: request.signal })
+        if (!this.ctx.fs.contains(root, current)) await working.set(agent, request.taskWorkspace, request.signal)
+      }
+      const commit = await request.setup?.(agentCtx, agent)
+      request.signal?.throwIfAborted()
+      setupReturned = true
+      return commit
     }
-    const native: AgentHandle = request.resume
-      ? await this.ctx.agents.resume({ resumeSessionId: sessionId, agentOptions, setup })
+    let native: AgentHandle
+    acquisition.dispatched = true
+    try { native = request.resume
+      ? await this.ctx.agents.resume({ resumeSessionId: sessionId, agentOptions, setup, signal: creation.signal })
       : await this.ctx.agents.create({
           sessionId,
+          signal: creation.signal,
           agentOptions,
           meta: { cwd: request.cwd, ...(presetId === undefined ? {} : { agentPreset: presetId }) },
           setup,
         })
+    } catch (error) {
+      if (request.signal?.aborted) throw new DshAgentCreationCancelled(
+        setupEntered && !setupReturned && !this.hasLiveOwner(request.sessionId), request.signal.reason,
+        setupEntered && !setupReturned
+          ? 'Creation was cancelled before setup returned: publication is fenced. Native rollback resource cleanup is not independently acknowledged.'
+          : 'Native creation failed before its owned handle returned: ' + errorChain(error) + '. Native execution cleanup has not been confirmed.')
+      throw error
+    } finally { request.signal?.removeEventListener('abort', cancelSetup) }
     const agent = native.agent
+    const closeNative = async () => {
+      try { await native.dispose() }
+      catch (error) {
+        recordNativeSessionClose(this.ctx, cleanupRegistration, { status: 'failed', error })
+        throw error
+      }
+      acquisition.closed = true
+      recordNativeSessionClose(this.ctx, cleanupRegistration, { status: 'closed' })
+    }
+    const cancelAfterNative = async () => {
+      if (!request.signal?.aborted) return
+      try { await closeNative() }
+      catch (error) { throw new DshAgentCreationCancelled(false, request.signal.reason,
+        'Native creation cancellation cleanup failed: ' + errorChain(error)) }
+      throw new DshAgentCreationCancelled(true, request.signal.reason)
+    }
+    await cancelAfterNative()
     if (!request.resume && request.recentExchanges?.length) {
       try {
         agent.inject(freezeMessage({ id: MessageId('servant-history:' + request.sessionId), role: 'user',
         source: { kind: 'deepseek-servant-history' }, content: [{ type: 'text', text:
-          'Recent completed conversation exchanges, verbatim and chronological. These are historical originals for context; the next actual user input supplies the current request. Use conversation_search/read for earlier originals.\n'
+          'Recent completed conversation exchanges, verbatim and chronological. These are historical originals for context; the next actual user input supplies the current request. Use dss_conversation_read with mode page and beforeId to page through earlier originals, or mode message and reference set to a known message id for one original.\n'
           + JSON.stringify(request.recentExchanges) }] }))
         await this.ctx.sessions.flush(agent.session)
-      } catch (error) { await native.dispose(); throw error }
+      } catch (error) {
+        try { await closeNative() } catch (cleanup) {
+          if (request.signal?.aborted) throw new DshAgentCreationCancelled(false, request.signal.reason, errorChain(cleanup))
+          throw new AggregateError([error, cleanup], 'Native history admission and cleanup failed')
+        }
+        if (request.signal?.aborted) throw new DshAgentCreationCancelled(true, request.signal.reason)
+        throw error
+      }
     }
+    await cancelAfterNative()
     let disposed = false, closing = false
     let disposal: Promise<void> | undefined
     const admissions = new Set<Promise<void>>()
+    const messageAdmissions = new Map<string, Promise<void>>()
+    const progressSubscriptions = new Set<() => void>()
     // Only join admitted durability barriers, never a model turn. Once closing
     // begins no new send/cancel may race native teardown's persistence close.
     const admit = (operation: () => Promise<void>): Promise<void> => {
@@ -120,9 +197,30 @@ export class DshAgentGateway {
     const handle: OwnedDshAgent = {
       sessionId: request.sessionId,
       actualAgent: agent,
-      send: async (text, messageId, mode = 'followup', source = request.role === 'foreground' ? 'user' : 'deepseek-servant') => {
-        if (closing || disposed) throw new Error(`Servant Agent is closing or disposed: ${request.sessionId}`)
-        return admit(async () => {
+      send: async (text, messageId, mode = 'followup', source = request.role === 'foreground' ? 'user' : 'deepseek-servant', recovery) => {
+        if (closing || disposed) throw new DshAgentAdmissionClosed(request.sessionId)
+        const predecessor = messageAdmissions.get(messageId)
+        const operation = admit(async () => {
+          await predecessor?.catch(() => undefined)
+          if (closing || disposed) throw new DshAgentAdmissionClosed(request.sessionId)
+          if (recovery) {
+            if (source !== 'deepseek-servant' || (mode !== 'followup' && mode !== 'steer')) throw new Error('Recovery delivery must be a waking plugin followup or steer input.')
+            const input = deriveNativeInputs(agent.session.snapshotEvents(), {
+              'next-turn': agent.inbox.nextTurn, 'next-step': agent.inbox.nextStep,
+            }, agent.status === 'running').get(messageId)
+            if (input && (input.text !== text || input.source !== source)) throw new Error('Recovery input differs from its persisted native identity.')
+            if (input?.state === 'claimed' && !input.active && !recovery.replayInactiveClaim) {
+              throw new Error('Inactive claimed recovery input requires confirmed prior execution stop.')
+            }
+            if (input?.state === 'queued' && agent.status === 'idle') {
+              // Only the existing recovery explanation is withdrawn. Business
+              // inputs stay in their original inbox positions and retain ids.
+              if (!agent.inbox.remove(MessageId(messageId))) throw new Error('Recovery inbox input changed before withdrawal.')
+              await this.ctx.sessions.flush(agent.session)
+              if (closing || disposed) throw new Error(`Servant Agent closed before recovery readmission: ${request.sessionId}`)
+            }
+          }
+
           if (handle.hasMessage(messageId)) {
             // A previous admission may have succeeded while its durability barrier failed.
             // The retry must prove persistence before acknowledging the same stable id.
@@ -134,9 +232,15 @@ export class DshAgentGateway {
             id: MessageId(messageId), role: 'user',
             content: [{ type: 'text', text }], source: source === 'user' ? { kind: 'user' as const } : { kind: 'deepseek-servant' as const },
           })
-          agent[mode](message)
+          // The official initiator boundary rejects a closing Host before the
+          // native driver mutates its inbox/activity promise. A late admission
+          // must not strand whenIdle during concurrent root teardown.
+          this.ctx.agents.withInitiator(agent, () => agent[mode](message))
           await this.ctx.sessions.flush(agent.session)
         })
+        messageAdmissions.set(messageId, operation)
+        void operation.finally(() => { if (messageAdmissions.get(messageId) === operation) messageAdmissions.delete(messageId) }).catch(() => undefined)
+        return operation
       },
       cancel: async () => {
         if (disposed) return
@@ -155,11 +259,12 @@ export class DshAgentGateway {
         if (disposed) return
         if (disposal) return disposal
         closing = true
+        for (const unsubscribe of progressSubscriptions) unsubscribe()
         const pending = Promise.resolve().then(async () => {
           // Their callers retain the original failures; a failed admission must
           // not prevent native cleanup from draining/releasing its own resources.
           await Promise.allSettled([...admissions])
-          await native.dispose()
+          await closeNative()
           disposed = true
           if (this.owned.get(request.sessionId) === handle) this.owned.delete(request.sessionId)
         })
@@ -172,6 +277,7 @@ export class DshAgentGateway {
         return {
           state: agent.status === 'running' ? 'running' : ownedJobs.some(job => job.status === 'running' || job.status === 'stopping') ? 'waiting' : 'idle',
           jobs: ownedJobs,
+          waitingForUser: waitingForUser(),
           ...(lastError === undefined ? {} : { error: { ...lastError } }),
         }
       },
@@ -183,7 +289,15 @@ export class DshAgentGateway {
         const input = deriveNativeInputs(events, { 'next-turn': agent.inbox.nextTurn, 'next-step': agent.inbox.nextStep }, agent.status === 'running').get(messageId)
         return input?.state === 'claimed' && input.active === true
       },
+      subscribeProgress: listener => {
+        if (closing || disposed) return () => {}
+        const stop = observeDshProgress(agent, event => { if (!closing && !disposed) listener(event) })
+        const unsubscribe = () => { stop(); progressSubscriptions.delete(unsubscribe) }
+        progressSubscriptions.add(unsubscribe)
+        return unsubscribe
+      },
       subscribe: (listener, terminalOnly = false) => {
+        questionListeners.add(listener)
         const onEvent = agent.ctx.on('session/event', (_session, event) => { if (!terminalOnly || event.type === 'turn/end') listener() })
         const onStatus = agent.ctx.on('agent/status', () => listener())
         const onError = agent.ctx.on('agent/error', () => listener())
@@ -192,7 +306,7 @@ export class DshAgentGateway {
           const owner = event.type === 'output' ? event.owner : event.job.owner
           if (owner === agent.id) listener()
         })
-        return () => { onEvent(); onStatus(); onError(); onJob?.() }
+        return () => { questionListeners.delete(listener); onEvent(); onStatus(); onError(); onJob?.() }
       },
     }
     this.owned.set(request.sessionId, handle)

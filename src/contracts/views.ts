@@ -27,12 +27,10 @@ export interface RecordStorageView {
   directory: string
   nativeDirectory?: string
   issues?: string[]
-  /** The move committed, but the old copy could not be removed. */
-  retainedSource?: string
 }
 export interface ServantView {
   conversationMode?: 'LOCAL' | 'PRIVATE_GIT_EXPERIMENTAL'
-  runtimeSettings: import('../application/runtime-settings.js').RuntimeSettings
+  runtimeSettings: { schemaVersion: 1; revision: number; workerSeats: number }
   recordStorage: RecordStorageView
   assistant: AssistantView
   tasks: TaskView[]

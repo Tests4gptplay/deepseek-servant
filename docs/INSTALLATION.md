@@ -1,40 +1,44 @@
 # 安装与升级
 
-正式版本：`0.4.1`。模型设置已在 Windows Desktop `0.2.1-rc.5` 验证；任务运行的历史环境见验收记录。
+## 安装
 
-## 原生安装
+在 DSH 的 **插件 → 添加插件 → 包名或地址** 中填写 `github:Tests4gptplay/deepseek-servant#main`，与 README 的 main 分支入口一致。安装后启用插件，按宿主提示重启。
 
-当前版本：**0.4.1**。安装包与固定标签均已包含运行文件，无需编译。
+已有插件 TGZ 时，也可填写 `deepseek-servant-0.5.0.tgz` 在运行 DSH 的电脑上的完整绝对路径，无需解压。
 
-**首次安装（Desktop）：** 打开侧栏 **插件 → 添加插件**（箭头菜单的 **安装第三方插件** 也可进入），把下面一整行填入 **包名或地址**，点击 **安装**，核对版本后点击 **立即启用**。
+**升级与资料保留：** 先正常停止 DSS 执行并保留原数据备份，通过相同的包名或地址入口更新，按宿主实际提示操作。保留 DSH 数据目录、Local 库及任务工作区，不手工删除记录或数据。Desktop 需要时完整退出托盘进程后再打开；升级后检查设置、对话、任务记录与成果可读取。
 
-```text
-github:Tests4gptplay/deepseek-servant#v0.4.1
-```
-
-**升级已有插件：** 同样填写上面的新版来源，成功后核对版本并启用；已有设置与用户文件保留。若宿主提示已安装或要求先卸载，再按提示仅卸载该插件条目并安装新版，不清除 DSH 数据或手工删除插件目录。是否需要重启以 DSH 提示为准；需要时完全退出并重新打开（Desktop 包括托盘）。
-
-启用后从侧栏打开 DeepSeek Servant，选择模型和工作区；DSS-cah 按需启用。
-
-**备用安装包：** 将下面的 `.tgz` 直链填入同一个 **包名或地址**；也可下载后填写文件的完整绝对路径，无需解压。该路径应属于运行 DSH 的电脑。
-
-```text
-https://github.com/Tests4gptplay/deepseek-servant/releases/download/v0.4.1/deepseek-servant-0.4.1.tgz
-```
-
-**Web：** 在运行服务的环境中执行。升级前停止对应 Web profile，成功后重新启动；Web 与 Desktop 分别安装。
+**Web：** 先停止对应 profile，在运行该服务的环境执行，之后重启：
 
 ```sh
-dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.4.1'
+dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#main'
+# 已有 TGZ 时改用其实际绝对路径：
+# dsh plugin --profile web add '/absolute/path/deepseek-servant-0.5.0.tgz'
 ```
 
-备用时将命令中的来源换成上面的 `.tgz` 直链或下载文件的完整绝对路径。
+使用 TGZ 入口时，将示例替换为安装包在运行 DSH 的电脑上的实际绝对路径。Desktop 与 Web 分别管理安装。模型提供者与工具权限仍由 DSH 管理。
 
-模型、工具权限与预设由 DSH 管理。协作依赖见下节，仓库设置见 [DSS-cah 使用说明](../PRIVATE_GIT.md)。
+## 原生会话 Cleaner 的平台边界
 
-## DSS-cah 依赖
+Cleaner 与 DSS 由同一个包自动挂载，没有新增启用开关。macOS 自动清理尚未支持，DSS 仍可正常启动。
 
-准备 Git（`git`）与 GitHub CLI（`gh`），让运行 DSH 的环境能够找到这两个命令。Git 用于仓库同步，GitHub CLI 提供当前账号授权。
+Cleaner 初始化失败会报告实际错误并保留普通缓存与 DSS 的使用；后续故障不因此停止仍在运行或 idle 的 Agent。Windows 完成逻辑删除后保留精确恢复记录，目录命名空间的断电持久性仍为未验证；技术回执可能随关闭的执行增长。它不删除权威 DSS 对话、任务原文或长期档案，也不按目录名扫除其他会话。
+
+## Git 身份与连接
+
+当前产品仅使用 **Dulwich 常驻内存 Git 后端**。Git 模式需要 Python 解释器与已登录授权账号的 GitHub CLI（`gh`）。Dulwich 1.2.21、urllib3 2.8.0 已随 DSS 安装包交付，无需 DSH 自动 pip、用户虚拟环境或额外联网安装。Local 模式不启动 Python helper。
+
+**正常从 DSH 界面安装本插件。** `koffi` 是 npm 依赖，由 DSH 原生安装器处理；若出现构建权限提示，使用界面的“允许这些脚本并重试”。本插件不增加 postinstall、不预写批准、不修改系统 Python。
+
+包内原生加速覆盖标准 CPython 3.12/3.13：Windows x64/ARM64/x86、macOS x64/ARM64、Linux glibc 2.28+ x64/ARM64。按解释器 ABI 和原生扩展后缀匹配，不以纯 Python 悄悄替代加速。其他 Python/平台或不兼容系统保持使用原有解释器及依赖，不改变既有可用配置；缺包时仍需在选定解释器环境准备 requirements.txt 所列依赖。`gitPythonExecutable` 可配置已有 Python 的完整路径，默认仍用 Windows 的 `python` 或 POSIX 的 `python3`。
+
+安装包不包含 Python 解释器本体；可使用 DSH 官方 `load_workspace_dependencies` 返回的内置解释器（将路径配置到 `gitPythonExecutable`）或已有官方 Python。执行时以 `-I` 隔离加载可信包内依赖，不依靠 PYTHONPATH，不写全局环境、不在任务中下载。详细许可与选择机制见 [内存 Git](MEMORY_GIT.md)。
+
+helper 在已有 Git 操作生命周期内按需启动，不阻塞插件注册；缺依赖会先报告，不重复花费账号/仓库 REST 查询。确认依赖修复后再次连接即可。每个仓库/authority 实例分别有后台读写、前台读写、界面刷新、Host 固定轮询和周期心跳发布七条独立通道，每条按约 40MiB 原始对象内容触发清理。活动快照和 UNKNOWN 写入仍受保护，40MiB 不是进程 RSS 或整个 Host 总内存上限；前台访问与后台连接可各有独立实例。
+
+helper 保留 Host 已有的 HTTP(S)/ALL/NO_PROXY 与 CA 路径选择，支持 HTTP/HTTPS CONNECT 代理和显式 CA，强制 TLS/主机名验证，不修改系统网络或信任。NTLM/Kerberos、SOCKS 和复杂 CIDR NO_PROXY 不受支持；不同平台的信任配置可能需要适配；遇到不支持配置应报告，不静默绕过代理。凭据只由既有授权源通过进程管道提供，不进入命令行、磁盘或日志。DNS 使用只接收主机、端口和地址族、继承受限运行环境的短生命周期子进程，不向其传入仓库 token 或代理凭据。取消会终止并回收对应 DNS 子进程、唤醒连接等待，并中断该请求仍拥有的底层 socket，包括 TLS；其他已热对象读取仍有独立执行资源。传输不设固定超时，等待完成、实际失败或取消，不保证取消返回时全部清理已经结束或凭据内存已擦除。
+
+产品 Git 不需要 `git` 可执行文件，不卸载用户现有 Git 或 gh。
 
 Windows 安装 GitHub CLI：
 
@@ -49,19 +53,10 @@ gh auth login --hostname github.com --web
 gh auth status --hostname github.com
 ```
 
-当前账号需有目标私库的读写权限。回到 DSS-cah 填写仓库与目录，点击“连接私有仓库”。CLI 未安装、未登录或仓库授权不足时，页面上方显示配置提示；完成配置后点击“重试”重新连接。
+当前账号需有目标私库的读写权限。在 DSS 的 Git 设置中填写仓库与目录，点击 **保存并连接**；成功提示表示设置已保存且连接登记成功。CLI 未安装、未登录或仓库授权不足时会显示实际错误，完成配置后再保存。**开始协作后台／退出协作后台** 控制后台参与；普通历史读取和发送消息不自动恢复已退出的后台。
+
+Git 协作的全局前台回复与顶层任务初始投递入口由**仓库所有者账号的主理实例**负责：该实例须在线并已开始协作后台。主理实例是此账号在同一仓库、分支和目录中登记后使用账号原名的实例。其他有写权限的协作者实例加入同一范围参与协作；已明确分派到其他实例的 O 任务及其 Recorder、Cleaner 由该任务的实际 owner 实例处理，无需成为全局主理者。新建协作域或更改显示名称不改变主理资格。
+
+**Git setup:** Global Foreground replies and initial admission of top-level task sources run on the **repository owner's primary instance**, which must be online with background participation enabled. This is the instance registered under the owner's exact account name in the same repository, branch, and directory. Other collaborators with write access can join that scope. An O task explicitly assigned to another instance, together with its Recorder and Cleaner, runs on that task's actual owner instance without requiring global-primary status. Creating a collaboration or changing a display name does not change primary ownership.
 
 参考：[GitHub CLI Windows 安装](https://github.com/cli/cli/blob/trunk/docs/install_windows.md)、[GitHub CLI 登录](https://cli.github.com/manual/gh_auth_login)。
-
-## 开发
-
-使用包内声明的 Node.js `^22.19.0 || >=24.0.0`：
-
-```sh
-npm ci --ignore-scripts
-npm run typecheck
-npm run build
-npm pack --ignore-scripts
-```
-
-构建将角色提示、样式及已接受美术嵌入生产文件。安装包由 files 白名单控制；测试、临时配置和开发验证按需显式运行。Local 的原生恢复与 31 分钟静默作业结果沿用 [alpha.39 验收](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/docs/acceptance-20261026.md)。

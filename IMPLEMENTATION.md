@@ -1,238 +1,123 @@
-# DeepSeek Servant 实现说明
+# 当前实现与验证边界
 
-版本：`0.3.5`。双模式架构见 [DESIGN.md](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/DESIGN.md)，协作操作见 [PRIVATE_GIT.md](PRIVATE_GIT.md)，Local 已接受运行记录见[alpha.39 验收](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/docs/acceptance-20261026.md)。
+> 本文件描述工作分支候选，不是发布公告。候选版本为 `0.5.0`，发布状态见 [版本说明](docs/releases/0.5.0.md)。
 
-## 0.3.5 分模式前台与工作随记
+## 入口和模块
 
-`SharedForeground` 位于组合层，按所选模式显示 Local 或 Git 的对话与任务，将新输入交给对应后台；上下文与分页缓存也按模式分开。模式菜单保留当前页面和输入草稿；Git 前台沿用输入框模型与前台工作区，任务仍通过独立 Coop Consumer 执行。
-
-`foreground-memory.ts` 共用两份文档的用途与维护约定。Local 通过原生记录存储保存，Git 通过受角色绑定的 `foreground_memory` 操作更新当前 Markdown；空文本删除。安装角色工具时只提供用途、路径与按需读取方法，不加载文档正文。List 的 7 天提醒、30 天确认与 Cache 清理由前台在普通对话轮次执行，无额外定时唤醒。
-
-`repository-guide.ts` 管理所选目录 README 的独立区段，保留自有文案；仅内容版本或仓库范围变化时发布。README 与助手随记属于协议路径，内部更新不触发业务任务通知。
-
-## 0.2.2 角色记录与远端状态
-
-`protocol.ts` 的 `roleCommandSchema` 同时用于模型工具参数与 RoleWriter 校验；实际角色 Markdown 位于 `src/experimental/private-git/prompts`。Foreground 保存用户答复，Planner 保存 Memory、按需更新 Plan Note 并执行计划/评审操作，Worker 保存 Child Reply。操作与返回路径见 [角色写入顺序](PRIVATE_GIT.md#git-完成信号)。
-
-`status.ts` 为每次执行追加 started、completed、closed 或 replaced 状态。Consumer 先写启动状态，再由后续快照启动原生执行；RoleWriter 先保存角色正文，随后保存 Result 引用，再独立追加 completed。消费端按远端完成状态推进，保留 AI 原文。正文已提交而最终状态中断时，可从远端 Result 恢复最后一步；旧的已完成结果继续可读，旧的未完成 action 在续作前升级启动契约。
-
-正常同步间隔为 1 秒，保留单轮合并与网络退避。未改变的 HEAD 复用元数据、目录与缺失路径缓存；账户/仓库验证结果按配置及凭据身份复用，实际写入重新核对私有性与权限。任务状态和指派的本地消费以发布者最终远端状态为准。封存包含独立状态记录。
-
-## 0.2.1 DSS-cah
-
-Host 使用独立 bare partial clone 增量 fetch，检测选定目录的路径、A/M/D 状态、提交和父提交。Consumer 读取相关任务的绑定、计划、控制及结果正文，按当前执行的 `turn_signal` 派发；普通业务文档才生成 Foreground 变更通知，由 AI 使用 `coop_changes` / `coop_read` 按需读取。自身写入带实例 trailer，内部协议路径不触发通用通知。变更通知与已消费游标在同一 Git 提交保存，冷启动从 Git 恢复调度；UI 打开时按需读取展示页。
-
-完成信号参考 CAH `local_bridge/planner_runtime.py` 的 `observe_semantic_turn` / `planner_runtime_tick` 及 `docs/task-cell/WORKER.md`、`PLANNER.md`。DSS 的 `outcome.ts` 将角色信号转为内部状态，精确匹配当前 action 的任务、执行及输出路径。`coop_commit` 自动注入绑定，新工具参数只显示当前角色的信号。Consumer 在 Git 确认后推进角色，不以原生 turn/end 作为前提；仍在收尾的原生执行由现有事件回收，并在归档前保存记录。旧版 kind/resultStatus 结果继续兼容。
-
-Git 操作使用显式 GIT_DIR，缓存目录与任何上级工程隔离。写入在临时索引构造，仅比较受影响的读写路径；无关远端更新直接保留并合入。GitHub API 用于核对账户、实际私有性、权限与成员；凭据复用 DSH Credentials、环境及已有 CLI 登录。
-
-## alpha.41 稳定性修复
-
-单条损坏记录、任务或协作原文分别报告，健康数据继续可读写；损坏原件保留，修复后沿正常操作恢复。目录派生标记损坏时先备份原字节再重建。模型设置修正和重新连接可恢复原有失败任务，旧连接和界面响应按当前上下文收束。任务列表提供完整分页，席位、记录策略及标识长度按实际数据表示能力处理。
-
-## alpha.40 独立协作实现
-
-`src/mode-router` 只路由新输入与界面选择；`src/experimental/private-git` 独立拥有设置、Git I/O、角色提示、状态机、调度、原生 Agent、页面和封存。GitJournal 以稳定回执和非强推 CAS 提交；Consumer 读取不可变提交后兑现动作，NativeAgents 使用实际 Session、工具操作身份和 Jobs。用户主动参与与当前指派共同决定本机工作范围。
-
-协作使用 `deepseek_servant_coop` 原生 Domain。GitHub 凭据来自原生 Credentials、环境或已登录 CLI；完整协作记录写入专用私库。原生存储键采用路径安全摘要，保留逻辑键用于投影与恢复。协议参数错误转为可读证据，网络失败保持待提交草稿。当前代码的协作验收见[alpha.40 开发验收](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/docs/acceptance-private-git-20261026.md)。
-
-下文保留 Local 的实现与历次运行记录。
-
-**设计来源：**[Chat Agent Harness（CAH）](https://github.com/Tests4gptplay/chat-agent-harness)，在 DSH 中实现其持续任务、Agent 角色分工、工作接续与知识积累机制。
-
-## 模块交付与宿主集成
-
-本仓库提供插件生产源码、构建配置和开发说明。`build`、`typecheck` 为显式工程命令；`npm pack --ignore-scripts` 使用正式文件白名单收录 Host/Client JS、许可证、NOTICE 和必要说明；发行构建关闭 source map。模型转接与实验素材在隔离验证环境中使用。
-
-任务和知识持久化在 DSH 的 `storageDomain`。模型调用、文件与命令工具、Session、jobs 和 Skills 使用宿主现有服务；当前模式的任务流转在所属 DSH 实例的后端完成。Client 通过宿主已认证的 Connection/RPC 与流事件通道交互。
-
-当前 Windows 运行验收使用 DSH `0.2.1-rc.3`。此前 API 基线为官方源码标签 `dsh-v0.2.1-rc.2`、提交 `687f282e8625c6b8d11ff58211a90524be2e4317`。DSH API 适配集中在 `src/adapters/dsh`，插件按实际服务接口运行，不以宿主版本字符串拦截启动。
-
-## 插件标识与存储域
-
-显示名称为 **DeepSeek Servant**，包名及插件 ID 为 `deepseek-servant`，持久化 domain 为 `deepseek_servant`。原生消息来源、RPC 路径、会话前缀和 scoped Skill 前缀使用统一的 Servant 标识。升级继续使用原存储域与目录指针，旧版内嵌字段按稳定身份迁移。
-
-## 文件与模块
-
-| 模块 | 入口 | 负责的工作 |
+| 范围 | 当前源码 | 责任 |
 | --- | --- | --- |
-| Host | `src/host.ts` | 装配服务、持有后台生命周期、接入宿主、关闭时收敛拥有的资源 |
-| 用户接入 | `application/assistant-service.ts`、`api.ts` | 消息持久接纳、前台 Session、独立设置、稳定交付与用户控制 |
-| 任务权威 | `application/task-service.ts`、`servant-store.ts`、`domain/task.ts` | 唯一任务写入口、命令去重、纯状态转换、同记录提交动作 |
-| 运行协调 | `runtime/coordinator.ts`、`scheduler.ts` | 依赖、席位、写域、等待、派发、恢复与本地幂等兑现 |
-| 实际所有权 | `runtime/agent-supervisor.ts` | 创建/持有/停止/释放确切 Agent，观察其模型回合和精确作业 |
-| 工作原文与上下文 | `application/record-journal.ts`、`task-records.ts`、`task-record-access.ts`、`runtime/context-assembler.ts` | 同域独立原文、当前机器状态、工作前沿与作用域分页读取 |
-| 知识与技能 | `application/knowledge-service.ts`、`adapters/dsh/skills.ts` | 候选、验证、版本、真实加载和结果反馈，发布原生 scoped provider |
-| 角色工具 | `roles/tools.ts`、前台及后台角色契约 | 实际 Agent 绑定的能力；Planner 判断方法和质量，代码检验身份和状态 |
-| 读取与界面 | `application/query-service.ts`、`client.tsx`、`client/` | 原生独立页面、对话、任务、产物、知识、设置与清理操作 |
-| 封存与清理 | `application/task-archive-store.ts`、`retention-service.ts`、`storage-usage.ts`、`domain/retention.ts` | 完整 records、精确临时清理、历史入口与技能维护、实际容量统计 |
+| Host / Client | `src/host.ts`、`src/client.tsx` | 注册正式宿主服务、页面及侧栏入口；沿用现有美术 |
+| 服务与通信 | `src/framework/service.ts`、`transport.ts` | 按模式和存储范围访问、命令与下载端点 |
+| 客户端 | `client-contracts.ts`、`client-page.tsx`、`client-notices.ts` | 保留原发送身份、历史导航、任务/知识界面及本地完成提示 |
+| 存储与事务 | `physical-local-files.ts`、`local-record-files.ts`、`transactions.ts`、`command-transactions.ts` | Local 物理文件与业务接续；Git 固定快照、原子提交及未知结果核对 |
+| Git 远端 | `src/experimental/private-git/remote-git-repository.ts`、`dulwich-git-backend.ts`、`dulwich-helper.py` | 单一 Dulwich 远端树/blob及分支头条件提交，无本地业务镜像 |
+| 访问和参与 | `connection.ts`、`instances.ts` | 纯存储访问与后台登记分离，实际账号和实例身份 |
+| 六角色 | `role-runtime.ts`、`role-tools.ts`、`role-prompts.ts` | Foreground / Organizer / Planner / Worker / Recorder / Helper |
+| 原生执行 | `native-executions.ts`、`execution-observation.ts`、`execution-control.ts` | DSH Agent / Session / Jobs、实际进展和停止证据 |
+| 任务和恢复 | `task-files.ts`、`task-index.ts`、`recovery.ts`、`host-loop.ts` | 任务初始化、信号、持久状态与接续 |
+| 对话 | `conversation.ts`、`conversation-context.ts`、`role-runtime.ts` | 原文、来源、回复关系、长文分页、显式回复阶段及六组上下文 |
+| Local 维护 | `manual-cleanup.ts`、`maintenance.ts`、`record-move.ts`、`local-location.ts` | 显式清理、完整记录导出、核验搬家与逻辑范围接续 |
+| 成果 | `artifacts.ts`、`recorder-retention.ts`、`cleaner.ts` | 授权读取真实字节、Recorder 保留归档、Cleaner 固定范围清理 |
+| 知识 | `skills.ts`、`knowledge.ts` | 摘要目录、原生技能 provider、正文编辑及停用控制 |
+| 旧数据迁移 | `legacy-migration.ts` 及现有显式历史资料读取入口 | 保留旧记录来源和身份，核对迁移与待接续事项 |
 
-## 正常任务调用链
+未带前缀的模块均位于 `src/framework/`。退役执行器及旧 Git Consumer 不再作为生产 fallback；保留的数据格式兼容和迁移，不等于恢复旧业务协议。
 
-用户的消息先在 Assistant 保存稳定 messageId 和正文指纹，再进入独立前台 Session。Foreground 理解原消息，用实际已接纳的用户来源提交 GoalContract。通知类消息不能借用早先用户消息生成新的用户授权。
+## 一套规则、两种存储
 
-模型无需编造消息编号。服务端从当前原生回合已消费的用户输入绑定来源，自动构造稳定命令身份。前台未消费的消息或交付在关闭后按原生 inbox 记录恢复；失活的未消费 claim 使用原消息身份重新接纳。已消费但被宿主中断的输入恢复原 Session，以隐藏的接续消息继续回复，并将完成结果归于原始输入。明确取消与终结错误按原流程收尾。用户仍可调整配置或正常发送新的消息。
+Local 的普通入口使用 `PhysicalLocalFiles.open`，逻辑类别直接映射到配置根目录下的实际文件与目录。`LocalRecordFiles` 提供覆盖、追加、创建、删除及单文件读改写；视图只管理生存期与取消，每次读取实际指定文件，不保持全目录快照。不同文件独立执行，不经全局 writer 或 SQL 事务。
 
-`TaskService.submit` 将 Task、命令回执和 `plan` 动作一次提交。RuntimeCoordinator 收到提交事件，在满足用户控制和资源条件后保存 `action.claim`。Supervisor 再保存 execution/session 身份，最后创建原生 Agent、装入所选 preset 和角色能力、注入该动作的稳定输入。没有保存成功就没有原生派发。
+跨文件的业务交接由各自的生产者、通知与现有执行接续记录承接，不把顺序文件写入称为原子事务。原生路径附件由授权 DSH 文件接口读入实际字节，Local 文件正文不采用 Git 的分块布局。Git 继续使用自己的固定视图、远端树/blob、条件 ref 更新及原操作核对，不建立本地业务镜像。
 
-Planner 用 `planning.commit` 保存正式 Plan 和子任务。Worker 席位默认两个，可在设置页保存为 1–32，已有 Host 配置用于初始化。持久设置立即影响后续调度与新 Planner 的容量快照；降低席位不停止当前所有者。该配置独立于 DSH 的全局模型并发限制。每个 Worker 仍由其原生 Agent 串行处理自己的模型回合。Worker `execution_report` 通过 executionId、assignmentVersion 和 resultId 核对，不让正常并发报告竞争一个旧 Task revision。
+旧 `dss-files.sqlite` 及 WAL 只由 `legacy-sqlite-reader.ts` 等一次性升级读取入口访问。已保留源数据、旧清单及其实际导出/接续入口继续保全；成功转换或安装不授权删除源数据。产品不再包含 SQL Local writer。迁移回归所需的真实旧生产器冻结在测试专用目录，按原清单哈希校验，不能作为产品后端。
 
-终结报告关闭该 Worker 的业务能力，持久成功后通过原生 `concludeTurn` 结束当前模型回合；后续业务提交按有效执行归属处理。实际 Agent 如仍有本机 jobs，则继续保有其物理归属；业务结果和作业退出分别记录。
+Local 的业务操作与执行接续使用本地持久记录；Git 的命令结果与执行恢复事实由 `git-authority.ts` 保存到远端，进程内会话缓存不作重启权威或持久历史。设置和实例 UUID 仍属本机配置与身份资料。客户端只把实际 Git 读取的正文放入 Git 消息记录，提交确认与正文读回分别表达。
 
-Planner 读取实际产物和证据后，通过 `planning.decide` 接受、返工或继续。代码只检查当前目标、计划、子任务结果及动作条件，不代替 Planner 判断质量。完整交付需当前计划全部验收，随后由持久 `deliver` 动作交给前台，并保存稳定通知标识。
+Git 读取固定快照后，多个正文及相关通知可在同一事务提交。其他任务或心跳的无关更新不使这次业务失效；实际相关输入改变时才按调用者策略重新判断。Git 发布仍使用协议规定的原子分支更新，已证明冲突后可以在相关依赖不变时基于配置分支的最新远端状态重建提交。未知结果保留原 operation 身份和内容摘要，先核实原操作，不能更换 ID、静默改写原尝试的 parent 或清空恢复记录伪造成功。
 
-界面页面关闭只移除订阅。Backend 仍持有任务与 Agent。关闭 Backend 会停止其实际拥有的资源并保存中断位置，后端再次启动时从本地状态恢复。
+纯授权存储访问不登记成员、不运行角色；后台参与通过独立连接建立。保存设置属于明确参与动作。Git 账号变更在参与写入前检查，旧身份和未知提交不自动重置。详情见 [Git 说明](PRIVATE_GIT.md)。
 
-## 原生能力与权限边界
+## 原生执行与业务边界
 
-角色工具从宿主的真实 Agent 对象和绑定记录获得身份；模型参数不能指定自己的角色或执行所有权。用户可从已认证 Client 回答等待问题，也可在当前聊天中答复，由 `task_answer` 绑定实际消息身份并转交原文。未知执行的人工核对仍由已认证 Client API 提供。
+六角色运行在 DSH 原生 Agent / Session / Jobs 之上，使用真实工具权限。P 与 O 任务分别交给 Planner 和 Organizer 路径；O 即使只有一个成员也不机械改成 P。角色负责规划、验收、恢复判断和长期记录。Host 观察状态机信号并唤醒对应角色；角色先消费本次信号，再读取权威存储的内容。内容读取和调度不等待本地回执或 SHA 配对。
 
-普通角色沿用所选 preset 的模型和本机工具。会在 Servant 所有权之外另起 Agent 的 `subagent`、`subagent_fork`、`workflow`，以及单独排程工具，暂不允许绕过本插件的协调器。已有全局工具通过原生限制隐藏；作用域工具在原生执行前入口拒绝。需要并行工作时，由正式 Plan 产生可跟踪的 Child 和 Worker。
+进展观察使用实际输出、工具和 Job 事件，心跳不算工作进展。分阶段的 5 / 5 / 30 分钟观察不等于给模型添加自动成功超时。停止执行先持久保存原执行、会话和 Job 证据，再请求原生停止；没有真实确认时保持不确定。异常接续可读取正式会话事件，不能仅凭重启后空 registry 宣称旧任务已停。
 
-Client 使用 DSH 原生模块加载器格式和共享组件，不另装一套应用路由。侧边栏顺序为 20，位于自动化任务之后。工作区设置独立于当前普通聊天，默认取宿主默认目录。改变前台模型/preset/工作区时，如果前台仍在执行，会返回明确的忙状态；在空闲边界保存新配置并轮换 Session，历史仍可读取。既有后台 Task 保持其创建时的工作区和模型快照。
+Worker 容量按本实例的每个 Task 独立计算：运行中的 Worker 与同 Task 的准入预留计入该 Task 的席位，不扣减其他 Task 的容量。配置 2 席时，4 个有工作可执行的 Task 最多共运行 8 个 Worker。未准入的 pending 等待不进入实际 AI 执行的 5 / 5 / 30 分钟停滞判断。总纲见 [每任务 Worker 席位](DESIGN.md#每任务-worker-席位)。
 
-任务详情可以暂停、恢复、取消、停止确切执行、回答问题、修改目标和优先级。优先级默认为 0，较大整数优先选择，不抢占正在执行的工作。只有旧执行物理状态为 unknown 时才出现人工核对入口，要求填写已核实的事实；正常派发不经过此入口。
+Foreground / Organizer / Recorder / Helper 消费信号后的中断，依据权威存储中的任务、笔记、状态及实际执行记录接续，不增加正文读回证明流程，不盲目唤醒普通等待中的 Organizer。代次和 execution 身份防止晚到旧事件覆盖新执行。
 
-## 当前实例的任务工作记忆
+总任务整体 complete 后，前台通知与根 Recorder 整理独立推进，不引入阅读 ACK。子 P/O 只通知直接父 O，不单独启动 Recorder 或 Cleaner。根 Recorder 阅读已知任务树的材料，由 AI 保存长期记录并发送原 Cleaner 信号；Cleaner 不读归档、旧哈希或技能，不补档或重唤 Recorder。
 
-任务接续借鉴 CAH 的角色责任、目标约定、工作前沿和结果评价思想，在 DSH 内使用本地持久记录实现，不依赖 Git 提交或外部 Task Cell。
+Local Cleaner 删除已知树中每个 Task 的固定运行、Cache 和成员状态目录；本端原生执行释放独立启动，Cleaner 不等待释放即可删除；同一任务的既有文件队列仍按已接收控制写入顺序执行，其他任务和前台不等待。原 Host 在现有责任记录中保留该次精确范围，直至目录、当前 Task 元数据和机械状态收尾完成；不逐文件审核、不等待后续审计轮询。Git 使用其自身的固定 tree 观察和原子目录删除，再由各 Host 的既有观察完成自身释放，事实留在远端。两者均不删除其他生命周期的 Conversation、技能、长期成果或本机工作区。
 
-权威顺序是当前用户目标、正式 Plan、已保存工作事实和评价。原始要求及其修订记录可回查；旧计划或可变 Note 不能覆盖当前目标。Planner 的结构化记录包含选择、返工理由、失败方法、假设变化和恢复依据。`planning.checkpoint` 可以保存有意义的规划进度，且不触发派发；Plan Note 自己带 revision，并在同一次 Task 提交记录其修改或采用理由。
+根任务以自身 sourcePath 的任务名加 Task ID 生成 Windows 安全目录名并固定 archiveFolder；子 P/O 在创建时按已核实的 parent/children 关系固定到父档案目录下，逐层对应任务树。自动子任务源名已经是自身 Task ID 时，叶目录只用该 ID 一次；有真实任务名时仍用任务名加 ID。Worker 不是独立 Task，不增加档案任务层级。子任务可以共用父 O 的本机工作区，但不共用其档案身份。各 Task 保留自己的档案身份；手动清理只处理明确选择的档案范围，排除未选子任务的目录。总任务 Recorder 沿真实父子关系读取已知子任务材料，关联成果按其确切引用读取；最终 Cleaner 由根任务统一承担。未固定字段按当前任务源文件名和 Task ID 定位，不作持续旧 ID 回退；不为升级补写旧任务路径字段，历史档案不扫描、搬迁、改名或补写。dss_snapshot / dss_claim 返回 archiveDirectory / archiveRecordsPath；六角色按自身职责使用这些路径。records.md 始终由 AI 写作；Local 的机械事实由程序更新档案同目录的 state.json，Git 的机械事实保存在 tasks/<TaskID>.json 的 runtimeState.lifecycles 中；retention.json 仍是独立 Recorder 输出与保留引用目录。状态更新保留其他 Host 和 lifecycle，不加入模型轮次、归档重审、ACK、定时器或读回握手。
 
-Worker checkpoint 保存已完成部分、失败方法/观察/证据、剩余工作、下一动作与下一读取位置。同一 Child 的工作、评审、恢复原文由同一 Domain 的分离记录保存，TaskService 组装当前事实及引用。新 Worker 通过这些记录继续同一个业务子任务。
+这里的 `cleaner.ts` 处理任务临时逻辑资料。`src/native-cleaner/` 通过 `deepseek-servant/cleaner` 独立挂载，随同一个安装包交付；它处理已确认关闭的 DSS 自有原生执行、精确日志和缓存索引，不等待 Task 完成或 Recorder 归档。官方 Loader 的依赖顺序、关闭后接续及平台实现分别验证，具体通过范围以随包证据为准。其所有角色覆盖、生产者保存责任及无额外业务轮询、模型调用、席位和 Git 读取的契约见 [总纲](DESIGN.md#清理职责与执行生命周期)及 [保留说明](RETENTION.md#原生执行-cleaner-的设计契约)。
 
-ContextAssembler 为角色提供有限的当前工作输入，近期工作、失败及已回答等待默认各 6 条、Planner 热子任务摘要最多 24 条、作用域事实最多 24 条。省略的内容附有精确引用；`memory_query` 只分页读取本地已保存的记录，每页最多 50 条。Worker 只能读取自己的工作、相关依赖和恢复记录。用户回答包含问题、答案、恢复条件和确切原所有者；同一 waitId 再次使用也不会覆盖先前回答快照。角色输入不会复制全部聊天或所有任务历史，原生 Skill 正文仍由宿主按需加载。
+## 前台会话与记录管理
 
-## 技能积累与纠正
+Foreground 运行时 Markdown 的开头明确优先级：对话唤醒后先按原状态机消费对应信号，读取当前消息及理解它所需的上下文，立即用自己的话给用户简短回应，再由同一前台继续实际处理。后台报告先用 `dss_claim` 消费信号。任务反馈先读取现有任务名和实际状态，再作任务相关的短回应；Helper 报告先读取确切文件中的完整报告。确认实际事件后及时回应，再检查详细成果与验收材料，不强行读取无关对话或虚构当前用户消息。短回应使用当前前台模型和既有 `dss_conversation_send`，不新增短回复模型、独立执行、固定文案或回执握手，也不等研究、详细规划、任务派发或完整历史复查结束。可直接回答的简单问题只答一次；无需 AI 参与的人际讨论不强行回复。
 
-实际结果或有证据的失败可以产生候选。失败来源不会直接获得可用状态；激活必须绑定准确版本内容哈希、当前作用域、已接受结果和其中实际存在的产物引用。修订带 expectedVersion，不继承旧版的验证结论。用户编辑形成新候选，旧版可用状态保留至新版本真正验证。
+Foreground 首次对话唤醒时直接调用 `dss_conversation_read`：工具先完成本次唤醒对应信号的消费，再打开正文视图，不要求模型另跑一次 `dss_conversation_claim`。后者保留为只消费、不读取正文的可选接口；后台任务结果仍先用 `dss_claim` 消费再检查权威记录。两种入口共用原有 execution/wake 消费身份，Local/Git 的权威存储、重试和信号归属不变。
 
-原生 Skill provider 发布当前作用域中的可用版本。仅在原生 `skill` 工具成功加载后记录实际使用；目录预览不算一次使用。结果评价产生持久反馈动作，将同一个 execution 的真实加载与后续成功/失败联系起来。任务可以不产生任何新技能。
+Foreground 自主决定处理中途的后续通知处理时机。Host 使用已有顶层 STATE 发现结果：未激活时维持原唤醒/准入；已激活时通过 native inject 仅提示有消息，不取消当前工具或要求立刻改变阅读节奏。通知不消费 STATE。前台可在准备好后调用普通 `dss_claim`，再读实际来源；`signals` 与 `binding.claimedNotifications` 保存累计来源。最终回复前，前台必须调用 fresh `dss_snapshot` 检查 `notifications`；若有后续通知则消费并处理实际内容后再复查，无待办时继续最终回复。这是 AI 的既有处理规则，不新增 Host 发送门禁或握手。已删除 Host turn-stopping 自动 steer 及显式 send 的 pending gate，保留执行归属检查。用户可见回复统一由前台明确调用 `dss_conversation_send`，各模式的正文发布、执行归属与 UNKNOWN 同身份接续保持不变。completed event 不再提取或发布 final，停机/冷启动也不补发旧 capture；原生状态只决定原执行的正常退休或责任恢复。`sent:true` 表示成功；未知结果仍核对原操作，不改原稿或换身份重发。在线提示按当前执行去重，消费成功或既有发现列表显示路径消失后清理去重项，因此同名空信号重建仍可再次通知。原生 inbox 自身的接收、下一步消费和状态转换不由 Host 替代，不代表已处理业务。最近六个完整往返原文作为接续材料，长文不以分页长度截断保存。长文搜索和字符分页按需执行，List/Cache 自动注入用途、路径与操作指南，正文由角色显式读取。
 
-## 正常 Worker 换代
+Foreground_Cache 可选用于暂存本次草稿，不新增字段或专用格式。若使用，先通过既有 `dss_conversation_send` 成功发出回复，再打开 fresh snapshot、用 `dss_read` 读 Cache，并通过 `dss_record append:false` 只删本次用过的草稿，保留其他需要保留的事实和记录，最后结束原生轮次，native final 本身不产生第二条回复。失败或结果未知不作成功清理；已确认成功后不用再次询问用户，也不把该稿留作记忆。重新读取时草稿已不在则不重建旧内容。没有持久 Cache 草稿时同样通过 `dss_conversation_send` 发布。
 
-`0.1.0-alpha.2` 增加明确的 `handoff` 报告。它是仍有剩余工作的正常接续：同一记录保存 checkpoint 和前驱执行引用，关闭旧语义权限，保留 Child、assignmentVersion 和累计工作段数。后继复用现有 `dispatch` 动作；只有精确前驱的物理所有者与作业收束后，才绑定新的 execution、Session 和 generation。新实例直接收到当前目标、保存前沿、相关历史与精确回查引用，第一轮即开始实际工作。
+Local 日期定位取选中日末尾并在该日分页；Git 日期定位以选中日末尾为初始上界，后续游标可跨日。无日期时保持连续历史分页。
 
-`continue` 仍在原 Worker 中续作；`handoff` 才请求新的 Worker 上下文。正常换代不伪装成失败或返工，也不重建已接受成果。正在运行的作业仍属于旧 Agent，不能保存 jobId 后销毁旧 Agent并宣称迁移成功。
+Local 的任务历史、前台对话、工作规划记录及调试记录分别由明确确认操作清理。任务历史清理保留成果引用；取消的任务须有持久取消意图及精确原生生产者停止证据，清理后保持原业务状态而非写成 complete。明确回收回执阻止旧 Task 再次调度或补充，后续业务使用新 Task 身份。
 
-默认每 5 个有效 `continue/handoff` 工作段触发 Planner 周期评审，计数跨 generation 保留；`progress` 不计段，`complete/failed` 立即评价。`handoff` 正好落在评审点时，先由新的 Planner 判断实际进展和方法，`continue` 决策才允许后继派发。暂停、目标修订及相同任务规格的重规划不能绕过已经到期的评审。这个计数不是 token 门槛或原生模型回合数；本插件没有为此增加一套历史压缩器或固定时间轮换器。
+记录搬家先持久原请求，再确认本次搬迁涉及的 Local 执行停止、复制与验证，最后更新设置并重开。逻辑存储范围及原 UUID、命令、会话和消息身份保持；未知结果继续核对原操作。宿主原生日志单独管理。旧任务的完整原记录通过迁移引用读取，Local 可导出现存完整原文。
 
-Worker 报告可以先于原派发动作的完成回执到达。原派发仍为 running 时，新派发会被去重规则暂时合并；原动作完成或恢复核对结束后，协调器再次检查已保存的派发条件，使正常后继继续兑现。这里沿用现有事件与动作通道。
+## 知识和附件
 
-## 恢复与失败
+Local 会话附件只保留用户选中的原生路径，从原电脑读取；不另复制到 DSS，不分块，不新建会话附件清单。以下成果归档导入是独立的显式接口，不能与会话附件混为一谈。Git 会话附件保留自己的单一二进制 blob 保存方式。
 
-恢复读取保存的 Task、原生 Session、当前租约、Agent 和运行中的 Job。仍有实际所有者时保留其归属；原生回合已经正常结束、Inbox 为空且报告和作业状态收束的 Worker，可恢复同一个空闲 execution/session。
+技能目录按需读取摘要，选择技能时才加载正文；正式原生 pre-step 边界失效缓存，而非每秒扫描全部正文。新技能要求正式 `SKILL.md` 格式，普通 `.md` 不自动注册。旧 Local 技能保留原 scope、验证状态及 activeVersion；旧 Git 技能保持实际 participant 范围，不伪造 Local 版本语义。
 
-保存了派发 claim 但尚无 execution binding 的动作可重新排队。原运行已经消失时，保存未收尾工具、排队输入与旧 Job 等 `interruption` 现场，退休失活身份，从原工作前沿建立同角色后继。历史中断记录随恢复输入交给后继核对 Session 与实际产物，恢复本身可直接推进。
+知识页显式发现和读取迁移保留的项目事实、偏好正文及范围/来源；这些资料沿只读职责展示。用户显式编辑直接保存原生 SKILL.md，复用 Recorder 的同文件三方合并，并更新派生目录与原生缓存；冲突保留当前正文和草稿，不新建候选。已有候选资料继续只读展示。Git Recorder 将定义和共享目录条目放入同一次条件提交，冲突后沿原基线重评合并；确认后在事务之外刷新本端所有现存 provider scope，其他任务不等待该 Recorder。停用/退役控制保存在独立元数据中，重建目录不清除它们；正文和来源仍可追溯。缺少宿主 skills 能力会报告实际诊断，不增加任意最低版本门槛。
 
-同角色新 generation 保留 Child、assignmentVersion、有效段计数与工作前沿；保存过的最终结果直接进入评价。普通工具报错继续由原执行处理。相同配置故障且没有新进展时进入具体等待，宿主中断独立处理。既有 Helper 历史可读，当前运行角色为 Foreground、Planner 和 Worker。
+附件从宿主授权文件接口读取实际字节。Local 使用物理文件及该附件既有发布接续；Git 保留自己的事务发布。完整性按实际长度与 SHA-256 核验，Local 不套用 Git 分块正文。下载端点返回原二进制。目录或外部链接不会自动变成已归档文件；本机附件引用也不冒充跨端永久链接。
 
-后台动作失败会保存明确等待或不确定状态，并向界面暴露原因；没有无上限自动重试、定时催模型继续或后台测试守护程序。持续推进来自已提交结果、作业事件、用户输入和满足等待条件后的动作。
+## 迁移与保留
 
-## 完成后的清理
+迁移保留旧任务、知识、来源、版本、等待事项及成果证据；来源不因迁移被删除。无法确认原生执行归属的事项保留 unresolved，不批量伪装为完成。迁移回读成功不等于全部任务已在真实 Host 自动接续。旧协议无明确 P/O 的可接续任务保留为同一映射身份，通过 Foreground_Legacy 状态信号交现有 Foreground 读取原目标、计划、工作及控制记录，再调用 dss_submit_task 的 legacyTask 参数明确选路；原始材料与已有成果自动带入，不按人数或复杂度硬切。暂停或待回答事项仍需原有用户控制，已有明确 P/O 不改变。具体资料范围和清理条件见 [RETENTION](RETENTION.md)。
 
-详见 [RETENTION.md](RETENTION.md)。当前版本先在同一 Domain 封存完整 records，唤醒前台交付，再自动释放终态 Task 的临时运行记录。封存内容落盘重读后发布清单；永久身份先保存，Task 热状态最后删除。
+## 构建与测试
 
-完整原始需求、规划与执行正文、成果证据和前台原文长期保留。手动清理和可选历史策略收起任务入口，旧技能按用户设置维护；清理中断后按已封存的准确键列表继续。records 可通过前台工具和任务详情导出 Markdown，原记录引用在清理后继续有效。
+当前 `package.json` 提供 `npm run typecheck` 和 `npm run build`，没有 `npm test` 或 `test:package` 脚本。按 [测试说明](docs/TESTING.md) 运行受影响的 `scripts/validate-*.mjs`，逐项记录源码哈希与边界；源码维护不自动授权构建、打包或发布。
 
-DSH 原生 Session 日志保存在宿主配置的目录。页面按 Domain 实际内容分别统计六项长期记录和六项临时记录，并提供原生日志目录入口。
+当前回归使用产品物理 Local 源码；一次性 SQL 读取回归只用 `scripts/test-support/historical-v44/` 中按原清单固定的历史生产器生成可丢弃输入。不得把旧 SQL 写入断言重新作为当前运行设计。
 
-## 构建与安装
+构建生成 `lib/host.js` 与 `lib/client.js`。Client 使用宿主 ModuleLoader factory，不能用普通浏览器 ESM 入口代替宿主接线。候选打包后还需核对包文件、构建结果与被测试源码一致；打包不等于发布或安装验收。
 
-统一入口见[安装、升级与开发构建](docs/INSTALLATION.md)。Node 版本、候选安装、固定 GitHub 来源约定及按改动选择的开发检查在该文档维护；包版本与依赖以 `package.json` / `package-lock.json` 为准。运行包采用明确白名单，历史文档和开发测试保留在源码库。
+历史候选曾开展 SQLite、官方原生技能 registry、受控 Git、客户端及原生宿主验证；这些结果仅属于当时源码及包。当前物理 Local 切换、SQL 退役与后续修改必须分别执行受影响回归，既有历史成功不构成本候选通过。
 
-本次私有仓库整理仅维护文档及停用文件，复用已验收的 alpha.39 运行代码和候选包。
+验证结果按测试层级、源码与包分别记录；跨不同真实账户的公网联合协作尚未执行。最终候选验收状态见 [测试说明](docs/TESTING.md)。历史 Windows rc.5 等结果见[旧公开证据](https://github.com/Tests4gptplay/deepseek-servant/blob/d28a4d8538abc966608761bcfd60d568dec11cc9/docs/testing/EVIDENCE.md)，仅适用于对应旧版本。
 
-## 历史版本验证结果
+许可证、素材署名及第三方声明见 [README](README.md#来源与开源许可)、[NOTICE](NOTICE) 和 [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES.md)。
 
-以下为此前 alpha.2 / alpha.3 的运行记录；当前升级验收另列于文末。
 
-功能场景运行于 DSH `0.2.1-rc.2`、Node `24.19.0` 的隔离 Web profile。此前 `alpha.2` 功能构建由 GPT 承担角色模型判断，实际文件操作、Agent、Session、持久化、派发和交付由 DSH 与插件执行；`alpha.3` 完成项目标识与接口命名调整，已进行源码级一致性核对。
+## Historical Child Organizer integration (2026-11-04)
 
-| 场景 | 实际运行结果 |
-| --- | --- |
-| 单目标到实际交付 | 原生读取四行 CSV；第一次 shell 操作被宿主拒绝，Worker 保存失败前沿；新 Planner 改法，新 Worker 用允许的文件工具完成整数分报告，独立 Planner 再读原文和产物验收，前台交付总额 37.50 |
-| 技能形成及后续复用 | 第一项 accepted 结果形成有边界的版本；第二项 Worker 通过原生 skill 加载该版本，生成并独立验收总额 1.40 的报告；真实加载与对应 success 反馈准确关联，技能加载与对应 success 反馈以 Worker 的真实执行为依据 |
-| 两 Worker 并行 | 同一 Task 的 Alpha、Beta 在两个独立原生 Agent 中同时处于 running，各有独立写域；Alpha 先验收，Beta 保持其确切 owner |
-| 提问及回答接续 | Planner 保存问题后结束该角色；用户答复进入正式等待记录，新 Planner 可从任务记忆读取“两条中文要点”，不依赖已退出 Planner 的对话 |
-| 暂停、后端退出与恢复 | 暂停期间 Beta 保存 continue checkpoint，没有继续派发；实际停止并重启独立后端后，恢复同一 Beta execution/session，已验收 Alpha 文件哈希不变 |
-| 修改目标与依赖派发 | 追加总览目标后，新 Plan 保留 Alpha、保留 Beta 原 assignment；Beta 从原前沿接续并验收后，依赖两个 accepted Child 的总览才派发；最终三个实际文件一起验收并交付 |
-| 前台排队恢复 | 前台有一个已消费回合和第二条排队消息时退出后端；重启后第二条保持原身份和正文，只进入一次模型输入并产生真实回复，没有新增任务 |
-| 任务记忆清理 | 第一轮归档前两项终态 Task，Servant 记录净回收 49,264 字节，仍活动的第三项受到保护；第三项完成后再次执行，归档再删除其详情，只留 294 字节身份记录，净回收 76,319 字节。全部 9 个工作区文件哈希不变，技能及成功反馈保留；两轮合计归档 18 个旧原生 Session，宿主日志回收如实为 0 |
-| 优先级与偏好纠正 | 实际 API 将已完成任务优先级由 0 改为 3，没有产生新执行或改变交付；两条真实前台消息先保存、再读取并修正同一工作区偏好，版本从 1 到 2，来源准确指向第二条用户消息 |
-| 原生 Client | 实际浏览器检查对话、任务、详情、知识、设置与清理页；独立入口位置正确，明暗主题和窄屏可用，未出现浏览器运行错误 |
+This paragraph records that earlier candidate only. Its independent child archival behavior is superseded by the current root Recorder/Cleaner contract above.
 
-第三项任务交付时三个 Child 均 accepted，待兑现动作、不确定动作、活动后台所有者和作业均为 0。重启前被明确退役的旧 Planner 保留 lost 历史事实，不改写成 stopped。三个场景结束均有真实前台交付消息。
+The previously untested source-only patch is reconciled into an isolated candidate based on the locked 972356 source. dss_planner_dispatch accepts explicit P/O route and child member scope; reciprocal O→O→P relations preserve scoped descendant controls and archive references. Nonprimary instances may execute and archive Tasks addressed to their exact member, while global Foreground admission stays primary-only. Role presets keep single-objective planning with P and expose roster/heartbeat facts to O for semantic coordination. Source-level Local/Git regression covers nested completion, member isolation, independent pause/cancel, owner-addressed recovery, native Organizer continuation and both archival orders. Git uses the actual GitFiles/Repository stack over controlled HTTP. Existing locked packages, profiles and configuration are unchanged; no installation, deployment or runtime restart was performed. A candidate-only build/package check is separate from real secondary/other-user instance acceptance, which remains required before release.
 
-第二轮清理后，Servant 自有记录总计 25,537 字节：包含两个仍受技能证据引用保护的瘦归档、当前技能与偏好、助手记录及最小任务身份。临时缩短的清理周期已恢复为默认值。原生后台 Session 日志仍占 509,902 字节，前台日志另计 127,055 字节；这些是实测保留量，不计为本插件释放的空间。
+### Foreground on-demand role reference
 
-开发临时区的有限检查还覆盖单记录保存失败、正常并发报告、旧执行迟到结果、重复回执、作业 exact owner、暂停/回答接续、Helper 失败收敛、知识版本及清理引用。它们不进入插件启动、安装或运行流程。生产源代码严格类型检查与构建通过。
+The always-present Foreground section supplies early-response obligations and the exact logical path `technical/role-guides/Foreground.md`. The complete Foreground rule text, including its current notification-loop lifecycle, remains in the on-demand guide. Explicit connection initialization, after account/branch preparation and confirmed instance registration, owns guide creation and recognized migrations. Unfinished work continues under that same initialization owner. It is not loaded automatically by the Host, a wake classifier, a new tool, or an acknowledgement gate. The model uses the existing `dss_read` and fixed snapshots when its next action needs the full rules, including a later interjection in an already active execution.
 
-### 16 批长任务的实际结果
+This path is relative to the authoritative FilesStore. Local stores the actual file below its configured physical root, including the `technical/role-guides` directory. GitFiles and RemoteGitRepository map the same key once to the configured `repositoryDirectory`, whether the repository root or a nested folder. Role tools receive only the logical key and never synthesize a repository prefix or fall back to a package/local copy when Git reading fails.
 
-该任务使用 16 个有序批次、64 条合成事件，逐批处理真实文件。每批形成审计、更新账本和累计快照、通过原生工具读回，再保存正式报告。模型判断由相互隔离的 GPT 角色上下文承担；官方 DSH 执行工具、持有 Agent/Session、保存任务并兑现后续动作。
+Initialization fills an absent physical Local guide with its single-file operation; Git uses its transaction/CAS path. A retained exact Local original is preserved for the owning one-time upgrade before creating that same target. Existing guides with recognized generated-template ancestry receive only the exact sentence replacements listed in `foreground-guide-upgrade-rules.ts`. The exact previous default that differs solely by the missing `foregroundStorageRecoveryNote` receives that note; customized guides are not replaced wholesale. Other text, including inline custom sentences, BOM, CRLF and trailing whitespace, remains unchanged. Empty, non-UTF-8 and wholly rewritten guides remain untouched. Quoted, fenced and comment examples are not rewrite targets. The migration does not keep an obsolete Markdown backup or install any old publication mechanism.
 
-后台任务于 2026-10-24 07:29:01.670 UTC 创建，08:48:50.317 UTC 正式完成并送入前台交付，用时 **79 分 49 秒**。前台模型回复在 11:18:37.496 UTC 实际写入会话；两者之间等待本次验证端提供模型响应，分别记录时间。前台对话已回读确认，包含全部成果链接。
+The existing initialization read determines whether a write is needed. Already-current and unrecognized guides cause no guide transaction. A proven conflict rereads the authoritative file and reruns exact recognition, preserving concurrent edits instead of reparenting an old full-document replacement. An uncertain outcome retains its original operation and is not retried as a replacement command. Read-only storage access and individual chat reads do not generate or migrate the guide. Existing Host maintenance continues only an unfinished failed initialization; a Local initialization deferred for a retained original resumes when actual one-time materialization or upgrade-work results arrive. Successful initialization leaves no polling responsibility, so a later manual deletion does not cause default regeneration. A new connection still performs its own initial acquisition. The original Git initialization command and transport operation remain owned only by this live connection; their current in-memory state does not provide cross-process UNKNOWN recovery. The connection returns a nonblocking migration report with changed-rule count and preserved/unreviewed sections; an unrecognized section is not automatically classified as incorrect. A guide-specific write error remains a nonblocking connection diagnostic logged by the service. The core protocol governs publication, notification consumption and context grouping regardless of stale or customized reference wording, without introducing another read, acknowledgement, send gate or recovery mechanism. Fully reworded rules need explicit review rather than an automatic semantic rewrite. When the model needs an unavailable guide, it states the precise gap and defers only dependent work.
 
-| 检查项 | 原生运行证据 |
-| --- | --- |
-| 连续工作 | 16 个正式报告：13 个 continue、2 个 handoff、1 个 complete；始终一个 Child，Goal/Plan revision 1、assignmentVersion 1 |
-| 三次周期评审 | 默认 reviewEvery=5，在第 5、10、15 批实际派发 evaluate，新的 Planner 独立检查来源和产物后保存 continue |
-| 第一次正常换代 | 第 6 批 handoff 后，旧 Worker closed/stopped 且 jobs 为空；第二代以新 execution/session 从第 7 批接续 |
-| 评审与换代顺序 | 第 10 批 handoff 先持久为 reviewRequired=true；实际观察到仅 Planner 在评审、第三代尚未建立；continue 决定保存后，第三代才从第 11 批开始 |
-| 同代继续 | 第 5 批评审后沿用第一代 Worker；第 15 批评审时第三代 idle 等待，评审后原 execution/session 恢复执行第 16 批 |
-| 新上下文与旧记忆 | 第二、三代首个请求均没有旧 assistant/tool 消息，分别携带第 6、10 批的精确前驱与工作前沿。第三代开始时历史共 12 条，仅注入最近 6 条；第 11 批实际查询 report 02/03/05，第 16 批再次查询 02/09，原生结果均成功返回准确引用及历史条目 |
-| 最终接受与交付 | 第五个 Planner 读取全部 19 项必需成果及恢复记录，核对最后一批、历史例外和此前三次正式评价，再保存 accept 与 Delivery。Task 为 completed，Child accepted，Delivery delivered |
-| 所有权收束 | 三代 Worker 和五个 Planner 均 closed/stopped，owned jobs 为空；待兑现动作、不确定动作和未响应模型请求均为 0 |
+The fetched document remains reference content within the current user/project/preset and permission boundaries. Its body is never automatically promoted into a system prompt, and repository text does not create user authorization. No business state, route-selection semantics, task admission, storage authority or tool schema is changed by this split.
 
-独立计算答案在启动前保存在模型工作区外。32 行最终账本逐单元格一致；16 个累计快照在按 manifest 对齐批次标识后，金额与全部处置计数逐项一致。原规则只指定 batch 列，产物使用 `batch-01` 等文件名形式，检查脚本最初预设序号 `1`；保留了该次比较记录，并仅在临时检查脚本按 manifest 的序号/文件名关系对应。业务文件和预存答案保持原样，16 份原始批次数据 SHA-256 未变。
+### 本机成果来源登记
 
-最终净额为 **2171.35 CNY**（books 280.58、tools 768.95、services 842.30、travel 279.52），32 笔交易中 28 笔 active、4 笔 void；60 个唯一事件已应用，3 条精确重放、1 条同 ID 冲突单独保留，待匹配为 0。早到退款的后续匹配、换代后的重放、已退款交易作废、类别迁移和合法更正均有原始位置及审计依据。前 6、10 批审计在后续换代中的文件哈希保持不变。
-
-最终独立计算、正式运行记录和原生工具结果共同完成核对。离线轨迹检查通过 36 个条件，覆盖身份、报告顺序、评审、冷上下文接续、真实历史查询、产物保持和终态。开发区另有 7 个有限的换代边界检查，覆盖报告先于派发回执、晚到作业、恢复、暂停与到期评审等场景；这些检查均按次结束，保留在临时区。
-
-长任务完成后通过正式清理 API，将其 246,638 字节任务记录归档并替换为 294 字节身份记录，净回收 **246,344 字节**。47 个工作区文件的哈希和已有知识记录保持一致，8 个原生后台 Session 完成归档。清理策略恢复默认后，整个临时 profile 的 Servant 自有记录为 28,334 字节；原生后台日志共 2,296,081 字节、前台日志 151,023 字节，原生日志物理回收为 0。详见 [RETENTION.md](RETENTION.md)。
-
-后台进程的四个节点 RSS 采样约为 178、188、196、217 MiB，进程记录的 VmHWM 为 288 MiB。它们是本次有限运行的观测值。验证结束后临时后端正常退出，退出码 0；该次运行使用 `alpha.2` 功能构建；`alpha.3` 的源码级命名与接口调整另行核对。
-
-### 历史实测环境与当时的后续项目
-
-该轮实测环境为 Linux / DSH 0.2.1-rc.2，覆盖原生文件工具、长任务周期评审、两次正常 Worker 换代、最终交付和清理。当时列出的后续项目包括 Windows Electron、Codex 专有路由、跨天运行、原生 token 阈值压缩及活动 OS 作业的跨代处理。Linux 测试中的 shell 操作受到宿主沙箱限制，Worker 已采用原生文件工具完成相应业务。64 MiB 为当时的记录维护目标，宿主 Session 日志及工作区成果另行计量。
-
-## alpha.39 恢复、历史阅读与长作业验收（2026-10-26）
-
-- 冷启动检查当前原生 Agent、Session 租约和 Job 注册表。历史未收尾工具与 Job 保存为 interruption 现场，交给原角色后继继续工作。多次中断保持 Child、assignmentVersion、工作前沿和有效段计数；用户暂停、取消与实际存活所有者继续生效。
-- 前台失活 claim 和已消费的中断回合均自动恢复；隐藏接续消息关联原始输入及其工具来源，稳定 task_submit 身份维持同一 Task。
-- 用户在聊天中回答等待问题时，task_answer 直接转交当前用户原文，解除对应等待并接续规划；后台通知仍按结果交付处理。
-- 删除 SSE 定时保活与重复席位检查，维持原生事件驱动调度。
-- 历史上翻预加载、消息去重、失败重试和阅读锚点通过源码与真实组件测试；日历复用官方 ui-schedule 设计、官方 UI primitives 与主题变量，支持键盘导航、选择及清空日期。
-- 73 项源码回归通过；实际 React 页面与官方 primitives 的 jsdom 测试通过。独立原生 SDK 场景在前台和 Worker 均执行期间，强制结束宿主及其子进程树；重新启动后保留旧文件，第二代 Worker 完成剩余文件，原 Task 完成 Planner 验收、前台主动交付和 records 封存清理。模型端为受控 SSE，Agent、Session、文件工具和后台 PowerShell Job 为原生实现。
-- 当前宿主由真实对话入口经 GPT完成原生静默 Job：持续 **1860.2037818 秒**、退出码 **0**，同一 Worker 持有同一 Job 直到完成。Planner 接受成果后前台主动交付，档案封存，临时 Task 清理，Jobs 列表为空。
-- 候选包已通过原生插件管理器安装并应用；完整时间、执行身份、包清单与 SHA-256 见[alpha.39 验收记录](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/docs/acceptance-20261026.md)。
-
-## alpha.37 升级验收（2026-10-26）
-
-生产源码 `npm run typecheck`、`npm run build` 均退出 0。源码回归 `npm test` 通过 59 项；随后新增的 Domain 分类统计检查单独通过 1 项。覆盖完整记录与迁移、增量规划、工作段和评审、故障归属、席位调整、六次完整交互、归档失败与恢复、导出冲突、旧维护操作和已确认的 UI 状态逻辑。
-
-### Windows 原生集成
-
-在独立 DSH_HOME 与 SDK profile 中，用 DSH `0.2.1-rc.3` 的原生插件命令安装 `alpha.37` 候选。只有外部模型响应被替换为受控 SSE；Agent、Session、Inbox、工具执行、事件、配置和 Windows JSON storageDomain 均由真实宿主管理。测试没有访问生产 profile 或用户凭据，也没有开启浏览器。
-
-| 场景 | 观测结果 |
-| --- | --- |
-| 前台接续 | 8 次问答逐条保存并进入不同物理 Session；随后种子只保留最近 6 次完整交互 |
-| 长任务 | 同一 Child、3 代 Worker、16 份正式报告；13 次 continue、2 次 handoff、1 次 complete，即 15 个有效接续段；在 5/10/15 段评审，最终第 16 份报告验收 |
-| 实际文件 | Worker 经原生 read/write 写出 16 行 `segment-1` 至 `segment-16`，最终逐字节符合预期 |
-| 原生故障 | 第一代 Worker 收到真实原生模型错误；事故保存后第二代 Worker 接续，assignmentVersion 不变，产物为 `recovered`；两个任务均无新 Helper |
-| 完成交付 | 完整 records 封存后程序唤醒前台，各产生一次结果留言；Delivery 为 delivered，最终档案为 ended，Task 热键删除 |
-| records 导出 | 长任务 409,262 字节，SHA-256 `4df3594fbe0b7f18c02a90b9da6cf5035fc9d2dfe7301c62a0eb608d8791e726`；恢复任务 114,576 字节，SHA-256 `4a2a2cf385f9704320b27b399ee67c26fd53b1cf64ef1037ed1399f7de9bc8c6`；导出文件哈希与封存清单相同 |
-| 后端重启 | 两项已清理 Task 的完整档案仍可回读，旧热键未复活，Domain 更新后的值及席位 3 保持 |
-| 原生配置及迁移 | 新安装默认席位 2；实际 API 保存 3，重启读取 3，再保存 1、4、32，Scheduler 即时一致；迁移整个 records 目录后 probe 数据保持 |
-| Domain 统计 | 迁移后逐键求和 1,675,454 字节，与服务统计一致；长期加临时等于总量，临时为 0，原生 Session 日志另存 |
-
-隔离驱动的 `continue`、`restart` 命令均退出 0。长任务初次检查把最终 complete 也计入有效接续段，产生 15/16 的断言差异；仅修正验证脚本，随后直接读取已完成档案继续验收，未重跑任务或改动产物。Jobs/未知副作用、跨日期记录及错误重试边界由针对性源码回归覆盖。此处保留 alpha.37 当时的覆盖范围；后续 Codex 路由的 31 分钟原生静默作业已在 alpha.39 完成。已被用户接受的 Desktop 外观、透明插画、设置和 alpha.36 侧栏隐藏规则继续沿用。
-
-### 首轮上下文比较
-
-同一原生宿主、standard preset 与首次问候输入，按实际发送的 `system`、`tools`、`messages` JSON 使用 `o200k_base` 统一计数：alpha.36 为 **6,101**，alpha.37 为 **4,696**，减少 **1,405（约 23.0%）**；可见工具由 30 个降为 20 个。该计数用于相同输入的比较，不是模型供应商账单 Token。角色正文和旧原文按需读取，完整永久记录没有缩短。
-
+实机 f62 Local 取消测试发现：README 已在指定工作区创建，但 Planner 验收前取消使 Task 尚无 workspaceResults，正文中的真实地址无法确定原电脑。修正在现有 dss_workspace_reference 入口核验并事务性保存四项物理身份，结果与 Task 取消状态独立；继续使用现有 UI 原生打开和 Recorder 引用保留，无产品安装或桥接改写。内部过程记录不作用户成果，无文件输出时回复纯结果。源码回归与后续安装包实机验收分别记录，不将源码测试等同实机修复。
