@@ -3,7 +3,6 @@ import { existsSync, readFileSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import { spawn, spawnSync } from 'node:child_process'
-import { DatabaseSync } from 'node:sqlite'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
@@ -34,30 +33,14 @@ const hooks = registerHooks({
     return next(url,context)
   },
 })
-const scratch=process.argv[2]==='--restore'?process.argv[3]:await fs.mkdtemp(path.join(os.tmpdir(),'dss-upgrade-host-'))
-const id='10000000-0000-4000-8000-000000000001',other='10000000-0000-4000-8000-000000000002',instance='20000000-0000-4000-8000-000000000001',scope='exact-original-scope',hostKey=taskArchiveHostKey(undefined,scope,instance)
+const { PhysicalLocalFiles } = await import('../src/framework/physical-local-files.ts')
+const { FrameworkHostLoop, helperSignalWakeHash } = await import('../src/framework/host-loop.ts')
+const scratch=await fs.mkdtemp(path.join(os.tmpdir(),'dss-runtime-compat-'))
+const id='10000000-0000-4000-8000-000000000001',other='10000000-0000-4000-8000-000000000002',scope='exact-original-scope'
 const task={version:1,taskId:id,route:'P',owner:'owner',members:['owner'],status:'running',sourcePath:'tasks/original_P.md',archiveFolder:id}
 const names=[],check=(n,a,b)=>{assert.deepEqual(a,b);names.push(n)},hash=x=>createHash('sha256').update(x).digest('hex'),json=x=>JSON.stringify(x,null,2)+'\n'
-class DiskRecords{
- constructor(directory){this.files=new LocalRecordFiles(path.join(directory,'host-records'))}
- async get(k){const bytes=await this.files.read(hash(k)+'.json');return bytes===undefined?undefined:JSON.parse(bytes)}
- async set(k,v){await this.files.replace(hash(k)+'.json',json(v))}
- async delete(k){await this.files.delete(hash(k)+'.json')}
- async list(){throw Error('No global Host-record scan')}
-}
-const sourcePathFor=root=>path.join(root,'files'),note='task-runs/'+id+'/owner/Planner_Memory.md'
-async function seed(root,released=false){
- const directory=sourcePathFor(root);await fs.mkdir(directory,{recursive:true});const db=new DatabaseSync(path.join(directory,'dss-files.sqlite'))
- db.exec('CREATE TABLE files(path TEXT PRIMARY KEY,content TEXT NOT NULL,version TEXT NOT NULL,bytes INTEGER NOT NULL,binary BLOB) STRICT')
- const put=(p,v)=>{const bytes=Buffer.from(typeof v==='string'?v:json(v));db.prepare('INSERT OR REPLACE INTO files VALUES(?,?,?,?,?)').run(p,'','fixture',bytes.length,bytes)}
- const value={...task,...(released?{status:'complete'}:{})}
- put('tasks/'+id+'.json',value);put(task.sourcePath,'Task ID: '+id+'\n# Preserve original requirement\n')
- for(const file of taskInitializationFiles(value))put(file.path,file.content??'')
- put(note,'original authored notes');put('state/owner/'+id+'/Planner_Inbox','')
- if(released)put('archives/'+id+'/state.json',{version:1,taskId:id,lifecycles:{'':{hosts:{[hostKey]:{released:true}},cleanup:{phase:'released'}}}})
- db.close();return value
-}
-const {withSnapshot,withOperationChannel}=await import('../src/framework/transactions.ts')
+const sourcePathFor=root=>path.join(root,'files')
+const {withSnapshot,withOperationChannel,GitFiles}=await import('../src/framework/transactions.ts')
 const {paths,readJson,readMemberStatus,taskLifecycle,taskLifecycleKey,isTerminalTask,assertTaskLifecycle}=await import('../src/framework/task-files.ts')
 const {readTaskHistoryIdentity,taskHistoryChange}=await import('../src/framework/task-history.ts')
 const {FrameworkTaskIndex}=await import('../src/framework/task-index.ts')
@@ -68,13 +51,13 @@ const {GitAuthorityStore}=await import('../src/framework/git-authority.ts')
 const runtimeSource=readFileSync(new URL('framework/role-runtime.ts',root),'utf8'),runtimeJs=stripTypeScriptTypes(runtimeSource,{mode:'transform'})
 loaded.set('framework/role-runtime.ts',hash(runtimeSource))
 function runtimeMethod(name){const m=new RegExp('\n    (?:async )?'+name+'\\(').exec(runtimeJs);assert.ok(m,name);const start=m.index+1,next=/\n    (?:async )?[A-Za-z_$][^\n]*(?:\(|=)/.exec(runtimeJs.slice(start+m[0].length));assert.ok(next,name);return runtimeJs.slice(start,start+m[0].length+next.index)}
-const methods=['settlePhysicalDirectDelivery','physicalSignalSources','physicalDirectInput','beforeTaskUse','currentTask','roleKey','requestKey','serialWork','settleOperations','scanMembers','memberContinuationEligible','diagnoseMissingTask','startup','retryStartupTasks','readStartupRecoveryFacts','startupRecovery','resumeImportedTask','startMaintenance','arrangeNativeContinuation','admissionWakes','runQueue','runQueueInChannel','confirmAdoptedWakes','taskRuntimeReleased','updateWake','wakeAdmission','checkWakeAdmissions','observeWakeAdmissions','rememberAdmissionWake','forgetAdmissionWake','clearLocalAdmissionInterval','localAdmissionHeld','admissionTask','admissionParent','rememberAdmissionAncestry','persistLocalAdmission','localAdmissionRecord','wake','storeWake','scheduleHelperSignal','publishHelperSignal','serialRecoveryWatch','watchKey','scheduleHostRestoreRetirement','scheduleCompletedHostRestoreRetirement','finishGitAuxiliaryRound','retrySettledHelperWakeRetirement','retireSettledHelperWakes','resetRecoveryCheck','helperResponsibilities']
+const methods=['backgroundDisabled','settlePhysicalDirectDelivery','physicalSignalSources','physicalDirectInput','beforeTaskUse','currentTask','roleKey','requestKey','serialWork','settleOperations','scanMembers','memberContinuationEligible','diagnoseMissingTask','startup','retryStartupTasks','readStartupRecoveryFacts','startupRecovery','resumeImportedTask','startMaintenance','arrangeNativeContinuation','admissionWakes','runQueue','runQueueInChannel','confirmAdoptedWakes','taskRuntimeReleased','updateWake','wakeAdmission','checkWakeAdmissions','observeWakeAdmissions','rememberAdmissionWake','forgetAdmissionWake','clearLocalAdmissionInterval','localAdmissionHeld','admissionTask','admissionParent','rememberAdmissionAncestry','persistLocalAdmission','localAdmissionRecord','wake','storeWake','scheduleHelperSignal','publishHelperSignal','serialRecoveryWatch','watchKey','scheduleHostRestoreRetirement','scheduleCompletedHostRestoreRetirement','finishGitAuxiliaryRound','retryLoggedHelperInputRetirement','retireLoggedHelperInput','resetRecoveryCheck','helperTaskOwner','helperResponsibilities']
 class ControlledSessions{constructor(ctx){this.ctx=ctx}async inspect(id){return this.ctx.sessionEvidence?.get(id)?.inspection??{exists:false}}async inputs(id){return this.ctx.sessionEvidence?.get(id)?.inputs??new Map()}async capture(id){return {finished:this.ctx.sessionEvidence?.get(id)?.finished??false}}async events(){return []}}
 const {retirePublishedDirectDelivery,resumePhysicalDirectDelivery}=await import('../src/framework/physical-direct-delivery.ts')
 const {resumePhysicalHelperReportsFromEvents}=await import('../src/framework/physical-helper-report.ts')
 const {parseDirectSignal,signalWorkerId}=await import('../src/framework/role-tools.ts')
 const {retirePhysicalPublicationsFromEvents}=await import('../src/framework/physical-publication-retirement.ts')
-const deps={DshStorageAdapter: class ControlledNonDshStorageAdapter {},resumePhysicalHelperReportsFromEvents,retirePublishedDirectDelivery,resumePhysicalDirectDelivery,retirePhysicalPublicationsFromEvents,helperSignalWakeHash,resolveNativeRecoveryInput,nativeRecoveryWakeId,taskLifecycleKey,createRecoveryWatch,PhysicalLocalFiles,GitAuthorityStore,withSnapshot,withOperationChannel,paths,readJson,readMemberStatus,taskLifecycle,isTerminalTask,assertTaskLifecycle,readTaskHistoryIdentity,FrameworkTaskIndex,scanMemberRecovery,memberRecoveryEligible,randomUUID,hash,DshSessionReader:ControlledSessions,parseDirectSignal,signalWorkerId,listAuthorityInRound:(records,prefix)=>records.list(prefix),DshAgentCreationCancelled:class extends Error{}}
+const deps={DshStorageAdapter: class ControlledNonDshStorageAdapter {},resumePhysicalHelperReportsFromEvents,retirePublishedDirectDelivery,resumePhysicalDirectDelivery,retirePhysicalPublicationsFromEvents,helperSignalWakeHash,resolveNativeRecoveryInput,nativeRecoveryWakeId,taskLifecycleKey,createRecoveryWatch,PhysicalLocalFiles,GitAuthorityStore,GitFiles,withSnapshot,withOperationChannel,paths,readJson,readMemberStatus,taskLifecycle,isTerminalTask,assertTaskLifecycle,readTaskHistoryIdentity,FrameworkTaskIndex,scanMemberRecovery,memberRecoveryEligible,randomUUID,hash,DshSessionReader:ControlledSessions,parseDirectSignal,signalWorkerId,listAuthorityInRound:(records,prefix)=>records.list(prefix),DshAgentCreationCancelled:class extends Error{}}
 const Runtime=new Function(...Object.keys(deps),'return class {\n'+methods.map(runtimeMethod).join('\n')+'\n}')(...Object.values(deps))
 class RuntimeRecords{
  values=new Map();lists=[]
@@ -99,7 +82,6 @@ function runtime(files){
  return {rt,records,events,opens,errors,role}
 }
 async function drain(rt){for(let n=0;n<20;n++){const jobs=[...rt.maintenance?.values()??[],...rt.admissions?.values()??[]];if(!jobs.length)return;await Promise.all(jobs)}throw Error('Owners did not settle')}
-async function independent(files){const value={...task,taskId:other,sourcePath:'tasks/independent_P.md',archiveFolder:other};await files.createIfAbsent(paths.task(other),json(value));await files.createIfAbsent(value.sourcePath,'Independent original');for(const file of taskInitializationFiles(value))await files.createIfAbsent(file.path,file.content??'');return value}
 try{
  const directory=path.join(scratch,'retained-runtime'),files=new PhysicalLocalFiles(sourcePathFor(directory)),{rt,errors,role}=runtime(files)
  // History is a visibility/reference identity, never replacement runtime.
