@@ -490,7 +490,7 @@ export function FrameworkPage(props: FrameworkPageProps) {
       <img className={css.avatar} src={__SERVANT_ICON_DATA_URI__} alt="" />
       <div><h1>{view?.settings.name || 'DeepSeek Servant'}</h1><p>{tr('围绕您的目标，持续做事与积累经验。', 'Work toward your goals and build reusable experience')}</p></div>
     </div><div className={css.headerStatus}>
-      <span className={css.status}><StateDot state={snapshot.error ? 'error' : snapshot.loading ? 'ongoing' : 'idle'} />{view ? frameworkStateLabel(view.connection.status, tr) : tr('未连接', 'Not connected')}</span>
+      <span className={css.status}><StateDot state={snapshot.error ? 'error' : snapshot.loading ? 'ongoing' : view?.connection.status === 'connected' ? 'done' : 'idle'} />{view ? frameworkStateLabel(view.connection.status, tr) : tr('未连接', 'Not connected')}</span>
       <Button size="sm" onClick={() => refresh(tab === 'archives', true)}>{tr('刷新', 'Refresh')}</Button>
       <Button size="sm" aria-label={tr('设置', 'Settings')} onClick={() => { setSettingsTab('settings'); setSettingsOpen(true) }}><IconSettingsOutlineRegular size={18} /></Button>
     </div></header>
