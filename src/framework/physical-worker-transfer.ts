@@ -43,9 +43,10 @@ const requestHash = (input: WorkerTransferInput) => createHash('sha256').update(
 export function transferPhysicalWorker<R>(files: PhysicalLocalFiles, input: WorkerTransferInput,
   prepare: () => Promise<WorkerBusinessTransfer<R>>, beforePublication: () => Promise<void>,
   acceptedSources: () => Promise<readonly { path: string; version: string }[]>,
-  beforeAcceptance?: () => void | Promise<void>): Promise<void> {
+  beforeAcceptance?: () => void | Promise<void>): Promise<WorkerBusinessTransfer<R> | undefined> {
   return serial(files, input.markerPath, () => withSnapshot(files, async snapshot => {
     let transfer = await readJson<PhysicalWorkerBusinessTransfer<R>>(files, snapshot, input.markerPath)
+    const createdHere = transfer === undefined
     if (transfer) {
       if (!transfer.physical || transfer.physical.commandId !== input.commandId || transfer.physical.request !== requestHash(input))
         throw new Error('This Worker already transferred its business responsibility through a different accepted command.')
@@ -75,6 +76,9 @@ export function transferPhysicalWorker<R>(files: PhysicalLocalFiles, input: Work
       await files.replace(input.markerPath, encodeJson(transfer))
     }
     await publish(files, input.markerPath, transfer, beforePublication, acceptedSources)
+    // Only this call's fresh, fully confirmed publication can be reused.
+    // Replay/resume still consult the current marker through their old path.
+    return createdHere ? transfer : undefined
   }))
 }
 

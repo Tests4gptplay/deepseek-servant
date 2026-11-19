@@ -115,6 +115,15 @@ export class GitAuthorityStore implements StoragePort {
     this.assertOpen()
     return withSnapshot(this.files, snapshot => this.listAt<T>(snapshot, prefix), { directories: [this.listRoot(prefix)] })
   }
+  /** Exact lookup and conditional discovery in a single remote observation. */
+  async getOrList<T>(key: string, prefix: string): Promise<{ exact?: T; rows?: Array<{ key: string; value: T }> }> {
+    this.assertOpen()
+    return withSnapshot(this.files, async snapshot => {
+      const exact = await this.getAt<T>(snapshot, key)
+      if (exact !== undefined) return { exact }
+      return { rows: await this.listAt<T>(snapshot, prefix) }
+    }, { files: [this.path(key)] })
+  }
   private listRoot(prefix: string): string {
     const directory = prefix.slice(0, prefix.lastIndexOf('/') + 1)
     return this.root + (directory ? directory.slice(0, -1).split('/').map(segment).join('/') + '/' : '')
@@ -153,10 +162,27 @@ export class GitAuthorityStore implements StoragePort {
     try { envelope = JSON.parse(raw) as Envelope } catch (failure) { if (!(failure instanceof SyntaxError)) throw failure }
     return handler({ path, ...(key ? { key } : {}), value: envelope?.value, reason: error.message, contentVersion: hash(raw) }) ?? []
   }
+  /** Answer a read-only existence question on the regular fresh listing.
+   * Still visit and validate every body; a match must not hide corrupt records. */
+  async some<T>(prefix: string, predicate: (value: Readonly<T>) => boolean): Promise<boolean> {
+    let matched = false, failure: { error: unknown } | undefined
+    await withSnapshot(this.files, snapshot => this.visitAt(snapshot, prefix, (_key, value) => {
+      if (matched || failure) return
+      try { matched = predicate(value as Readonly<T>) }
+      catch (error) { failure = { error } }
+    }), { directories: [this.listRoot(prefix)] })
+    if (failure) throw failure.error
+    return matched
+  }
   async listAt<T>(snapshot: FilesSnapshot, prefix: string, onContentFault?: ContentFaultHandler): Promise<Array<{ key: string; value: T }>> {
+    const result: Array<{ key: string; value: T }> = []
+    await this.visitAt(snapshot, prefix, (key, value) => { result.push({ key, value: structuredClone(value) as T }) }, onContentFault)
+    return result
+  }
+  private async visitAt(snapshot: FilesSnapshot, prefix: string, visit: (key: string, value: unknown) => void,
+    onContentFault?: ContentFaultHandler): Promise<void> {
     this.assertOpen()
     const entries = await this.files.list(snapshot, this.listRoot(prefix))
-    const result: Array<{ key: string; value: T }> = []
     await this.files.prefetch?.(snapshot, { files: entries.filter(entry => entry.path.endsWith('.json') && this.bodies.get(entry.path)?.version !== entry.version).map(entry => entry.path) })
     this.assertOpen()
     for (const entry of entries) {
@@ -175,20 +201,25 @@ export class GitAuthorityStore implements StoragePort {
         } catch (error) { this.contentFault(error, entry.path, raw, key, onContentFault); continue }
         this.bodies.set(entry.path, cached)
       }
-      if (cached.key.startsWith(prefix)) result.push({ key: cached.key, value: structuredClone(cached.value) as T })
+      if (cached.key.startsWith(prefix)) visit(cached.key, cached.value)
     }
     const present = new Set(entries.map(entry => entry.path))
     for (const [path, cached] of this.bodies) if (cached.key.startsWith(prefix) && !present.has(path)) this.bodies.delete(path)
     this.assertOpen()
-    return result
   }
   /** Explicit Host-local candidate index. Values locate exact authority keys;
    * consumers must reread selected rows before publication. */
   index<T>(prefix: string, groups: (value: T, key: string) => readonly string[]): GitRecordIndex<{ key: string }>
   index<T>(prefix: string, groups: (value: T, key: string) => readonly string[], onContentFault: ContentFaultHandler): GitRecordIndex<AuthorityDiscoveryKey>
   index<T>(prefix: string, groups: (value: T, key: string) => readonly string[], onContentFault?: ContentFaultHandler): GitRecordIndex<AuthorityDiscoveryKey> {
+    return this.projectedIndex(prefix, groups, () => ({}), onContentFault)
+  }
+  /** Small identity projections for discovery only. Selected writes still
+   * observe their exact authority bodies on the publication snapshot. */
+  projectedIndex<T, P extends object>(prefix: string, groups: (value: T, key: string) => readonly string[],
+    project: (value: T) => P, onContentFault?: ContentFaultHandler): GitRecordIndex<AuthorityDiscoveryKey & Partial<P>> {
     if (!(this.files instanceof GitFiles)) throw new Error('Git discovery requires Git files.')
-    return new GitRecordIndex<AuthorityDiscoveryKey>(this.files, this.listRoot(prefix), (path, text) => {
+    return new GitRecordIndex<AuthorityDiscoveryKey & Partial<P>>(this.files, this.listRoot(prefix), (path, text) => {
       let key: string | undefined, value: T
       try {
         key = this.discoveryKey(path, prefix, !!onContentFault)
@@ -198,7 +229,7 @@ export class GitAuthorityStore implements StoragePort {
         return { value: {}, groups: this.contentFault(error, path, text, key, onContentFault) }
       }
       // Consumer failures are not syntax/envelope failures and must not be hidden.
-      return { value: { key }, groups: groups(value, key) }
+      return { value: { ...project(value), key }, groups: groups(value, key) }
     })
   }
   /** Indexed reads can discover previously unknown members at the next HEAD.
@@ -455,6 +486,69 @@ export class GitAuthorityStore implements StoragePort {
   compareAndDelete<T>(key: string, expected: T | undefined, ownedPaths: readonly string[] = []): Promise<void> {
     const prior = expected === undefined ? null : JSON.stringify({ version: 1, key, value: expected } satisfies Envelope) + '\n'
     return this.mutate(key, null, prior, ownedPaths)
+  }
+  /** Batch only already-ready keys. Skipped keys keep their ordinary writer
+   * path; an uncertain batch is not dispatched again as individual deletes. */
+  compareAndDeleteReady<T>(keys: readonly string[], ownerOf: (key: string) => string, eligible: (value: T) => boolean):
+    { keys: readonly string[]; operation: Promise<Array<{ key: string; value: T }>> } | undefined {
+    this.assertOpen()
+    const ready = [...new Set(keys)].filter(key => {
+      const owner = ownerOf(key)
+      return !this.writes.has(key) && !this.ownedWrites.has(owner) && !this.ownedAttempts.has(owner)
+    })
+    if (ready.length < 2) return
+    const paths = new Map(ready.map(key => [key, this.path(key)]))
+    const operation = Promise.resolve().then(() => withWriteOperation(this.files, async () => {
+      let expected: Map<string, { raw: string; value: T }> | undefined
+      let retrySnapshot: FilesSnapshot | undefined
+      const readPlan = { files: [...paths.values()] }
+      try {
+        for (;;) {
+          this.assertOpen()
+          const recovered = retrySnapshot
+          const snapshot = recovered ?? await this.files.snapshot(readPlan)
+          retrySnapshot = undefined
+          try {
+            if (recovered) await this.files.prefetch?.(snapshot, readPlan)
+            const exact = new Map<string, { raw: string; value: T }>()
+            const absent: Array<{ key: string; value: T }> = []
+            for (const [key, path] of paths) {
+              const before = expected?.get(key)
+              if (expected && !before) continue
+              const raw = await this.files.read(snapshot, path)
+              if (before) {
+                if (raw === undefined) absent.push({ key, value: before.value })
+                else if (raw === before.raw) exact.set(key, before)
+                else throw new FilesConflictError(snapshot.revision)
+              } else if (raw !== undefined) {
+                const value = this.decode(key, raw) as T
+                if (eligible(value) && raw === JSON.stringify({ version: 1, key, value } satisfies Envelope) + '\n') exact.set(key, { raw, value })
+              }
+            }
+            // The first observation owns the expected value on every retry.
+            // A changed row is never deleted by this batch.
+            expected ??= exact
+            if (!exact.size) return absent
+            await withFileDependencies(this.files, snapshot, async () => {})
+            try {
+              await this.files.commit(snapshot, [...exact.keys()].map(key => ({ path: paths.get(key)!, content: null })),
+                'DSS authority batch ' + hash(JSON.stringify([...exact.keys()])), { beforeAttempt: this.publicationGuard() })
+              return [...absent, ...[...exact].map(([key, row]) => ({ key, value: row.value }))]
+            } catch (error) {
+              if (!(error instanceof FilesConflictError)) throw error
+              retrySnapshot = (this.files instanceof GitFiles ? this.files.takeConflictSnapshot(error) : undefined) ?? await this.files.snapshot({})
+              if (retrySnapshot.revision === snapshot.revision) throw error
+            }
+          } finally { await snapshot.release() }
+        }
+      } finally { await retrySnapshot?.release() }
+    }))
+    const tail = operation.then(() => {})
+    for (const key of ready) this.writes.set(key, tail)
+    void tail.finally(() => {
+      for (const key of ready) if (this.writes.get(key) === tail) this.writes.delete(key)
+    }).catch(() => {})
+    return { keys: ready, operation }
   }
   private mutate(key: string, content: string | null, expected: string | null, ownedPaths: readonly string[] = []): Promise<void> {
     this.assertOpen()

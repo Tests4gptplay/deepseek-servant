@@ -111,13 +111,21 @@ export class LocalRecordFiles {
   private target(path: string): string { return join(this.root, ...localRecordPath(path).split('/')) }
 
   /** Walk only this known chain, creating missing directories only for a write. */
-  private async directory(directory: string, create: boolean): Promise<boolean> {
+  private directory(directory: string, create: boolean): Promise<boolean>
+  private directory(directory: string, create: false, leafIdentity: true): Promise<BigIntStats | false>
+  private async directory(directory: string, create: boolean, leafIdentity = false): Promise<boolean | BigIntStats> {
     let current = parse(directory).root
     for (const part of directory.slice(current.length).split(sep).filter(Boolean)) {
       current = join(current, part)
       let info
-      try { info = await fs.lstat(current) }
-      catch (error) {
+      try {
+        if (leafIdentity && current === directory) {
+          const leaf = await fs.lstat(current, { bigint: true })
+          if (!leaf.isDirectory() || leaf.isSymbolicLink()) throw new Error('Not an ordinary Local records directory: ' + current)
+          return leaf
+        }
+        info = await fs.lstat(current)
+      } catch (error) {
         if (!missing(error)) throw error
         if (!create) return false
         try { await fs.mkdir(current) }
@@ -126,7 +134,7 @@ export class LocalRecordFiles {
       }
       if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Not an ordinary Local records directory: ' + current)
     }
-    return true
+    return leafIdentity ? fs.lstat(directory, { bigint: true }) : true
   }
   private async ordinaryFile(target: string): Promise<boolean> {
     let info
@@ -635,15 +643,15 @@ export class LocalRecordFiles {
   }
   private async existingParent(target: string, expected?: string, initialTaskPath?: string): Promise<string> {
     const parent = dirname(target)
-    if (!await this.directory(parent, false)) {
-      const message = 'The original Local record directory no longer exists: ' + parent
-      throw initialTaskPath === undefined ? new Error(message) : new LocalTaskRecordParentMissing(initialTaskPath, message)
-    }
-    let info: BigIntStats
-    try { info = await fs.lstat(parent, { bigint: true }) }
+    let info: BigIntStats | false
+    try { info = await this.directory(parent, false, true) }
     catch (error) {
       if (initialTaskPath !== undefined && missing(error)) throw new LocalTaskRecordParentMissing(initialTaskPath, (error as Error).message)
       throw error
+    }
+    if (!info) {
+      const message = 'The original Local record directory no longer exists: ' + parent
+      throw initialTaskPath === undefined ? new Error(message) : new LocalTaskRecordParentMissing(initialTaskPath, message)
     }
     if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Not an ordinary Local records directory: ' + parent)
     const identity = fileIdentity(info)

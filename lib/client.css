@@ -1,4 +1,4 @@
-/* ../dss-ui-work/node_modules/@deepseek-ai/dsh-client-ui-directory-picker-browse/src/client/DirectoryBrowser.module.css */
+/* ../../dss-ui-work/node_modules/@deepseek-ai/dsh-client-ui-directory-picker-browse/src/client/DirectoryBrowser.module.css */
 .DirectoryBrowser_dialog.DirectoryBrowser_dialog {
   width: min(680px, 100%);
   height: min(500px, calc(100dvh - 32px));
@@ -333,7 +333,7 @@
   margin-top: 8px;
 }
 
-/* ../dss-ui-work/node_modules/@deepseek-ai/dsh-client-ui-attachment/src/AttachmentRail.module.css */
+/* ../../dss-ui-work/node_modules/@deepseek-ai/dsh-client-ui-attachment/src/AttachmentRail.module.css */
 .AttachmentRail_root {
   position: relative;
   min-width: 0;
@@ -439,7 +439,7 @@
   right: 4px;
 }
 
-/* ../dss-ui-work/node_modules/@deepseek-ai/dsh-client-ui-attachment/src/DropOverlay.module.css */
+/* ../../dss-ui-work/node_modules/@deepseek-ai/dsh-client-ui-attachment/src/DropOverlay.module.css */
 .DropOverlay_mask {
   position: fixed;
   inset: 0;
@@ -489,7 +489,7 @@
   white-space: pre-wrap;
 }
 
-/* ../dss-ui-work/node_modules/@deepseek-ai/dsh-client-ui-attachment/src/FileCard.module.css */
+/* ../../dss-ui-work/node_modules/@deepseek-ai/dsh-client-ui-attachment/src/FileCard.module.css */
 .FileCard_card {
   position: relative;
   display: inline-flex;
@@ -650,7 +650,7 @@
   }
 }
 
-/* ../dss-ui-work/node_modules/@deepseek-ai/dsh-client-ui-attachment/src/client/ComposerAttachments.module.css */
+/* ../../dss-ui-work/node_modules/@deepseek-ai/dsh-client-ui-attachment/src/client/ComposerAttachments.module.css */
 .ComposerAttachments_rail {
   min-width: 0;
   padding: 2px 10px 0;

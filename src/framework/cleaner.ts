@@ -75,7 +75,8 @@ export async function observeCleanup(files: FilesStore, snapshot: FilesSnapshot,
     const current = readCurrent ? readCurrent.value : await readJson<TaskMetadata>(files, snapshot, paths.task(task.taskId))
     if (!current || current.taskId !== task.taskId || current.owner !== task.owner) throw new Error('Cleanup target must match the notified Task and its principal.')
     assertCleanupLifecycle(task, current); observed.task = current
-    const family = await taskFamily(files, snapshot, current.taskId)
+    const family = await taskFamily(files, snapshot, current.taskId, id =>
+      id === current.taskId ? Promise.resolve(current) : readJson<TaskMetadata>(files, snapshot, paths.task(id)))
     observed.family = family.length ? family : [current]
     if (record) {
       assertCleanupLifecycle(current, record)

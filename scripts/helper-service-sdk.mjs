@@ -28,13 +28,15 @@ RetirementStore.prototype.accept=async function(lives,verify){for(const l of liv
 ExactJsonlAdapter.prototype.cleanup=async function(life){mark('physical',{id:life.id});return cleanup.call(this,life)}
 function tool(name,input,id,index=0){return [{type:'tool-call-delta',index,name,id,argumentsDelta:JSON.stringify(input)},{type:'finish',reason:'tool-calls'}]}
 class Model extends LlmAdapter{
- calls=[];claimed=new Set();waiting=new Map()
+ calls=[];claimed=new Set();waiting=new Map();readForeground=new Set();publishedForeground=new Set()
  async *stream(o){this.calls.push(o);mark('model',{id:o.sessionId,call:this.calls.length});const supports=n=>o.tools.some(t=>t.name===n)
   if(process.env.DSS_EARLY_UPGRADE_TOOL==='1'&&supports('dss_upgrade_local_files')&&!this.earlyUpgradeCalled){this.earlyUpgradeCalled=true;yield*tool('dss_upgrade_local_files',{action:'restore_conversation',collaborationId:'po-native'},'early-restore');return}
   if(supports('dss_task_restore')&&!this.claimed.has(o.sessionId)){this.claimed.add(o.sessionId);yield*tool('dss_claim',{},'foreground-claim-'+this.calls.length);return}
   if(this.nextForeground&&supports('dss_task_restore')){const p=this.nextForeground;this.nextForeground=undefined;yield*tool(p.name,p.input,'foreground-request-'+this.calls.length);return}
+  if(supports('dss_task_restore')&&!this.readForeground.has(o.sessionId)){this.readForeground.add(o.sessionId);yield*tool('dss_conversation_read',{mode:'context'},'read-'+this.calls.length);return}
+  if(supports('dss_task_restore')&&!this.publishedForeground.has(o.sessionId)){this.publishedForeground.add(o.sessionId);yield*tool('dss_conversation_send',{id:'reply-'+o.sessionId,text:'Request arranged.',responsePhase:'final',intent:'human'},'publish-'+this.calls.length);return}
   if(supports('dss_task_restore')){yield{type:'text-delta',index:0,text:'Request arranged.'};yield{type:'finish',reason:'stop'};return}
-  if(!this.claimed.has(o.sessionId)&&supports('dss_restore')){this.claimed.add(o.sessionId);yield*tool('dss_claim',{},'claim-'+this.calls.length);return}
+  if(!this.claimed.has(o.sessionId)&&supports('dss_claim')){this.claimed.add(o.sessionId);yield*tool('dss_claim',{},'claim-'+this.calls.length);return}
   yield{type:'text-delta',index:0,text:'Actual isolated model progress.'}
   const d=defer();this.waiting.set(o.sessionId,d)
   const abort=()=>d.reject(o.signal.reason);o.signal.addEventListener('abort',abort,{once:true});if(o.signal.aborted)abort()
@@ -46,15 +48,15 @@ class Model extends LlmAdapter{
  command(id,action){const d=this.waiting.get(id);assert(d,'Actual model must be waiting');d.resolve(action)}
 }
 async function fixture(name='fixture',reopen=false,disabledOrBeforeStart=false){const dir=path.join(root,name);await fs.mkdir(path.join(dir,'workspace'),{recursive:true});if(typeof disabledOrBeforeStart==='function')await disabledOrBeforeStart(dir);const disabled=disabledOrBeforeStart===true;const sdk=await openDshStorageFixture(path.join(dir,'storage'),path.join(dir,'locator'))
- new AgentRegistry(sdk.ctx);new SessionStore(sdk.ctx);new SessionProjectionRegistry(sdk.ctx);new LlmRuntime(sdk.ctx);new SystemPrompt(sdk.ctx,{});new ToolRuntime(sdk.ctx);new LocalJobRegistry(sdk.ctx,{})
+ new SessionStore(sdk.ctx);new SessionProjectionRegistry(sdk.ctx);const ar=sdk.ctx.plugin(AgentRegistry);await ar.await();new LlmRuntime(sdk.ctx);new SystemPrompt(sdk.ctx,{});new ToolRuntime(sdk.ctx);const te=sdk.ctx.plugin(await import('@deepseek-ai/dsh-tool-executor-native'));await te.await();new LocalJobRegistry(sdk.ctx,{})
  const jp=sdk.ctx.plugin(jsonl,{root:path.join(dir,'sessions'),compression:'none'});await jp.await()
- new LocalFileSystem(sdk.ctx,{cwd:path.join(dir,'workspace'),diffBasisMaxBytes:1048576});new WorkingDirectoryService(sdk.ctx,{defaultDirectory:path.join(dir,'workspace')});const wp=sdk.ctx.plugin(WorkspaceRegistry);await wp.await();const lp=sdk.ctx.plugin(AgentLoop,{agents:[],maxParallelToolCalls:10});await lp.await()
+ new LocalFileSystem(sdk.ctx,{cwd:path.join(dir,'workspace'),diffBasisMaxBytes:1048576});const wd=sdk.ctx.plugin(WorkingDirectoryService,{defaultDirectory:path.join(dir,'workspace')});await wd.await();const wp=sdk.ctx.plugin(WorkspaceRegistry);await wp.await();const lp=sdk.ctx.plugin(AgentLoop,{agents:[],maxParallelToolCalls:10});await lp.await()
  const model=new Model();sdk.ctx.llm.registerAdapter(['isolated-wire'],model)
  sdk.ctx.on('session/event',(session,event)=>{if(['tool/call','tool/result'].includes(event.type)){mark('tool',{id:session.header.id,type:event.type,data:event.data});if(event.type==='tool/result'&&!event.data.message.isError){for(const c of event.data.message.content??[])if(c.type==='text'){try{const v=JSON.parse(c.text);if(v.snapshotId)results.set(session.header.id,v)}catch{}}}}})
  await cleaner.apply(sdk.ctx,{}, {onFailure(e,stage){throw Error(stage,{cause:e})}})
  const rawOpen=sdk.ctx.sessionPersistence.open.bind(sdk.ctx.sessionPersistence)
  sdk.ctx.sessionPersistence.open=async function(id,mode){mark('native-open',{id,mode,caller:new Error().stack});const h=await rawOpen(id,mode),close=h.close.bind(h);h.close=async()=>{const r=await close();mark('native-handle-closed',{id,mode});return r};return h}
- const service=new FrameworkService(sdk.ctx,sdk.adapter,{name:'PO native evidence',userName:'Evidence',localDirectory:path.join(dir,'business'),ownerRepo:'',repositoryDirectory:path.join(dir,'unused-git'),collaborationId:'po-native',workerSeats:1,workspace:path.join(dir,'workspace'),foreground:{provider:'isolated-wire',model:'controlled'},background:{provider:'isolated-wire',model:'controlled'}})
+ const service=new FrameworkService(sdk.ctx,sdk.adapter,{name:'PO native evidence',userName:'Evidence',localDirectory:path.join(dir,'business'),ownerRepo:'',repositoryDirectory:path.join(dir,'unused-git'),collaborationId:'po-native',workerSeats:Number(process.env.DSS_TEST_INITIAL_WORKER_SEATS??1),workspace:path.join(dir,'workspace'),foreground:{provider:'isolated-wire',model:'controlled'},background:{provider:'isolated-wire',model:'controlled'}})
  if(disabled)await sdk.adapter.set('framework-participation/local',false)
  await service.start();const active=service.running.get('local');if(!disabled)assert(active,'Actual Service startup');const rt=active?.runtime,prefix='framework-runtime/'+hash(active?.connection.scope??'')+'/'
  const f={dir,sdk,jp,model,service,active,rt,prefix,closed:false,

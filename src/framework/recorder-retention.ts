@@ -3,8 +3,9 @@ import { PhysicalLocalFiles } from './physical-local-files.js'
 import { readTaskReferenceIdentity, taskHistoryChange } from './task-history.js'
 import { materialLinks, parseTaskReference, referenceTaskId, taskReference } from './published-references.js'
 import { linkedChild, taskFamily } from './task-relations.js'
-import { fileReadFingerprint, withReevaluatedFileTarget } from './file-read-observation.js'
+import { fileReadFingerprint, withProjectedFileRead, withProjectedRead, withReevaluatedFileTarget } from './file-read-observation.js'
 import { createHash } from 'node:crypto'
+import { fileSelectionKey } from './file-list-selection.js'
 import { GitFiles, filePath, type FileChange, type FilesSnapshot, type FilesStore } from './transactions.js'
 import { encodeJson, paths, taskArchiveOwnsPath, taskArchiveSelection, readJson, taskIdentity, taskLifecycle, taskWorkingRoots, type TaskMetadata } from './task-files.js'
 
@@ -72,11 +73,11 @@ export async function prepareRecorderOutputReferences<T extends { path: string; 
 /** Copy authoritative bytes, never generate a summary or reinterpret native files.
  * Recorder persists this plan with its archive before sending its Cleaner signal. */
 export async function prepareRecorderRetention(files: FilesStore, snapshot: FilesSnapshot, task: TaskMetadata,
-  manifest: RetentionManifest, staged: readonly FileChange[], originals?: RecorderRetentionOriginalSink): Promise<{ changes: FileChange[]; ancestorChanges: FileChange[]; task: TaskMetadata; retention: RetentionManifest }> {
+  manifest: RetentionManifest, staged: readonly FileChange[], originals?: RecorderRetentionOriginalSink, gitFamily?: readonly TaskMetadata[]): Promise<{ changes: FileChange[]; ancestorChanges: FileChange[]; task: TaskMetadata; retention: RetentionManifest }> {
   if (taskLifecycle(task) !== taskLifecycle(manifest)) throw new Error('Recorder retention belongs to another Task lifecycle.')
   // A total Recorder owns the known task tree's material. Children do not run
   // their own Recorder or move their originals before the total handoff.
-  const family = task.parent ? [task] : await taskFamily(files, snapshot, task.taskId)
+  const family = task.parent ? [task] : (files instanceof GitFiles ? gitFamily : undefined) ?? await taskFamily(files, snapshot, task.taskId)
   const members = family.length ? family : [task]
   for (const change of staged) if (change.path.startsWith('archives/')
     && !members.some(member => taskArchiveOwnsPath(member, change.path)))
@@ -88,7 +89,8 @@ export async function prepareRecorderRetention(files: FilesStore, snapshot: File
   const programStates = new Set(members.map(member => paths.archive(member) + '/state.json'))
   if (manifest.retainedPaths.some(path => commandRoots.some(root => within(path, root)) || recorderStage(path))) throw new Error('Task command receipts and Recorder handoff material are not retained outputs.')
   if (manifest.retainedPaths.some(path => programStates.has(path))) throw new Error('Program state is not a Recorder retained output.')
-  const roots = members.flatMap(taskWorkingRoots), mapping = { ...manifest.relocatedReferences }, sources = { ...manifest.relocatedSources }
+  const memberRoots = members.map(member => ({ member, roots: taskWorkingRoots(member) }))
+  const roots = memberRoots.flatMap(entry => entry.roots), mapping = { ...manifest.relocatedReferences }, sources = { ...manifest.relocatedSources }
   // Git reuses only this immutable view’s reads. Physical capture streams into
   // exact owned stages and keeps descriptors, never a cache of original bodies.
   // Authored staged writes take precedence in either mode.
@@ -144,12 +146,25 @@ export async function prepareRecorderRetention(files: FilesStore, snapshot: File
     // reading a physical original into an aggregate body buffer.
     const directory = info !== undefined && 'directory' in info && info.directory === true
     if (directory) directories.add(path)
-    const listed = info === undefined || directory ? await files.list(snapshot, path + '/', taskArchiveOwnsPath(task, path) ? taskArchiveSelection(task) : undefined) : []
-    const entries = [...new Set([...(info === undefined || directory ? [] : [path]), ...listed.map(entry => entry.path)])].filter(entry => !programStates.has(entry) && entry !== archive + '/retention.json' && !commandRoots.some(root => within(entry, root)) && !recorderStage(entry))
+    const included = (entry: string) => !programStates.has(entry) && entry !== archive + '/retention.json'
+      && !commandRoots.some(root => within(entry, root)) && !recorderStage(entry)
+    const list = async () => {
+      const selection = taskArchiveOwnsPath(task, path) ? taskArchiveSelection(task) : undefined
+      const read = async () => {
+        const listed = await files.list(snapshot, path + '/', selection)
+        return { exists: listed.length !== 0, selected: listed.filter(entry => included(entry.path)) }
+      }
+      return files instanceof GitFiles
+        ? withProjectedRead(snapshot, 'list:' + path + '/' + fileSelectionKey(selection), read,
+          listed => listed.selected.map(entry => [entry.path, entry.version]).sort(([a], [b]) => a! < b! ? -1 : a! > b! ? 1 : 0))
+        : read()
+    }
+    const listed = info === undefined || directory ? await list() : undefined
+    const entries = [...new Set([...(info !== undefined && !directory && included(path) ? [path] : []), ...listed?.selected.map(entry => entry.path) ?? []])]
     // Keep the Recorder's references in its publication; Cleaner neither
     // reinterprets these references nor supplements the archive later.
     if (!entries.length) {
-      if (info === undefined && !listed.length) missingReferences.add(path)
+      if (info === undefined && !listed?.exists) missingReferences.add(path)
       return [path]
     }
     const result: string[] = []
@@ -158,7 +173,7 @@ export async function prepareRecorderRetention(files: FilesStore, snapshot: File
       // use the same exact identity check as an individual source selection.
       if (source !== path && sourceOwners.has(source)) { result.push(...await expand(source)); continue }
       if (!working(source)) { result.push(source); continue }
-      const sourceOwner = sourceOwners.get(source) ?? members.find(member => taskWorkingRoots(member).some(root => within(source, root))) ?? task
+      const sourceOwner = sourceOwners.get(source) ?? memberRoots.find(entry => entry.roots.some(root => within(source, root)))?.member ?? task
       if (originals) {
         const retained = await originals.retain(source, paths.archive(sourceOwner))
         if (!retained) throw new Error('Retained reference is missing: ' + source)
@@ -261,7 +276,7 @@ export async function prepareRecorderRetention(files: FilesStore, snapshot: File
     // not only the root result list. Exact parent/child classification survives
     // without members, controls, role state or cleanup inventory.
     const results = member.taskId === task.taskId ? resultPaths : member.resultPaths
-      ? await expandMany(await resolveChildResultReferences(files, snapshot, task, member.resultPaths, true)) : undefined
+      ? await expandMany(await resolveChildResultReferences(files, snapshot, task, member.resultPaths, true, false, members)) : undefined
     retainedResults.push(...(results ?? []).filter(path => !isLiveSkillReference(path)))
     if (files instanceof PhysicalLocalFiles) {
       const history = taskHistoryChange(member, results)
@@ -382,12 +397,20 @@ export async function resolveTaskRequirementReference(files: FilesStore, snapsho
 export async function resolveChildResultReferences(files: FilesStore, snapshot: FilesSnapshot, parent: TaskMetadata,
   references: readonly string[], relocating = false, selectedChildOnly = false, family?: readonly TaskMetadata[]): Promise<string[]> {
   const knownFamily = files instanceof GitFiles ? family : undefined
+  let observedFamily = knownFamily
+  const readFamily = async () => {
+    if (observedFamily) return observedFamily
+    const current = await taskFamily(files, snapshot, parent.taskId)
+    if (files instanceof GitFiles) observedFamily = current
+    return current
+  }
   // Organizer acceptance can follow an explicitly named working Task. Recorder
   // still uses the original whole-family resolver, including directory inputs.
   // An unlocated or mixed input keeps the existing general path unchanged.
   if (selectedChildOnly && !relocating && parent.route === 'O' && references.length
     && references.every(path => !path.startsWith('task-references/') && referenceTaskId(path) !== undefined)) {
     const tasks = new Map<string, Promise<TaskMetadata | undefined>>()
+    for (const item of knownFamily ?? []) tasks.set(item.taskId, Promise.resolve(item))
     const retentions = new Map<string, Promise<RetentionManifest | undefined>>()
     const task = (id: string): Promise<TaskMetadata | undefined> => {
       let pending = tasks.get(id)
@@ -426,7 +449,7 @@ export async function resolveChildResultReferences(files: FilesStore, snapshot: 
     if (selected.every((path): path is string => path !== undefined)) return selected
   }
   if (references.some(path => path.startsWith('task-references/'))) {
-    const chain = relocating && !parent.parent ? knownFamily ?? await taskFamily(files, snapshot, parent.taskId)
+    const chain = relocating && !parent.parent ? await readFamily()
       : await taskRequirementChain(files, snapshot, parent, relocating)
     references = await Promise.all(references.map(async path => {
       const reference = parseTaskReference(path)
@@ -440,10 +463,16 @@ export async function resolveChildResultReferences(files: FilesStore, snapshot: 
   }
   if (parent.route !== 'O' || !references.length) return [...references]
   const replacements = new Map<string, string>()
-  for (const child of (knownFamily ?? await taskFamily(files, snapshot, parent.taskId)).slice(1)) {
+  for (const child of (await readFamily()).slice(1)) {
     const selected = references.filter(path => taskWorkingRoots(child).some(root => within(path, root)) || path === child.sourcePath)
     if (!selected.length) continue
-    const retention = await readJson<RetentionManifest>(files, snapshot, paths.archive(child) + '/retention.json')
+    const retentionPath = paths.archive(child) + '/retention.json'
+    const readRetention = () => readJson<RetentionManifest>(files, snapshot, retentionPath)
+    const retention = relocating && knownFamily
+      ? await withProjectedFileRead(snapshot, retentionPath, readRetention,
+        manifest => selected.map(path => [path, manifest?.relocatedReferences?.[path] ?? null]),
+        'recorder-child-relocations:' + JSON.stringify([retentionPath, selected]))
+      : await readRetention()
     for (const path of selected) {
       const target = retention?.relocatedReferences?.[path]
       if (!target) continue
