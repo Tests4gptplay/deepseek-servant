@@ -21,6 +21,8 @@ const clientOptions = {
   format: 'cjs', platform: 'browser', target: 'es2022', sourcemap: false, jsx: 'automatic',
   external: ['@deepseek-ai/*', 'react', 'react/*', 'react-dom', 'react-dom/*'],
   alias: {
+    clsx: fileURLToPath(import.meta.resolve('clsx')),
+    '@deepseek-ai/dsh-client-ui-directory-picker-browse/src/client/DirectoryBrowser.tsx': fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-client-ui-directory-picker-browse/src/client/DirectoryBrowser.tsx')),
     '@deepseek-ai/dsh-agent-preset-registry/display': fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-agent-preset-registry/display')),
     '@deepseek-ai/dsh-util-file-drag': fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-util-file-drag')),
     // Public source exports are bundled once; React and shared DSH services stay external.
@@ -44,7 +46,7 @@ await build({ ...clientOptions, define: { ...clientOptions.define, __SERVANT_CLI
 
 // Keep the independent cleaner entry and reviewed runtime bytes in the same package.
 await mkdir('lib/native-cleaner', { recursive: true })
-for (const name of ["plugin", "coordinator", "jsonl-adapter", "cache-domain", "retirement-store", "kernel-lock", "windows-semaphore", "pinned-directory", "entry", "exact-file", "win32-file-signatures", "windows-native-api", "windows-storage-backend"]) await copyFile(`src/native-cleaner/${name}.mjs`, `lib/native-cleaner/${name}.mjs`)
+for (const name of ["workspace-account", "plugin", "coordinator", "jsonl-adapter", "cache-domain", "retirement-store", "kernel-lock", "windows-semaphore", "pinned-directory", "entry", "exact-file", "win32-file-signatures", "windows-native-api", "windows-storage-backend"]) await copyFile(`src/native-cleaner/${name}.mjs`, `lib/native-cleaner/${name}.mjs`)
 
 // The resident helper is package-owned code, launched only by authorized Git use.
 await copyFile('src/experimental/private-git/dulwich-helper.py', 'lib/dulwich-helper.py')

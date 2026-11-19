@@ -1,3 +1,4 @@
+import {removeWorkspaceAccount} from './workspace-account.mjs';
 import { constants } from 'node:fs';
 import { lstat, readdir, open, unlink, readFile, rename } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -168,7 +169,37 @@ export class ExactJsonlAdapter {
       return Object.hasOwn(records,life.id)?undefined:{status:'absent'};
     }finally{await root.close();}
   }
+  async cleanupWorkspace(life) {
+    const verify=()=>{
+      this.fence.current(life);
+      if(!life.retirementAccepted)throw new Error('Permanent retirement has not been accepted');
+      if(this.ctx.agents.get(life.id)||this.ctx.sessions.get(life.id))throw new Error('A live owner replaced this session');
+    };
+    verify();
+    const stored=await this.backend.stat(life.id);
+    if(stored&&(!life.header||!sameHeader(stored.header,life.header)))throw new Error('Workspace retirement identity differs from current stored session');
+    verify();return removeWorkspaceAccount(this.ctx,life,verify);
+  }
   async maintainProjection(life){
+    const verify=()=>{
+      this.fence.current(life);
+      if(!life.retirementAccepted)throw new Error('Permanent retirement has not been accepted');
+      if(this.ctx.agents.get(life.id)||this.ctx.sessions.get(life.id))throw new Error('A live owner replaced this session');
+    };
+    verify();
+    // Independent background duties: a missing/busy projection cache cannot
+    // postpone removal of an already retired workspace account.
+    const results=await Promise.allSettled([
+      this.maintainProjectionCache(life),this.cleanupWorkspace(life),
+    ]);
+    const errors=results.filter(result=>result.status==='rejected').map(result=>result.reason);
+    if(errors.length===1)throw errors[0];
+    if(errors.length)throw new AggregateError(errors,'Native cache/workspace maintenance failed');
+    const [cache,workspace]=results.map(result=>result.value);
+    if(workspace.status!=='removed'&&workspace.status!=='absent')return workspace;
+    return cache;
+  }
+  async maintainProjectionCache(life){
     if(!this.ctx.get('storageDomain')?.get('session_projcache')){
       const absent=await this.projectionFilesAbsent(life);
       // A real mount during the physical check must use its live domain path.

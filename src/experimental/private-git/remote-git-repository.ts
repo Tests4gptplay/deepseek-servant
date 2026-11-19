@@ -112,6 +112,20 @@ export class RemoteGitRepository implements GitRepository {
   withWriteOperation<T>(action: () => Promise<T>): Promise<T> {
     return this.withChannel(this.writeChannel(), action)
   }
+  /** EXPERIMENT ONLY: process-only ready in the already acquired scope.
+   * Never calls session(), tokens, connect, Git commands or HEAD reads. */
+  prewarmForegroundWriteHelper(): void {
+    const scope = this.checked?.scope
+    if (!scope || this.signal.aborted || scope.signal.aborted) return
+    if (scope.key !== this.bindingKey()) return
+    if (scope.channels.has('foreground-write')) return
+    const cache = this.newCache('foreground-write')
+    scope.channels.set('foreground-write', cache)
+    scope.caches.add(cache)
+    // Same resident ready/failure and same scope release ownership. The actual
+    // writer observes failures normally; warmup does not report or retry them.
+    void cache.transport.ready?.(scope.signal).catch(() => {})
+  }
   private newCache(channel: GitOperationChannel, transport: GitObjectBackend = new DulwichGitBackend(this.options.dulwich)): ObjectCache {
     return { channel, transport, trees: new Map(), commits: new Map(), metadata: new Set(), present: new Set(), writtenBlobs: new Map(), fetching: new Map(),
       dirty: false, floorBytes: 0, hotBlobs: new Map(), active: 0, retired: false, released: false, snapshots: new Map(), pending: new Set() }
@@ -627,6 +641,18 @@ export class RemoteGitRepository implements GitRepository {
       }
     }
     plan.signal?.throwIfAborted()
+  }
+  /** Exact current tree metadata. No historical walk, blob decoding or implicit rebase. */
+  observedRegularEmptyPaths(snapshot: GitSnapshot, sources: readonly { path: string; version: string }[]): Promise<string[]> {
+    return this.readSnapshot(snapshot, async session => {
+      const result: string[] = []
+      for (const { path, version } of sources) {
+        const entry = await this.entry(session, snapshot, path)
+        if (entry?.type === 'blob' && entry.mode === '100644' && entry.sha === version
+          && version === createHash(version.length === 64 ? 'sha256' : 'sha1').update('blob 0\0').digest('hex')) result.push(path)
+      }
+      return result
+    })
   }
   async prefetch(snapshot: GitSnapshot, plan: GitReadPlan): Promise<void> { await this.readSnapshot(snapshot, session => this.prefetchInSession(session, snapshot, plan), plan.signal) }
   /** Discovery metadata only: does not populate snapshot files or reads and

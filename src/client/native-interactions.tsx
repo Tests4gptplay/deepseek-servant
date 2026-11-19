@@ -1,3 +1,4 @@
+import css from './page.module.css'
 import { createElement, useEffect, useState, useSyncExternalStore, type ComponentType } from 'react'
 import type { UserQuestionProjectionView } from '@deepseek-ai/dsh-user-questions/types'
 import type {} from '@deepseek-ai/dsh-client-ui-tool/client'
@@ -97,7 +98,7 @@ export function NativeInteractions({ ctx, client, executions, zh, onlyPending = 
     const binding = sessions.binding(row.sessionId as SessionId)
     return !binding?.session.getSnapshot().removed && (catalog.byId[row.sessionId as SessionId] || binding) && !seen.has(row.sessionId) && !!seen.add(row.sessionId) && (!onlyPending || statuses?.get(row.sessionId as SessionId)?.pendingInteraction)
   }).map(execution =>
-    <section key={execution.sessionId + ':' + services.generation} aria-label={execution.role + (zh ? ' 待处理交互' : ' pending interaction')}><strong>{execution.role}</strong><InteractionSession ctx={ctx} execution={execution} {...slots}/></section>)}</>
+    <section className={css.nativeInteraction} key={execution.sessionId + ':' + services.generation} aria-label={execution.role + (zh ? ' 待处理交互' : ' pending interaction')}><strong>{execution.role}</strong><InteractionSession ctx={ctx} execution={execution} {...slots}/></section>)}</>
 }
 function InteractionSession({ ctx, execution, renderSlot, SessionProvider }: NativeInteractionSlots & { ctx: Context; execution: FrameworkClientExecution }) {
   const [reference, setReference] = useState<SessionReference>()

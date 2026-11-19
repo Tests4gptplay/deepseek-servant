@@ -40,7 +40,7 @@ export class LifecycleFence {
     life.handles.delete(reservation); this.wake(life);
   }
   forgetUnused(life) {
-    if(!life.enrolled&&!life.handles.size&&!life.writes.size&&life.phase==='active'&&this.lifecycles.get(life.id)===life)this.lifecycles.delete(life.id);
+    if(!life.enrolled&&!life.retirement&&!life.retirementAccepted&&!life.handles.size&&!life.writes.size&&life.phase==='active'&&this.lifecycles.get(life.id)===life)this.lifecycles.delete(life.id);
   }
   current(life) {
     if (life.identity !== this.identity || this.lifecycles.get(life.id) !== life) throw new Error('Lifecycle/backend binding changed');
@@ -114,6 +114,7 @@ export function decoratePersistence(backend, fence) {
 
 /** Explicit identity enrollment; no title/prefix/task-state inference and no DSS imports. */
 export class NativeCleanerCoordinator {
+  workspaceOnlyRetained=new Map(); workspaceOnlyWorkers=new Map(); workspaceOnlyRetryable=new Set();
   owned=new WeakMap(); preparing=new Set(); maintenance=new Set(); pending=new Map(); retained=new Map(); retryable=new WeakSet(); workers=new Map(); stopped=false; recoveryNeeded=true;
   projectionRetained=new Map(); projectionRetryable=new WeakSet(); projectionWorkers=new Map(); retryFlights=new Set(); logRetryPreparations=new Map();
   constructor(ctx,fence,adapter,report=()=>{}) {
@@ -189,8 +190,9 @@ export class NativeCleanerCoordinator {
       const stored=await this.adapter.backend.stat(id);
       const journal=await this.adapter.store.read(id,stored?.header);
       if(!stored&&!journal){
-        this.publish(life,{status:'absent'});
-        if(this.fence.lifecycles.get(id)===life)this.fence.lifecycles.delete(id);
+        await this.adapter.store.acceptAbsentWorkspace(id,()=>this.fence.current(life));
+        life.retirementAccepted=true;life.workspaceOnly=true;
+        this.startWorkspaceOnly(life);
         return;
       }
       this.fence.bind(life,stored?.header??journal.header);
@@ -211,6 +213,25 @@ export class NativeCleanerCoordinator {
     // The public caller can report the failure; the adapter also observes it
     // when the Host sends a fire-and-forget notification.
     void operation.catch(()=>{});return operation;
+  }
+  startWorkspaceOnly(life) {
+    if(this.stopped||this.workspaceOnlyWorkers.has(life.id))return;
+    const operation=Promise.resolve().then(async()=>{
+      this.fence.current(life);
+      this.workspaceOnlyRetryable.delete(life);
+      const outcome=await this.adapter.cleanupWorkspace(life);
+      if(outcome.status==='removed'||outcome.status==='absent'){
+        await this.adapter.store.completeAbsentWorkspace(life.id);
+        this.workspaceOnlyRetained.delete(life.id);
+        if(this.fence.lifecycles.get(life.id)===life)this.fence.lifecycles.delete(life.id);
+      }else this.workspaceOnlyRetained.set(life.id,life);
+      this.publish(life,{...outcome,stage:'workspace-account'});
+    }).catch(error=>{
+      this.workspaceOnlyRetained.set(life.id,life);
+      const outcome={status:'failed',stage:'workspace-account',error:describeError(error),retryable:isRetryable(error)};
+      this.publish(life,outcome);if(outcome.retryable){this.workspaceOnlyRetryable.add(life);this.scheduleRetry();}
+    }).finally(()=>{this.workspaceOnlyWorkers.delete(life.id);this.maintenance.delete(operation);});
+    this.workspaceOnlyWorkers.set(life.id,operation);this.maintenance.add(operation);return operation;
   }
   finishDisposal(entry){
     return entry.disposal??=Promise.resolve().then(async()=>{
@@ -336,6 +357,13 @@ export class NativeCleanerCoordinator {
         life.inheritedEventCount=row.inheritedEventCount;life.retirementAccepted=true;
         this.restoreDuties(life,row);this.resumeDuties(life);
       }
+      for(const id of await this.adapter.store.absentWorkspaceAccounts()){
+        if(this.fence.lifecycles.has(id)||this.ctx.agents.get(id)||this.ctx.sessions.get(id)||await this.adapter.backend.stat(id)){
+          this.publish({id},{status:'deferred',stage:'workspace-account',reason:'Current lifecycle requires its own explicit retirement'});continue;
+        }
+        const life={id,identity:this.adapter.backend.identity,phase:'retiring',handles:new Set(),writes:new Set(),idle:new Set(),retirementAccepted:true,workspaceOnly:true};
+        this.fence.lifecycles.set(id,life);this.startWorkspaceOnly(life);
+      }
       this.recoveryNeeded=false;
     }).catch(error=>{this.publish({},{status:'failed',stage:'retirement-recovery',error:describeError(error)});throw error;})
       .finally(()=>{this.preparing.delete(operation);if(this.recovering===operation)this.recovering=undefined;});
@@ -407,10 +435,19 @@ export class NativeCleanerCoordinator {
       if(this.retrying!==flight)return;
       this.retrying=undefined;
       if(flight.retryRequested&&([...this.retained.values()].some(life=>this.retryable.has(life))
-        ||[...this.projectionRetained.values()].some(life=>this.projectionRetryable.has(life))))this.scheduleRetry();
+        ||[...this.projectionRetained.values()].some(life=>this.projectionRetryable.has(life))
+        ||[...this.workspaceOnlyRetained.values()].some(life=>this.workspaceOnlyRetryable.has(life))))this.scheduleRetry();
     };
     flight.promise=Promise.resolve().then(async()=>{
       if(this.recoveryNeeded)await this.recoverAccepted();
+      const workspaceLives=new Map(this.workspaceOnlyRetained);
+      if(!automatic)for(const id of this.workspaceOnlyWorkers.keys())workspaceLives.set(id,this.fence.lifecycles.get(id));
+      const workspaceRetries=[...workspaceLives.values()].map(async life=>{
+        if(!life||automatic&&this.workspaceOnlyWorkers.has(life.id))return;
+        await this.workspaceOnlyWorkers.get(life.id);
+        if(!this.workspaceOnlyRetained.has(life.id)||automatic&&!this.workspaceOnlyRetryable.has(life))return;
+        return this.startWorkspaceOnly(life);
+      });
       const projections=new Map(this.projectionRetained);
       if(!automatic)for(const id of this.projectionWorkers.keys())projections.set(id,this.fence.lifecycles.get(id));
       const projectionRetries=[...projections.values()].map(async life=>{
@@ -446,7 +483,7 @@ export class NativeCleanerCoordinator {
         this.logRetryPreparations.set(life,attempt);return attempt;
       });
       releaseDispatch();
-      await Promise.all([...projectionRetries,...logRetries]);
+      await Promise.all([...projectionRetries,...logRetries,...workspaceRetries]);
       // Explicit callers retain the public drain semantics. Automatic retries
       // own only their dispatched work, never another session's held cache.
       if(!automatic)await this.drain();

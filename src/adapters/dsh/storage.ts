@@ -16,7 +16,7 @@ interface StoredEnvelope { key: string; value: unknown }
 const storedEnvelope: z.ZodType<StoredEnvelope> = z.object({ key: z.string().min(1), value: z.json() })
 const servantDomain = defineDomain({ name: 'deepseek_servant', version: 1, tables: { records: domainTable<string, StoredEnvelope>(storedEnvelope) } })
 const locationDomain = defineDomain({ name: 'deepseek_servant_location', version: 1,
-  tables: { settings: domainTable<string, LocationValue>(
+  tables: { configuration: domainTable<string, StoredEnvelope>(storedEnvelope), settings: domainTable<string, LocationValue>(
     z.object({ directory: z.string().min(1), layout: z.enum(['folders-v1', 'folders-v2']).optional(), move: z.object({ commandId: z.string().min(1), destination: z.string().min(1), copy: z.object({ version: z.literal(1), source: z.string(), destination: z.string(), fingerprint: z.string(), owned: z.record(z.string(), z.object({ dev: z.string(), ino: z.string() })) }).optional() }).optional() })) } })
 const DATA_FOLDER = 'deepseek_servant'
 const LEGACY_FILE = 'deepseek_servant.json'
@@ -167,6 +167,21 @@ export class DshStorageAdapter implements StoragePort {
   }
   /** Exact accepted relocation evidence only. This does not open a database,
    * scan a tree, or affect ordinary technical reads and writes. */
+  abandonRecordMove(commandId: string, source: string, target: string): Promise<void> {
+    return this.exclusive(async () => {
+      // Check the durable locator, not only an in-memory directory after a lost acknowledgement.
+      await this.location.close()
+      this.location = await this.ctx.storageDomain.open(locationDomain)
+      const active = this.location.table('settings').get('active')
+      if (this.pendingRelocation || this.directory !== source || active?.directory !== source)
+        throw new Error('The record destination may already be active; continue the original move instead.')
+      const pending = this.location.table('settings').get('record-move')
+      if (!pending?.move) return
+      if (pending.directory !== source || pending.move.commandId !== commandId || pending.move.destination !== target)
+        throw new Error('The retained technical move does not match this cancellation.')
+      await this.location.table('settings').delete('record-move')
+    })
+  }
   recordMoveCopy(commandId: string): RecordTreeCopyState | undefined {
     const move = this.location.table('settings').get('record-move')?.move
     return move?.commandId === commandId && move.copy ? structuredClone(move.copy) : undefined
@@ -247,6 +262,8 @@ export class DshStorageAdapter implements StoragePort {
 
   get<T>(key: string): Promise<T | undefined> {
     return this.read(key, false, async () => {
+      const selection = key === 'framework-settings/local' ? this.location.table('configuration').get(key) : undefined
+      if (selection) return structuredClone(selection.value) as T
       this.records.files?.assertReadable(key)
       const record = this.records.table.get(key)
       if (record === undefined || await this.records.files?.hasRecord(key) === false) {
@@ -273,7 +290,20 @@ export class DshStorageAdapter implements StoragePort {
   }
   set<T>(key: string, value: T): Promise<void> {
     const record = storedEnvelope.parse({ key, value: omitAbsentFields(structuredClone(value)) })
-    return this.write(key, async () => { this.records.files?.assertReadable(key); await this.records.table.put(key, record); this.oldLocalConfigurations.delete(key) })
+    return this.write(key, async () => {
+      const move = key === 'framework-settings/local' ? this.location.table('settings').get('record-move') : undefined
+      // A model/settings selection is not part of an already frozen record copy.
+      // Keep only its current value beside the locator until that copy publishes.
+      if (key === 'framework-settings/local' && move?.move?.copy && move.directory === this.directory) {
+        await this.location.table('configuration').put(key, record)
+        return
+      }
+      this.records.files?.assertReadable(key)
+      await this.records.table.put(key, record)
+      if (key === 'framework-settings/local' && this.location.table('configuration').get(key))
+        await this.location.table('configuration').delete(key)
+      this.oldLocalConfigurations.delete(key)
+    })
   }
   private async listedRecords<T>(prefix: string): Promise<Array<{ key: string; value: T }>> {
     const records: Array<{ key: string; value: T }> = []
@@ -283,6 +313,12 @@ export class DshStorageAdapter implements StoragePort {
       this.records.files?.assertReadable(key)
       if (await this.records.files?.hasRecord(key) === false) continue
       records.push({ key, value: structuredClone(record.value) as T })
+    }
+    const selection = this.location.table('configuration').get('framework-settings/local')
+    if (selection && selection.key.startsWith(prefix)) {
+      const index = records.findIndex(record => record.key === selection.key)
+      const record = { key: selection.key, value: structuredClone(selection.value) as T }
+      if (index < 0) records.push(record); else records[index] = record
     }
     return records
   }

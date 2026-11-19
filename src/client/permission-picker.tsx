@@ -1,5 +1,6 @@
+import css from './page.module.css'
 import { useEffect, useState, useSyncExternalStore } from 'react'
-import { Button, Menu, RiskConfirmation, PermissionIconReadOnlyRegular, PermissionIconWorkspaceWriteRegular, PermissionIconFullAccessRegular, PermissionIconAutoReviewRegular, IconShieldOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Menu, RiskConfirmation, PermissionIconReadOnlyRegular, PermissionIconWorkspaceWriteRegular, PermissionIconFullAccessRegular, PermissionIconAutoReviewRegular, IconShieldOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ISessions, SessionReference } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { PermissionSelection } from '@deepseek-ai/dsh-permission-presets/types'
@@ -63,10 +64,10 @@ export function PermissionPicker({ ctx, api, view, zh }: { ctx: Context; api: Fr
   const auto = confirmation === 'auto'
   const glyph = (value?: string) => value === undefined ? <IconShieldOutlineRegular /> : value === 'danger-full-access' ? <PermissionIconFullAccessRegular /> : value === 'auto' ? <PermissionIconAutoReviewRegular /> : value === 'workspace-write' ? <PermissionIconWorkspaceWriteRegular /> : <PermissionIconReadOnlyRegular />
   return <div aria-label={zh ? 'DSS 前台和后台权限' : 'DSS foreground and background permissions'}>
-    <Menu open={open} portal side="bottom" selectedId={actual?.currentValue} items={options.map(option => ({ id: option.value, label: label(option.value, option.name), icon: glyph(option.value) }))}
-      onSelect={choose} onClose={() => setOpen(false)} anchor={<Button variant="ghost" size="sm" aria-label={zh ? '权限' : 'Permissions'} disabled={loading || saving}
+    <Menu open={open} portal side="top" selectedId={actual?.currentValue} items={options.map(option => ({ id: option.value, label: label(option.value, option.name), icon: glyph(option.value) }))}
+      onSelect={choose} onClose={() => setOpen(false)} anchor={<button type="button" className={css.composerAdd} aria-label={zh ? '权限' : 'Permissions'} disabled={loading || saving}
         title={(actual ? (zh ? '前台当前：' : 'Foreground now: ') + label(actual.currentValue, options.find(option => option.value === actual.currentValue)?.name ?? actual.currentValue) : foreground ? (zh ? '读取当前权限' : 'Reading current permissions') : (zh ? '无当前前台会话' : 'No current foreground session')) + (selected ? (zh ? '；DSS 选择目标：' : '; DSS selected target: ') + label(selected, options.find(option => option.value === selected)?.name ?? selected) : (zh ? '；尚未设置 DSS 组选择' : '; no DSS group choice set')) + (zh ? '；选择会作用于此 DSS 前台和后台，不更改其它原生会话。' : '; a choice applies to this DSS foreground and background, not other native sessions.')}
-        onClick={() => open ? setOpen(false) : void load()}>{glyph(actual?.currentValue)}</Button>}/>
+        onClick={() => open ? setOpen(false) : void load()}>{glyph(actual?.currentValue)}</button>}/>
     {confirmation && <RiskConfirmation open title={t(auto ? 'auto.confirm.title' : 'confirm.title')}
       description={t(auto ? 'auto.confirm.description' : 'confirm.description')} acknowledgeLabel={t(auto ? 'auto.confirm.acknowledge' : 'confirm.acknowledge')}
       cancelLabel={t('confirm.cancel')} closeLabel={t('close')} confirmLabel={t(auto ? 'auto.confirm.enable' : 'confirm.enable')}

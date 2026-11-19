@@ -28,8 +28,11 @@ export class GitRecordIndex<T> {
         const rows = new Map(this.rows), changed = new Set<string>()
         const present = new Set(entries.map(entry => entry.path))
         for (const path of rows.keys()) if (!present.has(path)) { rows.delete(path); changed.add(path) }
-        for (const entry of entries) {
-          if (rows.get(entry.path)?.version === entry.version) continue
+        const changedEntries = entries.filter(entry => rows.get(entry.path)?.version !== entry.version)
+        // These bodies are already required by this index on this exact view.
+        // A single changed body takes the existing direct read path.
+        if (changedEntries.length > 1) await this.files.prefetch(snapshot, { files: changedEntries.map(entry => entry.path) })
+        for (const entry of changedEntries) {
           const text = await this.files.readDiscovery(snapshot, entry.path)
           if (text === undefined) throw new Error('Discovered Git record is missing from its immutable snapshot.')
           const parsed = this.parse(entry.path, text)

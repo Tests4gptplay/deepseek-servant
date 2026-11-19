@@ -1,3 +1,6 @@
+import { useDirectoryPicker } from './client/directory-picker.js'
+import { observeServantSidebarVisibility, type SidebarSessions, type SidebarWorkspaces } from './client/session-visibility.js'
+import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 import type { NativeImageAttachments } from './client/native-attachment-owner.js'
 import { ComposerAttachments } from '@deepseek-ai/dsh-client-ui-attachment/src/client/ComposerAttachments.tsx'
 import type {} from '@deepseek-ai/dsh-client-ui-file-drag/client'
@@ -25,6 +28,7 @@ import { PresetPicker } from './client/preset-picker.js';
 import { createRequestLifecycle } from './client/request-lifecycle.js';
 import { subscribeEventStreams } from './client/event-streams.js';
 import { en, zh, NS } from './client/locales.js';
+import { DIRECTORY_NS, en as directoryEn, zh as directoryZh } from './client/directory-locales.js';
 import css from './client/page.module.css';
 import { FrameworkPage } from './framework/client-page.js';
 import type { FrameworkClientApi, FrameworkClientModel } from './framework/client-contracts.js';
@@ -42,7 +46,15 @@ export function apply(ctx: Context): void {
     const nativeQuestions = createNativeInteractionClient(ctx);
     registerNativeInteractions(ctx);
     ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dss.locales');
-    ctx.effect(() => { const style = document.createElement('style'); style.dataset.deepseekServant = 'client'; style.textContent = typeof __SERVANT_CLIENT_CSS__ === 'undefined' ? '' : __SERVANT_CLIENT_CSS__; document.head.append(style); return () => style.remove(); }, 'dss.styles');
+    ctx.effect(() => ctx.locale.register(DIRECTORY_NS, { zh: directoryZh, en: directoryEn }), 'dss.directory-locales');
+    ctx.effect(() => {
+        const style = document.createElement('style'); style.dataset.deepseekServant = 'client';
+        const baseCss = typeof __SERVANT_CLIENT_CSS__ === 'undefined' ? '' : __SERVANT_CLIENT_CSS__;
+        const sessions = ctx.get('sessions', true) as unknown as { list: HostObservable<SidebarSessions> };
+        const workspaces = ctx.get('workspaces', true) as unknown as { list: HostObservable<SidebarWorkspaces> };
+        const stop = observeServantSidebarVisibility(sessions.list, workspaces.list, css => { style.textContent = baseCss + '\n' + css });
+        document.head.append(style); return () => { stop(); style.remove(); };
+    }, 'dss.styles');
     const connection = ctx.get('connection', true) as unknown as ConnectionHandle, requests = createRequestLifecycle(), t = ctx.locale.bind(NS);
     ctx.effect(() => { const off = ctx.on('connection/reset', requests.reset); return () => { off(); requests.dispose(); }; }, 'dss.requests');
     const browserFaults = createClientFaults(async input => {
@@ -70,6 +82,10 @@ export function apply(ctx: Context): void {
             if (!cancelled && !isLocalAttachmentError(error)) browserFaults.capture(error, context, occurrence);
             throw error;
         }
+    };
+    const directoryBrowser = {
+        listDirectory: (path?: string, signal?: AbortSignal) => call('directoryList', { path }, signal),
+        createDirectory: (path: string, name: string): Promise<string> => call('directoryCreate', { path, name }),
     };
     const rawAttachmentRequest = async <T,>(method: string, input: unknown, signal: AbortSignal | undefined, operation: (owned: AbortSignal) => Promise<T>): Promise<T> => {
         const occurrence = browserFaults.begin(), context = faultContext(method, input);
@@ -162,8 +178,8 @@ export function apply(ctx: Context): void {
         const transportState = useSyncExternalStore(subscribeConnection, connectionSnapshot);
         const locale = useSyncExternalStore(subscribeLocale, localeSnapshot);
         const modelView = useSyncExternalStore(models.source.subscribe, models.source.getSnapshot);
-        const picker = (globalThis as typeof globalThis & { __DSH_DIRECTORY_PICKER__?: { pick(): Promise<string | null> } }).__DSH_DIRECTORY_PICKER__;
-        return <FrameworkPage nativeAttachments={nativeAttachments} onStopForeground={view => cancelForeground(ctx.get('sessions', true) as unknown as ISessions, view)} permissionControl={(view, zh) => <PermissionPicker key={view.activeMode + ":" + view.storageScope} ctx={ctx} api={api} view={view} zh={zh}/>} nativePending={(view, zh, onOpen, onForeground) => <NativeTaskPending client={nativeQuestions} tasks={view.tasks} foreground={(view.executions ?? []).filter(row => row.role === 'Foreground')} zh={zh} onOpen={onOpen} onForeground={onForeground}/> } nativeInteractions={approvalSlots ? (executions, zh, onlyPending) => <NativeInteractions onlyPending={onlyPending} ctx={ctx} client={nativeQuestions} {...approvalSlots} executions={executions} zh={zh}/> : undefined} api={api} settingsOnly={settingsOnly} onConversationVisible={onConversationVisible} transportConnected={connectionState ? transportState === 'connected' : undefined} language={locale.active.toLowerCase().startsWith('zh') ? 'zh' : 'en'} onViewed={view => notices.ackLocal({ mode: view.activeMode, collaborationId: view.collaborationId, storageScope: view.storageScope })} onPickDirectory={picker ? async () => { const occurrence = browserFaults.begin(), context = faultContext('directoryPicker'); try { return await picker.pick(); } catch (error) { browserFaults.capture(error, context, occurrence); throw error; } } : undefined} modelControl={(value, onChange, label, options) => <ModelPicker {...options} value={value ?? {}} models={modelView} onRefresh={models.refresh} label={label} t={t} onChange={route => onChange(route.provider && route.model ? route as FrameworkClientModel : undefined)}/>} presetControl={(value, onChange) => <PresetPicker value={value ?? 'standard'} onLoad={onLoadPresets} onChange={onChange} t={t}/>}/>;
+        const picker = useDirectoryPicker(ctx, directoryBrowser);
+        return <><FrameworkPage nativeAttachments={nativeAttachments} onStopForeground={view => cancelForeground(ctx.get('sessions', true) as unknown as ISessions, view)} permissionControl={(view, zh) => <PermissionPicker key={view.activeMode + ":" + view.storageScope} ctx={ctx} api={api} view={view} zh={zh}/>} nativePending={(view, zh, onOpen, onForeground) => <NativeTaskPending client={nativeQuestions} tasks={view.tasks} foreground={(view.executions ?? []).filter(row => row.role === 'Foreground')} zh={zh} onOpen={onOpen} onForeground={onForeground}/> } nativeInteractions={approvalSlots ? (executions, zh, onlyPending) => <NativeInteractions onlyPending={onlyPending} ctx={ctx} client={nativeQuestions} {...approvalSlots} executions={executions} zh={zh}/> : undefined} api={api} settingsOnly={settingsOnly} onConversationVisible={onConversationVisible} transportConnected={connectionState ? transportState === 'connected' : undefined} language={locale.active.toLowerCase().startsWith('zh') ? 'zh' : 'en'} onViewed={view => notices.ackLocal({ mode: view.activeMode, collaborationId: view.collaborationId, storageScope: view.storageScope })} onPickDirectory={picker.pick ? async (initialPath) => { const occurrence = browserFaults.begin(), context = faultContext('directoryPicker'); try { return await picker.pick!(initialPath); } catch (error) { browserFaults.capture(error, context, occurrence); throw error; } } : undefined} modelControl={(value, onChange, label, options) => <ModelPicker {...options} value={value ?? {}} models={modelView} onRefresh={models.refresh} label={label} t={t} onChange={route => onChange(route.provider && route.model ? route as FrameworkClientModel : undefined)}/>} presetControl={(value, onChange) => <PresetPicker value={value ?? 'standard'} onLoad={onLoadPresets} onChange={onChange} t={t}/>}/>{picker.dialog}</>;
     }
     function MainPage(approvalSlots: NativeInteractionSlots) {
         const [conversationVisible, setConversationVisible] = useState(false);

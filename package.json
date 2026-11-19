@@ -1,6 +1,6 @@
 {
   "name": "deepseek-servant",
-  "version": "0.5.0",
+  "version": "0.5.1-pre.1",
   "description": "DeepSeek Harness Local/Git 协作助理：原生六角色执行、持久会话、任务恢复与成果归档。",
   "private": true,
   "type": "module",
@@ -31,6 +31,7 @@
     "docs/INSTALLATION.md",
     "docs/USAGE.md",
     "THIRD_PARTY_NOTICES.md",
+    "lib/native-cleaner/workspace-account.mjs",
     "lib/native-cleaner/plugin.mjs",
     "lib/native-cleaner/coordinator.mjs",
     "lib/native-cleaner/jsonl-adapter.mjs",
@@ -84,7 +85,8 @@
     "koffi": "*",
     "mdast-util-from-markdown": "*",
     "yaml": "*",
-    "zod": "*"
+    "zod": "*",
+    "@deepseek-ai/dsh-host-directory-picker-browse": "0.2.2-rc.3"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
@@ -202,7 +204,8 @@
     "shiki": "^4.5.0",
     "simple-icons": "^16.31.0",
     "typescript": "^6.0.3",
-    "zustand": "~4.5.7"
+    "zustand": "~4.5.7",
+    "@deepseek-ai/dsh-client-ui-directory-picker-browse": "0.2.2-rc.3"
   },
   "license": "AGPL-3.0-only",
   "repository": {

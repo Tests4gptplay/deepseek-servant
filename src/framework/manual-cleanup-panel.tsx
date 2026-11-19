@@ -1,5 +1,5 @@
 import { frameworkErrorText } from './client-error.js'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { FrameworkClientApi } from './client-contracts.js'
 import type { ManualTaskCleanupPreview, ManualFileCleanupPreview, ManualConversationCleanupPreview } from './manual-cleanup.js'
@@ -17,6 +17,7 @@ export function ManualCleanupPanel({ api, storageScope, tr, changed }: {
   const [debugRecord, setDebugRecord] = useState<{ path: string; text: string }>()
   const [usage, setUsage] = useState<Awaited<ReturnType<FrameworkClientApi['maintenanceView']>>>()
   const inspect = async () => { setBusy(true); setError(''); try { setUsage(await api.maintenanceView({ mode: 'local', storageScope })) } catch (error) { setError(frameworkErrorText(error)) } finally { setBusy(false) } }
+  useEffect(() => { void inspect() }, [api, storageScope])
   const open = async (target: 'records' | 'native-logs' | 'debug') => { setError(''); try { await api.openMaintenancePath({ mode: 'local', storageScope, target }) } catch (error) { setError(frameworkErrorText(error)) } }
   const inspectDebug = async () => {
     setBusy(true); setError(''); setDebugRecord(undefined)
@@ -69,6 +70,7 @@ export function ManualCleanupPanel({ api, storageScope, tr, changed }: {
         : pending.action === 'debug' ? { ...base, action: 'debug', preview: pending.filePreview!, confirmation: 'clear-debug-records' }
         : { ...base, action: 'planning', preview: pending.filePreview, confirmation: 'clear-work-planning-notes' })
       setPending(undefined); setDebug(undefined); setDebugRecord(undefined); setUsage(undefined)
+      await inspect()
       setResult(tr('已完成本次清理；保留的成果或后续变更文件：', 'Cleanup finished; retained artifacts or files changed afterward: ') + result.preservedPaths.length
         + (result.missingEntries?.length ? tr(' 以下聊天条目已缺失，原正文位置无法确定，未删除未知正文：', ' These conversation entries were already missing; their original body locations are unknown, so unknown bodies were not deleted: ') + result.missingEntries.join(', ') : ''))
       // Cleanup owns the confirmed write; its independent display refresh
@@ -77,26 +79,51 @@ export function ManualCleanupPanel({ api, storageScope, tr, changed }: {
     } catch (error) { setError(frameworkErrorText(error)) }
     finally { setBusy(false) }
   }
-  return <section className={css.section} aria-label={tr('长期记录管理', 'Long-term records')}>
-    <h3>{tr('长期记录管理', 'Long-term records')}</h3>
-    <p>{tr('记录保留到你明确清理。只作用于当前 Local 存储；不会自动按年龄或容量删除。', 'Records remain until you explicitly clear them. These actions affect this Local storage only; there is no age or capacity based deletion.')}</p>
-    <Button disabled={busy} onClick={() => void inspect()}>{tr('查看记录容量与目录', 'Inspect record usage and directories')}</Button>
-    <Button onClick={() => void open('records')}>{tr('打开记录目录', 'Open records directory')}</Button>
-    <Button onClick={() => void open('native-logs')}>{tr('打开宿主会话日志目录', 'Open Host session log directory')}</Button>
-    <Button disabled={busy} onClick={() => void inspectDebug()}>{tr('查看调试记录', 'View debug records')}</Button>
-    {usage?.debugDirectory && <Button onClick={() => void open('debug')}>{tr('打开调试记录目录', 'Open debug records directory')}</Button>}
+  const bytes = (value: number) => {
+    if (value < 1024) return value.toLocaleString() + ' B'
+    const units = ['KB', 'MB', 'GB', 'TB']; let amount = value / 1024, unit = 0
+    while (amount >= 1024 && unit < units.length - 1) { amount /= 1024; unit++ }
+    return amount.toLocaleString(undefined, { maximumFractionDigits: 1 }) + ' ' + units[unit]
+  }
+  const groups = [
+    { title: tr('保存记录', 'Saved records'), total: usage?.usage.permanentBytes, rows: [
+      [tr('聊天记录', 'Conversation'), usage?.usage.permanent.chatBytes], [tr('助理记录', 'Assistant records'), usage?.usage.permanent.assistantBytes],
+      [tr('技能与知识', 'Skills and knowledge'), usage?.usage.permanent.knowledgeBytes], [tr('原始记录', 'Original records'), usage?.usage.permanent.originBytes],
+      [tr('成果档案', 'Archives'), usage?.usage.permanent.archiveBytes], [tr('工作清单与缓存', 'Working notes'), usage?.usage.permanent.planningBytes],
+      [tr('调试记录', 'Debug records'), usage ? usage.usage.permanent.debugBytes ?? 0 : undefined],
+    ] },
+    { title: tr('运行资料', 'Task data'), total: usage?.usage.temporaryBytes, rows: [
+      [tr('任务资料', 'Task files'), usage?.usage.temporary.taskBytes], [tr('规划记忆', 'Planner memory'), usage?.usage.temporary.plannerMemoryBytes],
+      [tr('规划笔记', 'Planner notes'), usage?.usage.temporary.plannerNoteBytes], [tr('执行回复', 'Worker replies'), usage?.usage.temporary.workerReplyBytes],
+      [tr('执行记录', 'Execution records'), usage?.usage.temporary.executionBytes], [tr('恢复资料', 'Recovery data'), usage?.usage.temporary.recoveryBytes],
+    ] },
+  ]
+  return <section className={css.retention} aria-label={tr('记录管理', 'Record management')}>
+    <div className={css.retentionHeading}><h2>{tr('记录管理', 'Record management')}</h2><span className={css.retentionGrandTotal}>{tr('总计', 'Total')} <strong>{usage ? bytes(usage.usage.totalBytes) : '—'}</strong></span></div>
+    <div className={css.retentionColumns}>{groups.map(group => <dl className={css.retentionGroup} key={group.title}>
+      {group.rows.map(([label, size]) => <div className={css.retentionRow} key={String(label)}><dt>{label}</dt><dd title={typeof size === 'number' ? size.toLocaleString() + ' B' : undefined}>{typeof size === 'number' ? bytes(size) : '—'}</dd></div>)}
+      <div className={`${css.retentionRow} ${css.retentionSubtotal}`}><dt>{group.title}</dt><dd>{group.total === undefined ? '—' : bytes(group.total)}</dd></div>
+    </dl>)}</div>
+    <div className={css.actions}>
+      <Button type="button" variant="primary" disabled={busy} onClick={() => void inspect()}>{tr('刷新容量', 'Refresh usage')}</Button>
+      <Button type="button" variant="outline" onClick={() => void open('records')}>{tr('打开记录文件夹', 'Open records folder')}</Button>
+      <Button type="button" variant="outline" onClick={() => void open('native-logs')}>{tr('打开会话日志', 'Open session logs')}</Button>
+      <Button type="button" variant="outline" disabled={busy} onClick={() => void inspectDebug()}>{tr('查看调试记录', 'View debug records')}</Button>
+      {usage?.debugDirectory && <Button type="button" variant="outline" onClick={() => void open('debug')}>{tr('打开调试文件夹', 'Open debug folder')}</Button>}
+    </div>
     {debug && <div><p>{tr('调试记录', 'Debug records')}: {debug.files.length} · {debug.bytes} bytes</p>
       {debug.files.map(file => <Button key={file.path} disabled={busy} onClick={() => void readDebug(file.path)}>{file.path} · {file.bytes} bytes</Button>)}
       {debugRecord && <div><h4>{debugRecord.path}</h4><pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{debugRecord.text}</pre></div>}
     </div>}
-    {usage && <div><p>{usage.localDirectory}</p>{usage.recordsDirectory && <p>{tr('技术记录目录', 'Technical records directory')}: {usage.recordsDirectory}</p>}
-      {usage.nativeDirectory && <p>{tr('宿主日志目录', 'Host log directory')}: {usage.nativeDirectory}</p>}
-      <p>{tr('逻辑记录字节（不等同 SQLite 或宿主日志磁盘占用）', 'Logical record bytes (not SQLite or Host log disk allocation)')}: {usage.usage.totalBytes}</p>
-      <dl>{Object.entries({ [tr('聊天', 'Conversation')]: usage.usage.permanent.chatBytes, [tr('工作清单与缓存', 'List and Cache')]: usage.usage.permanent.planningBytes,
-        [tr('技能与知识', 'Skills and knowledge')]: usage.usage.permanent.knowledgeBytes, [tr('成果档案', 'Archives')]: usage.usage.permanent.archiveBytes, [tr('调试记录', 'Debug records')]: usage.usage.permanent.debugBytes ?? 0,
-        [tr('运行资料', 'Running task material')]: usage.usage.temporaryBytes }).map(([label, bytes]) => <div key={label}><dt>{label}</dt><dd>{bytes} bytes</dd></div>)}</dl>
-    </div>}
-    {!pending && (Object.keys(labels) as Action[]).map(action => <Button key={action} disabled={busy} onClick={() => void prepare(action)}>{labels[action]}</Button>)}
+    {usage && <details className={css.retentionManage}><summary>{tr('存储位置', 'Storage locations')}</summary>
+      <dl className={css.storagePaths}>
+        <div><dt>{tr('当前记录目录', 'Current records folder')}</dt><dd><code>{usage.localDirectory}</code></dd></div>
+        {usage.recordsDirectory && <div><dt>{tr('DSS 记录根目录', 'DSS records root')}</dt><dd><code>{usage.recordsDirectory}</code></dd></div>}
+        {usage.nativeDirectory && <div><dt>{tr('DSH 会话日志', 'DSH session logs')}</dt><dd><code>{usage.nativeDirectory}</code></dd></div>}
+      </dl>
+      <p className={css.muted}>{tr('以上为记录内容大小，不包含宿主会话日志。', 'Sizes show record content, excluding Host session logs.')}</p>
+    </details>}
+    {!pending && <div className={css.actions}>{(Object.keys(labels) as Action[]).map(action => <Button type="button" variant="outline" key={action} disabled={busy} onClick={() => void prepare(action)}>{labels[action]}</Button>)}</div>}
     {pending && <div role="group" aria-label={tr('确认清理', 'Confirm cleanup')}>
       <h4>{labels[pending.action]}</h4>
       <p>{pending.action === 'tasks' ? tr('只删除本次预览的已结束任务历史；成果、技能和知识保留。', 'Only the ended task history in this preview is removed; artifacts, skills and knowledge remain.')
@@ -106,8 +133,8 @@ export function ManualCleanupPanel({ api, storageScope, tr, changed }: {
       {pending.conversationPreview && <p>{pending.conversationPreview.messageIds.length} {tr('条已选聊天记录', 'selected conversation messages')}</p>}
       {pending.preview && <p>{pending.preview.tasks.length} {tr('个任务', 'tasks')} · {pending.preview.fileCount} {tr('个文件', 'files')} · {pending.preview.bytes} bytes</p>}
       {pending.filePreview && <div><p>{pending.filePreview.files.length} {tr('个文件', 'files')} · {pending.filePreview.bytes} bytes</p>{pending.filePreview.files.map(file => <p key={file.path}>{file.path}</p>)}</div>}
-      <Button disabled={busy} onClick={() => void confirm()}>{tr('确认清理', 'Confirm cleanup')}</Button>
-      <Button disabled={busy} onClick={() => { setPending(undefined); setError('') }}>{pending.submitted ? tr('关闭（不撤销已发送请求）', 'Close (does not cancel the submitted request)') : tr('取消', 'Cancel')}</Button>
+      <Button type="button" variant="primary" disabled={busy} onClick={() => void confirm()}>{tr('确认清理', 'Confirm cleanup')}</Button>
+      <Button type="button" variant="outline" disabled={busy} onClick={() => { setPending(undefined); setError('') }}>{pending.submitted ? tr('关闭（不撤销已发送请求）', 'Close (does not cancel the submitted request)') : tr('取消', 'Cancel')}</Button>
       {pending.submitted && <p>{tr('请求已发送。结果未确认时，请用同一操作重试；关闭面板不会撤销已接纳的清理。', 'The request was sent. Retry this same operation if its outcome is unknown; closing the panel does not revoke an accepted cleanup.')}</p>}
     </div>}
     {error && <p role="alert">{error}</p>}{result && <p role="status">{result}</p>}

@@ -125,6 +125,8 @@ export interface GitOperationStore {
 /** Reads use immutable Git snapshots; writes validate actual dependencies before
  * atomic ref publication. Production and current transport fixtures use Dulwich Git. */
 export interface FrameworkGitRepository {
+  /** Experimental process-only warmup, not an authority observation. */
+  prewarmForegroundWriteHelper?(): void
   withChannel?<T>(channel: GitOperationChannel, operation: () => Promise<T>): Promise<T>
   withWriteOperation?<T>(operation: () => Promise<T>): Promise<T>
   withReadOperation<T>(operation: () => Promise<T>): Promise<T>
@@ -133,6 +135,7 @@ export interface FrameworkGitRepository {
   at(revision: string): Promise<GitSnapshot>
   borrowSnapshot?(snapshot: GitSnapshot, signal: AbortSignal): GitSnapshot
   read(snapshot: GitSnapshot, path: string): Promise<string | undefined>
+  observedRegularEmptyPaths?(snapshot: GitSnapshot, sources: readonly { path: string; version: string }[]): Promise<string[]>
   readBytes(snapshot: GitSnapshot, path: string): Promise<Uint8Array | undefined>
   list(snapshot: GitSnapshot, prefix: string): Promise<void>
   listDirectory(snapshot: GitSnapshot, prefix: string): Promise<Array<{ path: string; sha: string; type: 'blob' | 'tree' | 'commit'; size?: number }>>
@@ -261,6 +264,11 @@ export class GitFiles implements FilesStore {
     }
   }
   prefetch(snapshot: FilesSnapshot, plan: FileReadPlan): Promise<void> { return this.repository.prefetch(this.native(snapshot), this.plan(plan)) }
+  async observedRegularEmptyPaths(snapshot: FilesSnapshot, sources: readonly { path: string; version: string }[]): Promise<string[] | undefined> {
+    const result = await this.repository.observedRegularEmptyPaths?.(this.native(snapshot),
+      sources.map(({ path, version }) => ({ path: 'dss-coop/' + filePath(path), version })))
+    return result?.map(path => path.slice('dss-coop/'.length))
+  }
   async at(revision: string): Promise<FilesSnapshot> { return this.wrap(await this.repository.at(revision)) }
   private native(snapshot: FilesSnapshot): GitSnapshot {
     this.aliasSignals.get(snapshot)?.throwIfAborted()

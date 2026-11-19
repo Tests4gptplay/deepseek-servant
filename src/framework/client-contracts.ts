@@ -101,7 +101,7 @@ export interface FrameworkClientView {
   foregroundProcessing?: { executionId: string; turnId: string; startedAt?: number }
   foregroundProcessGroups?: FrameworkClientProcessGroup[]
   processGroups?: FrameworkClientProcessGroup[]
-  pendingRecordMove?: { commandId: string; storageScope: string; expectedRevision: string; directory: string }
+  pendingRecordMove?: { commandId: string; storageScope: string; expectedRevision: string; directory: string; canAbandon?: boolean }
   /** This request's response only; a current location is not an old command receipt. */
   recordMoveOutcome?: { status: 'applied' | 'current-location'; commandId: string; requestedDirectory: string; directory: string; retainedSource?: string; sourceCleanup?: { retained: Array<{ directory: string; reason: string }> } }
   revision: string
@@ -154,6 +154,7 @@ export interface FrameworkClientApi {
   permissionCatalog?(input: { mode: FrameworkMode }): Promise<{ options: Array<{ value: string; name: string; description?: string }>; current?: string }>
   permissionSelect?(input: { mode: FrameworkMode; storageScope?: string; preset: string }): Promise<FrameworkClientView>
   foregroundModel(input: { mode: FrameworkMode; storageScope?: string; commandId: string; model?: FrameworkClientModel }): Promise<FrameworkClientView>
+  abandonRecordMove?(input: { mode: 'local'; storageScope: string; expectedRevision: string; commandId: string }): Promise<{ directory: string; retainedTarget: string }>
   moveRecords(input: { mode: 'local'; storageScope: string; expectedRevision: string; commandId: string; directory: string }): Promise<FrameworkClientView>
   legacyRecords(input: { mode: FrameworkMode; storageScope?: string; migrationId: string; oldTaskId: string }): Promise<{ text: string; revision: string }>
   legacyControl(input: { mode: FrameworkMode; storageScope?: string; commandId: string; migrationId: string; oldTaskId: string; action: 'resume' | 'answer'; waitId?: string; answer?: string }): Promise<{ submitted: true; commandId: string }>

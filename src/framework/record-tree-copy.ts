@@ -71,6 +71,45 @@ async function manifest(root: string, signal?: AbortSignal, observed?: Map<strin
   await visit('')
   return entries
 }
+// Recovery only: a changed source may contain new configuration not yet copied.
+// Accept its new snapshot only when every retained byte still matches it.
+async function verifyRetainedPrefix(source: string, destination: string, state: RecordTreeCopyState,
+  entries: Entry[], signal?: AbortSignal): Promise<void> {
+  const expected = new Map(entries.map(entry => [entry.path, entry]))
+  const actual = await manifest(destination, signal), actualPaths = new Set(actual.map(entry => entry.path))
+  if (!state.owned[''] || !same(state.owned[''], identity(await ordinaryDirectory(destination))))
+    throw new Error('The retained record destination was replaced: ' + destination)
+  for (const entry of actual) {
+    const original = expected.get(entry.path), target = join(destination, entry.path), owner = state.owned[entry.path]
+    if (!original || original.kind !== entry.kind) throw new Error('Retained destination conflicts with the current source: ' + target)
+    if (entry.kind === 'directory') {
+      const info = await ordinaryDirectory(target)
+      if (owner ? !same(owner, identity(info)) : (await readdir(target)).length !== 0)
+        throw new Error('Unrecognized retained directory contents: ' + target)
+      continue
+    }
+    const info = await lstat(target, { bigint: true })
+    if (!owner || !same(owner, identity(info)) || entry.bytes! > original.bytes!)
+      throw new Error('Unrecognized or changed retained file: ' + target)
+    const input = await open(join(source, entry.path), constants.O_RDONLY | flags)
+    try {
+      const before = await input.stat({ bigint: true }), buffer = Buffer.allocUnsafe(windowSize), hash = createHash('sha256')
+      let read = 0
+      while (read < entry.bytes!) {
+        signal?.throwIfAborted()
+        const next = await input.read(buffer, 0, Math.min(buffer.length, entry.bytes! - read), read)
+        if (!next.bytesRead) throw new Error('Current source no longer contains retained prefix: ' + target)
+        hash.update(buffer.subarray(0, next.bytesRead)); read += next.bytesRead
+      }
+      await unchanged(join(source, entry.path), input, before)
+      if (hash.digest('hex') !== entry.sha256) throw new Error('Retained output differs from the current source: ' + target)
+    } finally { await input.close() }
+  }
+  for (const logical of Object.keys(state.owned)) {
+    if (!logical) continue
+    if (!actualPaths.has(logical)) throw new Error('A retained copied path is missing: ' + join(destination, logical))
+  }
+}
 const digest = (entries: Entry[]) => createHash('sha256').update(JSON.stringify(entries)).digest('hex')
 /** Content and directory names, including empty directories and user-added
  * files. This is an explicit move check, never an ordinary Local read gate. */
@@ -82,8 +121,8 @@ export async function recordTreeFingerprint(directory: string, signal?: AbortSig
  * Cold continuation checks its saved physical identities and exact source
  * prefixes before APPENDING an incomplete file. It never truncates/replaces an
  * existing file, removes an original, follows a link, or merges unknown files.
- * A process stop between exclusive create and saving its identity is explicitly
- * unconfirmed: preserve that path for inspection, rather than guess ownership.
+ * A retained move may resume an empty directory left between creation and
+ * identity persistence, under its unchanged owned parent. Unknown files stay intact.
  * Portable Node path operations are not a cross-process filesystem transaction.
  */
 export async function copyRecordTree(sourceDirectory: string, destinationDirectory: string,
@@ -96,8 +135,16 @@ export async function copyRecordTree(sourceDirectory: string, destinationDirecto
   if (expectedFingerprint !== undefined && expectedFingerprint !== fingerprint)
     throw new Error('Record source changed after its copy was prepared; no destination was created.')
   const state: RecordTreeCopyState = prior ? structuredClone(prior) : { version: 1, source, destination, fingerprint, owned: {} }
-  if (state.version !== 1 || state.source !== source || state.destination !== destination || state.fingerprint !== fingerprint)
+  if (state.version !== 1 || state.source !== source || state.destination !== destination)
     throw new Error('The retained record copy no longer matches its original source, destination or contents.')
+  if (prior && state.fingerprint !== fingerprint) {
+    await verifyRetainedPrefix(source, destination, state, entries, signal)
+    // Freeze the current source only after all existing destination content
+    // has been checked; ordinary copies do not perform this recovery pass.
+    if (await recordTreeFingerprint(source, signal) !== fingerprint) throw new Error('Record source changed during recovery.')
+    state.fingerprint = fingerprint
+    await save(structuredClone(state))
+  }
   if (!prior) await save(structuredClone(state))
   // Parents are routing containers only. An existing destination itself is
   // never adopted, including an empty directory or identical-looking tree.
@@ -109,7 +156,18 @@ export async function copyRecordTree(sourceDirectory: string, destinationDirecto
     if (owner) {
       if (!same(owner, identity(await ordinaryDirectory(path)))) throw new Error('The retained record destination was replaced: ' + path)
     } else {
-      await mkdir(path) // EEXIST preserves any pre-existing directory or file.
+      try { await mkdir(path) }
+      catch (error) {
+        // Only a retained move can leave this creation/persistence gap. Its
+        // owned parent and an empty ordinary directory permit continuation;
+        // never adopt files, populated directories, or a different parent.
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || !prior || !logical) throw error
+        const parentKey = logical.includes('/') ? logical.slice(0, logical.lastIndexOf('/')) : ''
+        const parentOwner = state.owned[parentKey]
+        if (!parentOwner || !same(parentOwner, identity(await ordinaryDirectory(dirname(path))))) throw error
+        await ordinaryDirectory(path)
+        if ((await readdir(path)).length) throw error
+      }
       Object.defineProperty(state.owned, logical, { value: identity(await ordinaryDirectory(path)), enumerable: true, writable: true, configurable: true }); await save(structuredClone(state))
     }
   }

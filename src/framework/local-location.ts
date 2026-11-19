@@ -157,6 +157,16 @@ export class LocalLocationRegistry {
       state.moves.push(receipt); await this.save(state, commandId); return receipt
     })
   }
+  abandon(commandId: string): Promise<void> {
+    return serialized(this.storage, async () => {
+      const state = await this.state(), receipt = state.moves.find(move => move.commandId === commandId)
+      if (receipt && receipt.phase !== 'prepared' || Object.values(state.bindings).some(binding => binding.commandId === commandId))
+        throw new Error('A published Local location cannot be abandoned.')
+      if (!receipt) return
+      state.moves = state.moves.filter(move => move.commandId !== commandId)
+      await this.save(state, commandId)
+    })
+  }
   /** Call only after physical publication and exact fingerprint verification.
    * Neither preparing nor merely opening a directory establishes this binding.
    */

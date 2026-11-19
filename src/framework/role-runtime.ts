@@ -34,7 +34,7 @@ import { FrameworkTaskIndex } from './task-index.js'
 import { createHash, randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { StoragePort } from '../contracts/ports.js'
 import type { FrameworkClientChange } from './client-contracts.js'
 import { DshSessionReader, deriveNativeInputs } from '../adapters/dsh/sessions.js'
@@ -57,7 +57,7 @@ import { FrameworkTransactions, gitCommandReceiptPath } from './command-transact
 import type { ObservedInstance } from './instances.js'
 import { FrameworkArtifacts } from './artifacts.js'
 import { type CleanupRecord, FrameworkCleaner, type CleanupObservation, readTaskCleanupRecord } from './cleaner.js'
-import { FrameworkConversation, isLocalConversationSignal, localForegroundRoleRecordPath, scopedLocalForegroundSourceNotification, type ConversationSend } from './conversation.js'
+import { FrameworkConversation, isLocalConversationSignal, ownsGitConversationPublication, localForegroundRoleRecordPath, scopedLocalForegroundSourceNotification, type ConversationSend } from './conversation.js'
 import { localUpgradeMappingKey, type LocalUpgradeMapping } from './local-upgrade-mapping.js'
 import type { ManualConversationCleanupPreview } from './manual-cleanup.js'
 import { FrameworkHostLoop, helperSignalWakeHash, type RoleWake, type TaskRoleNotification, type DirectRoleNotification } from './host-loop.js'
@@ -79,6 +79,33 @@ interface TaskNoticeState { consumedAt: number; signals: Map<string, TaskNotice>
 interface ClaimedNotificationContext { taskId?: string; signals: string[] }
 interface NotificationClaim { helperWakes?: RoleWake[]; lifecycleId?: string; claimedNotifications?: ClaimedNotificationContext[]; commandId: string; executionId: string; wakeId: string; taskId?: string; initialSignals: string[]; sources: Array<{ path: string; version: string }> }
 interface RoleRecord { foregroundCollaborationId?: string; nativeRetirements?: Array<{ sessionId: string; executionId: string; wakeId?: string; helper?: Pick<RoleRecord, 'delivery' | 'lastWake' | 'notificationClaims'> }>; taskWorkspace?: TaskWorkspaceLocation; notificationClaims?: Record<string, NotificationClaim>; businessTransferred?: boolean; foregroundOutputIds?: string[]; gitSettledWakeId?: string; identity: WorkIdentity; sessionId: string; generation: number; completedRound?: boolean; lastWake?: RoleWake; delivery?: { request: RoleWake; messageId: string; text?: string; confirmed: boolean; sequence?: number }; released?: boolean; stopped?: boolean; stopIntent?: NativeStopEvidence; stopUnknown?: { reason: string; jobs: string[] } }
+/** Fold only on explicit Foreground cancel; ordinary waiting/polling never reads this history.
+ * An actual appended input leaves the inbox; a nonempty queue alone cannot prove the turn was pure. */
+function foregroundAbortEvidence(messageId: string) {
+  let turn: number | undefined, matched = false, other = false, userAborted = false
+  const pending = new Set<string>()
+  return {
+    accept(event: SessionEvent) {
+      if (event.type === 'turn/start') { turn = event.data.turn; matched = false; other = false; userAborted = false }
+      if (event.type === 'user/message' && turn !== undefined) {
+        const source = nativeSourceKind(event.data.source)
+        if (event.data.id === messageId && source === 'deepseek-servant') matched = true
+        // DSH appends these descriptive catalog/clock snapshots to the turn; neither is another input to handle.
+        else if (source !== 'runtime-context' && !(source === 'skill-catalog' && 'form' in event.data.source && event.data.source.form === 'catalog')
+          && !(source === 'time-context' && 'form' in event.data.source && event.data.source.form === 'snapshot')) other = true
+      }
+      if (event.type === 'tool/call') pending.add(event.data.callId)
+      if (event.type === 'tool/result') pending.delete(event.data.message.toolCallId)
+      if (event.type === 'turn/end') {
+        userAborted = turn === event.data.turn && matched && event.data.reason.kind === 'aborted' && event.data.reason.reason.kind === 'user'
+        turn = undefined
+      }
+    },
+    get mixed() { return other || pending.size > 0 },
+    get exactUserAbort() { return userAborted },
+  }
+}
+interface CancelledConversationInput { messageId: string; wakeId: string; hasOtherNativeInput: boolean }
 interface TrackedStop { lifecycleId?: string; executionId: string; taskId?: string; promise: Promise<void>; settled: boolean; result?: StopResult; persistedStopped?: boolean; reportedFailure?: string; failure?: unknown; controlCommands?: Set<string> }
 interface WakeRecovery {
   targetExecutionId?: string
@@ -594,10 +621,44 @@ export class FrameworkRoleRuntime {
     }
     await this.releaseLocalTask(taskId)
   }
-  updateWorkerSeats(workerSeats: number): void {
+  private backgroundTransition: Promise<void> = Promise.resolve()
+  updateWorkerSeats(workerSeats: number, retryBackgroundStop = false): Promise<void> {
     if (!Number.isSafeInteger(workerSeats) || workerSeats < 0) throw new Error('Worker seats must be a nonnegative integer.')
+    const previous = this.config.workerSeats
     this.config.workerSeats = workerSeats
+    if ((previous === 0) === (workerSeats === 0) && !(workerSeats === 0 && retryBackgroundStop)) return Promise.resolve()
+    // This is a user configuration transition, not a wait added to message dispatch.
+    // Foreground keeps its existing Host driver and native execution throughout.
+    return this.backgroundTransition = this.backgroundTransition.catch(() => {}).then(async () => {
+      if (this.closed) return
+      if (this.config.workerSeats === 0) {
+        const targets = [...this.roleRecords.values(), ...(this.retiredWorkers?.values() ?? [])].filter(record => record.identity.role !== 'Foreground' && !record.stopped)
+        const stopped = await Promise.allSettled(targets.map(async record => {
+          const result = await this.stopOwnedRecord(record)
+          const retired = this.retiredWorkers?.has(record.identity.executionId)
+          const current = retired ? this.retiredWorkers!.get(record.identity.executionId) : this.roleRecords.get(record.identity.workId)
+          const save = (value: RoleRecord) => retired ? this.saveRetiredWorker(value) : this.saveRole(value)
+          if (current?.identity.executionId !== record.identity.executionId) return
+          if (result.status === 'stopped') await save({ ...current, stopped: true, stopUnknown: undefined })
+          else if (result.status === 'unconfirmed') {
+            await save({ ...current, stopUnknown: result })
+            throw new Error(result.reason)
+          }
+        }))
+        const failures = stopped.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason)
+        if (failures.length) throw new AggregateError(failures, 'Some background executions did not finish closing.')
+      } else {
+        const facts = await this.readStartupRecoveryFacts()
+        await Promise.all([...this.roleRecords.values()].filter(record => record.identity.role !== 'Foreground' && record.stopped && !record.businessTransferred)
+          .map(async record => this.startupRecovery({ taskId: await this.currentTask(record), workId: record.identity.workId, facts })))
+        this.startOwnedPump()
+      }
+    })
   }
+  private backgroundDisabled(role: RoleWake['role']): boolean {
+    return role !== 'Foreground' && this.config.workerSeats === 0
+  }
+
   start(): Promise<void> {
     // Startup creates the background Host driver and its timers. A user action
     // that starts it must not donate its Foreground or refresh transport lane.
@@ -921,10 +982,10 @@ export class FrameworkRoleRuntime {
     const direct = request.sources.map((source) => parseDirectSignal(source.path.split('/').at(-1)!)).find(Boolean);
     return this.roleKey(request.role, request.taskId, request.workerId, direct?.id)
   }
-  private saveRole(record: RoleRecord, evidenceUpdate = false, deliveryUpdate?: 'prepare' | 'confirm', retiredRecorderSettled = false, completedNativeCommands?: readonly string[], addedClaim?: { id: string; value: NotificationClaim }): Promise<void> {
-    return withOperationChannel(this.files, record.identity.role === 'Foreground' ? 'foreground-read' : record.identity.role === 'Helper' ? 'host-poll-write' : 'read', () => this.saveRoleInChannel(record, evidenceUpdate, deliveryUpdate, retiredRecorderSettled, completedNativeCommands, addedClaim))
+  private saveRole(record: RoleRecord, evidenceUpdate = false, deliveryUpdate?: 'prepare' | 'confirm', retiredRecorderSettled = false, completedNativeCommands?: readonly string[], addedClaim?: { id: string; value: NotificationClaim }, cancelled?: CancelledConversationInput, closeWake?: { key: string; requestId: string }): Promise<void> {
+    return withOperationChannel(this.files, record.identity.role === 'Foreground' ? 'foreground-read' : record.identity.role === 'Helper' ? 'host-poll-write' : 'read', () => this.saveRoleInChannel(record, evidenceUpdate, deliveryUpdate, retiredRecorderSettled, completedNativeCommands, addedClaim, cancelled, closeWake))
   }
-  private saveRoleInChannel(record: RoleRecord, evidenceUpdate = false, deliveryUpdate?: 'prepare' | 'confirm', retiredRecorderSettled = false, completedNativeCommands?: readonly string[], addedClaim?: { id: string; value: NotificationClaim }): Promise<void> {
+  private saveRoleInChannel(record: RoleRecord, evidenceUpdate = false, deliveryUpdate?: 'prepare' | 'confirm', retiredRecorderSettled = false, completedNativeCommands?: readonly string[], addedClaim?: { id: string; value: NotificationClaim }, cancelled?: CancelledConversationInput, closeWake?: { key: string; requestId: string }): Promise<void> {
     this.roleWrites ??= new Map()
     const workId = record.identity.workId
     this.roleWriteOwners.set(workId, record.identity)
@@ -932,6 +993,45 @@ export class FrameworkRoleRuntime {
       if (this.config.mode === 'local' && record.identity.role === 'Foreground')
         record = { ...record, foregroundCollaborationId: this.config.collaborationId }
       let latest = this.roleRecords.get(workId)
+      if (cancelled) {
+        const files = this.files, authority = this.records, delivery = record.delivery
+        if (!(files instanceof GitFiles) || !(authority instanceof GitAuthorityStore) || record.identity.role !== 'Foreground'
+          || !delivery || delivery.request.reason !== 'notification' || delivery.request.taskId) return
+        const same = (owner?: RoleRecord): owner is RoleRecord => !!owner && owner.identity.executionId === record.identity.executionId
+          && owner.sessionId === record.sessionId && owner.delivery?.messageId === cancelled.messageId && owner.delivery.request.id === cancelled.wakeId
+        if (!same(latest)) return
+        const previousBase = this.roleBases?.get(workId)
+        const known = delivery.request.sources.filter(source => ownsGitConversationPublication(source.path, this.config.collaborationId)
+          && source.version === createHash(source.version.length === 64 ? 'sha256' : 'sha1').update('blob 0\0').digest('hex'))
+        if (!known.length) return // Old timestamp paths and unverified inputs remain available.
+        const saved = await authority.updateWithReads<RoleRecord, RoleRecord | undefined>(this.roleRecordPath(workId), [], async (owner, _reads, snapshot) => {
+          if (!same(owner)) return { write: false, result: undefined }
+          const paths = await files.observedRegularEmptyPaths(snapshot, known)
+          if (!paths) return { write: false, result: undefined }
+          // End replay of this one input, never the business task or another native responsibility.
+          const pure = known.length === delivery.request.sources.length && !cancelled.hasOtherNativeInput
+            && !Object.keys(owner.notificationClaims ?? {}).length && !owner.delivery?.request.context?.notificationClaims
+          const value = pure ? { ...owner, gitSettledWakeId: cancelled.wakeId } : owner
+          return { write: paths.length > 0 || value.gitSettledWakeId !== owner.gitSettledWakeId,
+            value, result: value, changes: paths.map(path => ({ path, content: null })) }
+        }, undefined, true)
+        const live = this.roleRecords.get(workId)
+        if (saved && same(live)) {
+          // A CAS retry can observe changes to this same owner from another
+          // producer. Advance the live view alongside the durable CAS base,
+          // retaining local differences only where authority did not change.
+          const merged: RoleRecord = { ...saved }
+          if (same(previousBase)) for (const field of new Set([...Object.keys(live), ...Object.keys(previousBase)]) as Set<keyof RoleRecord>) {
+            if (field === 'gitSettledWakeId' || JSON.stringify(live[field]) === JSON.stringify(previousBase[field])
+              || JSON.stringify(saved[field]) !== JSON.stringify(previousBase[field])) continue
+            if (Object.hasOwn(live, field)) Object.assign(merged, { [field]: live[field] })
+            else delete merged[field]
+          }
+          ;(this.roleBases ??= new Map()).set(workId, structuredClone(saved))
+          this.roleRecords.set(workId, merged)
+        }
+        return
+      }
       const incomingDelivery = record.delivery
       if (evidenceUpdate && this.records instanceof GitAuthorityStore) {
         if (!latest || latest.identity.executionId !== record.identity.executionId) throw new Error('Stop evidence execution was replaced before persistence.')
@@ -1087,14 +1187,23 @@ export class FrameworkRoleRuntime {
         const rolePath = this.roleRecordPath(workId)
       if (this.records instanceof GitAuthorityStore) {
         const base = this.roleBases?.get(workId)
-        const accepted = await this.records.updateWithReads<RoleRecord, boolean>(rolePath, [], async (current, _reads, snapshot) => {
+        const authority = this.records
+        let closedWake: WakeRecord | undefined
+        const accepted = await authority.updateWithReads<RoleRecord, boolean>(rolePath, closeWake ? [closeWake.key] : [], async (current, reads, snapshot) => {
+          closedWake = undefined
           if (await this.taskRuntimeReleased(record.identity, snapshot)) return { write: false, result: false }
-          if (JSON.stringify(current) === JSON.stringify(record)) return { write: false, result: true }
-          if (JSON.stringify(current) !== JSON.stringify(base)) throw new Error('Role authority changed since this operation observed it; re-evaluate the owned execution.')
-          let changes: FileChange[] = []
+          const same = JSON.stringify(current) === JSON.stringify(record)
+          if (!same && JSON.stringify(current) !== JSON.stringify(base)) throw new Error('Role authority changed since this operation observed it; re-evaluate the owned execution.')
+          const changes: FileChange[] = []
+          const wake = closeWake ? reads.get(closeWake.key) as WakeRecord | undefined : undefined
+          if (closeWake && wake?.request.id === closeWake.requestId) {
+            closedWake = wake.delivered && !wake.admission ? wake : { ...wake, delivered: true, admission: undefined }
+            if (closedWake !== wake) changes.push(authority.change(closeWake.key, closedWake))
+          }
+          if (same && !changes.length) return { write: false, result: true }
           if (completedNativeCommands?.length) {
             try {
-              changes = await this.transactions.completedNativeCommandChanges(snapshot, completedNativeCommands)
+              changes.push(...await this.transactions.completedNativeCommandChanges(snapshot, completedNativeCommands))
             }
             catch (error) { this.ctx.logger?.('deepseek-servant').warn('Successful command receipt cleanup was skipped; the original role completion continues.', error) }
           }
@@ -1108,6 +1217,10 @@ export class FrameworkRoleRuntime {
         }
           ;
         (this.roleBases ??= new Map()).set(workId, structuredClone(record))
+        if (closeWake && closedWake) {
+          this.admissionObservationVersion++
+          this.rememberAdmissionWake(closeWake.key, closedWake)
+        }
       } else {
         await this.records.set(rolePath, record)
         // A send may confirm while this auxiliary Local save is awaiting storage.
@@ -1905,6 +2018,17 @@ export class FrameworkRoleRuntime {
         } while (retained && !this.closed && this.localWakeAdmissions.get(key) === state && captured !== JSON.stringify(this.localAdmissionRecord(state)))
       }))
   }
+  private startAdmissionInterval(key: string, state: LocalWakeAdmission, now: number): void {
+    state.eligibleSince = now
+    const { request, recovery, admission } = state.wake
+    // A first ordinary Git Foreground wake starts timing in this Host.
+    // Until it has a role or a real diagnostic, no owner or recovery fact
+    // is published by writing this queue timestamp to Git.
+    const localOnly = this.config.mode === 'git' && request.role === 'Foreground'
+      && request.reason === 'notification' && !request.taskId && !recovery && !admission
+      && state.reportedAt === undefined && !this.roleRecords.has(this.requestKey(request))
+    if (!localOnly) this.persistLocalAdmission(key, state)
+  }
   private clearLocalAdmissionInterval(key: string, state: LocalWakeAdmission): void {
     if (state.eligibleSince === undefined) return
     state.eligibleSince = undefined
@@ -1920,7 +2044,7 @@ export class FrameworkRoleRuntime {
     const task = request.taskId && this.admissionTask(state, request.taskId)
     const invalidTask = !!task && (taskLifecycle(task) !== taskLifecycle(request) || isTerminalTask(task))
     const terminal = request.taskId && this.observedTerminalTasks.get(taskLifecycleKey({ taskId: request.taskId, lifecycleId: request.lifecycleId }))
-    return !!state.pendingControl || (['Planner', 'Worker', 'Organizer'].includes(request.role) && (invalidTask || !!terminal))
+    return this.backgroundDisabled(request.role) || !!state.pendingControl || (['Planner', 'Worker', 'Organizer'].includes(request.role) && (invalidTask || !!terminal))
       || state.held === true || state.ownershipHeld === true || (request.role === 'Foreground' && !!this.pendingForegroundResets?.size)
       || (!!record && !ownAdmission && (this.active(record) || request.role === 'Foreground' && record.completedRound && !record.stopped))
       || (!!record && !record.stopped && this.gitPriorExecutions.has(record.identity.executionId))
@@ -1939,7 +2063,7 @@ export class FrameworkRoleRuntime {
       if (this.localAdmissionHeld(state)) { this.clearLocalAdmissionInterval(key, state); continue }
       if (state.eligibleSince === undefined) {
         if (!state.eligibleKnown) continue
-        state.eligibleSince = now; this.persistLocalAdmission(key, state)
+        this.startAdmissionInterval(key, state, now)
       }
       const progress = this.wakeAdmission(state.wake)
       state.executionId = progress?.executionId ?? state.executionId
@@ -2064,7 +2188,7 @@ export class FrameworkRoleRuntime {
         // present eligibility; restored and newly released waits start now.
         if (this.restoringAdmissionWakes?.delete(row.key)) state.eligibleSince = undefined
         if (state.eligibleSince === undefined) {
-          state.eligibleSince = this.admissionNow(); this.persistLocalAdmission(row.key, state)
+          this.startAdmissionInterval(row.key, state, this.admissionNow())
         }
         this.checkWakeAdmissions()
       })
@@ -2207,10 +2331,16 @@ export class FrameworkRoleRuntime {
       const operation: Promise<void> = this.serialWork(workId, async () => {
         if (this.closed) return
         const currentWake = await this.records.get<WakeRecord>(row.key)
-        if (this.closed || !currentWake || currentWake.delivered) return
+        if (this.closed || !currentWake || currentWake.delivered || this.backgroundDisabled(currentWake.request.role)) return
         if (!await this.beforeTaskUse(currentWake.request.taskId) || this.closed) return
         row.value = currentWake
         if (this.requestKey(currentWake.request) !== workId) return
+        // EXPERIMENT ONLY: overlap helper startup with remaining admission
+        // checks for a real reread ordinary input, never idle discovery.
+        if (this.files instanceof GitFiles && currentWake.request.role === 'Foreground'
+          && !currentWake.request.taskId && currentWake.request.reason === 'notification'
+          && currentWake.request.sources.length > 0 && !currentWake.recovery)
+          this.files.repository.prewarmForegroundWriteHelper?.()
         if ((await this.admissionWakes(undefined, helperOnly)).some(item =>
           !item.value.delivered && this.requestKey(item.value.request) === workId
           && item.value.recovery?.replacesUnadmittedWake === currentWake.request.id)) return
@@ -2432,6 +2562,22 @@ export class FrameworkRoleRuntime {
           if (taskWorkspace) record = { ...record, taskWorkspace };
           await this.saveRole({ ...record, delivery: { request, messageId, text, confirmed: false } }, false, 'prepare')
           const cancelledAdmission = async (beforeOpen = false) => {
+            if (this.backgroundDisabled(request.role)) {
+              const current = this.roleRecords.get(key)
+              if (current?.identity.executionId === record.identity.executionId) {
+                if (beforeOpen && createdForAdmission) await this.saveRole({ ...current, stopped: true })
+                else {
+                  const result = await this.stopOwnedRecord(current)
+                  if (result.status === 'stopped') {
+                    const latest = this.roleRecords.get(key)
+                    if (latest?.identity.executionId === current.identity.executionId) await this.saveRole({ ...latest, stopped: true })
+                  }
+                  else if (result.status === 'unconfirmed') throw new Error(result.reason)
+                }
+              }
+              // Keep the original queued input for a later explicit enable.
+              return true
+            }
             if (!request.taskId || !['Planner', 'Worker', 'Organizer'].includes(request.role)) return false;
             const task = await withSnapshot(this.files, (snapshot) => readJson<TaskMetadata>(this.files, snapshot, paths.task(request.taskId!)));
             if (task?.status !== "cancelled" && (!task || taskLifecycle(task) === taskLifecycle(request))) return false;
@@ -2493,6 +2639,35 @@ export class FrameworkRoleRuntime {
                 if (request.role === 'Foreground' && (event.type === 'turn/start' || event.type === "turn/end")) {
                   const current = this.roleRecords.get(key)
                   if (!this.closed && current?.identity.executionId === record.identity.executionId && current.sessionId === String(actual.session.id)) {
+                    if (event.type === 'turn/end' && event.data.reason.kind === 'aborted' && event.data.reason.reason.kind === 'user'
+                      && (this.files instanceof PhysicalLocalFiles || this.files instanceof GitFiles) && current.delivery?.request.reason === 'notification' && !current.delivery.request.taskId) {
+                      const delivery = current.delivery, turn = event.data.turn, files = this.files
+                      // Only an input actually appended to this cancelled turn can be retired.
+                      // Online notices, new messages and unrelated task signals are not its inputs.
+                      const events = actual.session.snapshotEvents()
+                      for (let i = events.length - 1; i >= 0; i--) {
+                        const item = events[i]!
+                        if (item.type === 'turn/start') break
+                        if (item.type !== 'user/message' || item.data.id !== delivery.messageId || item.data.source.kind !== 'deepseek-servant') continue
+                        // The cancel API preserves the inbox, but already-appended inputs have left it.
+                        // An unresolved native tool can also outlive its turn. Only an ordinary,
+                        // unmixed input is eligible for whole-wake settlement.
+                        let hasOtherNativeInput = false
+                        if (files instanceof GitFiles) {
+                          const evidence = foregroundAbortEvidence(delivery.messageId)
+                          for (let j = actual.session.inheritedEventCount; j < events.length; j++) evidence.accept(events[j]!)
+                          hasOtherNativeInput = !evidence.exactUserAbort || evidence.mixed || actual.inbox.nextTurn.length > 0 || actual.inbox.nextStep.length > 0
+                            || !!this.ctx.get('sessionProjections')?.snapshot(actual.session, ['userQuestions']).values.userQuestions?.active.length
+                        }
+                        void this.serialWork(key, async () => {
+                          if (files instanceof GitFiles) return this.saveRole(current, false, undefined, false, undefined, undefined,
+                            { messageId: delivery.messageId, wakeId: delivery.request.id, hasOtherNativeInput })
+                          for (const source of delivery.request.sources) if (isLocalConversationSignal(source.path))
+                            await files.deleteObserved(source.path, source.version)
+                        }).catch(error => this.error(error, { identity: current.identity, turn, stage: 'cancel-foreground-input' }))
+                        break
+                      }
+                    }
                     this.environment.changed?.()
                   }
                 }
@@ -2581,12 +2756,28 @@ export class FrameworkRoleRuntime {
             replayInactiveClaim: (recovery.targetExecutionId !== undefined && recovery.confirmedStoppedExecutions?.includes(recovery.targetExecutionId)) === true,
           } : undefined)
           const acceptedAdmission = this.localWakeAdmissions.get(row.key)
-          if (acceptedAdmission) { this.admissionObservationVersion++; acceptedAdmission.accepted = true; this.clearLocalAdmissionInterval(row.key, acceptedAdmission) }
+          if (acceptedAdmission) {
+            this.admissionObservationVersion++; acceptedAdmission.accepted = true
+            // The awaited delivery receipt and final wake close already retire this Git wake.
+            if (this.config.mode === 'git') acceptedAdmission.eligibleSince = undefined
+            else this.clearLocalAdmissionInterval(row.key, acceptedAdmission)
+          }
           const currentAfterSend = this.roleRecords.get(key)
-          if (currentAfterSend?.identity.executionId === record.identity.executionId && !currentAfterSend.businessTransferred)
-            await this.saveRole({ ...record, lastWake: request, delivery: { request, messageId, confirmed: true } }, false, 'confirm')
+          let closedWithRole = false
+          if (currentAfterSend?.identity.executionId === record.identity.executionId && !currentAfterSend.businessTransferred) {
+            // Ordinary first Git Foreground: actual native acceptance is already known.
+            // Its own wake receipt belongs in the same existing role CAS, not a later
+            // publication racing this execution's normal consumption of the signal.
+            const closeWake = this.records instanceof GitAuthorityStore && request.role === 'Foreground'
+              && request.reason === 'notification' && !request.taskId && !previousRecord && !recovery
+              && !row.value.admission && acceptedAdmission?.reportedAt === undefined && !this.wakeWrites.has(row.key)
+              ? { key: row.key, requestId: request.id } : undefined
+            await this.saveRole({ ...record, lastWake: request, delivery: { request, messageId, confirmed: true } }, false, 'confirm',
+              false, undefined, undefined, undefined, closeWake)
+            closedWithRole = !!closeWake
+          }
           await this.confirmAdoptedWakes(request, recovery)
-          await this.updateWake(row.key, current => current ? { ...current, delivered: true, admission: undefined } : undefined)
+          if (!closedWithRole) await this.updateWake(row.key, current => current ? { ...current, delivered: true, admission: undefined } : undefined)
         } catch (error) {
           const executionId = row.value.admission?.executionId ?? this.roleRecords.get(workId)?.identity.executionId
           const cancellation = executionId && this.admissionCancellations.get(executionId)
@@ -3266,7 +3457,7 @@ executionId: binding.executionId, run: persistContext,
     // A pre-fix Local execution may already have saved another collaboration's
     // global Foreground source. Its historical Session remains its own, but a
     // resumed claim cannot delete that other domain's still-pending file.
-    const selectedSources = binding.role === 'Foreground' && this.config.mode === 'local'
+    const selectedSources = binding.role === 'Foreground'
       ? await this.conversation.routeForegroundSignals(claim.sources) : claim.sources
     if (!selectedSources.length) return
     const notices = this.taskNoticeConsumption(binding, claim.commandId)
@@ -7503,6 +7694,7 @@ executionId: binding.executionId, run: persistContext,
     const skillCacheClosed = this.skillCacheRefresh?.close()
     this.cleaner.close(); this.cleanupResidues.clear()
     const failures: unknown[] = []
+    try { await this.backgroundTransition } catch (error) { failures.push(error) }
     try {
       const cancellation = this.shutdownReason = new DOMException('Framework runtime is closing its owned requests.', 'AbortError')
       const openingStops = [...this.roleRecords.values()].map(async record => {

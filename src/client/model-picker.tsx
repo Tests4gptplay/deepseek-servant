@@ -88,7 +88,6 @@ export function ModelPicker({ value, models, onChange, onRefresh, disabled, labe
       if (showSearch && !routes.size) items.push({ id: 'empty', label: t('model.noMatches'), disabled: true })
     }
   }
-  if (models.status === 'loading') items.push({ id: 'loading', label: t('model.loading'), disabled: true })
   if (models.error) items.push({ id: 'error', label: models.error, disabled: true })
   for (const failure of models.failures) items.push({ id: 'failure:' + failure.id, label: failure.name + ': ' + failure.message, disabled: true })
   if (models.status === 'error' || models.failures.length) items.push({ id: 'retry', label: t('runtime.retry') })

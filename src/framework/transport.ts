@@ -1,3 +1,4 @@
+import { installUiDirectoryTransport } from '../adapters/dsh/ui-directory-browser.js'
 import { isLocalAttachmentError } from './conversation-attachment-reference.js'
 import { HistorySelectionChangedError, requiresUserAction, RecordMoveNotStartedError } from './client-error.js'
 import type { Context } from '@deepseek-ai/cordis';
@@ -6,7 +7,7 @@ import { z } from 'zod';
 import { ModeEvents } from '../mode-router/events.js';
 import { FilesConflictError, FilesOutcomeUnknownError } from './transactions.js';
 import type { FrameworkService } from './service.js';
-const methods = ['clientFault', 'maintenanceView', 'openMaintenancePath', 'keepCurrentLocalUpgradeTarget', 'openWorkspaceFile', 'exportRecords', 'cleanupPreview', 'cleanupRecords', 'knowledgeList', 'knowledgeRead', 'knowledgeEdit', 'knowledgeStatus', 'view', 'history', 'send', 'foregroundModel', 'permissionCatalog', 'permissionSelect', 'configure', 'moveRecords', 'legacyRecords', 'legacyControl', 'invite', 'gitMembers', 'gitMemberAction', 'taskControl', 'stopExecution', 'participation', 'selectMode', 'readFile', 'attachment', 'selectLocalAttachment', 'openLocalAttachment'] as const;
+const methods = ['clientFault', 'maintenanceView', 'openMaintenancePath', 'keepCurrentLocalUpgradeTarget', 'openWorkspaceFile', 'exportRecords', 'cleanupPreview', 'cleanupRecords', 'knowledgeList', 'knowledgeRead', 'knowledgeEdit', 'knowledgeStatus', 'view', 'history', 'send', 'foregroundModel', 'permissionCatalog', 'permissionSelect', 'configure', 'moveRecords', 'abandonRecordMove', 'legacyRecords', 'legacyControl', 'invite', 'gitMembers', 'gitMemberAction', 'taskControl', 'stopExecution', 'participation', 'selectMode', 'readFile', 'attachment', 'selectLocalAttachment', 'openLocalAttachment'] as const;
 
 /** One existing error contract for RPC and raw-byte requests. */
 function frameworkFailure(service: FrameworkService, method: string, error: unknown) {
@@ -19,6 +20,7 @@ function frameworkFailure(service: FrameworkService, method: string, error: unkn
 export function installFrameworkTransport(ctx: Context, service: FrameworkService): () => Promise<void> {
     const events = new ModeEvents(), off = service.subscribeChanged(events.changed);
     const fiber = ctx.inject(['connection'], scope => {
+        installUiDirectoryTransport(scope)
         const attachmentDownload = async (request: Request): Promise<Response> => {
             try {
                 const query = new URL(request.url).searchParams;

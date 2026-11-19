@@ -59,7 +59,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 20px;
+  flex-wrap: wrap;
+  gap: 12px 20px;
   padding: 28px clamp(24px, 4vw, 48px) 24px;
 }
 [data-platform=darwin] .heading {
@@ -218,6 +219,11 @@
   gap: 8px;
   padding: 0 8px 12px;
 }
+.historyNavigation [aria-current="page"] {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+  font-weight: 600;
+}
 .historyNavigation label {
   display: flex;
   align-items: center;
@@ -260,6 +266,15 @@
   max-width: 100%;
   min-width: 0;
 }
+.messageContent {
+  width: fit-content;
+  max-width: 92%;
+  min-width: 0;
+}
+.userMessage .messageContent {
+  margin-inline-start: auto;
+  margin-inline-end: 0;
+}
 .messageHeader {
   display: grid;
   grid-template-columns: minmax(0, 1fr) max-content;
@@ -285,13 +300,17 @@
 }
 .messageBody {
   width: fit-content;
-  max-width: 92%;
+  max-width: 100%;
   min-width: 0;
 }
 .replyPreview {
   color: var(--dsw-alias-label-secondary);
   font: var(--dsw-font-xs-13);
   overflow-wrap: anywhere;
+}
+.composer .replyPreview {
+  padding-inline-start: 8px;
+  border-inline-start: 2px solid var(--dsw-alias-border-l4);
 }
 .messageText {
   white-space: pre-wrap;
@@ -399,6 +418,9 @@
 .taskRow:hover,
 .taskRow.selected {
   background: var(--dsw-alias-interactive-bg-hover);
+}
+.taskRow.selected {
+  border-color: var(--dsw-alias-label-secondary);
 }
 .taskRowTitle {
   font-weight: 500;
@@ -609,6 +631,8 @@
   width: 100%;
 }
 .knowledgeCard {
+  min-width: 0;
+  overflow-wrap: anywhere;
   padding: 20px;
   border: 0.5px solid var(--dsw-alias-border-l3);
   border-radius: var(--dsw-radius-md);
@@ -740,6 +764,19 @@
 }
 .retentionManage > p {
   margin-block: 10px;
+}
+.storagePaths {
+  display: grid;
+  gap: 8px;
+  margin-block: 12px;
+}
+.storagePaths dt {
+  color: var(--dsw-alias-label-secondary);
+}
+.storagePaths dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 .retentionManage > .actions {
   margin-block: 10px;
@@ -1255,6 +1292,7 @@
   border-bottom: 0.5px solid var(--dsw-alias-border-l3);
   font: var(--dsw-font-xs-13);
 }
+.recordLocation > .recordLocationRow { margin-bottom: 0; }
 .recordLocation p {
   margin: 0;
 }
@@ -1264,6 +1302,12 @@
   flex-wrap: wrap;
   gap: 8px;
   min-width: 0;
+}
+.recordLocationRow .directoryHint {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
 }
 .recordLocationRow .directoryField {
   flex-basis: 220px;
@@ -1341,3 +1385,12 @@
    native input card's 12px row gap. Preserve that geometry for both real rails. */
 .nativeAttachments { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .nativeAttachmentFiles { min-width: 0; padding: 0 10px; }
+
+.recordMoveProgress { display: flex; align-items: center; gap: 12px; margin-block: 8px; }
+.recordMoveProgress progress { flex: 1; min-width: 80px; accent-color: currentColor; }
+.recordLocationRow { align-items: end; margin-bottom: 14px; }
+.recordLocationRow > button { flex-shrink: 0; margin-bottom: 0; }
+
+/* Retain native interaction subscriptions, but do not show an empty role label. */
+.nativeInteraction:has(> strong:only-child),
+.nativeInteraction:has(> [data-slot="deepseek-servant.interaction"]:empty) { display: none; }
