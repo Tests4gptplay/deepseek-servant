@@ -1,4 +1,339 @@
-/* node_modules/@deepseek-ai/dsh-client-ui-attachment/src/AttachmentRail.module.css */
+/* ../dss-ui-work/node_modules/@deepseek-ai/dsh-client-ui-directory-picker-browse/src/client/DirectoryBrowser.module.css */
+.DirectoryBrowser_dialog.DirectoryBrowser_dialog {
+  width: min(680px, 100%);
+  height: min(500px, calc(100dvh - 32px));
+  padding: 0;
+  gap: 0;
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+}
+.DirectoryBrowser_editorScope {
+  display: contents;
+}
+.DirectoryBrowser_header {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: none;
+  padding: 16px 14px 8px 24px;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l3);
+}
+.DirectoryBrowser_title {
+  display: flex;
+  align-items: flex-end;
+  min-height: 28px;
+  margin: 0;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 510;
+  color: var(--dsw-alias-label-primary);
+}
+.DirectoryBrowser_crumbBar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  box-sizing: border-box;
+  min-height: 24px;
+  margin-left: -9px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--dsw-radius-sm);
+}
+.DirectoryBrowser_crumbBar:has(.DirectoryBrowser_crumbEditZone:focus-visible),
+.DirectoryBrowser_crumbBar:has(.DirectoryBrowser_pathInput) {
+  border-color: var(--dsw-alias-border-l2);
+}
+@media (hover: hover) {
+  .DirectoryBrowser_crumbBar:has(.DirectoryBrowser_crumbEditZone:enabled:hover) {
+    border-color: var(--dsw-alias-border-l2);
+  }
+}
+.DirectoryBrowser_millerRow {
+  display: flex;
+  align-items: stretch;
+  flex: 1 1 0;
+  min-height: 0;
+  gap: 12px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.DirectoryBrowser_crumbTrail {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.DirectoryBrowser_crumbSeat {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  min-width: 0;
+}
+.DirectoryBrowser_crumb {
+  border: none;
+  background: transparent;
+  padding: 0;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+.DirectoryBrowser_crumb:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: -2px;
+}
+@media (hover: hover) {
+  .DirectoryBrowser_crumb:hover {
+    color: var(--dsw-alias-label-primary);
+  }
+}
+.DirectoryBrowser_crumbChevron {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+}
+.DirectoryBrowser_crumbEditZone {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: 1 0 34px;
+  min-width: 34px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: text;
+  outline: none;
+}
+.DirectoryBrowser_crumbEditGlyph {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+}
+.DirectoryBrowser_crumbEditZone:focus-visible .DirectoryBrowser_crumbEditGlyph {
+  color: var(--dsw-alias-label-primary);
+}
+@media (hover: hover) {
+  .DirectoryBrowser_crumbEditZone:enabled:hover .DirectoryBrowser_crumbEditGlyph {
+    color: var(--dsw-alias-label-primary);
+  }
+}
+.DirectoryBrowser_crumbEditZone:disabled {
+  cursor: default;
+}
+.DirectoryBrowser_crumbEditZone:disabled .DirectoryBrowser_crumbEditGlyph {
+  color: var(--dsw-alias-label-caption);
+}
+.DirectoryBrowser_pathInput {
+  box-sizing: border-box;
+  flex: 1 1 0;
+  min-width: 0;
+  height: 22px;
+  padding: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-primary);
+}
+.DirectoryBrowser_content {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+  position: relative;
+  padding: 16px 16px 16px 24px;
+}
+.DirectoryBrowser_column {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 0;
+  min-width: 256px;
+  overflow-y: auto;
+  padding-right: 8px;
+}
+.DirectoryBrowser_divider {
+  flex: none;
+  width: 0.5px;
+  background: var(--dsw-alias-border-l3);
+}
+.DirectoryBrowser_rowSeat {
+  display: flex;
+  flex: none;
+}
+.DirectoryBrowser_row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  flex: none;
+  padding: 4px;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.DirectoryBrowser_row:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: -2px;
+}
+@media (hover: hover) {
+  .DirectoryBrowser_row:hover {
+    background: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+.DirectoryBrowser_rowSelected {
+  background: var(--dsw-alias-interactive-bg-active, var(--dsw-alias-interactive-bg-hover));
+}
+@media (hover: hover) {
+  .DirectoryBrowser_rowSelected:hover {
+    background: var(--dsw-alias-interactive-bg-active, var(--dsw-alias-interactive-bg-hover));
+  }
+}
+.DirectoryBrowser_rowIcon {
+  flex: none;
+  color: var(--dsw-alias-label-secondary);
+}
+.DirectoryBrowser_rowIconSelected {
+  flex: none;
+  color: var(--dsw-alias-button-info-fill);
+}
+.DirectoryBrowser_rowName {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+}
+.DirectoryBrowser_rowChevron {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+}
+.DirectoryBrowser_status,
+.DirectoryBrowser_error {
+  padding: 4px;
+  padding-right: 120px;
+  font-size: 12px;
+  line-height: 18px;
+}
+.DirectoryBrowser_status {
+  color: var(--dsw-alias-label-secondary);
+}
+.DirectoryBrowser_error {
+  color: var(--dsw-alias-state-error-primary);
+}
+.DirectoryBrowser_loadingFloat {
+  position: absolute;
+  right: 16px;
+  bottom: 8px;
+  padding: 2px 8px;
+  background: var(--dsw-alias-bg-layer-2);
+}
+.DirectoryBrowser_footerBar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: none;
+  padding: 16px 24px;
+  border-top: 0.5px solid var(--dsw-alias-border-l3);
+}
+.DirectoryBrowser_showHiddenToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  background: transparent;
+  padding: 0;
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+@media (hover: hover) {
+  .DirectoryBrowser_showHiddenToggle:hover {
+    color: var(--dsw-alias-label-primary);
+  }
+}
+.DirectoryBrowser_showHiddenToggle:disabled {
+  color: var(--dsw-alias-label-caption);
+  cursor: default;
+}
+.DirectoryBrowser_showHiddenToggleActive {
+  color: var(--dsw-alias-label-primary);
+}
+.DirectoryBrowser_footerGap {
+  flex: 1 1 0;
+}
+.DirectoryBrowser_footerAction {
+  min-width: 72px;
+}
+.DirectoryBrowser_createDialog.DirectoryBrowser_createDialog {
+  width: min(380px, 100%);
+  padding: 0;
+  gap: 0;
+}
+.DirectoryBrowser_createBody {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 22px 24px 20px;
+}
+.DirectoryBrowser_createTitle {
+  margin: 0;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 510;
+  color: var(--dsw-alias-label-primary);
+}
+.DirectoryBrowser_createIn {
+  margin: 0;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--dsw-alias-label-primary);
+}
+.DirectoryBrowser_createInput {
+  box-sizing: border-box;
+  width: 100%;
+  height: 44px;
+  padding: 7px 14px;
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  border-radius: var(--dsw-radius-lg);
+  outline: none;
+  background: transparent;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--dsw-alias-label-primary);
+}
+.DirectoryBrowser_createInput::placeholder {
+  color: var(--dsw-alias-label-caption);
+}
+.DirectoryBrowser_createActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* ../dss-ui-work/node_modules/@deepseek-ai/dsh-client-ui-attachment/src/AttachmentRail.module.css */
 .AttachmentRail_root {
   position: relative;
   min-width: 0;
@@ -104,7 +439,7 @@
   right: 4px;
 }
 
-/* node_modules/@deepseek-ai/dsh-client-ui-attachment/src/DropOverlay.module.css */
+/* ../dss-ui-work/node_modules/@deepseek-ai/dsh-client-ui-attachment/src/DropOverlay.module.css */
 .DropOverlay_mask {
   position: fixed;
   inset: 0;
@@ -154,7 +489,7 @@
   white-space: pre-wrap;
 }
 
-/* node_modules/@deepseek-ai/dsh-client-ui-attachment/src/FileCard.module.css */
+/* ../dss-ui-work/node_modules/@deepseek-ai/dsh-client-ui-attachment/src/FileCard.module.css */
 .FileCard_card {
   position: relative;
   display: inline-flex;
@@ -315,7 +650,7 @@
   }
 }
 
-/* node_modules/@deepseek-ai/dsh-client-ui-attachment/src/client/ComposerAttachments.module.css */
+/* ../dss-ui-work/node_modules/@deepseek-ai/dsh-client-ui-attachment/src/client/ComposerAttachments.module.css */
 .ComposerAttachments_rail {
   min-width: 0;
   padding: 2px 10px 0;
@@ -492,7 +827,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 20px;
+  flex-wrap: wrap;
+  gap: 12px 20px;
   padding: 28px clamp(24px, 4vw, 48px) 24px;
 }
 [data-platform=darwin] .page_heading {
@@ -651,6 +987,11 @@
   gap: 8px;
   padding: 0 8px 12px;
 }
+.page_historyNavigation [aria-current=page] {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+  font-weight: 600;
+}
 .page_historyNavigation label {
   display: flex;
   align-items: center;
@@ -693,6 +1034,15 @@
   max-width: 100%;
   min-width: 0;
 }
+.page_messageContent {
+  width: fit-content;
+  max-width: 92%;
+  min-width: 0;
+}
+.page_userMessage .page_messageContent {
+  margin-inline-start: auto;
+  margin-inline-end: 0;
+}
 .page_messageHeader {
   display: grid;
   grid-template-columns: minmax(0, 1fr) max-content;
@@ -718,13 +1068,17 @@
 }
 .page_messageBody {
   width: fit-content;
-  max-width: 92%;
+  max-width: 100%;
   min-width: 0;
 }
 .page_replyPreview {
   color: var(--dsw-alias-label-secondary);
   font: var(--dsw-font-xs-13);
   overflow-wrap: anywhere;
+}
+.page_composer .page_replyPreview {
+  padding-inline-start: 8px;
+  border-inline-start: 2px solid var(--dsw-alias-border-l4);
 }
 .page_messageText {
   white-space: pre-wrap;
@@ -832,6 +1186,9 @@
 .page_taskRow:hover,
 .page_taskRow.page_selected {
   background: var(--dsw-alias-interactive-bg-hover);
+}
+.page_taskRow.page_selected {
+  border-color: var(--dsw-alias-label-secondary);
 }
 .page_taskRowTitle {
   font-weight: 500;
@@ -1042,6 +1399,8 @@
   width: 100%;
 }
 .page_knowledgeCard {
+  min-width: 0;
+  overflow-wrap: anywhere;
   padding: 20px;
   border: 0.5px solid var(--dsw-alias-border-l3);
   border-radius: var(--dsw-radius-md);
@@ -1173,6 +1532,19 @@
 }
 .page_retentionManage > p {
   margin-block: 10px;
+}
+.page_storagePaths {
+  display: grid;
+  gap: 8px;
+  margin-block: 12px;
+}
+.page_storagePaths dt {
+  color: var(--dsw-alias-label-secondary);
+}
+.page_storagePaths dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 .page_retentionManage > .page_actions {
   margin-block: 10px;
@@ -1688,6 +2060,9 @@
   border-bottom: 0.5px solid var(--dsw-alias-border-l3);
   font: var(--dsw-font-xs-13);
 }
+.page_recordLocation > .page_recordLocationRow {
+  margin-bottom: 0;
+}
 .page_recordLocation p {
   margin: 0;
 }
@@ -1697,6 +2072,12 @@
   flex-wrap: wrap;
   gap: 8px;
   min-width: 0;
+}
+.page_recordLocationRow .page_directoryHint {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xs-13);
 }
 .page_recordLocationRow .page_directoryField {
   flex-basis: 220px;
@@ -1792,6 +2173,29 @@
 .page_nativeAttachmentFiles {
   min-width: 0;
   padding: 0 10px;
+}
+.page_recordMoveProgress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-block: 8px;
+}
+.page_recordMoveProgress progress {
+  flex: 1;
+  min-width: 80px;
+  accent-color: currentColor;
+}
+.page_recordLocationRow {
+  align-items: end;
+  margin-bottom: 14px;
+}
+.page_recordLocationRow > button {
+  flex-shrink: 0;
+  margin-bottom: 0;
+}
+.page_nativeInteraction:has(> strong:only-child),
+.page_nativeInteraction:has(> [data-slot="deepseek-servant.interaction"]:empty) {
+  display: none;
 }
 
 /* src/client/conversation-turn-navigator.module.css */

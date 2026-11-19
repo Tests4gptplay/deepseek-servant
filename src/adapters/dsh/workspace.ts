@@ -12,14 +12,15 @@ export class DshWorkspaceAdapter {
     return this.ctx.workspaceRegistry.list().map(workspace => ({ id: workspace.id, directory: workspace.path, title: workspace.title }))
   }
 
-  async resolve(selectedId?: string, customDirectory?: string): Promise<WorkspaceBinding> {
+  async resolve(selectedId?: string, customDirectory?: string): Promise<{ id?: string; directory: string }> {
     const registry = this.ctx.workspaceRegistry
     if (customDirectory !== undefined) {
       if (selectedId !== undefined) throw new Error('Select a registered workspace or a custom directory, not both.')
-      // Prepare the selected directory, then native creation validates and reuses its
-      // canonical identity. It does not select it or change the host default.
-      const selected = await registry.create(await ensureWriteDirectory(customDirectory.trim()))
-      return { id: selected.id, directory: selected.path }
+      // A Servant physical output directory is not a request to add a native
+      // front-end Workspace. Preserve existing registrations without creating one.
+      const directory = await ensureWriteDirectory(customDirectory.trim())
+      const selected = await registry.resolveByPath(directory)
+      return selected ? { id: selected.id, directory: selected.path } : { directory }
     }
     if (selectedId !== undefined && selectedId.length > 0) {
       const selected = registry.get(WorkspaceId(selectedId))
@@ -27,22 +28,25 @@ export class DshWorkspaceAdapter {
       await ensureWriteDirectory(selected.path)
       return { id: selected.id, directory: selected.path }
     }
-    const directory = this.ctx.get('workingDirectory')?.defaultDirectory
-    let initialized = false
-    const existingDefault = await registry.initializeDefault(async () => {
-      if (directory === undefined) throw new Error('DSH has no default workspace or default working directory. Select a Servant workspace.')
-      initialized = true
-      return directory
-    })
+    // Preserve the host's existing persistent default through its public API.
+    // Refuse only the optional creation callback before a new Workspace is registered.
+    const noDefaultCreation = {}
+    let existingDefault: Awaited<ReturnType<typeof registry.initializeDefault>> = undefined
+    try {
+      existingDefault = await registry.initializeDefault(async () => { throw noDefaultCreation })
+    } catch (error) {
+      if (error !== noDefaultCreation) throw error
+    }
     if (existingDefault !== undefined) {
-      // Native creation already prepared this directory. Existing registrations
-      // still need repair when their directory has since been removed.
-      if (!initialized) await ensureWriteDirectory(existingDefault.path)
+      await ensureWriteDirectory(existingDefault.path)
       return { id: existingDefault.id, directory: existingDefault.path }
     }
-    if (directory === undefined) throw new Error('DSH has no default workspace or default working directory. Select a Servant workspace.')
+    const directory = this.ctx.get('workingDirectory')?.defaultDirectory
+    if (directory === undefined) throw new Error('DSH has no default working directory. Select a Servant workspace.')
+    // Resolving a physical default is read-only with respect to the native list.
+    // The host/user owns Workspace creation; Servant only prepares its directory.
     const prepared = await ensureWriteDirectory(directory)
-    const fallback = await registry.resolveByPath(prepared) ?? await registry.create(prepared)
-    return { id: fallback.id, directory: fallback.path }
+    const selected = await registry.resolveByPath(prepared)
+    return selected ? { id: selected.id, directory: selected.path } : { directory: prepared }
   }
 }

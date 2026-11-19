@@ -229,9 +229,9 @@ export class GitAuthorityStore implements StoragePort {
   update<T, R>(key: string, evaluate: (current: T | undefined) => { value?: T; result: R; write: boolean }, beforeAttempt?: PublicationGuard): Promise<R> {
     return this.updateWithReads<T, R>(key, [], current => evaluate(current), beforeAttempt)
   }
-  updateWithReads<T, R>(key: string, readKeys: readonly string[], evaluate: (current: T | undefined, reads: ReadonlyMap<string, unknown>, snapshot: FilesSnapshot) => { value?: T; result: R; write: boolean; changes?: FileChange[] } | Promise<{ value?: T; result: R; write: boolean; changes?: FileChange[] }>, beforeAttempt?: PublicationGuard): Promise<R> {
+  updateWithReads<T, R>(key: string, readKeys: readonly string[], evaluate: (current: T | undefined, reads: ReadonlyMap<string, unknown>, snapshot: FilesSnapshot) => { value?: T; result: R; write: boolean; changes?: FileChange[] } | Promise<{ value?: T; result: R; write: boolean; changes?: FileChange[] }>, beforeAttempt?: PublicationGuard, reevaluateOnConflict = false): Promise<R> {
     this.assertOpen()
-    const operation = withWriteOperation(this.files, () => this.updateInner<T, R>(key, readKeys, [], [], (current, reads, _rows, _raw, snapshot) => evaluate(current, reads, snapshot), beforeAttempt))
+    const operation = withWriteOperation(this.files, () => this.updateInner<T, R>(key, readKeys, [], [], (current, reads, _rows, _raw, snapshot) => evaluate(current, reads, snapshot), beforeAttempt, reevaluateOnConflict))
     this.updates.add(operation)
     void operation.finally(() => this.updates.delete(operation)).catch(() => {})
     return operation

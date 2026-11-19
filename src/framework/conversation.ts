@@ -4,7 +4,7 @@ import { physicalConversationEntryPath } from './local-conversation-paths.js'
 import { conversationContextKind, appendConversationContext, emptyConversationContext, parseConversationContext, pruneConversationContext, type ConversationContextIndex, type ConversationContextProvenance, type ConversationResponsePhase } from './conversation-context.js'
 import { ConversationAttachments } from './conversation-attachments.js'
 import type { ConversationAttachmentReference } from './conversation-attachment-reference.js'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import type { DshForegroundProcessGroup } from '../adapters/dsh/foreground-process.js'
 import { preservePublishedReferences, preservePhysicalPublishedReferences } from './published-references.js'
 import { PhysicalLocalFiles } from './physical-local-files.js'
@@ -97,6 +97,11 @@ export const scopedLocalForegroundNotification = (username: string, date: Date, 
 export const scopedLocalForegroundSourceNotification = (sourcePath: string, collaborationId: string): string =>
   'state/Foreground_Conversation-g' + localForegroundScopeTag(collaborationId)
     + hash('local-source\0' + filePath(sourcePath)).slice(0, 32)
+// Git readers before this change already discover Foreground notifications by prefix.
+const gitPublication = /^state\/Foreground_[^/]+-GMT-?\d+(?:m\d{2})?-\d{8}-\d{9}-j([a-f0-9]{31})[a-f0-9]{32}$/
+const gitScope = (id: string) => hash('git-scope-v1\0' + id).slice(0, 31)
+export const ownsGitConversationPublication = (path: string, collaborationId: string): boolean =>
+  gitPublication.exec(path)?.[1] === gitScope(collaborationId)
 const localConversationSignal = /^state\/Foreground_[^/]+-GMT-?\d+(?:m\d{2})?-\d{8}-\d{9}(?:-(?:[a-f0-9]{64}|g[a-f0-9]{63}))?$/
 const scopedLocalSignal = /-g([a-f0-9]{31})[a-f0-9]{32}$/
 const scopedLocalSourceSignal = /^state\/Foreground_Conversation-g([a-f0-9]{31})[a-f0-9]{32}$/
@@ -190,9 +195,10 @@ class GitDailyConversation {
   send(command: string, message: ConversationSend, options: CommandOptions, commandInput?: unknown, beforeAppend?: (snapshot: FilesSnapshot) => Promise<void>): Promise<FileReceipt> {
     const date = new Date(message.createdAt), day = date.toISOString().slice(0, 10), path = this.path(day);
     const notification = message.role === 'user' && message.recipient === 'ai'
-      ? 'state/' + foregroundNotification(message.username ?? message.participantId, date, message.timezoneOffsetMinutes ?? 0) : undefined;
+      ? 'state/' + foregroundNotification(message.username ?? message.participantId, date, message.timezoneOffsetMinutes ?? 0)
+        + '-j' + gitScope(this.scope.collaborationId) + randomBytes(16).toString('hex') : undefined;
     const usesContext = conversationContextKind(message) !== undefined;
-    return this.transactions.run(command, commandInput === undefined ? { scope: this.scope, message } : { scope: this.scope, commandInput }, { ...options, readPlan: { ...options.readPlan, files: [...(options.readPlan?.files ?? []), path, ...(usesContext ? [this.contextPath] : []), ...notification ? [notification] : []] } }, async (snapshot) => {
+    return this.transactions.run(command, commandInput === undefined ? { scope: this.scope, message } : { scope: this.scope, commandInput }, { ...options, readPlan: { ...options.readPlan, files: [...(options.readPlan?.files ?? []), path, ...(usesContext ? [this.contextPath] : [])] } }, async (snapshot) => {
       const record = await this.dailyRecord(snapshot, day), messages = record.messages;
       const { username: _name, timezoneOffsetMinutes: _offset, conversationContext: _untrusted, ...body } = message as ConversationSend & Pick<ConversationMessage, 'conversationContext'>;
       const previous = messages.find(row => row.id === message.id);
@@ -212,12 +218,7 @@ class GitDailyConversation {
         ...(context.index !== previousContext ? [{ path: this.contextPath, content: json(context.index) }] : []),
         ...(message.role === 'assistant' ? await preservePublishedReferences(this.files, snapshot, message.text) : []),
       ];
-      if (notification) {
-        let signal = notification;
-        if (await this.files.read(snapshot, signal) !== undefined)
-          signal += '-' + hash(this.scope.collaborationId + '\0' + message.id);
-        changes.push({ path: signal, content: '' });
-      }
+      if (notification) changes.push({ path: notification, content: '' });
       return changes;
     });
   }
@@ -387,7 +388,10 @@ export class FrameworkConversation {
    * exact path and its original message ID proves that historical name. No
    * other conversation is searched and unproven old signals stay intact. */
   async routeForegroundSignals<T extends { path: string }>(sources: readonly T[]): Promise<T[]> {
-    if (this.scope.mode !== 'local') return [...sources]
+    if (this.scope.mode === 'git') {
+      const tag = gitScope(this.scope.collaborationId)
+      return sources.filter(source => { const parsed = gitPublication.exec(source.path); return !parsed || parsed[1] === tag })
+    }
     const tag = localForegroundScopeTag(this.scope.collaborationId)
     const old = sources.filter(source => localConversationSignal.test(source.path)
       && !scopedLocalSignal.test(source.path) && oldLocalSignalHash.test(source.path))
@@ -805,10 +809,11 @@ export class FrameworkConversation {
   }
   async readForeground(): Promise<ForegroundMemory> {
     await this.prepare()
+    const list = this.foregroundRoot + '/Foreground_List.md', cache = this.foregroundRoot + '/Foreground_Cache.md'
     return withSnapshot(this.files, async snapshot => ({
-      list: await this.files.read(snapshot, this.foregroundRoot + '/Foreground_List.md') ?? '',
-      cache: await this.files.read(snapshot, this.foregroundRoot + '/Foreground_Cache.md') ?? '',
-    }))
+      list: await this.files.read(snapshot, list) ?? '',
+      cache: await this.files.read(snapshot, cache) ?? '',
+    }), this.scope.mode === 'git' ? { files: [list, cache] } : undefined)
   }
   private memoryChanges(memory: ForegroundMemory): FileChange[] {
     return [{ path: this.foregroundRoot + '/Foreground_List.md', content: memory.list }, { path: this.foregroundRoot + '/Foreground_Cache.md', content: memory.cache }]

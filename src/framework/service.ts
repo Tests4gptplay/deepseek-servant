@@ -790,7 +790,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 oldLocalControlRecovered: taskId => this.clearLegacyLocalControlIssue(connection.scope, taskId),
                 cancelPending: reason => connection.cancelPending(reason), heartbeat: async snapshot => {
                     await connection.tick(snapshot);
-                    resource.runtime.updateWorkerSeats(connection.registration.workerSeats);
+                    await resource.runtime.updateWorkerSeats(connection.registration.workerSeats);
                 }, observationInterrupted: () => connection.observationInterrupted(), observeResources: async snapshot => {
                     const next = await connection.members(snapshot);
                     const visible = (rows: ObservedInstance[]) => JSON.stringify(rows.map(row => ({ member: row.member, workerSeats: row.workerSeats, availability: row.availability, error: row.error })));
@@ -861,7 +861,8 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         const mode = input.mode ?? this.activeMode, saved = this.config(mode), active = this.running.get(mode);
         const base = this.settingsView(mode);
         if (mode === 'local' && this.pendingRecordMove?.scope) base.pendingRecordMove = { commandId: this.pendingRecordMove.commandId,
-            storageScope: this.pendingRecordMove.scope, expectedRevision: this.pendingRecordMove.settingsBefore.revision, directory: this.pendingRecordMove.targetRecords };
+            storageScope: this.pendingRecordMove.scope, expectedRevision: this.pendingRecordMove.settingsBefore.revision, directory: this.pendingRecordMove.targetRecords, canAbandon: (this.pendingRecordMove.phase === 'prepared' || this.pendingRecordMove.phase === 'abandoning')
+                && (this.storage as StoragePort & Partial<RecordMovePhysicalStore>).storageView?.().directory === this.pendingRecordMove.sourceRecords };
         if (mode === 'git' && !saved.settings.ownerRepo.trim()) { base.connection.status = 'unconfigured'; return base; }
         const startup = this.startupState.get(mode);
         if (input.headerOnly) {
@@ -1101,10 +1102,16 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             quiesce: (receipt, signal) => this.quiesceRecords(receipt, signal),
             applySettings: async receipt => {
                 const current = await this.storage.get<Saved>('framework-settings/local');
-                if (!isDeepStrictEqual(current, receipt.settingsAfter)) {
-                    if (!isDeepStrictEqual(current, receipt.settingsBefore)) throw new Error('Local settings changed outside the retained record move.');
-                    await this.persistSettings('local', receipt.settingsAfter);
-                } else this.saved.set('local', current!);
+                const selected = current ?? receipt.settingsBefore;
+                const relocated = { revision: selected.revision === receipt.settingsBefore.revision ? receipt.settingsAfter.revision : selected.revision,
+                    settings: { ...selected.settings, localDirectory: receipt.settingsAfter.settings.localDirectory } };
+                // Relocation owns the path, not subsequent model or other settings choices.
+                await this.persistSettings('local', relocated);
+            },
+            restoreSettings: async receipt => {
+                const selected = await this.storage.get<Saved>('framework-settings/local') ?? receipt.settingsBefore;
+                await this.persistSettings('local', { revision: randomUUID(), settings: {
+                    ...selected.settings, localDirectory: receipt.settingsBefore.settings.localDirectory } });
             },
             reopen: async (_receipt, signal) => {
                 this.recordMoving = undefined;
@@ -1194,6 +1201,21 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             const view = await this.view({ mode: 'local', includeArchives: true, panelsOnly: true }, undefined, 'foreground-read');
             return { ...view, recordMoveOutcome };
         });
+    }
+    abandonRecordMove(input: Parameters<NonNullable<FrameworkClientApi['abandonRecordMove']>>[0]): Promise<{ directory: string; retainedTarget: string }> {
+        return this.serialMode('local', async () => {
+            this.assertOpen();
+            const mover = this.mover(), receipt = await mover.receipt(input.commandId);
+            if (!receipt || receipt.scope !== input.storageScope || receipt.settingsBefore.revision !== input.expectedRevision)
+                throw new Error('The original move does not match this request.');
+            const controller = this.recordMoveController = new AbortController();
+            try {
+                const abandoned = await mover.abandon(input.commandId, controller.signal);
+                this.pendingRecordMove = undefined;
+                this.clearResolvedErrors('local', input.commandId); this.changed();
+                return { directory: abandoned.sourceRecords, retainedTarget: abandoned.targetRecords };
+            } finally { if (this.recordMoveController === controller) this.recordMoveController = undefined; }
+        }, undefined, true);
     }
     async maintenanceView(input: Parameters<FrameworkClientApi['maintenanceView']>[0]) {
         const access = await this.access(input.mode); this.checkScope(access, input.storageScope);
@@ -1640,7 +1662,6 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         try {
             this.assertOpen();
             mode = z.enum(['local', 'git']).parse(input.mode);
-            if (this.moveError(mode)) throw this.moveError(mode);
             route = model.optional().parse(input.model);
             z.string().min(1).parse(input.commandId);
         } catch (error) { return Promise.reject(error); }
@@ -1648,9 +1669,10 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         this.configurationOwners.add(owner);
         const signal = owner.controller.signal;
         const operation = this.serialMode(mode, async () => {
-            this.assertOpen(); signal.throwIfAborted(); if (this.moveError(mode)) throw this.moveError(mode);
+            this.assertOpen(); signal.throwIfAborted();
             if (input.storageScope !== undefined) {
-                let scope = this.running.get(mode)?.connection.scope;
+                let scope = this.running.get(mode)?.connection.scope
+                    ?? (mode === 'local' ? this.pendingRecordMove?.scope : undefined);
                 const access = this.accesses.get(mode);
                 if (!scope && access && !this.accessOpening.has(mode)) scope = (await access).connection.scope;
                 if (scope !== input.storageScope) throw new Error('Storage scope changed or is not ready; refresh before changing the foreground model.');
@@ -1680,8 +1702,11 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         let mode: FrameworkMode, settings: FrameworkClientSettings, requested: FrameworkClientSettings,
             changedFields: Array<keyof FrameworkClientSettings> | undefined, commandId: string,
             backgroundOnly = false, conversationBarrier = true;
-        const applyChanges = (base: FrameworkClientSettings): FrameworkClientSettings => changedFields === undefined
-            ? requested : settingsSchema.parse({ ...base, ...Object.fromEntries(changedFields.map(key => [key, requested[key]])) });
+        // Existing conversation identities remain readable; settings no longer select/create groups.
+        const applyChanges = (base: FrameworkClientSettings): FrameworkClientSettings => settingsSchema.parse({
+            ...(changedFields === undefined ? requested : { ...base, ...Object.fromEntries(changedFields.map(key => [key, requested[key]])) }),
+            collaborationId: base.collaborationId,
+        });
         const conversationAccessSettings = (value: FrameworkClientSettings) => JSON.stringify([
             mode === 'local' ? [value.localDirectory, value.userName] : [value.ownerRepo, value.repositoryDirectory], value.collaborationId]);
         try {
@@ -1805,7 +1830,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                     if (updateRegistration) {
                         const registration = await running.connection.updateWorkerSeats(settings.workerSeats);
                         signal.throwIfAborted();
-                        running.runtime.updateWorkerSeats(registration.workerSeats);
+                        await running.runtime.updateWorkerSeats(registration.workerSeats, true);
                         running.resources = await running.connection.members();
                     }
                 } else await this.connect(mode, signal);

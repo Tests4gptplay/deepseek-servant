@@ -743,8 +743,16 @@ export class FrameworkHostLoop {
           await this.save()
         }
         this.seenSources.set(current.path, current.version)
-        // Ordinary discovery reads the committed Task on a subsequent view.
-        // Initialization never emits business wakes from its pre-commit view.
+        // Physical initialization has published its Task and initial signal.
+        // Hand that exact Task to the existing discovery lane from a fresh
+        // view instead of waiting for the next periodic directory scan.
+        if (this.files instanceof PhysicalLocalFiles && initialized && !this.stopping) {
+          const committed = await this.files.snapshot()
+          try {
+            const taskEntry = await this.files.fileMetadata(paths.task(initialized.taskId))
+            if (taskEntry) this.startTask(taskEntry, committed.revision, {}, performance.now())
+          } finally { await committed.release() }
+        }
       } finally { await snapshot.release() }
     }))
     this.sourceOperations.set(entry.path, operation)

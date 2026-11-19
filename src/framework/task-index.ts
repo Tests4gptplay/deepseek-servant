@@ -65,6 +65,7 @@ export class FrameworkTaskIndex {
         this.cache.delete(entry.path)
         let bytes: Uint8Array | undefined
         try { bytes = await this.files.readBytes(snapshot, entry.path) } catch (cause) {
+          if (signal?.aborted && cause === signal.reason) throw cause
           this.error(new Error('Cannot read Task ' + entry.path, { cause }))
           continue // IO/network failure is retried, even at the same blob version.
         }

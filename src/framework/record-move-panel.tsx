@@ -9,8 +9,8 @@ interface Attempt { input: MoveInput; submitted: boolean; promise?: ReturnType<F
 // Closing Settings is not cancellation. Retain the original browser command so
 // its uncertain result is resolved rather than replaced with another move.
 const attempts = new WeakMap<FrameworkClientApi, Map<string, Attempt>>()
-export function RecordMovePanel({ api, storageScope, settingsRevision, pendingRequest, tr, changed }: {
-  api: FrameworkClientApi; storageScope: string; settingsRevision: string; pendingRequest?: Omit<MoveInput, 'mode'>; tr: (cn: string, en: string) => string; changed(): Promise<void>
+export function RecordMovePanel({ api, storageScope, settingsRevision, pendingRequest, currentDirectory, onPickDirectory, tr, changed }: {
+  api: FrameworkClientApi; storageScope: string; settingsRevision: string; currentDirectory: string; onPickDirectory?: (initialPath?: string) => Promise<string | null>; pendingRequest?: Omit<MoveInput, 'mode'> & { canAbandon?: boolean }; tr: (cn: string, en: string) => string; changed(): Promise<void>
 }) {
   let scoped = attempts.get(api)
   if (!scoped) { scoped = new Map(); attempts.set(api, scoped) }
@@ -19,14 +19,21 @@ export function RecordMovePanel({ api, storageScope, settingsRevision, pendingRe
     const existing = retained.get(storageScope)
     if (existing) return existing
     if (!pendingRequest) return undefined
-    const restored: Attempt = { input: { ...pendingRequest, mode: 'local' }, submitted: true }
+    const { canAbandon: _canAbandon, ...input } = pendingRequest
+    const restored: Attempt = { input: { ...input, mode: 'local' }, submitted: true }
     retained.set(storageScope, restored)
     return restored
   })
-  const [directory, setDirectory] = useState(''), [busy, setBusy] = useState(false), [result, setResult] = useState(''), [error, setError] = useState(pending?.error ?? '')
+  const [directory, setDirectory] = useState(currentDirectory), [busy, setBusy] = useState(false), [result, setResult] = useState(''), [error, setError] = useState(pending?.error ?? '')
+  const [moveStatusVerified, setMoveStatusVerified] = useState(true)
+  const [abandoning, setAbandoning] = useState(false)
+  const canAbandon = moveStatusVerified && pendingRequest?.canAbandon === true && pendingRequest.commandId === pending?.input.commandId
   const active = useRef(true)
+  const [picking, setPicking] = useState(false)
+  useEffect(() => { if (!pending) setDirectory(currentDirectory) }, [currentDirectory])
   const submit = async (attempt: Attempt) => {
     attempt.submitted = true; retained.set(storageScope, attempt)
+    setMoveStatusVerified(false)
     setBusy(true); setError('')
     try {
       if (!attempt.confirmed) {
@@ -36,7 +43,7 @@ export function RecordMovePanel({ api, storageScope, settingsRevision, pendingRe
         attempt.confirmed = true
       }
       if (!active.current) return
-      retained.delete(storageScope); setPending(undefined); setDirectory('')
+      retained.delete(storageScope); setPending(undefined); setDirectory(attempt.outcome?.directory ?? attempt.input.directory)
       const outcome = attempt.outcome
       setResult(outcome?.status === 'current-location'
         ? tr('原请求的完成结果尚未确认，本次没有再次搬迁。核对时的记录目录：', 'The original request’s completion is unconfirmed; no move was repeated. Record directory at this check: ') + outcome.directory
@@ -56,7 +63,11 @@ export function RecordMovePanel({ api, storageScope, settingsRevision, pendingRe
         return
       }
       attempt.error = frameworkErrorText(reason)
-      if (active.current) setError(attempt.error)
+      if (active.current) {
+        setError(attempt.error)
+        try { await changed(); if (active.current) setMoveStatusVerified(true) }
+        catch { /* Keep retry available; no confirmed abandonment state was received. */ }
+      }
     } finally { attempt.promise = undefined; if (active.current) setBusy(false) }
   }
   useEffect(() => {
@@ -65,22 +76,37 @@ export function RecordMovePanel({ api, storageScope, settingsRevision, pendingRe
     if (attempt?.promise || attempt?.confirmed) void submit(attempt)
     return () => { active.current = false }
   }, [])
-  const prepare = () => {
-    if (!directory.trim()) return
-    const attempt: Attempt = { input: { mode: 'local', storageScope, expectedRevision: settingsRevision, commandId: crypto.randomUUID(), directory }, submitted: false }
-    retained.set(storageScope, attempt); setPending(attempt); setError(''); setResult('')
+  const abandon = async (attempt: Attempt) => {
+    if (!api.abandonRecordMove || !canAbandon || busy) return
+    setBusy(true); setAbandoning(true); setError('')
+    try {
+      const outcome = await api.abandonRecordMove(attempt.input)
+      retained.delete(storageScope)
+      if (!active.current) return
+      setPending(undefined); setDirectory(outcome.directory)
+      setResult(tr('已放弃本次搬迁，继续使用原记录目录。已复制的文件保留在：', 'Move abandoned. The original records folder remains in use. Copied files remain at: ') + outcome.retainedTarget)
+      void changed().catch(reason => { if (active.current) setError(frameworkErrorText(reason)) })
+    } catch (reason) { if (active.current) setError(frameworkErrorText(reason) || tr('未能放弃本次搬迁，请重试。', 'Could not abandon this move. Please retry.')) }
+    finally { if (active.current) { setBusy(false); setAbandoning(false) } }
   }
-  return <section className={css.section} aria-label={tr('记录搬家', 'Move record storage')}>
-    <h3>{tr('记录搬家', 'Move record storage')}</h3>
-    {!pending && <><label className={css.field}><span>{tr('目标记录目录（绝对路径）', 'Target record directory (absolute path)')}</span><Input value={directory} disabled={busy} onChange={event => setDirectory(event.target.value)} /></label>
-      <Button disabled={busy || !directory.trim()} onClick={prepare}>{tr('搬家并应用', 'Move and apply')}</Button></>}
-    {pending && <div role="group" aria-label={tr('确认记录搬家', 'Confirm record move')}>
-      <code>{pending.input.directory}</code>
-      <p>{tr('这不是单纯修改目录：会暂停本插件受影响的 Local 执行，确认已停止后复制技术记录和 Local 记录，核验完整内容后应用新地址，保留原逻辑范围、身份和完整资料。Git 执行与宿主原生日志位置不变。已有目标内容不会被覆盖；新地址生效后删除本次确认复制的旧 DSS 副本，不删除无关资料。若清理未完成，会显示实际保留的旧位置与原因，不影响新地址继续使用。', 'This is not merely a directory setting: it pauses affected Local executions, copies technical and Local records, then verifies their complete contents before applying the new location. Logical scope, identities and all contents are preserved. Git executions and native Host log locations are unchanged. Existing destination contents are not overwritten. Once the new location is active, this move removes its confirmed old DSS copies, not unrelated files. Any cleanup residual is shown with its location and reason; the new location remains usable.')}</p>
-      <Button disabled={busy} onClick={() => void submit(pending)}>{pending.submitted ? tr('核对并重试原搬家', 'Resolve and retry original move') : tr('确认搬家并应用', 'Confirm move and apply')}</Button>
-      {!pending.submitted && <Button disabled={busy} onClick={() => { retained.delete(storageScope); setPending(undefined); setError('') }}>{tr('取消', 'Cancel')}</Button>}
-      {pending.submitted && <p>{tr('请求已发送；结果未确认时保留原命令、原目录和原设置版本。关闭面板不会撤销已接纳的搬家。', 'The request was sent. An unconfirmed outcome retains the original command, locations and settings revision. Closing this panel does not cancel an accepted move.')}</p>}
-    </div>}
-    {error && <p role="alert">{error}</p>}{result && <p role="status">{result}</p>}
+  const changeDirectory = (directory: string) => {
+    if (!directory.trim() || directory.trim() === currentDirectory || busy || pending) return
+    const attempt: Attempt = { input: { mode: 'local', storageScope, expectedRevision: settingsRevision, commandId: crypto.randomUUID(), directory: directory.trim() }, submitted: false }
+    retained.set(storageScope, attempt); setDirectory(directory); setPending(attempt); setError(''); setResult('')
+    void submit(attempt)
+  }
+  return <section className={css.recordLocation} aria-label={tr('记录保存文件夹', 'Records folder')}>
+    <div className={css.recordLocationRow}>
+      <label className={css.directoryField}><span>{tr('记录保存文件夹', 'Records folder')}</span><Input value={pending?.input.directory ?? directory} title={pending?.input.directory ?? directory} disabled={busy || !!pending || picking} onChange={event => setDirectory(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); changeDirectory(directory) } }} /></label>
+      {onPickDirectory && <Button type="button" variant="outline" disabled={busy || !!pending || picking} onClick={() => {
+        setPicking(true); setError('')
+        void onPickDirectory(currentDirectory).then(selected => { if (selected !== null && active.current) changeDirectory(selected) }, reason => { if (active.current) setError(frameworkErrorText(reason)) }).finally(() => { if (active.current) setPicking(false) })
+      }}>{tr('选择文件夹', 'Choose folder')}</Button>}
+    </div>
+    <p className={css.muted}>{tr('选择新文件夹，或输入新路径后按回车，即会迁移现有记录。', 'Choose a new folder or type a path and press Enter to move your existing records.')}</p>
+    {busy && <div className={css.recordMoveProgress} role="status"><progress aria-label={abandoning ? tr('正在放弃搬迁', 'Abandoning move') : tr('正在迁移记录', 'Moving records')} /><span>{abandoning ? tr('正在放弃本次搬迁…', 'Abandoning this move…') : tr('正在迁移记录…', 'Moving records…')}</span></div>}
+    {pending && !busy && <div className={css.actions}><Button type="button" variant="outline" onClick={() => void submit(pending)}>{tr('重试迁移', 'Retry move')}</Button>{api.abandonRecordMove && canAbandon && <Button type="button" variant="outline" onClick={() => void abandon(pending)}>{tr('放弃本次搬迁', 'Abandon this move')}</Button>}</div>}
+    {pending && !busy && canAbandon && api.abandonRecordMove && <p className={css.muted}>{tr('放弃后继续使用原记录目录；已复制到新目录的文件会保留。', 'Abandoning keeps the original records folder in use. Files already copied to the new folder are retained.')}</p>}
+    {error && <p className={css.errorDetail} role="alert">{error}</p>}{result && <p className={css.muted} role="status">{result}</p>}
   </section>
 }

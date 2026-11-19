@@ -30,12 +30,13 @@ export interface RecordMoveReceipt extends RecordMoveRequest {
   upgradeRelocated?: true
   /** Result of this command’s one-shot old-copy cleanup; absent on older receipts. */
   sourceCleanup?: { retained: Array<{ directory: string; reason: string }> }
-  phase: 'prepared' | 'published' | 'reopening' | 'applied'
+  phase: 'prepared' | 'published' | 'reopening' | 'applied' | 'abandoning' | 'abandoned'
   settingsAfter: { revision: string; settings: FrameworkClientSettings }
 }
 export interface RecordMovePhysicalStore {
   storageView(): { directory: string }
   moveRecords(target: string, expected: string, signal: AbortSignal, verifyPublished?: (directory: string) => Promise<void>, commandId?: string): Promise<{ directory: string }>
+  abandonRecordMove?(commandId: string, source: string, target: string): Promise<void>
   recordMoveCopy?(commandId: string): RecordTreeCopyState | undefined | Promise<RecordTreeCopyState | undefined>
 }
 export interface RecordMoveLifecycle {
@@ -43,6 +44,7 @@ export interface RecordMoveLifecycle {
   quiesce(receipt: Readonly<RecordMoveReceipt>, signal: AbortSignal): Promise<void>
   /** Compare the retained original revision or recognize the same new revision. */
   applySettings(receipt: Readonly<RecordMoveReceipt>): Promise<void>
+  restoreSettings?(receipt: Readonly<RecordMoveReceipt>): Promise<void>
   /** Idempotently reopen the confirmed target, without restarting completed work. */
   reopen(receipt: Readonly<RecordMoveReceipt>, signal: AbortSignal): Promise<void>
 }
@@ -60,9 +62,9 @@ const equalRequest = (a: RecordMoveRequest, b: RecordMoveRequest) => a.sourceRec
 /** One current applied move supports the existing UI's uncertain retry. A
  * later applied move replaces it; copy inventories end after this move’s one-shot cleanup. */
 function currentReceipts(receipts: RecordMoveReceipt[]): RecordMoveReceipt[] {
-  const latest = receipts.filter(receipt => receipt.phase === 'applied').at(-1)
-  return receipts.filter(receipt => receipt.phase !== 'applied' || receipt === latest).map(receipt => {
-    if (receipt.phase !== 'applied') return receipt
+  const latest = receipts.filter(receipt => (receipt.phase === 'applied' || receipt.phase === 'abandoned')).at(-1)
+  return receipts.filter(receipt => (receipt.phase !== 'applied' && receipt.phase !== 'abandoned') || receipt === latest).map(receipt => {
+    if (receipt.phase !== 'applied' && receipt.phase !== 'abandoned') return receipt
     const { localCopy: _finishedCopy, ...current } = receipt
     return current
   })
@@ -86,7 +88,7 @@ export class FrameworkRecordMove {
   private async receipts(): Promise<RecordMoveReceipt[]> {
     const value = await this.storage.get<{ version: 1; receipts: RecordMoveReceipt[] }>(recordMoveKey)
     if (value === undefined) return []
-    if (value.version !== 1 || !Array.isArray(value.receipts) || value.receipts.some(item => !item.commandId || !['prepared', 'published', 'reopening', 'applied'].includes(item.phase)))
+    if (value.version !== 1 || !Array.isArray(value.receipts) || value.receipts.some(item => !item.commandId || !['prepared', 'published', 'reopening', 'applied', 'abandoning', 'abandoned'].includes(item.phase)))
       throw new Error('Invalid record move receipts; inspect before reopening storage.')
     return structuredClone(value.receipts)
   }
@@ -96,7 +98,7 @@ export class FrameworkRecordMove {
   }
   async receipt(commandId: string): Promise<RecordMoveReceipt | undefined> { return currentReceipts(await this.receipts()).find(item => item.commandId === commandId) }
   async pendingReceipt(): Promise<RecordMoveReceipt | undefined> {
-    const pending = (await this.receipts()).filter(item => item.phase !== 'applied')
+    const pending = (await this.receipts()).filter(item => item.phase !== 'applied' && item.phase !== 'abandoned')
     if (pending.length > 1) throw new Error('Multiple unresolved record moves require inspection.')
     return pending[0]
   }
@@ -107,12 +109,13 @@ export class FrameworkRecordMove {
         ...(input.sourceLocal ? { sourceLocal: await canonical(input.sourceLocal) } : {}) }
       const receipts = await this.receipts(), prior = receipts.find(item => item.commandId === commandId)
       if (prior) {
+        if (prior.phase === 'abandoning' || prior.phase === 'abandoned') throw new Error('This move was abandoned; choose a new destination for a new move.')
         if (!equalRequest(prior, request)) throw new Error('Move command was reused with different locations or settings revisions.')
         return this.advance(receipts, prior, signal)
       }
       if (!commandId || !request.settingsBefore?.revision || !request.nextSettingsRevision || request.sourceRecords === request.targetRecords
         || Boolean(request.sourceLocal) !== Boolean(request.scope)) throw new RecordMoveNotStartedError('An explicit record move requires its original settings and Local scope identity.')
-      if (receipts.some(item => item.phase !== 'applied')) throw new Error('Resolve the existing record move before starting another.')
+      if (receipts.some(item => item.phase !== 'applied' && item.phase !== 'abandoned')) throw new Error('Resolve the existing record move before starting another.')
       if (await canonical(this.physical.storageView().directory) !== request.sourceRecords) throw new RecordMoveNotStartedError('Active record storage changed before preparing the move.')
       const localKind = !request.sourceLocal ? 'none' : request.sourceLocal === join(request.sourceRecords, 'deepseek_servant', 'framework') ? 'owned' : 'custom'
       const targetLocal = localKind === 'none' ? undefined : localKind === 'owned' ? join(request.targetRecords, 'deepseek_servant', 'framework')
@@ -136,9 +139,9 @@ export class FrameworkRecordMove {
   }
   resumePending(signal: AbortSignal): Promise<RecordMoveReceipt | undefined> {
     return this.serial(async () => {
-      const receipts = await this.receipts(), pending = receipts.filter(item => item.phase !== 'applied')
+      const receipts = await this.receipts(), pending = receipts.filter(item => item.phase !== 'applied' && item.phase !== 'abandoned')
       if (pending.length > 1) throw new Error('Multiple unresolved record moves require inspection.')
-      if (pending[0]) return this.advance(receipts, pending[0], signal)
+      if (pending[0]) return pending[0].phase === 'abandoning' ? this.finishAbandon(receipts, pending[0], signal) : this.advance(receipts, pending[0], signal)
       // This existing startup path also retires already completed legacy detail.
       // A failed write is reported for retry; optional housekeeping never
       // becomes an admission condition for ordinary records.
@@ -149,6 +152,31 @@ export class FrameworkRecordMove {
       } catch (error) { console.error('deepseek-servant completed record move maintenance', error) }
       return undefined
     })
+  }
+  abandon(commandId: string, signal: AbortSignal): Promise<RecordMoveReceipt> {
+    return this.serial(async () => {
+      const receipts = await this.receipts(), receipt = receipts.find(item => item.commandId === commandId)
+      if (!receipt) throw new Error('The original move receipt is unavailable.')
+      if (receipt.phase === 'abandoned') return receipt
+      if (receipt.phase !== 'prepared' && receipt.phase !== 'abandoning') throw new Error('The target was published; continue the original move instead.')
+      if (await canonical(this.physical.storageView().directory) !== receipt.sourceRecords)
+        throw new Error('The target may be active; the original location cannot be restored blindly.')
+      if (!this.physical.abandonRecordMove) throw new Error('This Host does not expose record move cancellation.')
+      if (receipt.phase !== 'abandoning') { receipt.phase = 'abandoning'; await this.save(receipts, commandId) }
+      return this.finishAbandon(receipts, receipt, signal)
+    })
+  }
+  private async finishAbandon(receipts: RecordMoveReceipt[], receipt: RecordMoveReceipt, signal: AbortSignal): Promise<RecordMoveReceipt> {
+    signal.throwIfAborted()
+    if (await canonical(this.physical.storageView().directory) !== receipt.sourceRecords || !this.physical.abandonRecordMove)
+      throw new Error('Cannot abandon a move whose original location is not active.')
+    await this.physical.abandonRecordMove(receipt.commandId, receipt.sourceRecords, receipt.targetRecords)
+    await this.locations.abandon(receipt.commandId)
+    await this.lifecycle.restoreSettings?.(structuredClone(receipt))
+    await this.lifecycle.reopen(structuredClone(receipt), signal)
+    receipt.phase = 'abandoned'
+    await this.save(receipts, receipt.commandId)
+    return receipt
   }
   private async advance(receipts: RecordMoveReceipt[], receipt: RecordMoveReceipt, signal: AbortSignal): Promise<RecordMoveReceipt> {
     if (receipt.phase === 'applied') return receipt
