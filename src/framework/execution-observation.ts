@@ -133,6 +133,10 @@ export class ExecutionObservations {
     if (executing === saved.executing && !progress) return saved
     let observation = progress ? recordProgress(saved.observation, progress.kind, progress.observedAt) : saved.observation
     if (executing && !saved.executing) observation = rebindObservation(observation, binding.identity.executionId, this.now())
+    if (executing === saved.executing && observation.lastProgressAt === saved.observation.lastProgressAt) {
+      if (binding.progress === progress) binding.progress = undefined
+      return saved
+    }
     const next = { ...saved, executing, observation }
     await this.store.set(binding.identity.workId, next, saved)
     if (binding.progress === progress) binding.progress = undefined
@@ -146,8 +150,12 @@ export class ExecutionObservations {
     binding.unsubscribe()
     await this.queue(workId, async () => {
       const saved = await this.store.get(workId)
-      if (saved?.observation.identity.executionId === executionId) await this.store.set(workId, { ...saved, executing: false,
-        observation: binding.progress ? recordProgress(saved.observation, binding.progress.kind, binding.progress.observedAt) : saved.observation }, saved)
+      if (saved?.observation.identity.executionId !== executionId) return
+      const observation = binding.progress ? recordProgress(saved.observation, binding.progress.kind, binding.progress.observedAt) : saved.observation
+      // The binding is already inactive in storage and no newer progress was
+      // observed. Do not start a second publication for the same stored state.
+      if (!saved.executing && observation.lastProgressAt === saved.observation.lastProgressAt) return
+      await this.store.set(workId, { ...saved, executing: false, observation }, saved)
     })
   }
   /** Retire the exact work identities already owned by this Task's runtime.

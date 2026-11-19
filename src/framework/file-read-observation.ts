@@ -5,13 +5,13 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 // It records values already read at one immutable snapshot, not extra scans.
 type ReadObserver = (key: string, fingerprint: string) => void
 const observers = new WeakMap<object, { read: ReadObserver; rechecked?: (path: string) => void }>()
-const rechecking = new AsyncLocalStorage<{ snapshot: object; path: string }>()
+const rechecking = new AsyncLocalStorage<{ snapshot: object; key: string }>()
 const observerAt = (snapshot: object): ReadObserver | undefined => {
   const observer = observers.get(snapshot)
   if (!observer) return
   return (key, fingerprint) => {
     const own = rechecking.getStore()
-    if (own?.snapshot === snapshot && key === 'file:' + own.path) return
+    if (own?.snapshot === snapshot && key === own.key) return
     observer.read(key, fingerprint)
   }
 }
@@ -19,9 +19,21 @@ const observerAt = (snapshot: object): ReadObserver | undefined => {
  * read. Other reads of the same path remain assessed business inputs; native
  * Git dependencies are independent and are never suppressed here. */
 export async function withReevaluatedFileTarget<T>(snapshot: object, path: string, action: () => Promise<T>): Promise<T> {
-  const result = await rechecking.run({ snapshot, path }, action)
+  const result = await rechecking.run({ snapshot, key: 'file:' + path }, action)
   observers.get(snapshot)?.rechecked?.(path)
   return result
+}
+/** Observe only the business values taken from this exact file. The raw
+ * read still contributes its native dependency and remains an exact write
+ * target if this same command also updates it. */
+export async function withProjectedFileRead<T>(snapshot: object, path: string, read: () => Promise<T>, project: (value: T) => unknown, key = 'file:' + path): Promise<T> {
+  return withProjectedRead(snapshot, 'file:' + path, read, project, key)
+}
+export async function withProjectedRead<T>(snapshot: object, key: string, read: () => Promise<T>,
+  project: (value: T) => unknown, projectedKey = key): Promise<T> {
+  const value = await rechecking.run({ snapshot, key }, read)
+  observerAt(snapshot)?.(projectedKey, createHash('sha256').update(JSON.stringify(project(value))).digest('hex'))
+  return value
 }
 export async function observeFileReads<T>(snapshot: object, observer: ReadObserver, action: () => Promise<T>, rechecked?: (path: string) => void): Promise<T> {
   if (observers.has(snapshot)) throw new Error('This snapshot already has an owned read observer.')

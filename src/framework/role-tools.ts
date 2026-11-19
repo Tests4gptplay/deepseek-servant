@@ -26,7 +26,7 @@ import { completePhysicalTask, type PhysicalCompletionPlan } from './physical-ta
 import { foregroundMemoryGuide } from '../contracts/foreground-memory.js'
 import { readCleanupRecord, taskCleanupRecord } from './cleaner.js'
 import { taskMetadataRuntimeState } from './task-archive.js'
-import { withReevaluatedFileTarget, observedFileBytes } from './file-read-observation.js'
+import { withReevaluatedFileTarget, observedFileBytes, withProjectedFileRead } from './file-read-observation.js'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -116,8 +116,8 @@ export interface FrameworkRoleServices {
     transferPath?(binding: FrameworkRoleBinding): string
     assertLive?(binding: FrameworkRoleBinding, transferring?: boolean): void
     assert(binding: FrameworkRoleBinding, snapshot: FilesSnapshot, selected?: TaskMetadata): Promise<void>
-    transfer(binding: FrameworkRoleBinding, snapshot: FilesSnapshot, successorId: string, successorRole?: 'Worker' | 'Planner'): Promise<readonly FileChange[]>
-    committed(binding: FrameworkRoleBinding): Promise<void>
+    transfer(binding: FrameworkRoleBinding, snapshot: FilesSnapshot, successorId: string, successorRole?: 'Worker' | 'Planner', selected?: TaskMetadata): Promise<readonly FileChange[]>
+    committed(binding: FrameworkRoleBinding, published?: readonly FileChange[], localPublished?: WorkerBusinessTransfer): Promise<void>
   }
   skillsChanged?(): void
   conversation?: {
@@ -339,7 +339,7 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
       if (files instanceof GitFiles && known) await withReevaluatedFileTarget(current.snapshot, paths.task(selected), async () => checkTaskLifecycle(current.snapshot, selected, binding, known.current))
       else await assertTaskLifecycle(files, current.snapshot, selected, binding)
     }
-    const workspace = await services.workspace.locate(selected, current.snapshot, files instanceof GitFiles && known ? { value: known.reference } : undefined)
+    const workspace = await services.workspace.locate(selected, current.snapshot, files instanceof GitFiles && known && 'reference' in known ? { value: known.reference } : undefined)
     return { ...(workspace ? { workspace } : {}), workspaceSource }
   }
   const view = (id: string): View => { const value = views.get(id); if (!value) throw new Error('Snapshot is released; open and read a current snapshot.'); return value }
@@ -494,7 +494,13 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
       services.errorTaskSelected?.(selected, exec)
       const notifications = consumed?.unchangedRead ? [] : await pending(current)
       assertViewLifetime(epoch)
-      return { snapshotId: id, revision: current.snapshot.revision, consistency: current.snapshot.consistency ?? 'revision-fixed', taskId: selected, notifications, binding, ...(binding.role === 'Foreground' && taskControlPath(selected) ? { taskControlPath: taskControlPath(selected) } : {}), ...await archiveView(current, selected), ...await workspaceView(current, selected), ...plannerExecutionFacts(), ...(binding.role === 'Helper' ? { helperRecordPath: selected ? helperDebugPath(selected, new Date().toISOString().slice(0, 10)) : binding.recordPath ?? helperDebugPath(undefined, new Date().toISOString().slice(0, 10)), safetyFaults: services.helper?.faults?.(binding) ?? [], helperNotifications: [...new Map([
+      // Keep the independent workspace read. A released view or a different lifecycle
+      // must take the original read path so Git authority errors keep their precedence.
+      let liveTask: TaskMetadata | undefined
+      return { snapshotId: id, revision: current.snapshot.revision, consistency: current.snapshot.consistency ?? 'revision-fixed', taskId: selected, notifications, binding, ...(binding.role === 'Foreground' && taskControlPath(selected) ? { taskControlPath: taskControlPath(selected) } : {}),
+        ...await archiveView(current, selected, (_reference, live) => { if (files instanceof GitFiles && live?.lifecycleId === binding.lifecycleId) liveTask = live }),
+        ...await workspaceView(current, selected, liveTask && epoch === viewEpoch ? { current: liveTask } : undefined),
+        ...plannerExecutionFacts(), ...(binding.role === 'Helper' ? { helperRecordPath: selected ? helperDebugPath(selected, new Date().toISOString().slice(0, 10)) : binding.recordPath ?? helperDebugPath(undefined, new Date().toISOString().slice(0, 10)), safetyFaults: services.helper?.faults?.(binding) ?? [], helperNotifications: [...new Map([
         ...services.helper?.notifications?.(binding) ?? binding.helperNotifications ?? [], ...consumed?.helperNotifications ?? [],
       ].map(request => [request.id, request])).values()] } : {}) }
     } catch (error) { if (opened) await close(opened.id); throw error }
@@ -894,7 +900,7 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
     const signalPath = paths.state(binding.member, binding.taskId) + '/' + (successor
       ? workerWakeSignal(successor.id) : workerReplySignal(binding.workerId, binding.generation ?? 1))
     try {
-      await transferPhysicalWorker(files, { commandId: physicalPublicationCommand(exec), markerPath,
+      const confirmed = await transferPhysicalWorker(files, { commandId: physicalPublicationCommand(exec), markerPath,
         directory: worker.root + '/transfer/' + encodeURIComponent(binding.executionId),
         replyPath: worker.reply, reply: input.reply, notePath: worker.notes, records: input.records,
         ...(input.handoff !== undefined ? { handoff: { path: worker.handoff, text: input.handoff } } : {}),
@@ -918,7 +924,7 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
         if (isTerminalTask((await readJson<TaskMetadata>(files, snapshot, paths.task(binding.taskId!)))!))
           throw new Error('The Task is closed; its Worker transfer cannot publish a new notification.')
       }), () => services.physicalSignalSources?.(signalPath) ?? Promise.resolve([]), () => { assertLive(); business.assertLive?.(binding, true) })
-      await business.committed(binding)
+      await business.committed(binding, undefined, confirmed)
     } catch (error) {
       if (error instanceof PendingRoleNotifications) throw error
       rememberRoleErrorOrigin(error, { identity: binding, taskId: binding.taskId })
@@ -934,7 +940,8 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
         await physicalWorkerTransfer(input, exec, { id: input.successorId, contract: input.contract })
         exec.concludeTurn(); return
       }
-      await mutate(input.snapshotId, input, exec, async (snapshot, current) => {
+      let published: readonly FileChange[] | undefined
+      const receipt = await mutate(input.snapshotId, input, exec, async (snapshot, current) => {
         await requireDrained(current)
         if (!binding.member || !binding.workerId) throw new Error('Worker ownership is missing from the execution binding.')
         const selected = await task(current)
@@ -953,10 +960,11 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
         if (input.successorId !== binding.workerId) for (const path of [next.notes, next.reply]) {
           if (await files.read(snapshot, path) === undefined) changes.push({ path, content: '' })
         }
-        changes.push(...await business.transfer(binding, snapshot, input.successorId))
+        published = await business.transfer(binding, snapshot, input.successorId, undefined, current.taskMetadata)
+        changes.push(...published)
         return changes
       }, '', false, true)
-      await business.committed(binding)
+      await business.committed(binding, receipt && !receipt.replay ? published : undefined)
       exec.concludeTurn(); return
     })
   if (binding.role === 'Worker' && !binding.direct) register('dss_worker_deliver', 'At a meaningful acceptance checkpoint in the Planner plan, save long Reply/report references before notifying Planner, and clear the delivered current-round Worker Note. Ordinary steps use dss_worker_relay instead. Git commits the handoff together; Physical Local resumes this execution’s accepted delivery.',
@@ -967,7 +975,8 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
         await physicalWorkerTransfer(input, exec)
         exec.concludeTurn(); return
       }
-      await mutate(input.snapshotId, input, exec, async (snapshot, current) => {
+      let published: readonly FileChange[] | undefined
+      const receipt = await mutate(input.snapshotId, input, exec, async (snapshot, current) => {
         await requireDrained(current)
         if (!binding.member || !binding.workerId) throw new Error('Worker ownership is missing from the execution binding.')
         if (isTerminalTask(await task(current))) throw new Error('The total task is closed; preserve late work as records rather than reopening its business flow.')
@@ -983,10 +992,11 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
         if (input.handoff !== undefined) changes.push({ path: worker.handoff, content: input.handoff })
         // Delivery ends this Worker's round in the same authoritative write as
         // its result and Planner signal, even if shutdown loses the callback.
-        changes.push(...await business.transfer(binding, snapshot, binding.member, 'Planner'))
+        published = await business.transfer(binding, snapshot, binding.member, 'Planner', current.taskMetadata)
+        changes.push(...published)
         return changes
       }, '', false, true)
-      await business.committed(binding)
+      await business.committed(binding, receipt && !receipt.replay ? published : undefined)
       exec.concludeTurn(); return
     })
   if ((binding.role === 'Planner' && !binding.direct) || binding.role === 'Organizer') register('dss_complete',
@@ -1003,9 +1013,9 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
         if (isTerminalTask(selected)) throw new Error('The total task is already closed; use its durable results for a new task.')
         const localResults: PhysicalWorkspaceReference[] = []
         for (const reference of input.workspaceResults ?? []) if (!localResults.some(old => sameWorkspaceReference(old, reference))) localResults.push(reference)
-        const family = localResults.length ? await taskFamily(files, snapshot, selected.taskId) : []
+        const family = localResults.length ? await taskFamily(files, snapshot, selected.taskId) : undefined
         for (const reference of localResults) {
-          const own = family.find(task => task.taskId === reference.taskId)
+          const own = family?.find(task => task.taskId === reference.taskId)
           if (!own || ![own.owner, ...own.members ?? []].includes(reference.owner)) throw new Error('Physical result belongs to another task package or producer.')
           if (reference.owner === binding.owner && reference.instanceUUID === services.workspace?.instanceUUID) {
             await services.workspace!.validate(reference, snapshot, files instanceof GitFiles ? own : undefined)
@@ -1013,7 +1023,7 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
             throw new Error('The producing Host has not delivered this exact physical result. A remote path is not a local file.')
           }
         }
-        const resultPaths = await resolveChildResultReferences(files, snapshot, selected, input.resultPaths, false, true)
+        const resultPaths = await resolveChildResultReferences(files, snapshot, selected, input.resultPaths, false, true, family)
         for (const path of resultPaths) {
           const target = filePath(path)
           const exists = files instanceof PhysicalLocalFiles ? await files.fileInfo(target) : await files.readBytes(snapshot, target)
@@ -1143,11 +1153,22 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
           exec.concludeTurn(); return result
         }
         const validate = async (current: View) => {
-          const selected = await task(current)
+          const root = taskId(current)
+          const assessed = (id: string, value: TaskMetadata | undefined) => value ? {
+            taskId: value.taskId, lifecycleId: taskLifecycle(value), route: value.route,
+            owner: value.owner, ...(id === root ? { status: value.status } : {}),
+            sourcePath: value.sourcePath, archive: paths.archive(value),
+            members: value.members, parent: value.parent, children: value.children,
+            resultPaths: value.resultPaths, workspaceResults: value.workspaceResults,
+          } : null
+          const recorderTask = <T extends TaskMetadata | undefined>(id: string, read: () => Promise<T>): Promise<T> =>
+            files instanceof GitFiles ? withProjectedFileRead(current.snapshot, paths.task(id), read, value => assessed(id, value)) : read()
+          const selected = await recorderTask(root, () => task(current))
           if (selected.parent) throw new Error('Child Tasks retain their runtime materials for the total-task Recorder; they cannot finalize or request Cleaner independently.')
           if (selected.owner !== binding.owner || !isTerminalTask(selected)) throw new Error('Recorder finalization belongs to the principal’s terminal task (complete or cancelled).')
           if (!outputs.some(item => item.path === archiveRecordsPath(selected))) throw new Error('Save the AI-authored Task records at ' + archiveRecordsPath(selected) + ' before requesting Cleaner.')
-          const family = await taskFamily(files, current.snapshot, selected.taskId)
+          const family = await taskFamily(files, current.snapshot, selected.taskId,
+            id => recorderTask(id, () => readJson<TaskMetadata>(files, current.snapshot, paths.task(id))))
           if (outputs.some(item => family.some(member => item.path.startsWith(paths.archive(member) + '/lifecycles/')))) throw new Error('Previous lifecycle archives are read-only historical material.')
           if (outputs.some(item => family.some(member => [paths.archive(member) + '/retention.json', paths.archive(member) + '/state.json'].some(reserved => item.path === reserved || item.path.startsWith(reserved + '/'))))) throw new Error('retention.json and state.json are program-managed records, not AI-authored output paths.')
           if (outputs.some(item => !family.some(member => item.path.startsWith(paths.archive(member) + '/') && taskArchiveOwnsPath(member, item.path)) && !item.path.startsWith('skills/'))) throw new Error('Recorder outputs belong in this actual Task tree’s archives or long-term skills.')
@@ -1192,10 +1213,10 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
             }
             const archiveOutputs = linked.outputs.filter(output => !isSkillFile(output.path))
               .map(output => ({ path: filePath(output.path), content: output.text }))
-            const retainedPaths = await resolveChildResultReferences(files, current.snapshot, selected, [...input.retainedPaths, ...linked.retainedPaths], true)
+            const retainedPaths = await resolveChildResultReferences(files, current.snapshot, selected, [...input.retainedPaths, ...linked.retainedPaths], true, false, family)
             const originalRetention: RetentionManifest = { outputs: archiveOutputs.map(output => output.path), retainedPaths,
               recorderCommand: saveCommand, ...(selected.lifecycleId ? { lifecycleId: selected.lifecycleId } : {}) }
-            const archival = await prepareRecorderRetention(files, current.snapshot, selected, originalRetention, archiveOutputs)
+            const archival = await prepareRecorderRetention(files, current.snapshot, selected, originalRetention, archiveOutputs, undefined, family)
             missingReferences = archival.retention.missingReferences
             return [...archival.changes, ...archival.ancestorChanges,
               { path: paths.archive(selected) + '/retention.json', content: encodeJson(archival.retention) },

@@ -184,7 +184,8 @@ async function prepareArchive(files: PhysicalLocalFiles, snapshot: FilesSnapshot
   }
   const plan = await prepareRecorderRetention(files, snapshot, task, manifest, outputs.map(output => ({ path: output.path, content: output.text })), originals)
   if (plan.ancestorChanges.length) throw new Error('A total Recorder cannot have ancestor publications.')
-  const archive: RecorderPackage = { records: [], originals: [...captured.values()].filter(body => Object.values(plan.retention.relocatedReferences ?? {}).includes(body.path)), identities: [], retention: plan.retention,
+  const retainedOriginalPaths = new Set(Object.values(plan.retention.relocatedReferences ?? {}))
+  const archive: RecorderPackage = { records: [], originals: [...captured.values()].filter(body => retainedOriginalPaths.has(body.path)), identities: [], retention: plan.retention,
     ...(plan.task.resultPaths ? { resultPaths: plan.task.resultPaths } : {}) }
   for (const change of plan.changes) {
     if (change.path === paths.task(task.taskId)) continue

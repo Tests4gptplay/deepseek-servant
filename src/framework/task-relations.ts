@@ -7,8 +7,9 @@ export function linkedChild(parent: TaskMetadata, child: TaskMetadata): boolean 
     && child.parent.owner === parent.owner && (parent.children ?? []).some(link => link.taskId === child.taskId
       && link.objectiveId === child.parent!.objectiveId && link.member === child.owner)
 }
-export async function taskFamily(files: FilesStore, snapshot: FilesSnapshot, taskId: string): Promise<TaskMetadata[]> {
-  const parent = await readJson<TaskMetadata>(files, snapshot, paths.task(taskId))
+export async function taskFamily(files: FilesStore, snapshot: FilesSnapshot, taskId: string,
+  readTask = (id: string) => readJson<TaskMetadata>(files, snapshot, paths.task(id))): Promise<TaskMetadata[]> {
+  const parent = await readTask(taskId)
   if (!parent) return []
   if (parent.taskId !== taskId) throw new Error('Task metadata identity is inconsistent: ' + taskId)
   const result = [parent]
@@ -18,7 +19,7 @@ export async function taskFamily(files: FilesStore, snapshot: FilesSnapshot, tas
   for (let index = 0; index < result.length; index++) {
     const current = result[index]!
     for (const id of new Set((current.route === 'O' ? current.children ?? [] : []).map(link => link.taskId))) {
-      const child = await readJson<TaskMetadata>(files, snapshot, paths.task(id))
+      const child = await readTask(id)
       if (!child || child.taskId !== id || !linkedChild(current, child)) throw new Error('Task child association is missing or inconsistent: ' + id)
       if (visited.has(id)) throw new Error('Task child association is cyclic: ' + id)
       visited.add(id)

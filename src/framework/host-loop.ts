@@ -40,12 +40,18 @@ export interface DirectRoleNotification {
   sources: RoleWake['sources']
   observation: object
 }
+type WakeDispatch = boolean | (() => void)
+function deferAdmission(result: WakeDispatch, ready: Array<() => void>): boolean {
+  if (typeof result !== 'function') return result
+  ready.push(result)
+  return false
+}
 export interface HostLoopActions {
   physicalSignalSources?(path: string): Promise<readonly { path: string; version: string }[]>
   /** Optional display context only; returns the original owned operation promise. */
   operation?<T>(work: () => Promise<T>): Promise<T>
-  /** Resolve after durable scheduling, never after a model turn. */
-  wake(request: RoleWake): Promise<boolean | void>
+  /** Resolve after durable scheduling. Run an exact admission callback only after releasing the view. */
+  wake(request: RoleWake): Promise<WakeDispatch | void>
   /** Admit newly persisted discovery only after the borrowed view is released. Never waits for a model turn. */
   admitDiscovered?(): Promise<void>
   /** Schedule owned online delivery without joining native admission/persistence. No wake, consumption or turn policy. */
@@ -86,7 +92,7 @@ export interface HostLoopActions {
   error(error: unknown, role?: RecoveryRole): void
   changed?(): void
 }
-type TaskDispatch = (role: RecoveryRole, workerId: string | undefined, action: () => Promise<boolean>) => void
+type TaskDispatch = (role: RecoveryRole, workerId: string | undefined, action: () => Promise<WakeDispatch>) => void
 interface InitialAssignment {
   taskId: string; lifecycleId?: string; owner: string; members: string[]
   /** Existing Host reservation owns physical restart identity, not source version. */
@@ -432,7 +438,7 @@ export class FrameworkHostLoop {
     const completion = this.record.completed[key] ??= {}
     for (const flag of [...pending]) await this.persistCompletion(task, completion, flag)
   }
-  private async wake(role: RecoveryRole, snapshot: Pick<FilesSnapshot, 'revision'>, sources: FileEntry[], taskId?: string, workerId?: string, context?: Record<string, unknown>, lifecycleId?: string, observation?: object, directId?: string): Promise<boolean> {
+  private async wake(role: RecoveryRole, snapshot: Pick<FilesSnapshot, 'revision'>, sources: FileEntry[], taskId?: string, workerId?: string, context?: Record<string, unknown>, lifecycleId?: string, observation?: object, directId?: string): Promise<WakeDispatch> {
     if (this.stopping || !sources.length) return false
     if (this.actions.executing(role, singleton(role) ? undefined : taskId, workerId, directId)) {
       const selected = sources.map(({ path, version }) => ({ path, version }))
@@ -443,7 +449,7 @@ export class FrameworkHostLoop {
       return false
     }
     return (await this.actions.wake({ id: digest(JSON.stringify([role, taskId, lifecycleId, workerId, snapshot.revision, sources.map(source => source.path)])),
-      role, taskId, ...(lifecycleId ? { lifecycleId } : {}), workerId, sources: sources.map(({ path, version }) => ({ path, version })), reason: 'notification', ...(context ? { context } : {}) })) !== false
+      role, taskId, ...(lifecycleId ? { lifecycleId } : {}), workerId, sources: sources.map(({ path, version }) => ({ path, version })), reason: 'notification', ...(context ? { context } : {}) })) ?? true
   }
   private async runPoll(owned: Promise<void>[], round: FilesReadRound | undefined, observation: object, startedAt: number): Promise<Promise<void>[]> {
     try { await this.actions.observe(round, observation) } catch (error) { this.actions.error(error) }
@@ -534,8 +540,8 @@ export class FrameworkHostLoop {
     if (this.stopping) return []
     // Each role has one ordered lane; an unrelated held/failing wake cannot
     // delay another role's admission. No lane borrows the released view.
-    const lanes = new Map<string, Array<() => Promise<boolean>>>()
-    const enqueue = (key: string, action: () => Promise<boolean>) => {
+    const lanes = new Map<string, Array<() => Promise<WakeDispatch>>>()
+    const enqueue = (key: string, action: () => Promise<WakeDispatch>) => {
       const lane = lanes.get(key) ?? []
       lane.push(action); lanes.set(key, lane)
     }
@@ -613,13 +619,17 @@ export class FrameworkHostLoop {
       if (active) { owned.push(active); continue }
       const operation = Promise.resolve().then(() => this.runOperation(async () => {
         let scheduled = false
+        const ready: Array<() => void> = []
         const errors: unknown[] = []
         for (const dispatch of lane) {
           if (this.stopping) break
-          try { scheduled = await dispatch() || scheduled } catch (error) { errors.push(error) }
+          try { scheduled = deferAdmission(await dispatch(), ready) || scheduled } catch (error) { errors.push(error) }
         }
-        if (scheduled && !this.stopping) {
-          try { await this.actions.admitDiscovered?.() } catch (error) { errors.push(error) }
+        if (!this.stopping) {
+          try {
+            if (scheduled || ready.length > 1) await this.actions.admitDiscovered?.()
+            else ready[0]?.()
+          } catch (error) { errors.push(error) }
         }
         if (errors.length === 1) throw errors[0]
         if (errors.length) throw new AggregateError(errors, 'Signal lane failed')
@@ -775,7 +785,7 @@ export class FrameworkHostLoop {
       this.taskLanes.set(entry.path, lane)
     }
     if (lane.running) return lane.owned
-    const owned = lane, dispatches = new Map<string, Array<() => Promise<boolean>>>()
+    const owned = lane, dispatches = new Map<string, Array<() => Promise<WakeDispatch>>>()
     const roleOperations: Promise<void>[] = []
     const enqueue: TaskDispatch = (role, workerId, action) => {
       const key = JSON.stringify([entry.path, role, workerId])
@@ -786,6 +796,7 @@ export class FrameworkHostLoop {
       if (this.stopping) return
       const snapshot = round ? await round.acquireSnapshot() : await this.pollingSnapshot(revision)
       let scheduled = false
+      const ready: Array<() => void> = []
       try {
         if (this.stopping) return
         // A task lane never borrows a poll view that another Task can hold open.
@@ -815,7 +826,7 @@ export class FrameworkHostLoop {
         const physicalCleanup = this.files instanceof PhysicalLocalFiles && !task.parent && task.owner === this.identity.member
           && await this.files.read(snapshot, paths.state(task.owner, task.taskId) + '/Cleaner') !== undefined
         if (!physicalCleanup && await this.actions.discoverTask?.(task, snapshot) === false) return
-        if (!this.stopping) scheduled = await this.scanTask(task, snapshot, startedAt, enqueue, observation)
+        if (!this.stopping) scheduled = await this.scanTask(task, snapshot, startedAt, enqueue, observation, ready)
       } finally {
         await snapshot.release()
         if (!this.stopping) for (const [key, queue] of dispatches) {
@@ -824,13 +835,17 @@ export class FrameworkHostLoop {
           if (this.taskRoleLanes.has(key)) continue
           const operation = Promise.resolve().then(() => this.runOperation(async () => {
             let admitted = false
+            const ready: Array<() => void> = []
             const errors: unknown[] = []
             for (const dispatch of queue) {
               if (this.stopping) break
-              try { admitted = await dispatch() || admitted } catch (error) { errors.push(error) }
+              try { admitted = deferAdmission(await dispatch(), ready) || admitted } catch (error) { errors.push(error) }
             }
-            if (admitted && !this.stopping) {
-              try { await this.actions.admitDiscovered?.() } catch (error) { errors.push(error) }
+            if (!this.stopping) {
+              try {
+                if (admitted || ready.length > 1) await this.actions.admitDiscovered?.()
+                else ready[0]?.()
+              } catch (error) { errors.push(error) }
             }
             if (errors.length === 1) throw errors[0]
             if (errors.length) throw new AggregateError(errors, 'Task role discovery failed')
@@ -838,7 +853,10 @@ export class FrameworkHostLoop {
           this.taskRoleLanes.set(key, operation); roleOperations.push(operation)
           void operation.catch(error => this.actions.error(error)).finally(() => { if (this.taskRoleLanes.get(key) === operation) this.taskRoleLanes.delete(key) })
         }
-        if (scheduled && !this.stopping) await this.actions.admitDiscovered?.()
+        if (!this.stopping) {
+          if (scheduled || ready.length > 1) await this.actions.admitDiscovered?.()
+          else ready[0]?.()
+        }
       }
     }))
     // The metadata lane ends once reads are released and role flights are
@@ -868,7 +886,7 @@ export class FrameworkHostLoop {
     }).catch(() => {})
     return operation
   }
-  private async scanTask(task: TaskMetadata, snapshot: FilesSnapshot, startedAt: number, enqueue?: TaskDispatch, observation?: object): Promise<boolean> {
+  private async scanTask(task: TaskMetadata, snapshot: FilesSnapshot, startedAt: number, enqueue?: TaskDispatch, observation?: object, ready: Array<() => void> = []): Promise<boolean> {
     const lifecycleKey = taskLifecycleKey(task)
     let scheduled = false
     try {
@@ -968,7 +986,7 @@ export class FrameworkHostLoop {
           if (recorderReady && !task.parent && task.owner === this.identity.member) {
             const signals = await stateSignals()
             for (const source of signals.filter(entry => entry.path.split('/').at(-1) === 'Recorder')) {
-              scheduled = await this.wake('Recorder', snapshot, [source], task.taskId, undefined, completionLocations(task.taskId, task), task.lifecycleId) || scheduled
+              scheduled = deferAdmission(await this.wake('Recorder', snapshot, [source], task.taskId, undefined, completionLocations(task.taskId, task), task.lifecycleId), ready) || scheduled
             }
           }
           if (completion.released) return
@@ -988,7 +1006,7 @@ export class FrameworkHostLoop {
           if (!sources.length) return false
           const action = () => this.wake(role, snapshot, sources, task.taskId, workerId, context, task.lifecycleId, observation)
           if (enqueue) { enqueue(role, workerId, action); return false }
-          return action()
+          return deferAdmission(await action(), ready)
         }
         if (task.route === 'P') scheduled = await dispatch('Planner', signals.filter(entry => entry.path.split('/').at(-1)!.startsWith('Planner_'))) || scheduled
         for (const source of task.route === 'P' ? signals.filter(entry => entry.path.split('/').at(-1)!.startsWith('Worker_')) : []) {

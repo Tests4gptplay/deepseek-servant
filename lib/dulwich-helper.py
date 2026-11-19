@@ -633,16 +633,22 @@ class Engine:
 
     def receive(self, repo, client, path, wants, *, tip=None, filter_spec=b'blob:none', protocol=2, prefixes=None, depth=1):
         stage = StrictMemoryStore(repo.object_store)
-        stream, commit, abort = stage.add_pack()
+        pack = None
         def write(chunk):
+            nonlocal pack
             check_cancelled()
-            return stream.write(chunk)
+            if not chunk:
+                return 0
+            if pack is None:
+                pack = stage.add_pack()
+            return pack[0].write(chunk)
         try:
             walker = repo.get_graph_walker(heads=[tip] if tip else [])
             result = client.fetch_pack(path, wants, walker, write, depth=depth,
                 filter_spec=filter_spec, protocol_version=protocol, ref_prefix=prefixes)
             check_cancelled()
-            commit()
+            if pack is not None:
+                pack[1]()
             check_cancelled()
             # Publish confirmed objects and shallow metadata together. Neither
             # changes until this receive and validation work has succeeded.
@@ -654,7 +660,8 @@ class Engine:
                     repo.update_shallow(result.new_shallow, result.new_unshallow)
             return result
         except BaseException:
-            abort()
+            if pack is not None:
+                pack[2]()
             raise
 
     def replacement(self, repo, request):
