@@ -1,17 +1,10 @@
 import { uploadNativeLocalAttachment } from './native-local-attachment-upload.js'
 import { GitStartupUpgrade } from './git-startup-upgrade.js'
 import { convertedLocalSkillPath } from './local-upgrade-mapping.js'
-import { localUpgradeView } from './local-upgrade-view.js'
-import { keepCurrentLocalUpgradeTarget, keepRetainedLocalUpgradeStage } from './local-startup-upgrade.js'
-import { keepRetainedSpecialLocalUpgradeStage } from './local-upgrade-special-stage-choice.js'
-import { readLocalUpgradeCompleted } from './local-upgrade-completion.js'
 import { PendingLocalTaskViewCache, pendingLocalTaskResult } from './legacy-local-task-view.js'
-import { pendingLocalInitializationOriginal } from './local-upgrade-initialization.js'
 import { frameworkArchiveSkillPublication } from './client-presentation.js'
-import { legacyTaskNeedsRestoration, type LocalTaskUpgradeReport } from './local-upgrade-task.js'
 import { PhysicalLocalFiles } from './physical-local-files.js'
-import { LocalStartupUpgradeAgent, type LocalUpgradeAgentResult } from './local-startup-upgrade-agent.js'
-import { legacyConversationNeedsRestoration, prepareLocalConversation, restoreLegacyConversationSignals, localConversationUpgradeKey, type LocalConversationUpgradeReport } from './local-upgrade-conversation.js'
+import { legacyConversationNeedsRestoration, prepareLocalConversation } from './local-upgrade-conversation.js'
 import { LegacyLocalConversationView } from './legacy-local-conversation-view.js'
 import { taskArchiveReadPath } from './task-archive.js'
 import { ConversationAttachments, type ConversationAttachmentUpload } from './conversation-attachments.js'
@@ -54,7 +47,7 @@ import { createRecorderCapacity } from './capacity.js';
 import { paths, readJson, readMemberStatus, taskLifecycle, isTerminalTask, type TaskMetadata, type MemberStatus } from './task-files.js';
 import { withOperationChannel, withReadOperation, withSnapshot, FilesConflictError, FilesOutcomeUnknownError, type FilesStore, type FilesSnapshot, type FileChange } from './transactions.js';
 import { readArchivedReference, resolveTaskRequirementReference } from './recorder-retention.js';
-import { InstanceRegistration, type ObservedInstance, type RegisteredInstance } from './instances.js';
+import { InstanceRegistration, type ObservedInstance } from './instances.js';
 import type { FrameworkClientApi, FrameworkTaskControlSubmission, FrameworkExecutionStopSubmission, FrameworkClientChange, FrameworkClientSettings, FrameworkClientView, FrameworkMode, FrameworkSendInput } from './client-contracts.js';
 import { GitAuthorityStore } from './git-authority.js'
 import { taskArchiveHostKey } from './task-archive.js'
@@ -82,7 +75,6 @@ interface Running {
 }
 /** Both modes use one business implementation; selecting a page does not own either runtime. */
 export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChanged' | 'uploadAttachment'> {
-    private readonly localUpgrades = new Map<string, { controller: AbortController; work?: Promise<LocalUpgradeAgentResult>; agent?: LocalStartupUpgradeAgent; result?: LocalUpgradeAgentResult; failure?: string; choosing?: boolean; oldSourceFound?: true; assessedSignals: Set<string>; conversations: Map<string, Promise<LocalConversationUpgradeReport>>; tasks: Map<string, Promise<LocalTaskUpgradeReport>>; independentTasks: Set<string>; taskChecks?: Map<string, Promise<boolean>>; registered?: RegisteredInstance }>();
     private readonly accessTransitions = new Map<FrameworkMode, Promise<void>>();
     private readonly accesses = new Map<FrameworkMode, Promise<Access>>();
     private readonly writePreparations = new Set<Promise<void>>();
@@ -346,159 +338,6 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
     }
     /** Explicit lifecycle callers may still await every owned startup responsibility. */
     async start(): Promise<void> { await this.initialize(); await this.starting; this.assertOpen(); }
-    private boundLocalScope(directory: string): string | undefined {
-        const running = this.running.get('local');
-        if (!running || this.stopping.has(running) || !(running.connection.files instanceof PhysicalLocalFiles)
-            || running.connection.files.directory !== directory
-            || running.runtime.config.collaborationId !== this.config('local').settings.collaborationId) return undefined;
-        return running.runtime.config.collaborationId;
-    }
-    /** Activated by the existing Host startup owner, never by an ordinary read.
-     * The physical connection is available while this exact source is converted;
-     * unrelated tasks and already converted scopes do not await the Agent. */
-    private startLocalUpgrade(connection: Pick<FrameworkStorage, 'files' | 'scope' | 'identity'>, workspace: string, settings: FrameworkClientSettings): void {
-        if (!(connection.files instanceof PhysicalLocalFiles) || this.localUpgrades.has(connection.files.directory)) return;
-        const directory = connection.files.directory;
-        const owner = { controller: new AbortController(), conversations: new Map<string, Promise<LocalConversationUpgradeReport>>(), tasks: new Map<string, Promise<LocalTaskUpgradeReport>>(), independentTasks: new Set<string>(), taskChecks: new Map<string, Promise<boolean>>(), assessedSignals: new Set<string>(), oldSourceFound: undefined as true | undefined, work: undefined as Promise<LocalUpgradeAgentResult> | undefined, agent: undefined as LocalStartupUpgradeAgent | undefined, result: undefined as LocalUpgradeAgentResult | undefined, failure: undefined as string | undefined, registered: undefined as RegisteredInstance | undefined };
-        this.localUpgrades.set(directory, owner);
-        const invalidateTaskView = (taskId?: string) => {
-            if (taskId === undefined) owner.taskChecks.clear(); else owner.taskChecks.delete(taskId);
-            void this.accesses.get('local')?.then(access => {
-                if (access.connection.files instanceof PhysicalLocalFiles && access.connection.files.directory === directory) access.originalTasks?.invalidate(taskId);
-            }).catch(() => {});
-        };
-        const resumeInitialization = () => {
-            // The exporter can finish before runtime construction. Reuse this
-            // acquisition's opening promise; do not start another connection.
-            void (async () => {
-                const running = this.running.get('local') ?? await this.opening.get('local')?.catch(() => undefined);
-                if (running?.connection.files instanceof PhysicalLocalFiles && running.connection.files.directory === directory)
-                    running.runtime.resumeInitializationOriginals();
-            })().catch(error => { if (!owner.controller.signal.aborted) this.report('local', error, connection.scope); });
-        };
-        const agent = new LocalStartupUpgradeAgent(this.ctx, this.storage, { directory, cwd: workspace,
-            presetId: settings.presetId, model: settings.background, collaborationId: settings.collaborationId,
-            currentCollaborationId: () => this.boundLocalScope(directory),
-            whenLocalOpened: () => this.opening.get('local'),
-            onOldSourceFound: () => {
-                owner.oldSourceFound = true;
-                const running = this.running.get('local');
-                if (running?.connection.files instanceof PhysicalLocalFiles && running.connection.files.directory === directory)
-                    this.scheduleBoundOriginalConversationSignals(running);
-            },
-            currentInstance: () => ({ instanceUUID: connection.identity.instanceUUID,
-                registered: this.running.get('local')?.connection.scope === connection.scope ? this.running.get('local')!.connection.registration : owner.registered }),
-            hostKey: taskArchiveHostKey(undefined, connection.scope, connection.identity.instanceUUID),
-            changed: () => this.changed(),
-            onMaterialization: () => resumeInitialization(),
-            onSkillRestoration: result => {
-                if (result.status === 'complete') {
-                    const running = this.running.get('local');
-                    if (running?.connection.files instanceof PhysicalLocalFiles && running.connection.files.directory === directory) running.runtime.refreshSkills();
-                }
-            },
-            onTaskRestoration: (taskId, work) => {
-                owner.taskChecks.delete(taskId);
-                owner.tasks.set(taskId, work);
-                void work.finally(() => { if (owner.tasks.get(taskId) === work) owner.tasks.delete(taskId); invalidateTaskView(taskId); }).catch(() => {});
-                void work.then(async result => {
-                    if (result.status !== 'complete' && result.status !== 'not-needed') return;
-                    owner.independentTasks.add(taskId);
-                    const running = this.running.get('local') ?? await this.opening.get('local')?.catch(() => undefined);
-                    if (running?.connection.files instanceof PhysicalLocalFiles && running.connection.files.directory === directory)
-                        running.runtime.resumeImportedTask(taskId);
-                    this.changed();
-                }).catch(error => { if (!owner.controller.signal.aborted) this.report('local', error, connection.scope); });
-            },
-            onConversationRestoration: (scope, work) => {
-                owner.conversations.set(scope, work);
-                void work.then(async result => {
-                    if (result.status !== 'complete' && result.status !== 'not-needed') return;
-                    const access = await this.accesses.get('local')?.catch(() => undefined);
-                    if (access?.connection.files instanceof PhysicalLocalFiles && access.connection.files.directory === directory && access.conversation.scope.collaborationId === scope) {
-                        await access.conversation.resumePhysicalPublication();
-                        access.legacyConversation = undefined;
-                    }
-                    this.changed();
-                }).catch(error => { if (!owner.controller.signal.aborted) this.report('local', error, connection.scope); });
-            } });
-        owner.agent = agent;
-        owner.work = agent.start(owner.controller.signal);
-        void owner.work.then(result => {
-            owner.result = result;
-            if (result.status === 'complete') owner.oldSourceFound = undefined;
-            invalidateTaskView(); resumeInitialization();
-            if (result.status === 'not-needed' && this.localUpgrades.get(directory) === owner) this.localUpgrades.delete(directory);
-            if (result.status === 'pending') this.report('local', new Error(result.detail ?? result.pending?.map(item => item.path + ': ' + item.reason).join('; ') ?? 'The one-time Local upgrade remains incomplete; original data is retained.'), connection.scope);
-            this.changed();
-        }, error => { if (!owner.controller.signal.aborted) { owner.failure = error instanceof Error ? error.message : String(error); invalidateTaskView(); this.report('local', error, connection.scope); this.changed(); } });
-    }
-    /** Activation only: retry an already-restored exact scope whose old
-     * notification was deferred before this Host was bound. The decision is
-     * one persisted receipt read, not a SQL scan on every scope switch. */
-    private async resumeBoundOriginalConversationSignals(running: Running): Promise<void> {
-        if (!(running.connection.files instanceof PhysicalLocalFiles)) return;
-        const directory = running.connection.files.directory, scope = running.runtime.config.collaborationId;
-        const owner = this.localUpgrades.get(directory);
-        if (!owner?.agent || !owner.oldSourceFound || owner.assessedSignals.has(scope)) return;
-        const state = await this.storage.get<{ kind: string; directory: string; collaborationId: string; status: string; signalsAssessed?: { version: number; pending?: unknown[] } }>(localConversationUpgradeKey(directory, scope));
-        if (state?.kind !== 'dss-once-conversation-full-text' || state.directory !== directory || state.collaborationId !== scope
-            || state.status !== 'complete') return;
-        if (state.signalsAssessed?.version === 1) {
-            if (Array.isArray(state.signalsAssessed.pending) && state.signalsAssessed.pending.length === 0)
-                owner.assessedSignals.add(scope);
-            return;
-        }
-        await restoreLegacyConversationSignals(directory, scope, this.storage,
-            () => this.boundLocalScope(directory), owner.controller.signal);
-        // Only a persisted empty-pending assessment is final. A binding change
-        // or an ambiguous original must remain eligible on the next activation.
-        const assessed = await this.storage.get<{ signalsAssessed?: { version: number; pending?: unknown[] } }>(localConversationUpgradeKey(directory, scope));
-        if (assessed?.signalsAssessed?.version === 1 && Array.isArray(assessed.signalsAssessed.pending)
-            && assessed.signalsAssessed.pending.length === 0) owner.assessedSignals.add(scope);
-        this.changed();
-    }
-    private scheduleBoundOriginalConversationSignals(running: Running): void {
-        void this.resumeBoundOriginalConversationSignals(running).catch(error => {
-            const owner = running.connection.files instanceof PhysicalLocalFiles ? this.localUpgrades.get(running.connection.files.directory) : undefined;
-            if (!owner?.controller.signal.aborted) this.report('local', error, running.connection.scope);
-        });
-    }
-    private beforeLocalTaskDiscovery(connection: Pick<FrameworkStorage, 'files'>, task: TaskMetadata): Promise<boolean> {
-        return this.beforeLocalTaskUse(connection, task.taskId);
-    }
-    private async beforeLocalTaskUse(connection: Pick<FrameworkStorage, 'files'>, taskId: string, wait = true): Promise<boolean> {
-        if (!(connection.files instanceof PhysicalLocalFiles)) return true;
-        const owner = this.localUpgrades.get(connection.files.directory);
-        if (owner?.independentTasks.has(taskId)) return true;
-        const work = owner?.tasks.get(taskId);
-        if (work) {
-            // A non-waiting runtime probe borrows this Task's live restoration;
-            // it neither opens the original SQL again nor waits for another Task.
-            if (!wait) return false;
-            await work;
-            if (owner?.independentTasks.has(taskId)) return true;
-        }
-        // Once the existing startup lifecycle has completed without an owner,
-        // later Tasks do not repeatedly inspect the old migration source.
-        if (!owner) return !!this.starting && !this.startupState.has('local') || !await legacyTaskNeedsRestoration(connection.files.directory, taskId, this.storage);
-        const checks = owner.taskChecks ??= new Map<string, Promise<boolean>>();
-        const pending = checks.get(taskId);
-        if (pending) return pending;
-        // Reuse both the in-flight read and its known pending answer until this
-        // Task restoration, source result or explicit Refresh changes the facts.
-        const checked: Promise<boolean> = legacyTaskNeedsRestoration(connection.files.directory, taskId, this.storage, owner.controller.signal).then(needed => {
-            if (!needed && checks.get(taskId) === checked) {
-                owner.independentTasks.add(taskId); checks.delete(taskId);
-            }
-            return !needed;
-        }, error => {
-            if (checks.get(taskId) === checked) checks.delete(taskId);
-            throw error;
-        });
-        checks.set(taskId, checked);
-        return checked;
-    }
     private async prepareConversationWrite(access: Access): Promise<void> {
         await access.conversation.prepare();
         await access.conversation.resumePhysicalPublication();
@@ -550,10 +389,6 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                         await this.connect(mode, owner.controller.signal);
                     } else if (mode === 'local') {
                         const access = await this.access(mode);
-                        if (access.connection.files instanceof PhysicalLocalFiles) {
-                            const workspace = await new DshWorkspaceAdapter(this.ctx).resolve(undefined, this.config(mode).settings.workspace || undefined);
-                            this.startLocalUpgrade(access.connection, workspace.directory, this.config(mode).settings);
-                        }
                         await this.withManualCleanup(access, cleanup => cleanup.resumePending((error, commandId) => { this.report(mode, error, access.connection.scope, commandId); }));
                     }
                     if (this.startupState.get(mode)?.owner === owner) this.startupState.delete(mode);
@@ -753,15 +588,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         const connection = await openFrameworkConnection(mode === 'local' ? { mode, directory: settings.localDirectory, login: settings.userName, workerSeats: settings.workerSeats }
              : { mode, ownerRepo: settings.ownerRepo, repositoryDirectory: settings.repositoryDirectory, workerSeats: settings.workerSeats }, { storage: this.storage, signal, gitRuntime: this.gitRuntime,
                 onGitOperationConfirmed: (scope, id) => this.gitOperationConfirmed(mode, scope, id),
-                onStorageOpened: access => this.startLocalUpgrade(access, workspace.directory, settings),
                 onOriginalInstanceIssue: error => { this.report(mode, error); },
-                onInstanceRegistered: (access, registered) => {
-                    if (access.files instanceof PhysicalLocalFiles) {
-                        const owner = this.localUpgrades.get(access.files.directory);
-                        if (owner) owner.registered = registered;
-                    }
-                },
-                ...(mode === 'local' ? { pendingInitializationOriginal: (path: string) => pendingLocalInitializationOriginal(settings.localDirectory, this.storage, path, signal) } : {}),
             });
         if (connection.roleGuideInitializationError !== undefined)
             this.ctx.logger?.('deepseek-servant').error('Foreground reference initialization did not complete; independent work remains available.', connection.roleGuideInitializationError);
@@ -785,7 +612,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 scope: connection.scope, member: connection.registration.member, instanceUUID: connection.registration.instanceUUID, primary: connection.registration.primary, workspace: workspace.directory,
                 workerSeats: settings.workerSeats, mode, collaborationId: settings.collaborationId, presetId: settings.presetId,
                 foreground: settings.foreground, background: settings.background, permissionPreset: settings.permissionPreset,
-            }, { ...(connection.files instanceof PhysicalLocalFiles ? { beforeTaskUse: (taskId: string, wait?: boolean) => this.beforeLocalTaskUse(connection, taskId, wait) } : {}), initialization: connection.initialization, beforeTaskDiscovery: task => this.beforeLocalTaskDiscovery(connection, task), sharedRecords: connection.sharedRecords, members: () => resource.resources.map(row => row.member), resources: () => resource.resources, capacity: createRecorderCapacity(connection.files),
+            }, { initialization: connection.initialization, sharedRecords: connection.sharedRecords, members: () => resource.resources.map(row => row.member), resources: () => resource.resources, capacity: createRecorderCapacity(connection.files),
                 changed: change => this.changed(change), resolved: target => this.resolveRoleErrors(mode, connection.scope, target),
                 oldLocalControlRecovered: taskId => this.clearLegacyLocalControlIssue(connection.scope, taskId),
                 cancelPending: reason => connection.cancelPending(reason), heartbeat: async snapshot => {
@@ -818,7 +645,6 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             this.assertOpen(); signal?.throwIfAborted();
             runtime.setForegroundModel(this.config(mode).settings.foreground);
             this.running.set(mode, resource); this.deliverSafetyFaults();
-            if (mode === 'local') this.scheduleBoundOriginalConversationSignals(resource);
             if (mode === 'git') this.startGitUpgrade(resource, workspace.directory, settings);
             const startupError = this.startupErrors.get(mode), reported = this.reportedErrors.get(mode);
             if (startupError && !reported?.get(startupError)?.operationId) { reported?.delete(startupError); this.startupErrors.delete(mode); this.refreshErrors(mode); }
@@ -882,9 +708,6 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         signal?.throwIfAborted();
         if (this.config(mode).revision !== saved.revision) return this.view(input, signal, channel);
         base.storageScope = access.connection.scope;
-        if (access.connection.files instanceof PhysicalLocalFiles) {
-            try { base.localUpgrade = await localUpgradeView(access.connection.files.directory, this.storage, this.localUpgrades.get(access.connection.files.directory)); } catch (error) { report(error); }
-        }
         if (input.includeArchives) base.archives = [];
         // One view reads one authorized revision. Nested readers borrow this
         // snapshot; independent refreshes still acquire their own remote HEAD.
@@ -937,8 +760,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             // scope. This borrowed snapshot belongs only to the access store.
             let pendingOriginalTasks: Awaited<ReturnType<PendingLocalTaskViewCache['read']>> = [];
             if (access.connection.files instanceof PhysicalLocalFiles) {
-                if (base.localUpgrade?.status === 'complete') access.originalTasks?.retire();
-                else try {
+                try {
                     if (!access.originalTasks) {
                         const accessOwner = this.accesses.get(mode);
                         const current = () => !this.closed && !access.closing && this.accesses.get(mode) === accessOwner;
@@ -947,7 +769,6 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                     }
                     if (input.refreshOriginalTasks) {
                         access.originalTasks.invalidate();
-                        this.localUpgrades.get(access.connection.files.directory)?.taskChecks?.clear();
                     }
                     const originalView = access.originalTasks.view(signal);
                     base.originalTaskRead = originalView.status;
@@ -1127,9 +948,6 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         // it never starts a loop, registers a member or opens an Agent.
         const owners = new Map<FrameworkMode, Access>();
         if (!this.recordMoving) owners.set('local', await this.access('local'));
-        for (const owner of this.localUpgrades.values()) owner.controller.abort();
-        await Promise.allSettled([...this.localUpgrades.values()].map(owner => owner.work));
-        this.localUpgrades.clear();
         this.recordMoving = new Error('The confirmed record move owns these locations; resume that command before accessing records.');
         this.accessOpening.get('local')?.abort(this.recordMoving);
         this.backgroundOpening.get('local')?.abort(this.recordMoving);
@@ -1190,7 +1008,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 this.clearResolvedErrors('local', input.commandId); this.changed();
                 const directory = (this.storage as StoragePort & RecordMovePhysicalStore).storageView().directory;
                 return { status: 'applied' as const, commandId: input.commandId,
-                    requestedDirectory: input.directory, directory, ...(applied.sourceCleanup ? { sourceCleanup: applied.sourceCleanup } : { retainedSource: applied.sourceRecords }) };
+                    requestedDirectory: input.directory, directory, ...(applied.sourceRetained ? { retainedSource: applied.sourceRecords } : {}) };
             } catch (error) {
                 try { this.pendingRecordMove = await mover.pendingReceipt() ?? this.pendingRecordMove; } catch { /* Keep the already-owned intent if locator reconciliation remains unknown. */ }
                 this.report('local', error, input.storageScope, input.commandId); throw error;
@@ -1238,57 +1056,6 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         if (!controller?.canOpenWorkspacePath()) throw new Error('This Host cannot open local directories. Path: ' + path);
         await controller.openWorkspacePath({ path }, signal);
         return { path };
-    }
-    async keepCurrentLocalUpgradeTarget(input: Parameters<FrameworkClientApi['keepCurrentLocalUpgradeTarget']>[0]): Promise<{ saved: boolean }> {
-        const keepStage = input.confirmation === 'keep-retained-stage-without-cleanup';
-        if (input.mode !== 'local' || !keepStage && input.confirmation !== 'keep-current-with-original-unexported')
-            throw new Error('Confirm keeping the current physical state while leaving the original SQL row unexported.');
-        if (!keepStage && input.stageOwner) throw new Error('A retained-stage owner is not an original-row export choice.');
-        const access = await this.access('local'); this.checkScope(access, input.storageScope);
-        if (!(access.connection.files instanceof PhysicalLocalFiles)) throw new Error('This choice belongs to the selected Local records.');
-        const directory = access.connection.files.directory, owner = this.localUpgrades.get(directory);
-        // Two authenticated Settings windows may submit distinct dispositions at once.
-        // Serialize only this owner's explicit choice write, never ordinary reads
-        // or other Local roots. A losing request refreshes rather than claiming
-        // success from a stale operation snapshot.
-        if (owner?.choosing) throw new Error('Another Local upgrade choice is being saved; refresh and retry this row.');
-        if (owner) owner.choosing = true;
-        try {
-            const selectedSpecial = (item: { owner: { kind: string; id: string }; operationId: string; path: string }) =>
-                !!input.stageOwner && item.owner.kind === input.stageOwner.kind && item.owner.id === input.stageOwner.id
-                && item.operationId === input.operationId && item.path === input.path;
-            if (keepStage && input.stageOwner && owner?.result?.retainedSpecialStages?.some(selectedSpecial)) return { saved: true };
-            if (owner?.result?.report.operationId === input.operationId && (keepStage
-                ? !input.stageOwner && owner.result.report.retainedStages?.some(stage => stage.path === input.path && stage.keptByUser)
-                : owner.result.report.keptCurrent?.some(row => row.path === input.path)))
-                return { saved: true };
-            const completed = await readLocalUpgradeCompleted(directory, this.storage);
-            if (keepStage && input.stageOwner && completed?.retainedSpecialStages?.some(selectedSpecial)) return { saved: true };
-            if (completed?.operationId === input.operationId && (keepStage
-                ? !input.stageOwner && completed.report.retainedStages?.some(stage => stage.path === input.path && stage.keptByUser)
-                : completed.report.keptCurrent?.some(row => row.path === input.path)))
-                return { saved: true };
-            if (!owner || owner.result?.status !== 'pending' || !owner.agent || !owner.work)
-                throw new Error('Wait for the original one-time upgrade to report its exact conflict before choosing.');
-            await owner.work;
-            if (keepStage && input.stageOwner && !owner.result?.specialStageChoices?.some(selectedSpecial))
-                throw new Error('This exact specialist stage was not offered by the settled one-time finish assessment; refresh it.');
-            let saved = true;
-            if (keepStage && input.stageOwner) saved = (await keepRetainedSpecialLocalUpgradeStage(directory, this.storage,
-                { owner: input.stageOwner, operationId: input.operationId, path: input.path })).saved;
-            else if (keepStage) saved = (await keepRetainedLocalUpgradeStage(directory, this.storage, input.operationId, input.path)).saved;
-            else await keepCurrentLocalUpgradeTarget(directory, this.storage, input.operationId, input.path);
-            // Resume the same one-time owner once; its original wake/session and SQL
-            // still decide every other row. Saving the choice never claims finish.
-            owner.result = undefined; owner.failure = undefined;
-            const work = owner.agent.start(owner.controller.signal);
-            owner.work = work;
-            void work.then(result => { owner.result = result; this.changed(); }, error => {
-                if (!owner.controller.signal.aborted) { owner.failure = error instanceof Error ? error.message : String(error); this.report('local', error, access.connection.scope); this.changed(); }
-            });
-            this.changed();
-            return { saved };
-        } finally { if (owner) owner.choosing = false; }
     }
     private async legacyManifestPath(access: Access, snapshot: import('./transactions.js').FilesSnapshot, migrationId: string): Promise<string> {
         const index = await readJson<{ migrations: Array<{ id: string; manifestPath: string }> }>(access.connection.files, snapshot, 'technical/legacy-migrations/index.json');
@@ -1375,11 +1142,9 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         return access.knowledge ??= new FrameworkKnowledge(access.connection.files, access.connection.transactions, () => {
             this.running.get(mode)?.runtime.refreshSkills(); this.changed();
         }, access.connection.files instanceof PhysicalLocalFiles ? {
-            pendingPaths: () => this.localUpgrades.get((access.connection.files as PhysicalLocalFiles).directory)?.agent?.pendingSkillPaths() ?? [],
+            pendingPaths: () => [],
             resolve: async path => {
                 const directory = (access.connection.files as PhysicalLocalFiles).directory;
-                const owner = this.localUpgrades.get(directory)?.agent;
-                if (owner) return owner.skillSelection(path);
                 const convertedPath = await convertedLocalSkillPath(directory, path, this.storage);
                 return convertedPath ? { convertedPath } : {};
             },
@@ -1415,13 +1180,6 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
     taskControl(input: { mode: FrameworkMode; storageScope?: string; commandId: string; taskId: string; lifecycleId?: string; intent: 'running' | 'paused' | 'cancelled' }): Promise<FrameworkTaskControlSubmission> {
         return this.withAccessOperation(input, async access => {
             const active = this.running.get(input.mode);
-            if (access.connection.files instanceof PhysicalLocalFiles && !await this.beforeLocalTaskUse(access.connection, input.taskId)) {
-                const owner = this.localUpgrades.get(access.connection.files.directory);
-                if (!owner?.agent) throw new Error('This original Task is waiting for its one-time Local restoration after DSS Host activation.');
-                const restored = await owner.agent.restoreTask(input.taskId, owner.controller.signal);
-                if (restored.status === 'incomplete') throw new Error(restored.issues.map(issue => (issue.path ? issue.path + ': ' : '') + issue.message).join('; '));
-                if (!await this.beforeLocalTaskUse(access.connection, input.taskId)) throw new Error('The selected original Task restoration remains incomplete; its original data is retained.');
-            }
             return withOperationChannel(access.connection.files, 'foreground-write', async () => {
                 // Git writes own their foreground access and CAS, never the Host read queue.
                 // Physical Local controls own only the addressed Task, never a global writer queue.
@@ -2116,7 +1874,6 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         if (this.disposal) return this.disposal;
         this.closed = true;
         this.recordMoveController?.abort();
-        for (const owner of this.localUpgrades.values()) owner.controller.abort();
         for (const owner of this.configurationOwners) owner.controller.abort();
         for (const controller of [...this.accessOpening.values(), ...this.backgroundOpening.values()]) controller.abort();
         // Pending acquisitions remain owned until they settle. Their publication
@@ -2134,8 +1891,6 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             const cancellingAccess = accesses.map(pending => pending.then(access => {
                 try { access.connection.cancelPending(); } catch (error) { this.disposalErrors.push(error); }
             }, () => {}));
-            await Promise.allSettled([...this.localUpgrades.values()].map(owner => owner.work));
-            this.localUpgrades.clear();
             await Promise.allSettled([this.initializing, this.starting, ...this.modeConfiguration.values(), ...this.modeSending.values()]);
             await Promise.allSettled([...this.opening.values()]);
             await Promise.all(stopping);

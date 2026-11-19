@@ -33,8 +33,7 @@ const hooks = registerHooks({
   },
 })
 
-const { materializeLegacyLocalFiles, inspectLocalStartupUpgrade, readLegacyLocalOriginal, localStartupUpgradeKey } = await import('../src/framework/local-startup-upgrade.ts')
-const { assessLocalUpgradeCompletion } = await import('../src/framework/local-upgrade-completion.ts')
+const { publishLocalUpgradeBytes, inspectLocalStartupUpgrade, readLegacyLocalOriginal, localStartupUpgradeKey } = await import('../src/framework/local-startup-upgrade.ts')
 const { LocalRecordFiles } = await import('../src/framework/local-record-files.ts')
 const { localFilesWorkerSource, historicalProducer } = await import('./test-support/historical-v44/load-sql-producer.mjs')
 const oldTaskManifest = JSON.parse(readFileSync(new URL('./test-support/historical-v44/conversation-producer/SOURCE.json', import.meta.url), 'utf8'))
@@ -86,14 +85,21 @@ if (mode === '--producer' || mode === '--resume') {
   try {
     const root = process.argv[3]
     const records = new DiskRecords(root)
-    const result = await materializeLegacyLocalFiles(path.join(root, 'files'), records, { deferActivation: true,
+    const directory = path.join(root, 'files'), source = await readLegacyLocalOriginal(directory, note)
+    const stat = await fs.stat(path.join(directory, 'dss-files.sqlite'), { bigint: true })
+    const prior = await records.get(records.key)
+    const operation = prior ?? { kind:'dss-local-sqlite-to-physical', operationId:'addressed-fixture', directory,
+      source:{dev:String(stat.dev),ino:String(stat.ino)}, status:'publishing', files:[], issues:[] }
+    const save=()=>records.set(records.key,operation)
+    const issue = await publishLocalUpgradeBytes(directory, source, operation, save, {
       onProgress: async progress => {
         if (mode !== '--producer' || phase !== 'pre-rename' || progress.path !== note || progress.step !== 'ready') return
         const prior = await records.get(records.key), file = prior.files.find(item => item.path === note)
-        await pause({ phase, target: path.join(root, 'files', ...note.split('/')),
-          stage: path.join(root, 'files', ...file.stagePath.split('/')), fact: path.join(root, 'records/upgrade.json') })
+        await pause({ phase, target: path.join(directory, ...note.split('/')),
+          stage: path.join(directory, ...file.stagePath.split('/')), fact: path.join(root, 'records/upgrade.json') })
       },
     })
+    const result={status:issue?'incomplete':'complete',issues:issue?[issue]:[]}
     process.send?.({ result })
     process.exit(0)
   } catch (error) {
@@ -193,22 +199,16 @@ try {
     check(cold.code, 0)
     const outcome = cold.messages.at(-1)
     check(outcome.error, undefined)
-    check(outcome.result.status, 'incomplete')
     const noteIssue = outcome.result.issues.find(issue => issue.path === note)
     const resolved = disposition === 'none' || disposition === 'edit'
     check(noteIssue?.code, resolved ? undefined : 'target-conflict')
     if (!resolved) check(noteIssue.message.includes('unconfirmed'), true)
-    check(outcome.result.issues.filter(issue => issue.path !== note).map(issue => [issue.code, issue.path]), [
-      ['source-row', state], ['source-row', taskPath], ['source-row', 'tasks/sample_O.md'],
-    ])
+    check(outcome.result.status, resolved ? 'complete' : 'incomplete')
     const after = await new DiskRecords(root).get(localStartupUpgradeKey(path.join(root, 'files')))
     check(after.status, 'publishing')
     check(after.files.find(item => item.path === note).status, resolved ? 'published' : 'owned')
     const inspection = await inspectLocalStartupUpgrade(path.join(root, 'files'), new DiskRecords(root))
     check(inspection.status, 'incomplete')
-    const assessment = await assessLocalUpgradeCompletion(path.join(root, 'files'), new DiskRecords(root))
-    check(assessment.report.status, 'incomplete')
-    if (!resolved) check(assessment.pending.some(item => item.path === note), true)
     const original = await readLegacyLocalOriginal(path.join(root, 'files'), note)
     check(Buffer.from(original.bytes).toString(), 'Original Helper report')
     if (disposition === 'edit') check(await fs.readFile(boundary.target, 'utf8'), 'user edit after native folder open')
@@ -227,5 +227,5 @@ try {
     results.push({ disposition, stopped: stopped.signal, issueCodes: outcome.result.issues.map(issue => issue.code), noteStatus: resolved ? 'published' : 'owned', sourceRetained: true })
   }
   console.log(JSON.stringify({ status: 'passed', assertions, results, historicalProducer, oldTaskManifest, sourceHashes: Object.fromEntries([...hashes].sort()),
-    limits: 'Frozen v44 initializeTask and Worker commit; dated Helper report path checked against frozen v44 role-runtime/role-tools. Actual Linux Koffi renameat2. Controlled pauses locate post-rename/pre-save and pre-rename/ready boundaries, then actual SIGTERM. Disposable files and external edit/delete/replace, not full historical Host, current DSH native UI/model, Windows/macOS, power loss or user incident.' }, null, 2))
+    limits: 'Addressed publication primitive, not removed database exporter. Frozen v44 initializeTask and Worker commit; dated Helper report path checked against frozen v44 role-runtime/role-tools. Actual Linux Koffi renameat2. Controlled pauses locate post-rename/pre-save and pre-rename/ready boundaries, then actual SIGTERM. Disposable files and external edit/delete/replace, not full historical Host, current DSH native UI/model, Windows/macOS, power loss or user incident.' }, null, 2))
 } finally { hooks.deregister(); await fs.rm(scratch, { recursive: true, force: true }) }

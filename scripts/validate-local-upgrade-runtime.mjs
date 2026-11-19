@@ -34,13 +34,6 @@ const hooks = registerHooks({
     return next(url,context)
   },
 })
-const { restoreLegacyTask, legacyTaskNeedsRestoration } = await import('../src/framework/local-upgrade-task.ts')
-const { legacyConversationNeedsRestoration } = await import('../src/framework/local-upgrade-conversation.ts')
-const { PhysicalLocalFiles } = await import('../src/framework/physical-local-files.ts')
-const { LocalRecordFiles } = await import('../src/framework/local-record-files.ts')
-const { FrameworkHostLoop, helperSignalWakeHash } = await import('../src/framework/host-loop.ts')
-const { taskArchiveHostKey } = await import('../src/framework/task-archive.ts')
-const { taskInitializationFiles } = await import('../src/framework/task-files.ts')
 const scratch=process.argv[2]==='--restore'?process.argv[3]:await fs.mkdtemp(path.join(os.tmpdir(),'dss-upgrade-host-'))
 const id='10000000-0000-4000-8000-000000000001',other='10000000-0000-4000-8000-000000000002',instance='20000000-0000-4000-8000-000000000001',scope='exact-original-scope',hostKey=taskArchiveHostKey(undefined,scope,instance)
 const task={version:1,taskId:id,route:'P',owner:'owner',members:['owner'],status:'running',sourcePath:'tasks/original_P.md',archiveFolder:id}
@@ -64,22 +57,6 @@ async function seed(root,released=false){
  if(released)put('archives/'+id+'/state.json',{version:1,taskId:id,lifecycles:{'':{hosts:{[hostKey]:{released:true}},cleanup:{phase:'released'}}}})
  db.close();return value
 }
-if(process.argv[2]==='--restore'){
- const phase=process.argv[4],directory=sourcePathFor(scratch)
- await restoreLegacyTask(directory,id,hostKey,new DiskRecords(scratch),{onProgress:p=>{
-  if(phase==='before-metadata'&&p.path==='tasks/'+id+'.json'&&p.step==='ready'||phase==='metadata'&&p.path==='tasks/'+id+'.json'&&p.step==='published'||phase==='source'&&p.path===task.sourcePath&&p.step==='published'||phase==='history-source'&&p.path===task.sourcePath&&p.step==='published'||phase==='signal'&&p.path==='state/owner/'+id+'/Planner_Inbox'&&p.step==='ready')process.exit(79)
- }})
- throw Error('Requested exit boundary was not reached')
-}
-const serviceSource=readFileSync(new URL('framework/service.ts',root),'utf8'),serviceJs=stripTypeScriptTypes(serviceSource,{mode:'transform'})
-loaded.set('framework/service.ts',hash(serviceSource))
-const method=name=>{const m=new RegExp('\n    (?:async )?'+name+'\\(').exec(serviceJs);assert.ok(m,name);const start=m.index+1,next=/\n    (?:async )?[A-Za-z_$][^\n]*(?:\(|=)/.exec(serviceJs.slice(start+m[0].length));assert.ok(next,name);return serviceJs.slice(start,start+m[0].length+next.index)}
-let agentConfigurations=[],agentStarts=0
-class ControlledAgent{constructor(_ctx,_storage,config){this.config=config;agentConfigurations.push(config)}async start(){agentStarts++;return {status:'not-needed'}}}
-const dependencies={PhysicalLocalFiles,legacyTaskNeedsRestoration,legacyConversationNeedsRestoration,LocalStartupUpgradeAgent:ControlledAgent,taskArchiveHostKey}
-const Service=new Function(...Object.keys(dependencies),'return class {\n'+['startLocalUpgrade','beforeLocalTaskDiscovery','beforeLocalTaskUse','prepareConversationWrite'].map(method).join('\n')+'\n}')(...Object.values(dependencies))
-const newService=records=>Object.assign(new Service(),{storage:records,ctx:{},localUpgrades:new Map(),accesses:new Map(),running:new Map(),opening:new Map(),changes:0,errors:[],changed(){this.changes++},report(_mode,error){this.errors.push(error)}})
-const sleep=ms=>new Promise(r=>setTimeout(r,ms)),until=async predicate=>{for(let i=0;i<100;i++){if(predicate())return;await sleep(10)}throw Error('Controlled condition did not settle')}
 const {withSnapshot,withOperationChannel}=await import('../src/framework/transactions.ts')
 const {paths,readJson,readMemberStatus,taskLifecycle,taskLifecycleKey,isTerminalTask,assertTaskLifecycle}=await import('../src/framework/task-files.ts')
 const {readTaskHistoryIdentity,taskHistoryChange}=await import('../src/framework/task-history.ts')
@@ -105,10 +82,10 @@ class RuntimeRecords{
  async set(k,v){this.values.set(k,structuredClone(v))}
  async list(p){this.lists.push(p);return [...this.values].filter(([k])=>k.startsWith(p)).map(([key,value])=>({key,value:structuredClone(value)}))}
 }
-function runtime(files,service,connection){
+function runtime(files){
  const records=new RuntimeRecords(),events=[],opens=[],errors=[],config={scope,member:'owner',mode:'local',workerSeats:3,workspace:'/controlled-workspace'}
  const rt=Object.assign(new Runtime(),{files,records,ctx:{logger:()=>({error(){}})},loop:{files,record:{completed:{}},ownsPhysicalTaskCleanup:FrameworkHostLoop.prototype.ownsPhysicalTaskCleanup,observedTask:()=>undefined},observedTerminalTasks:new Map(),wakeWrites:new Map(),wakeWriteOwners:new Map(),localWakeAdmissions:new Map(),reportedAdmissionDiagnostics:new Set(),admissionNow:()=>100000,taskSealAt:async()=>undefined,config,prefix:'runtime/',bootId:'boot',roleRecords:new Map(),knownTaskLifecycles:new Map(),admissionCancellations:new Map(),
-  environment:{beforeTaskUse:(id,wait)=>service.beforeLocalTaskUse(connection,id,wait),members:()=>['owner'],resources:()=>[],error:e=>{errors.push({message:e.message});return true}},
+  environment:{members:()=>['owner'],resources:()=>[],error:e=>{errors.push({message:e.message});return true}},
   controls:{taskHeld:async()=>false,execution:async()=>false},startSafetyResolutionLoad(){},processObservations:async()=>{},manuallyCleared:async()=>false,rememberTerminalTask(){},
   active:r=>r.active===true,error:(e,c)=>errors.push({message:e.message,stage:c?.stage}),assertOrganizerBusiness(){},replaySafetyWake(){},replaySafetyWakes(){},waitingSafetyResolution:()=>false,transferredWorkerWake:()=>false,trackedStop(){throw Error('Unexpected stop')},
   startOwnedPump(){this.pumps=(this.pumps??0)+1},
@@ -124,88 +101,18 @@ function runtime(files,service,connection){
 async function drain(rt){for(let n=0;n<20;n++){const jobs=[...rt.maintenance?.values()??[],...rt.admissions?.values()??[]];if(!jobs.length)return;await Promise.all(jobs)}throw Error('Owners did not settle')}
 async function independent(files){const value={...task,taskId:other,sourcePath:'tasks/independent_P.md',archiveFolder:other};await files.createIfAbsent(paths.task(other),json(value));await files.createIfAbsent(value.sourcePath,'Independent original');for(const file of taskInitializationFiles(value))await files.createIfAbsent(file.path,file.content??'');return value}
 try{
- for(const phase of ['before-metadata','metadata','source','history-source']){
-  const directory=path.join(scratch,phase);await seed(directory,phase==='history-source')
-  const exited=spawnSync(process.execPath,[fileURLToPath(import.meta.url),'--restore',directory,phase],{encoding:'utf8'});check('Real cold exit '+phase,exited.status,79)
-  const files=new PhysicalLocalFiles(sourcePathFor(directory)),records=new DiskRecords(directory),service=newService(records),connection={files,scope,identity:{instanceUUID:instance}}
-  await independent(files)
-  const {rt,events,errors,role}=runtime(files,service,connection)
-  rt.roleRecords.set(rt.roleKey('Planner',id),role(id));rt.roleRecords.set(rt.roleKey('Planner',other),role(other))
-  await rt.startup();await drain(rt)
-  check('Unrelated native startup continues during '+phase,events.some(e=>e.request.taskId===other&&e.request.role==='Planner'),true)
-  check('Original partial/released Task not continued '+phase,events.some(e=>e.request.taskId===id&&e.request.role==='Planner'),false)
-  check('Migration never becomes missing-metadata Helper fault '+phase,errors,[])
-  check('Original startup responsibility retained unless fully restored '+phase,rt.pendingStartupTasks.has(id),true)
-  const work=restoreLegacyTask(files.directory,id,hostKey,records);service.localUpgrades.set(files.directory,{controller:new AbortController(),tasks:new Map([[id,work]]),conversations:new Map(),independentTasks:new Set()});await work
-  rt.retryStartupTasks();await drain(rt)
-  check('Only running Task resumes after exact restore '+phase,events.some(e=>e.request.taskId===id&&e.request.role==='Planner'),phase!=='history-source')
-  check('Restored/released startup responsibility removed '+phase,rt.pendingStartupTasks.has(id),false)
-  const before=events.filter(e=>e.request.taskId===id&&e.request.role==='Planner').length;rt.retryStartupTasks();await drain(rt)
-  check('Retry does not duplicate original continuation '+phase,events.filter(e=>e.request.taskId===id&&e.request.role==='Planner').length,before)
-  check('Restored/released Task produces no false missing fault '+phase,errors,[])
-  await files.close()
- }
- const late=path.join(scratch,'late-task');await seed(late)
- const lateDb=new DatabaseSync(path.join(sourcePathFor(late),'dss-files.sqlite')),lateBody=Buffer.from('Original assigned work still needs continuation')
- lateDb.prepare('UPDATE files SET binary=?,bytes=? WHERE path=?').run(lateBody,lateBody.length,paths.inbox(id,'owner'))
- lateDb.prepare('DELETE FROM files WHERE path=?').run('state/owner/'+id+'/Planner_Inbox');lateDb.close()
- const lateFiles=new PhysicalLocalFiles(sourcePathFor(late)),lateRecords=new DiskRecords(late),lateService=newService(lateRecords),lateConnection={files:lateFiles,scope,identity:{instanceUUID:instance}}
- const l=runtime(lateFiles,lateService,lateConnection);await l.rt.startup();await drain(l.rt)
- check('Old Task absent at boot has no invented startup identity',l.rt.pendingStartupTasks.size,0)
- const originalInventoryReads=l.records.lists.length
- lateService.running.set('local',{connection:lateConnection,runtime:l.rt});lateService.startLocalUpgrade(lateConnection,'/workspace',{collaborationId:'chat'})
- const actual=restoreLegacyTask(lateFiles.directory,id,hostKey,lateRecords)
- agentConfigurations.at(-1).onTaskRestoration(id,actual);await actual
- await until(()=>l.rt.completedStartupTasks?.has(id));await drain(l.rt)
- check('Actual AI completion discovers late original member material',l.events.some(e=>e.request.taskId===id&&e.request.role==='Planner'),true)
- const lateCount=l.events.length;l.rt.resumeImportedTask(id);await drain(l.rt)
- check('Repeated AI completion does not repeat cold startup',l.events.length,lateCount)
- check('Late Task reuses boot inventory without repeated global scans',l.records.lists.length,originalInventoryReads)
- check('Late original Task stays out of missing-Task Helper repair',l.errors,[]);await lateFiles.close()
- const directory=path.join(scratch,'parallel-live');await seed(directory)
- const files=new PhysicalLocalFiles(sourcePathFor(directory)),records=new DiskRecords(directory),service=newService(records),connection={files,scope,identity:{instanceUUID:instance}}
- await independent(files)
- let release,paused=false;const wait=new Promise(r=>release=r)
- const work=restoreLegacyTask(files.directory,id,hostKey,records,{onProgress:async p=>{if(p.path===paths.task(id)&&p.step==='published'){paused=true;await wait}}})
- service.localUpgrades.set(files.directory,{controller:new AbortController(),tasks:new Map([[id,work]]),conversations:new Map(),independentTasks:new Set()});await until(()=>paused)
- const {rt,events,opens,errors,role}=runtime(files,service,connection)
- rt.roleRecords.set(rt.roleKey('Planner',id),role(id));rt.roleRecords.set(rt.roleKey('Planner',other),role(other))
- let eligibleSettled=false;const eligible=rt.memberContinuationEligible(role(id)).then(v=>{eligibleSettled=true;return v})
- let missingSettled=false;const missing=rt.diagnoseMissingTask(role(id)).then(v=>{missingSettled=true;return v})
- await rt.startup();await until(()=>events.some(e=>e.request.taskId===other&&e.request.role==='Planner'))
- check('Actual startup returns while only imported Task waits',eligibleSettled||missingSettled,false)
- check('Exact pending native startup owns real Promise',rt.maintenance.has('startup-task:'+id),true)
- // Existing queue has no previous native role. Actual runQueue reaches native.open
- // only after the task's physical source exists; other Task opens independently.
- const q=runtime(files,service,connection)
- for(const taskId of [id,other])await q.records.set('runtime/wakes/'+hash(taskId),{request:{id:taskId,role:'Planner',taskId,reason:'user-resume',sources:[]}})
- await q.rt.runQueue(false,undefined,false);await until(()=>q.opens.some(r=>r.taskId===other))
- check('Unrelated queued native admission opens before old restore',q.opens.map(r=>r.taskId),[other])
- check('Pending old wake is not marked delivered',(await q.records.get('runtime/wakes/'+hash(id))).delivered,undefined)
- const diagnostic=runtime(files,service,connection)
- await diagnostic.records.set('runtime/wakes/delayed',{request:{id:'delayed',role:'Planner',taskId:id,reason:'user-resume',sources:[]},admission:{eligibleSince:1,phase:'queued'}})
- await diagnostic.rt.observeWakeAdmissions();await drain(diagnostic.rt);await diagnostic.rt.checkWakeAdmissions()
- check('Migration wait is not an admission timeout',diagnostic.errors,[])
- check('Diagnostic non-wait probe does not block independent startup',diagnostic.rt.restoringAdmissionWakes.has('runtime/wakes/delayed'),true)
- release();await work;check('Eligibility succeeds after own source/materials',await eligible,true);check('Own restoration is not missing metadata',await missing,false)
- await drain(rt);await drain(q.rt)
- await diagnostic.rt.observeWakeAdmissions();await drain(diagnostic.rt);await diagnostic.rt.checkWakeAdmissions()
- check('Restoration time is excluded from admission age',(await diagnostic.records.get('runtime/wakes/delayed')).admission.eligibleSince,100000)
- check('No spurious Helper after restoration',diagnostic.errors,[])
- check('Waiting queued Task opens after restoration',q.opens.map(r=>r.taskId).sort(),[id,other].sort())
- check('Queued native admission confirms original wake',(await q.records.get('runtime/wakes/'+hash(id))).delivered,true)
- check('Native startup has no migration diagnostic',errors,[]);check('Native admissions have no errors',q.errors,[])
+ const directory=path.join(scratch,'retained-runtime'),files=new PhysicalLocalFiles(sourcePathFor(directory)),{rt,errors,role}=runtime(files)
  // History is a visibility/reference identity, never replacement runtime.
  const history=taskHistoryChange({...task,status:'complete'});await files.replace(history.path,history.content);await files.delete(paths.task(id))
  for(const name of ['Planner','Worker','Organizer','Recorder'])check('Historical '+name+' cannot continue',await rt.memberContinuationEligible(role(id,name)),false)
  check('Historical Task is not a missing-runtime fault',await rt.diagnoseMissingTask(role(id)),true);check('Historical diagnosis stays quiet',errors,[])
- const archived=runtime(files,service,connection);await archived.records.set('runtime/wakes/released',{request:{id:'released',role:'Organizer',taskId:id,reason:'user-resume',sources:[]}})
+ const archived=runtime(files);await archived.records.set('runtime/wakes/released',{request:{id:'released',role:'Organizer',taskId:id,reason:'user-resume',sources:[]}})
  await archived.rt.runQueue();check('Released queued Organizer is never opened',archived.opens,[]);check('Released wake is retained for actual runtime retirement',(await archived.records.get('runtime/wakes/released')).delivered,undefined);await archived.rt.checkWakeAdmissions()
  check('Archive retirement leaves no native errors',archived.errors,[])
  // Reconstruct the saved, already-delivered Helper responsibility after a Host
  // restart. Native evidence is controlled, but actual startup/continuation,
  // storeWake signal publication and explicit recovery-reset methods execute.
- const helper=runtime(files,service,connection);delete helper.rt.wake
+ const helper=runtime(files);delete helper.rt.wake
  helper.rt.publishedHelperSignals=new Set();helper.rt.helperWakeWrites=new Map()
  helper.rt.organizerWakeWrites=new Map();helper.rt.replaySafetyWake=()=>{}
  const oldSignal='state/Helper_owner_'+hash('old-check'),marker='state/owner/'+other+'/recovery',cycle=500
@@ -246,5 +153,5 @@ try{
  check('Planner recovery marker remains untouched',await withSnapshot(files,s=>files.read(s,marker)),'')
  check('Cold original Helper recovery produces no errors',helper.errors,[])
  await files.close()
- console.log(JSON.stringify({status:'passed',assertions:names.length,names,platform:process.platform,runtime:process.version,limits:'Actual full selected startup/admission/member/missing-task methods, real service per-Task wait, physical files and four real process exits. Native engine, session inspection, surrounding error/control ports are controlled. No real DSH/model/Windows acceptance or dependency-backed full typecheck.',sourceHashes:Object.fromEntries([...loaded].sort()),scriptHash:hash(readFileSync(fileURLToPath(import.meta.url)))},null,2))
+ console.log(JSON.stringify({status:'passed',assertions:names.length,names,platform:process.platform,runtime:process.version,limits:'Retained current history and native Helper continuation; no removed migration scenarios. Native engine, session inspection, surrounding error/control ports are controlled. No real DSH/model/Windows acceptance or dependency-backed full typecheck.',sourceHashes:Object.fromEntries([...loaded].sort()),scriptHash:hash(readFileSync(fileURLToPath(import.meta.url)))},null,2))
 }finally{hooks.deregister();await fs.rm(scratch,{recursive:true,force:true})}

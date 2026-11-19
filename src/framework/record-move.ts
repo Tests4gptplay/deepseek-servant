@@ -7,8 +7,7 @@ import { isAbsolute, join, relative, sep } from 'node:path'
 import type { StoragePort } from '../contracts/ports.js'
 import { LocalLocationRegistry, canonicalLocalLocation as canonical } from './local-location.js'
 import { localRecordFingerprint, prepareLocalRecordCopy, type LocalRecordBackend } from './maintenance.js'
-import { retireRecordTreeSource, type RecordTreeCopyState } from './record-tree-copy.js'
-import { prepareLocalUpgradeRelocation, projectLocalUpgradeRelocation, applyLocalUpgradeRelocation, type LocalUpgradeRelocation } from './local-upgrade-relocation.js'
+import type { RecordTreeCopyState } from './record-tree-copy.js'
 
 export const recordMoveKey = 'framework/record-moves'
 export interface RecordMoveRequest {
@@ -26,10 +25,7 @@ export interface RecordMoveReceipt extends RecordMoveRequest {
   localKind: 'owned' | 'custom' | 'none'
   fingerprint?: string
   localCopy?: RecordTreeCopyState
-  upgradeRelocation?: LocalUpgradeRelocation
-  upgradeRelocated?: true
-  /** Result of this command’s one-shot old-copy cleanup; absent on older receipts. */
-  sourceCleanup?: { retained: Array<{ directory: string; reason: string }> }
+  sourceRetained?: true
   phase: 'prepared' | 'published' | 'reopening' | 'applied' | 'abandoning' | 'abandoned'
   settingsAfter: { revision: string; settings: FrameworkClientSettings }
 }
@@ -37,7 +33,6 @@ export interface RecordMovePhysicalStore {
   storageView(): { directory: string }
   moveRecords(target: string, expected: string, signal: AbortSignal, verifyPublished?: (directory: string) => Promise<void>, commandId?: string): Promise<{ directory: string }>
   abandonRecordMove?(commandId: string, source: string, target: string): Promise<void>
-  recordMoveCopy?(commandId: string): RecordTreeCopyState | undefined | Promise<RecordTreeCopyState | undefined>
 }
 export interface RecordMoveLifecycle {
   /** Must confirm all affected native producers stopped before resolving. */
@@ -74,7 +69,7 @@ const inside = (parent: string, child: string) => { const path = relative(parent
 
 /** Coordinates the physical store adapter and explicit Local scope binding.
  * It never rewrites business/session payloads or copies native Host data. The
- * exact one-time upgrade's location/inode metadata follows this verified move.
+ * original physical records remain at the old location.
  */
 export class FrameworkRecordMove {
   private readonly locations: LocalLocationRegistry
@@ -193,10 +188,6 @@ export class FrameworkRecordMove {
       await this.lifecycle.quiesce(structuredClone(receipt), signal)
       signal.throwIfAborted()
       if (receipt.sourceLocal) {
-        if (receipt.localBackend === 'physical' && !receipt.upgradeRelocation && !receipt.upgradeRelocated) {
-          receipt.upgradeRelocation = await prepareLocalUpgradeRelocation(this.storage, receipt.sourceLocal, receipt.targetLocal!, signal)
-          await this.save(receipts, receipt.commandId)
-        }
         const fingerprint = await localRecordFingerprint(receipt.sourceLocal, receipt.localBackend, signal)
         if (receipt.fingerprint && receipt.fingerprint !== fingerprint) throw new Error('Original Local records changed after the move fingerprint was frozen.')
         if (!receipt.fingerprint) { receipt.fingerprint = fingerprint; await this.save(receipts, receipt.commandId) }
@@ -229,26 +220,6 @@ export class FrameworkRecordMove {
     } else if (receipt.targetLocal && await this.locations.resolve(receipt.targetLocal) !== receipt.scope) {
       throw new Error('Reopened target no longer owns the published logical scope.')
     }
-    if (receipt.phase !== 'reopening' && receipt.sourceLocal && receipt.localBackend === 'physical' && !receipt.upgradeRelocated) {
-      // A prior accepted move can have published its physical location before
-      // acknowledgement. Its retained original records remain the exact input;
-      // this is continuation of that command, never an ordinary-read fallback.
-      if (!receipt.upgradeRelocation) {
-        receipt.upgradeRelocation = await prepareLocalUpgradeRelocation(this.storage, receipt.sourceLocal, receipt.targetLocal!, signal)
-        await this.save(receipts, receipt.commandId)
-      }
-      const upgrade = receipt.upgradeRelocation
-      if (!upgrade.projected) {
-        const copy = receipt.localKind === 'custom' ? receipt.localCopy : await this.physical.recordMoveCopy?.(receipt.commandId)
-        upgrade.projected = await projectLocalUpgradeRelocation(upgrade, copy, signal)
-        await this.save(receipts, receipt.commandId)
-      }
-      await applyLocalUpgradeRelocation(this.storage, upgrade, signal)
-      // No permanent second metadata manifest. The new exact keys now own
-      // their existing responsibility; historical source keys are unchanged.
-      receipt.upgradeRelocated = true; delete receipt.upgradeRelocation
-      await this.save(receipts, receipt.commandId)
-    }
     await this.lifecycle.applySettings(structuredClone(receipt))
     if (receipt.phase !== 'reopening') {
       // Persist permission for new writers before retiring the exact location
@@ -258,22 +229,8 @@ export class FrameworkRecordMove {
     }
     if (receipt.sourceLocal) await this.locations.applied(receipt.commandId)
     await this.lifecycle.reopen(structuredClone(receipt), signal)
-    // New records are already usable. Cleanup failure is an applied move with
-    // a visible residual, not a reason to roll back or hold the new location.
-    const retained: Array<{ directory: string; reason: string }> = []
-    const copies = [{ source: join(receipt.sourceRecords, 'deepseek_servant'), destination: join(receipt.targetRecords, 'deepseek_servant'),
-      copy: () => this.physical.recordMoveCopy?.(receipt.commandId) },
-      ...(receipt.localKind === 'custom' ? [{ source: receipt.sourceLocal!, destination: receipt.targetLocal!, copy: () => receipt.localCopy }] : [])]
-    for (const { source, destination, copy: readCopy } of copies) {
-      try {
-        const copy = await readCopy()
-        if (!copy || copy.source !== source || copy.destination !== destination) throw new Error('This move has no matching verified copy inventory; source retained.')
-        await retireRecordTreeSource(copy)
-      } catch (error) {
-        retained.push({ directory: source, reason: error instanceof Error ? error.message : String(error) })
-      }
-    }
-    receipt.sourceCleanup = { retained }; delete receipt.localCopy
+    delete receipt.localCopy
+    receipt.sourceRetained = true
     receipt.phase = 'applied'; await this.save(receipts, receipt.commandId)
     return receipt
   }

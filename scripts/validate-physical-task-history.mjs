@@ -34,7 +34,6 @@ const hooks = registerHooks({
 })
 const { PhysicalLocalFiles } = await import('../src/framework/physical-local-files.ts')
 const { PendingLocalTaskViewCache, pendingLocalTaskResult } = await import('../src/framework/legacy-local-task-view.ts')
-const { localUpgradeView } = await import('../src/framework/local-upgrade-view.ts')
 const { frameworkArchiveSkillPublication } = await import('../src/framework/client-presentation.ts')
 const { LocalRecordFiles } = await import('../src/framework/local-record-files.ts')
 const { FrameworkCleaner, readTaskCleanupRecord } = await import('../src/framework/cleaner.ts')
@@ -62,7 +61,7 @@ const serviceMethod = name => {
   assert.ok(next, name)
   return serviceJs.slice(start, start + match[0].length + next.index)
 }
-const serviceDependencies = { frameworkArchiveSkillPublication, PhysicalLocalFiles, PendingLocalTaskViewCache, pendingLocalTaskResult, localUpgradeView, withSnapshot, withOperationChannel, FrameworkTaskIndex, FrameworkTaskHistoryCache, listTaskHistory, readTaskReferenceIdentity,
+const serviceDependencies = { frameworkArchiveSkillPublication, PhysicalLocalFiles, PendingLocalTaskViewCache, pendingLocalTaskResult, withSnapshot, withOperationChannel, FrameworkTaskIndex, FrameworkTaskHistoryCache, listTaskHistory, readTaskReferenceIdentity,
   taskArchiveReadPath, paths, readJson, readMemberStatus, isTerminalTask, taskLifecycle, readTaskCleanupRecord,
   parseTaskReference, referenceTaskId, readPublishedReference, readArchivedReference, resolveTaskRequirementReference }
 const Service = new Function(...Object.keys(serviceDependencies), 'return class {\n' + ['settingsView', 'view', 'readFileBytes'].map(serviceMethod).join('\n') + '\n}')(...Object.values(serviceDependencies))
@@ -223,7 +222,7 @@ try {
   await rejects('Runtime state writes cannot revive history by Task ID', () => updateTaskArchiveState(files, total.taskId, (_s, _t, state) => ({ write: true, state, result: undefined })), /Current Task metadata is unavailable/)
   const service = new Service(), viewErrors = []
   const access = { connection: { files, scope: 'history', identity: { instanceUUID: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' } } }
-  Object.assign(service, { storage: fixture.records, localUpgrades: new Map(), running: new Map(), userErrors: new Map(), archiveViews: new Map(), activeMode: 'local', startupState: new Map(), accesses: new Map(), accessOpening: new Map(),
+  Object.assign(service, { storage: fixture.records, running: new Map(), userErrors: new Map(), archiveViews: new Map(), activeMode: 'local', startupState: new Map(), accesses: new Map(), accessOpening: new Map(),
     config: () => ({ revision: 1, settings: { collaborationId: 'chat' } }), access: async () => access, observe: async () => [],
     report: (_mode, error) => viewErrors.push(error), controls() { throw new Error('Archived Tasks must not request live controls') } })
   const view = await service.view({ mode: 'local', panelsOnly: true, includeArchives: true })

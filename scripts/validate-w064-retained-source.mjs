@@ -61,11 +61,17 @@ async function fixture(root, kind, existing) {
 try {
   for (const kind of ['owned', 'custom']) {
     const root = path.join(scratch, kind), f = await fixture(root, kind)
-    const input = f.input, result = await f.service.moveRecords(input)
+    const input = f.input
+    const get = f.store.get.bind(f.store)
+    f.store.get = async key => {
+      if (/^framework-(?:physical-upgrade|startup-upgrade-agent|local-upgrade-result|upgrade-)/.test(key))
+        throw new Error('Unrelated historical upgrade lookup must not be part of a move')
+      return get(key)
+    }
+    const result = await f.service.moveRecords(input)
     check(kind + ': applied through actual service and mover', result.recordMoveOutcome.status, 'applied')
-    check(kind + ': cleanup succeeded', result.recordMoveOutcome.sourceCleanup, { retained: [] })
-    check(kind + ': removed sources are not called retained', Object.hasOwn(result.recordMoveOutcome, 'retainedSource'), false)
-    check(kind + ': copied source tree removed', await fs.lstat(f.sourceLocal).then(()=>true,e=>{if(e.code!=='ENOENT')throw e;return false}), false)
+    check(kind + ': source reported retained', result.recordMoveOutcome.retainedSource, f.sourceRecords)
+    check(kind + ': original archive unchanged', await fs.readFile(path.join(f.sourceLocal, 'archives/example/records.md'), 'utf8'), 'Original user archive.\r\n')
     check(kind + ': unrelated parent file retained', await fs.readFile(path.join(f.sourceRecords, 'unrelated.txt'), 'utf8'), 'outside the DSS copy')
     const local = f.service.config('local').settings.localDirectory
     check(kind + ': target archive retained', await fs.readFile(path.join(local, 'archives/example/records.md'), 'utf8'), 'Original user archive.\r\n')
@@ -73,7 +79,7 @@ try {
     check(kind + ': target writes proceed', await f.store.get('framework-git-enabled'), true)
     const before = (await f.store.get(recordMoveKey)).receipts
     const repeat = await f.service.moveRecords(input)
-    check(kind + ': same command keeps cleanup result', repeat.recordMoveOutcome.sourceCleanup, { retained: [] })
+    check(kind + ': same command still reports original', repeat.recordMoveOutcome.retainedSource, f.sourceRecords)
     check(kind + ': repeated result did not move again', (await f.store.get(recordMoveKey)).receipts, before)
     check(kind + ': one quiesce', f.stops, 1)
     // Close/reopen the actual SDK and service: memory-only retainedSource is gone.
@@ -81,12 +87,25 @@ try {
     const cold = await fixture(root, kind, true)
     check(kind + ': adapter memory source is absent after restart', cold.store.storageView().retainedSource, undefined)
     const retry = await cold.service.moveRecords(input)
-    check(kind + ': durable original command keeps cleanup after restart', retry.recordMoveOutcome.sourceCleanup, { retained: [] })
+    check(kind + ': durable original command retains source after restart', retry.recordMoveOutcome.retainedSource, f.sourceRecords)
     check(kind + ': completed retry does not stop execution', cold.stops, 0)
     const secondInput = { ...input, commandId: 'second-' + kind, directory: path.join(root, 'second-target'), expectedRevision: cold.service.config('local').revision }
+    const set = cold.store.set.bind(cold.store)
+    let interrupted = false
+    cold.store.set = async (key, value) => {
+      await set(key, value)
+      if (!interrupted && key === recordMoveKey && value.receipts.some(x => x.commandId === secondInput.commandId && x.phase === 'prepared')) {
+        interrupted = true
+        throw new Error('controlled acknowledgement loss after prepared receipt')
+      }
+    }
+    await assert.rejects(() => cold.service.moveRecords(secondInput), /not confirmed/)
+    check(kind + ': interruption left the exact prepared receipt', interrupted, true)
+    check(kind + ': prepared move leaves old root active', cold.store.storageView().directory, input.directory)
+    cold.store.set = set
     const second = await cold.service.moveRecords(secondInput)
-    check(kind + ': second cleanup succeeded', second.recordMoveOutcome.sourceCleanup, { retained: [] })
-    check(kind + ': first target is no longer a duplicate tree', await fs.lstat(path.join(input.directory, 'deepseek_servant')).then(()=>true,e=>{if(e.code!=='ENOENT')throw e;return false}), false)
+    check(kind + ': second move retains its own source', second.recordMoveOutcome.retainedSource, input.directory)
+    check(kind + ': first target remains on disk', (await fs.stat(path.join(input.directory, 'deepseek_servant'))).isDirectory(), true)
     const retired = await cold.service.moveRecords(input)
     check(kind + ': retired command only reports current location', retired.recordMoveOutcome.status, 'current-location')
     check(kind + ': retired command does not borrow latest retained source', Object.hasOwn(retired.recordMoveOutcome, 'retainedSource'), false)
@@ -97,35 +116,11 @@ try {
     check(kind + ': no extra quiesce on rejected input', cold.stops, 1)
     await cold.close()
   }
-  for (const kind of ['owned', 'custom']) {
-    const root = path.join(scratch, 'readonly-' + kind), f = await fixture(root, kind)
-    const locked = path.join(f.sourceLocal, 'archives/example')
-    await fs.chmod(locked, 0o500)
-    try {
-      const result = await f.service.moveRecords(f.input), outcome = result.recordMoveOutcome
-      check(kind + ': actual EACCES still applied', outcome.status, 'applied')
-      check(kind + ': actual failed directory is reported', outcome.sourceCleanup.retained[0].directory,
-        kind === 'owned' ? path.join(f.sourceRecords, 'deepseek_servant') : f.sourceLocal)
-      check(kind + ': real filesystem reason reported', outcome.sourceCleanup.retained[0].reason.includes('EACCES'), true)
-      check(kind + ': failed source original retained', await fs.readFile(path.join(locked, 'records.md'), 'utf8'), 'Original user archive.\r\n')
-      check(kind + ': new archive is readable after cleanup failure', await fs.readFile(path.join(f.service.config('local').settings.localDirectory, 'archives/example/records.md'), 'utf8'), 'Original user archive.\r\n')
-      await f.store.set('framework-git-enabled', true)
-      check(kind + ': new address accepts writes after cleanup failure', await f.store.get('framework-git-enabled'), true)
-      check(kind + ': cleanup did not become pending move', (await f.store.get(recordMoveKey)).receipts[0].phase, 'applied')
-      await fs.chmod(locked, 0o700)
-      await f.close()
-      const cold = await fixture(root, kind, true), retry = await cold.service.moveRecords(f.input)
-      check(kind + ': cold retry keeps exact failure result', retry.recordMoveOutcome.sourceCleanup, outcome.sourceCleanup)
-      check(kind + ': retry does not silently delete a former residual', await fs.readFile(path.join(locked, 'records.md'), 'utf8'), 'Original user archive.\r\n')
-      await cold.close()
-      console.log(JSON.stringify({ realCleanupFailure: outcome }))
-    } finally { await fs.chmod(locked, 0o700).catch(()=>{}) }
-  }
   check('native close saw no outstanding opens', closes.every(x => x.opening === 0), true)
   check('native close saw no outstanding writes', closes.every(x => x.inFlight === 0), true)
   check('every observed close completed', closes.every(x => x.status === 'closed'), true)
   console.log(JSON.stringify({ status: 'passed', assertions: checks.length, checks, closes, ...evidence(),
-    limits: 'Actual full FrameworkService class, sequencing, mover, configuration publication, physical files and current DSH SDK. Native-free runtime stop, access acquisition and page view are explicit ports. Actual same-directory refusal, normal cleanup/restart/repeat and real read-only-directory EACCES; no injected error or delay. Linux temporary files, not DSH UI/Windows/model.' }, null, 2))
+    limits: 'Actual full FrameworkService class, sequencing, mover, configuration publication, physical files and current DSH SDK. Native-free runtime stop, access acquisition and page view are explicit ports. Actual same-directory refusal, source retention, restart/repeat, and observation of legacy upgrade key reads. Linux temporary files, not DSH UI/Windows/model.' }, null, 2))
 } catch (error) {
   console.error(JSON.stringify({ status: 'failed', checks, closes, error: String(error), ...evidence() }, null, 2)); throw error
 } finally {

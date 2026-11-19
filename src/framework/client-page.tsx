@@ -1,5 +1,5 @@
 import { NativeAttachmentOwner, type NativeImageAttachments } from '../client/native-attachment-owner.js'
-import { LocalUpgradeStatus, OriginalTaskReadStatus } from './client-upgrade-status.js'
+import { OriginalTaskReadStatus } from './client-upgrade-status.js'
 import { taskCancellationNotice } from './client-contracts.js'
 import { frameworkErrorText } from './client-error.js'
 import { AttachmentDownloadCapabilityError, authenticatedAttachmentDownloadPath, attachmentByteLabel, attachmentKind, getConversationAttachmentDrafts, sameAttachmentReferences } from './client-attachments.js'
@@ -453,17 +453,6 @@ export function FrameworkPage(props: FrameworkPageProps) {
   const empty = !view || (tab === 'conversation' ? !view.messages.length && !view.missingBodies?.length : tab === 'tasks' ? !view.tasks.length : false)
   const imageFor = (page: 'conversation' | 'tasks') => illustrationFor(page, view?.settings ?? blankSettings) === 'welcome' ? __SERVANT_WELCOME_CHARACTER_DATA_URI__ : __SERVANT_TASK_EMPTY_CHARACTER_DATA_URI__
   const corner = showCornerIllustration(!empty, view?.settings ?? blankSettings)
-  const keepCurrentUpgrade = view?.storageScope ? async (path: string, operationId: string) => {
-    await props.api.keepCurrentLocalUpgradeTarget({ mode: 'local', storageScope: view.storageScope!, operationId, path,
-      confirmation: 'keep-current-with-original-unexported' })
-    void controller.refresh(true).catch(() => {})
-  } : undefined
-  const keepRetainedStage = view?.storageScope ? async (path: string, operationId: string, stageOwner?: Parameters<FrameworkClientApi['keepCurrentLocalUpgradeTarget']>[0]['stageOwner']) => {
-    await props.api.keepCurrentLocalUpgradeTarget({ mode: 'local', storageScope: view.storageScope!, operationId, path,
-      ...(stageOwner ? { stageOwner } : {}),
-      confirmation: 'keep-retained-stage-without-cleanup' })
-    void controller.refresh(true).catch(() => {})
-  } : undefined
   const settingsContent = <>
       {!view && <p role="status">{tr('正在读取设置…', 'Loading settings…')}</p>}
       {view && <div className={css.settingsSurface}>
@@ -472,7 +461,6 @@ export function FrameworkPage(props: FrameworkPageProps) {
         ]} />
         <div className={css.settingsBody}>
           {settingsTab === 'settings' && <div className={css.settingsColumn}>
-      {view?.activeMode === 'local' && <LocalUpgradeStatus value={view.localUpgrade} tr={tr} className={css.notice} onKeepCurrent={keepCurrentUpgrade} onKeepStage={keepRetainedStage} />}
       {view && <FrameworkSettingsForm key={view?.activeMode ?? 'local'} {...props} controller={controller} view={view} afterSettings={view.activeMode === 'local' && view.storageScope ? <ManualCleanupPanel key={scope} api={props.api} storageScope={view.storageScope} tr={tr} changed={async () => { await controller.latest(); await controller.refresh(true) }} /> : undefined} />}
           </div>}
           {settingsTab === 'knowledge' && <KnowledgePanel key={scope} api={props.api} view={view} tr={tr} open={open} />}
@@ -505,7 +493,6 @@ export function FrameworkPage(props: FrameworkPageProps) {
           onClick={() => setModeOpen(!modeOpen)}><span>{!view ? tr('模式', 'Mode') : view.activeMode === 'git' ? 'DSS-cah' : 'local'}</span><IconChevronDownOutlineRegular size={14} /></Button>} />
     </div>{view && <div className={css.workspaceSummary}><span>{view.settings.workspace}</span>{view.connection.workerSeats !== undefined && <span>{tr('已生效每任务 Worker 席位', 'Applied Worker seats per task')}: {view.connection.workerSeats}{view.connection.workerSeats !== view.settings.workerSeats && <> ({tr('已保存设置', 'Saved setting')}: {view.settings.workerSeats})</>}</span>}</div>}</nav>
     {(error || snapshot.error || view?.connection.detail) && <div className={css.notice} role="alert">{error || snapshot.error || view?.connection.detail}</div>}
-    {view?.activeMode === 'local' && !settingsOpen && <LocalUpgradeStatus value={view.localUpgrade} tr={tr} className={css.notice} onKeepCurrent={keepCurrentUpgrade} />}
     {exported && <p className={css.notice} role="status" style={{ flexShrink: 0, minWidth: 0, overflowWrap: 'anywhere' }}>{tr('记录已导出到', 'Records exported to')}: {exported}</p>}
     <Fragment key={scope}>{!changingMode && props.transportConnected !== false && view && props.nativePending?.(view, zh, taskId => { setSelectedTask(taskId); setTab('tasks') }, () => setTab('conversation'))}{!changingMode && props.transportConnected !== false && props.nativeInteractions?.((view?.executions ?? []).filter(row => row.role !== 'Foreground' && !view?.tasks.some(task => task.executions.some(item => item.sessionId === row.sessionId))), zh, true)}</Fragment>
     <div className={`${css.content} ${corner ? css.contentWithCorner : ''}`}>

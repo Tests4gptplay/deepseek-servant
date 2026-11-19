@@ -9,7 +9,7 @@ import { sourceRoot, evidence, hooks } from './test-support/dsh-sdk-runtime.mjs'
 import { localFilesWorkerSource, historicalProducer } from './test-support/historical-v44/load-sql-producer.mjs'
 import { Repository, put, head } from './test-support/controlled-git/repository.mjs'
 const { FrameworkService } = await import(new URL('framework/service.ts', sourceRoot))
-const { LocalStartupUpgradeAgent } = await import(new URL('framework/local-startup-upgrade-agent.ts', sourceRoot))
+const { pendingLocalTaskViews } = await import(new URL('framework/legacy-local-task-view.ts', sourceRoot))
 const { openFrameworkConnection } = await import(new URL('framework/connection.ts', sourceRoot))
 const { LocalRecordFiles } = await import(new URL('framework/local-record-files.ts', sourceRoot))
 const { DshAgentGateway } = await import(new URL('adapters/dsh/agents.ts', sourceRoot))
@@ -80,48 +80,20 @@ try {
       { path: 'tasks/' + originalTaskId + '.json', content: JSON.stringify({ version: 1, taskId: originalTaskId, owner: 'empty-install', route: 'P', status: 'running', sourcePath: 'tasks/original_P.md', archiveFolder: originalTaskId }) },
       { path: 'tasks/original_P.md', content: 'Task ID: ' + originalTaskId + '\nOriginal user requirement\n' }
     ] : [])
-    const beforeSql = await sqliteHashes(directory), service = serviceFor(records), beforeCreates = creates
-    let work, openings = 0
-    const connection = await openFrameworkConnection({ mode: 'local', directory, login: 'empty-install', workerSeats: 0 }, { storage: records,
-      onStorageOpened(access) { openings++; service.startLocalUpgrade(access, scratch, { collaborationId: 'default' }); work = service.localUpgrades.get(access.files.directory).work } })
-    const result = await work
-    await Promise.resolve()
-    // This method-level harness represents the existing startup lifecycle after
-    // its Local connection is published. It does not claim DSH activation.
-    service.starting = Promise.resolve()
-    check(kind + ': one real connection startup callback', openings, 1)
-    check(kind + ': outcome', result.status, kind === 'nonempty-original' ? 'pending' : 'not-needed')
-    check(kind + ': native creations', creates - beforeCreates, kind === 'nonempty-original' ? 1 : 0)
-    check(kind + ': live migration owners', service.localUpgrades.size, kind === 'nonempty-original' ? 1 : 0)
+    const beforeSql = await sqliteHashes(directory), beforeCreates = creates
+    const connection = await openFrameworkConnection({ mode: 'local', directory, login: 'empty-install', workerSeats: 0 }, { storage: records })
+    check(kind + ': legacy conversion starter is absent', 'startLocalUpgrade' in FrameworkService.prototype, false)
+    check(kind + ': native creations', creates - beforeCreates, 0)
+    check(kind + ': no durable conversion receipts', records.writes.filter(migrationKey), [])
+    const original = await pendingLocalTaskViews(directory, records, new Set(), error => { throw error }, undefined, [originalTaskId])
+    check(kind + ': original Task remains readable without conversion', original.map(row => row.task.taskId), kind === 'nonempty-original' ? [originalTaskId] : [])
+    const id = '10000000-0000-4000-8000-000000000001'
+    const newTask = { version: 1, taskId: id, owner: 'empty-install', route: 'P', status: 'running', sourcePath: 'tasks/' + id + '_P.md', archiveFolder: id }
+    if (kind === 'no-source') await connection.files.createIfAbsent('tasks/' + id + '.json', JSON.stringify(newTask))
+    check(kind + ': no conversion receipts after new Task write', records.writes.filter(migrationKey), [])
     check(kind + ': original SQLite bytes retained', await sqliteHashes(directory), beforeSql)
     check(kind + ': user physical bytes retained', await fs.readFile(path.join(directory, 'user-original.txt'), 'utf8'), 'user physical material\n')
-    if (kind === 'empty-original') {
-      let oldSourceCallbacks = 0
-      const direct = new LocalStartupUpgradeAgent({}, records, { directory, cwd: scratch, onOldSourceFound: () => { oldSourceCallbacks++ } },
-        { hasLiveOwner: () => false, exists: async () => false, create: async () => { throw Error('Empty source must not launch a native Agent') } })
-      const directResult = await direct.start()
-      check('empty-original: no old-source callback schedules legacy signal work', oldSourceCallbacks, 0)
-      check('empty-original: direct Agent exits without wake', directResult.status, 'not-needed')
-    }
-    const migrationWrites = records.writes.filter(migrationKey)
-    if (kind !== 'nonempty-original') {
-      check(kind + ': no durable migration state written', migrationWrites, [])
-      const beforeReads = records.reads.length
-      for (const id of ['10000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000002', '10000000-0000-4000-8000-000000000003']) {
-        await connection.files.createIfAbsent('tasks/' + id + '.json', JSON.stringify({ version: 1, taskId: id, owner: 'empty-install', route: 'P', status: 'running', sourcePath: 'tasks/' + id + '_P.md', archiveFolder: id }))
-        check(kind + ': subsequent Task admitted ' + id, await service.beforeLocalTaskUse(connection, id), true)
-      }
-      check(kind + ': later Tasks do not re-read migration state', records.reads.length - beforeReads, 0)
-      check(kind + ': no owner recreated by later Tasks', service.localUpgrades.size, 0)
-    } else {
-      check(kind + ': pending wake retained for real content', migrationWrites.some(k => k.startsWith('framework-startup-upgrade-agent/')), true)
-      check(kind + ': actual original Task still needs its pending owner', await service.beforeLocalTaskUse(connection, originalTaskId), false)
-      const earlyService = serviceFor(records)
-      check(kind + ': before startup registration the actual original Task is checked', await earlyService.beforeLocalTaskUse(connection, originalTaskId), false)
-      earlyService.startupState.set('local', { status: 'starting', owner: {} })
-      check(kind + ': startup without its owner still checks the actual original Task', await earlyService.beforeLocalTaskUse(connection, originalTaskId), false)
-    }
-    observations.push({ kind, status: result.status, migrationWrites, ownerCount: service.localUpgrades.size })
+    observations.push({ kind, originalRead: original.length })
     await connection.close()
   }
   for (const signal of [false, true]) {
@@ -153,11 +125,11 @@ try {
     check(label + ': later Task starts no migration Agent', creates - beforeCreates, 0)
     observations.push({ kind: label, ownerCount: service.gitUpgrades.size, originalPublications: repository.calls.length - 1 })
   }
-  check('Only the deliberately unfinished nonempty control is reported', errors.length, 1)
-  check('The one controlled nonempty native handle is disposed', disposes, 1)
+  check('No migration errors reported', errors.length, 0)
+  check('No controlled migration native handle created or disposed', [creates, disposes], [0, 0])
   const passed = checks.every(row => row.passed)
   console.log(JSON.stringify({ status: passed ? 'passed' : 'failed', checks, observations, errors, historicalProducer, ...evidence(),
-    limits: 'Actual production FrameworkService, openFrameworkConnection Local callback, Local upgrade agent/reader, frozen v44 SQL producer, real Linux SQLite/files, GitFiles/FrameworkTransactions/package retirement. Native creation and profile/package service facts controlled; Git repository controlled in memory. Subsequent Task checks exercise actual admission method and Git business transaction, not full role/model execution. No live DSH activation/model, Windows, user installation or remote repository.' }, null, 2))
+    limits: 'Local: actual backend acquisition and addressed compatibility reader; startup Agent method absence checked at service API, not live activation. Frozen v44 SQL producer and real Linux files. Git: original method-level startup and GitFiles/FrameworkTransactions/package retirement with controlled repository and profile package facts. No live DSH activation/model, Windows, user installation or remote repository.' }, null, 2))
   if (!passed) process.exitCode = 1
 } finally {
   DshAgentGateway.prototype.create = originalCreate
