@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { lstat } from 'node:fs/promises'
 import { join } from 'node:path'
-import { FrameworkConversation, scopedLocalForegroundSourceNotification } from './conversation.js'
+import { FrameworkConversation } from './conversation.js'
 import { FrameworkTransactions } from './command-transactions.js'
 import type { FilesStore } from './transactions.js'
 import { appendConversationContext, emptyConversationContext, parseConversationContext, type ConversationContextIndex } from './conversation-context.js'
@@ -9,7 +9,6 @@ import type { StoragePort } from '../contracts/ports.js'
 import { canonicalLocalLocation } from './local-location.js'
 import { localRecordPath } from './local-record-files.js'
 import { PhysicalLocalFiles } from './physical-local-files.js'
-import { parseForegroundTaskSignal } from './task-files.js'
 import { withLegacySqliteSnapshot, type LegacySqliteFile } from './legacy-sqlite-reader.js'
 import { inspectLocalUpgradeMapping, rememberLocalUpgradeMapping, localUpgradeResultKey } from './local-upgrade-mapping.js'
 import { publishLocalUpgradeBytes, type LocalUpgradePublication, type LocalUpgradeIssue, type LocalStartupUpgradeOptions } from './local-startup-upgrade.js'
@@ -43,7 +42,6 @@ interface ConversationUpgrade extends LocalUpgradePublication {
   issues: LocalUpgradeIssue[]
   /** One addressed, active-Host review of old chat notices. A deferred
    * different-scope call does not mark this complete. */
-  signalsAssessed?: { version: 1; pending: Array<{ path: string; reason: string }> }
 }
 export const localConversationUpgradeKey = (directory: string, collaborationId: string): string =>
   'framework-upgrade-conversation/' + hash(directory + '\0' + collaborationId)
@@ -75,126 +73,6 @@ export async function restoreLegacyConversationScope(directory: string, collabor
     { mode: 'local', collaborationId })
   try { return await conversation.withPhysicalPublication(() => restoreConversationOriginals(root, collaborationId, storage, files, options)) }
   finally { await files.close() }
-}
-
-type ConversationSignalsResult = { published: number; alreadyPresent: number; pending: Array<{ path: string; reason: string }> }
-const runningConversationSignals = new WeakMap<StoragePort, Map<string, Promise<ConversationSignalsResult>>>()
-/** An addressed one-time tool action after original conversation restoration.
- * Coordinate only concurrent copies of this upgrade action, never ordinary
- * conversation sends or their index lane. */
-export async function restoreLegacyConversationSignals(directory: string, collaborationId: string, storage: StoragePort,
-  currentScope: () => string | undefined, signal?: AbortSignal, recheckPending = false): Promise<ConversationSignalsResult> {
-  signal?.throwIfAborted()
-  const root = await canonicalLocalLocation(directory, true), key = root + '\0' + collaborationId
-  let running = runningConversationSignals.get(storage)
-  if (!running) runningConversationSignals.set(storage, running = new Map())
-  const prior = running.get(key)
-  if (prior) return prior
-  const work = restoreLegacyConversationSignalsOwned(root, collaborationId, storage, currentScope, signal, recheckPending)
-  running.set(key, work)
-  try { return await work }
-  finally { if (running.get(key) === work) running.delete(key) }
-}
-async function restoreLegacyConversationSignalsOwned(root: string, collaborationId: string, storage: StoragePort,
-  currentScope: () => string | undefined, signal?: AbortSignal, recheckPending = false): Promise<ConversationSignalsResult> {
-  const key = localConversationUpgradeKey(root, collaborationId)
-  if (currentScope() !== collaborationId) return { published: 0, alreadyPresent: 0,
-    pending: [{ path: key, reason: 'This original chat is not the currently bound Local conversation; its global signal was retained.' }] }
-  const state = await storage.get<ConversationUpgrade>(key)
-  if (state?.kind !== 'dss-once-conversation-full-text' || state.directory !== root || state.collaborationId !== collaborationId
-    || state.status !== 'complete' || !state.originalsRestored || !state.indexRestored || !Array.isArray(state.files))
-    return { published: 0, alreadyPresent: 0, pending: [{ path: key, reason: 'Restore the exact original conversation and its index before its old notification.' }] }
-  if (state.signalsAssessed?.version === 1 && (!recheckPending || !state.signalsAssessed.pending.length))
-    return { published: 0, alreadyPresent: 0, pending: state.signalsAssessed.pending }
-  const pending: Array<{ path: string; reason: string }> = []
-  let published = 0, alreadyPresent = 0
-  let bindingChanged = false
-  const save = () => storage.set(key, structuredClone(state))
-  await withLegacySqliteSnapshot(join(root, 'dss-files.sqlite'), async source => {
-    const candidates = new Map<number, Array<{ scope: string; id: string; path: string; createdAt: string }>>()
-    let uncertainIndex = false
-    for await (const row of source.entries('conversation-index/local/')) {
-      const match = row.kind === 'file' || row.issue.path ? /^conversation-index\/local\/([^/]+)\/index\.json$/.exec(row.kind === 'file' ? row.path : row.issue.path!) : undefined
-      if (row.kind === 'issue') { if (match || !row.issue.path) uncertainIndex = true; continue }
-      if (!match) continue
-      try {
-        const scope = decodeURIComponent(match[1]!), index = parse(row.bytes)
-        if (!scope || index.version !== 1 || !Array.isArray(index.messages)) { uncertainIndex = true; continue }
-        for (const ref of index.messages) {
-          if (!ref || typeof ref.id !== 'string' || typeof ref.path !== 'string' || typeof ref.createdAt !== 'string' || typeof ref.role !== 'string') { uncertainIndex = true; continue }
-          if (ref.role !== 'user') continue
-          const date = Date.parse(ref.createdAt)
-          if (!Number.isFinite(date)) { uncertainIndex = true; continue }
-          const group = candidates.get(date) ?? []
-          group.push({ scope, id: ref.id, path: ref.path, createdAt: ref.createdAt }); candidates.set(date, group)
-        }
-      } catch { uncertainIndex = true }
-    }
-    for await (const row of source.entries('state/')) {
-      signal?.throwIfAborted()
-      if (row.kind === 'issue') {
-        if (row.issue.path && !parseForegroundTaskSignal(row.issue.path) && originalConversationSignalStamp(row.issue.path))
-          pending.push({ path: row.issue.path, reason: row.issue.message })
-        continue
-      }
-      if (!row.path.startsWith('state/Foreground_')) continue
-      if (parseForegroundTaskSignal(row.path)) continue // Exact Task UUID notifications retain their Task owner.
-      const stamp = originalConversationSignalStamp(row.path)
-      if (!stamp) continue // Task, Helper, Legacy, or unknown Foreground notices have other owners.
-      if (currentScope() !== collaborationId) {
-        bindingChanged = true
-        pending.push({ path: row.path, reason: 'The currently bound Local conversation changed; no old signal was published.' }); continue
-      }
-      const matches = (candidates.get(stamp.utc) ?? []).filter(ref => !stamp.suffix || stamp.suffix === hash('local\0' + ref.scope + '\0' + ref.id))
-      const owners = new Set<string>()
-      let uncertainEntry = uncertainIndex
-      for (const ref of matches) try {
-        const entryPath = logical(ref.path)
-        if (!entryPath.startsWith('conversations/local/') || !entryPath.endsWith('/entry.json')) { uncertainEntry = true; continue }
-        const original = await source.read(entryPath)
-        if (original?.kind !== 'file') { uncertainEntry = true; continue }
-        const entry = parse(original.bytes)
-        if (entry.id !== ref.id || entry.collaborationId !== ref.scope || entry.createdAt !== ref.createdAt || entry.role !== 'user') { uncertainEntry = true; continue }
-        if (entry.recipient === 'ai') owners.add(ref.scope)
-      } catch { uncertainEntry = true }
-      if (owners.size === 1 && !owners.has(collaborationId) && !uncertainEntry) continue // Another exact scope owns this source.
-      if (row.bytes.byteLength !== 0 || uncertainEntry || owners.size !== 1) {
-        const reason = row.bytes.byteLength !== 0 ? 'The old chat signal is no longer empty; its changed bytes were retained.'
-          : uncertainEntry ? 'An original conversation index or message needed for exact signal ownership could not be verified; the old signal was retained.'
-          : owners.size > 1 ? 'More than one original Local conversation has a user-to-AI message matching this signal time; the old signal does not name its conversation, so its scope cannot be chosen.'
-          : 'No original user-to-AI conversation uniquely owns this old signal; it was retained.'
-        pending.push({ path: row.path, reason }); continue
-      }
-      const mapping = await inspectLocalUpgradeMapping(storage, root, row)
-      if (mapping === 'mapped') continue
-      if (mapping === 'source-changed') { pending.push({ path: row.path, reason: 'The old signal changed after its prior conversion.' }); continue }
-      const targetPath = scopedLocalForegroundSourceNotification(row.path, collaborationId)
-      const target = { path: targetPath, bytes: row.bytes }
-      const issue = await publishLocalUpgradeBytes(root, target, state, save, { signal, publishedSignal: true,
-        onProgress: () => { if (currentScope() !== collaborationId) throw new Error('The bound Local conversation changed during old signal publication.') } })
-      if (issue) { if (currentScope() !== collaborationId) bindingChanged = true; pending.push({ path: row.path, reason: issue.message }); continue }
-      const publication = state.files.find(file => file.path === targetPath)
-      if (publication?.status === 'published') published++
-      else if (publication?.status === 'already-present') alreadyPresent++
-      await rememberLocalUpgradeMapping(storage, root, row, state.operationId, [targetPath])
-    }
-  }, { signal })
-  if (!bindingChanged && currentScope() === collaborationId) {
-    state.signalsAssessed = { version: 1, pending }
-    await save()
-  }
-  return { published, alreadyPresent, pending }
-}
-
-function originalConversationSignalStamp(path: string): { utc: number; suffix?: string } | undefined {
-  const match = /^state\/Foreground_[^/]+-GMT(-?)(\d+)(?:m(\d{2}))?-(\d{8})-(\d{9})(?:-([0-9a-f]{64}))?$/.exec(path)
-  if (!match) return
-  const [, sign, hours, minutes, day, clock, suffix] = match
-  const offset = (sign ? -1 : 1) * (Number(hours) * 60 + Number(minutes ?? 0))
-  const local = Date.UTC(Number(day!.slice(0, 4)), Number(day!.slice(4, 6)) - 1, Number(day!.slice(6, 8)),
-    Number(clock!.slice(0, 2)), Number(clock!.slice(2, 4)), Number(clock!.slice(4, 6)), Number(clock!.slice(6, 9)))
-  if (!Number.isFinite(local) || new Date(local).toISOString().replace(/[-:.TZ]/g, '').slice(0, 17) !== day + clock || Number(minutes ?? 0) >= 60) return
-  return { utc: local - offset * 60_000, ...(suffix ? { suffix } : {}) }
 }
 
 function mergeOriginalIndex(original: Record<string, any>, current: Record<string, any> | undefined, restore: boolean): Record<string, any> {

@@ -25,7 +25,6 @@ const hooks = registerHooks({
 const {PhysicalLocalFiles,PhysicalLocalPublicationRequiredError}=await import(new URL('framework/physical-local-files.ts',root))
 const {FrameworkTransactions}=await import(new URL('framework/command-transactions.ts',root))
 const {openFrameworkConnection}=await import(new URL('framework/connection.ts',root))
-const {materializeLegacyLocalFiles}=await import(new URL('framework/local-startup-upgrade.ts',root))
 const {RecordFilesBackend,recordFolder}=await import(new URL('adapters/dsh/record-files.ts',root))
 const {foregroundTaskSignal,paths}=await import(new URL('framework/task-files.ts',root))
 const scratch=await fs.mkdtemp(path.join(os.tmpdir(),'dss-physical-activation-audit-'))
@@ -41,15 +40,11 @@ try {
  const oldBody=JSON.stringify({sequence:8,updatedAt:'2026-11-07T00:00:00Z',status:'stopped'})+'\n',otherBody=JSON.stringify({sequence:90,updatedAt:'2026-11-07T00:00:00Z',status:'running'})+'\n'
  await seed(directory,[[oldPath,oldBody],[otherPath,otherBody]]);await records.set('framework-instance-uuid',own)
  const before=await fs.readFile(path.join(directory,'dss-files.sqlite'))
- let proof={instanceUUID:own},opened=0
- const pending=await materializeLegacyLocalFiles(directory,records,{deferActivation:true,currentInstance:proof})
- check(pending.status,'incomplete');check(pending.issues.some(x=>x.path===oldPath),true);check(existsSync(path.join(directory,oldPath)),false)
- const connection=await openFrameworkConnection({mode:'local',directory,login:'occupied',workerSeats:5},{storage:records,onStorageOpened:()=>opened++,onInstanceRegistered:(access,registration)=>{check(access.identity.instanceUUID,own);proof={instanceUUID:own,registered:registration}}})
+ let opened=0
+ const connection=await openFrameworkConnection({mode:'local',directory,login:'occupied',workerSeats:5},{storage:records,onStorageOpened:()=>opened++,onInstanceRegistered:(access,registration)=>{check(access.identity.instanceUUID,own)}})
  check(opened,1);check(connection.identity.instanceUUID,own);check(connection.registration.member,'original-alias');check(connection.registration.workerSeats,5)
  const current=JSON.parse(await fs.readFile(path.join(directory,connection.registration.path),'utf8'));check(current.sequence,9);check(current.status,'running')
- const report=await materializeLegacyLocalFiles(directory,records,{deferActivation:true,currentInstance:proof});check(report.status,'complete')
- check(existsSync(path.join(directory,oldPath)),false);check(await fs.readFile(path.join(directory,otherPath),'utf8'),otherBody)
- const mapped=await records.get(localUpgradeMappingKey(directory,oldPath));check(mapped.targets,[connection.registration.path]);check(mapped.sourceBytes,Buffer.byteLength(oldBody))
+ check(existsSync(path.join(directory,oldPath)),false);check(existsSync(path.join(directory,otherPath)),false)
  check(await records.get(localUpgradeMappingKey(directory,otherPath)),undefined)
  check(await fs.readFile(path.join(directory,'dss-files.sqlite')),before)
  await connection.close()
@@ -58,8 +53,7 @@ try {
  const second=path.join(scratch,'new-host'),secondRecords=memory(),newId='33333333-3333-4333-8333-333333333333';await seed(second,[[otherPath,otherBody]]);await secondRecords.set('framework-instance-uuid',newId)
  let registration;const newcomer=await openFrameworkConnection({mode:'local',directory:second,login:'occupied',workerSeats:0},{storage:secondRecords,onInstanceRegistered:(_access,row)=>registration=row})
  check(newcomer.registration.member,'occupied1');check(registration.instanceUUID,newId)
- const secondReport=await materializeLegacyLocalFiles(second,secondRecords,{deferActivation:true,currentInstance:{instanceUUID:newId,registered:registration}});check(secondReport.status,'complete')
- check(await fs.readFile(path.join(second,otherPath),'utf8'),otherBody);check(await secondRecords.get(localUpgradeMappingKey(second,otherPath)),undefined)
+ check(existsSync(path.join(second,otherPath)),false);check(await secondRecords.get(localUpgradeMappingKey(second,otherPath)),undefined)
  await newcomer.close()
  // A live physical alias of an existing UUID wins over its retained SQL alias.
  const third=path.join(scratch,'current'),thirdRecords=memory();await seed(third,[[oldPath,oldBody],[otherPath,otherBody]]);await thirdRecords.set('framework-instance-uuid',own)
@@ -77,5 +71,5 @@ try {
   await connection.files.createIfAbsent('tasks/unrelated_P.md','继续');check(await fs.readFile(path.join(directory,'tasks/unrelated_P.md'),'utf8'),'继续')
   check(await fs.readFile(path.join(directory,'dss-files.sqlite')),original);await connection.close()
  }
- console.log(JSON.stringify({status:'passed',assertions,sourceHashes:Object.fromEntries(loaded),limits:'Actual Linux Physical registration+one-time SQL exporter; old/current aliases, new UUID collision, unchanged original SQL and exact current UUID source mapping. StoragePort/schema/FFI explicitly controlled. No native AI/DSH, Windows, multi-process same-root guarantee, default cutover or full build.'},null,2))
+ console.log(JSON.stringify({status:'passed',assertions,sourceHashes:Object.fromEntries(loaded),limits:'Actual Linux Physical registration using the read-only original SQL roster; old/current aliases, new UUID collision, unchanged original SQL and no original roster materialization. StoragePort/schema/FFI explicitly controlled. No native AI/DSH, Windows, multi-process same-root guarantee, default cutover or full build.'},null,2))
 } finally {await fs.rm(scratch,{recursive:true,force:true});hooks.deregister()}

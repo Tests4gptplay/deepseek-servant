@@ -1,5 +1,3 @@
-import type { LocalSourceRetirementAudit } from './local-upgrade-source-audit.js'
-import type { LocalUpgradeSpecialStageOwner } from './local-upgrade-completion.js'
 import type { ConversationAttachmentReference } from './conversation-attachment-reference.js'
 import type { PhysicalWorkspaceReference } from './workspace-paths.js'
 import type { DshForegroundProcessGroup } from '../adapters/dsh/foreground-process.js'
@@ -79,20 +77,7 @@ export interface FrameworkLegacyTask {
   artifacts?: Array<{ id: string; sourcePath: string; originalAbsolutePath?: string; sha256?: string; archivedPath?: string; status: 'archived' | 'pending' | 'unavailable'; detail?: string }>
   waits?: Array<{ id: string; question: string; memberIdentity: string }>
 }
-export interface FrameworkLocalUpgradeStatus {
-  status: 'running' | 'pending' | 'complete'
-  sourcePath?: string
-  detail?: string
-  pending?: Array<{ path: string; reason: string }>
-  conflicts?: Array<{ path: string; operationId: string }>
-  keptCurrent?: ReadonlyArray<{ path: string; target: 'absent' | 'different-inode' }>
-  retainedStageChoices?: Array<{ path: string; operationId: string; owner?: LocalUpgradeSpecialStageOwner }>
-  keptRetainedStages?: ReadonlyArray<{ path: string; selectedAt: string; owner?: LocalUpgradeSpecialStageOwner }>
-  sourceDisposition?: 'retained-pending-retirement-review'
-  sourceAudit?: LocalSourceRetirementAudit
-}
 export interface FrameworkClientView {
-  localUpgrade?: FrameworkLocalUpgradeStatus
   originalTaskRead?: 'loading' | 'failed'
   taskStateCursor?: FrameworkTaskStateCursor
   faultOccurrence?: number
@@ -103,7 +88,7 @@ export interface FrameworkClientView {
   processGroups?: FrameworkClientProcessGroup[]
   pendingRecordMove?: { commandId: string; storageScope: string; expectedRevision: string; directory: string; canAbandon?: boolean }
   /** This request's response only; a current location is not an old command receipt. */
-  recordMoveOutcome?: { status: 'applied' | 'current-location'; commandId: string; requestedDirectory: string; directory: string; retainedSource?: string; sourceCleanup?: { retained: Array<{ directory: string; reason: string }> } }
+  recordMoveOutcome?: { status: 'applied' | 'current-location'; commandId: string; requestedDirectory: string; directory: string; retainedSource?: string }
   revision: string
   activeMode: FrameworkMode
   collaborationId: string
@@ -136,9 +121,6 @@ export interface FrameworkClientApi {
   clientFault?(input: { mode: FrameworkMode; storageScope?: string; source: string; message: string; code?: string; target?: string; occurrence?: number; displayOwner?: string }): Promise<SafetyPresentation | undefined>
   maintenanceView(input: { mode: 'local'; storageScope?: string }): Promise<{ localDirectory: string; recordsDirectory?: string; nativeDirectory?: string; debugDirectory?: string; usage: StorageUsageStats }>
   openMaintenancePath(input: { mode: 'local'; storageScope?: string; target: 'records' | 'native-logs' | 'debug' }): Promise<{ path: string }>
-  keepCurrentLocalUpgradeTarget(input: { mode: 'local'; storageScope: string; operationId: string; path: string;
-    stageOwner?: LocalUpgradeSpecialStageOwner;
-    confirmation: 'keep-current-with-original-unexported' | 'keep-retained-stage-without-cleanup' }): Promise<{ saved: boolean }>
   exportRecords(input: { mode: 'local'; storageScope?: string; recordPath?: string; taskId?: string; migrationId?: string; oldTaskId?: string }): Promise<{ path: string; sha256: string; bytes: number }>
   cleanupPreview(input: { mode: 'local'; storageScope?: string; action?: 'tasks' | 'conversation' | 'planning' | 'debug' }): Promise<ManualTaskCleanupPreview | ManualFileCleanupPreview | ManualConversationCleanupPreview>
   cleanupRecords(input: { mode: 'local'; storageScope?: string; commandId: string } & (

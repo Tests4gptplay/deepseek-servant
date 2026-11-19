@@ -30,7 +30,6 @@ async function fixture(name){
 try {
   const f = await fixture('actual-upgrade-keys')
   const producers = [
-    ['framework/local-startup-upgrade-agent.ts','localUpgradeAgentKey',['/actual/Local']],
     ['framework/local-startup-upgrade.ts','localStartupUpgradeKey',['/actual/Local']],
     ['framework/local-upgrade-task.ts','localTaskUpgradeKey',['/actual/Local','TaskID']],
     ['framework/local-upgrade-conversation.ts','localConversationUpgradeKey',['/actual/Local','conversation']],
@@ -49,7 +48,7 @@ try {
     await f.adapter.set(key,value); check(await f.adapter.get(key),value)
     check(JSON.parse(await fs.readFile(path.join(f.tree,recordFolder(key),'record.json'),'utf8')).tables.records[key].value,value)
   }
-  check(new Set(keys.map(recordFolder)).size,7)
+  check(new Set(keys.map(recordFolder)).size,producers.length)
   check(await f.adapter.get(good),'healthy')
   await f.adapter.close()
   reopened=new RecordFilesBackend(f.tree); const unit=await reopened.kv.open({name:'deepseek_servant',version:1,tables:['records'],hasGlobal:false})

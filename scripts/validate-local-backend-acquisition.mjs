@@ -23,7 +23,7 @@ const hooks = registerHooks({
  load(u,c,n) {if(u.startsWith(root.href) && u.endsWith('.ts')) {let s=readFileSync(new URL(u),'utf8');loaded.set(u.slice(root.href.length),createHash('sha256').update(s).digest('hex'));return{format:'module',source:stripTypeScriptTypes(s,{mode:'transform'}),shortCircuit:true}}return n(u,c)}
 })
 const {openFrameworkStorage}=await import(new URL('framework/connection.ts',root))
-const {materializeLegacyLocalFiles,localStartupUpgradeKey}=await import(new URL('framework/local-startup-upgrade.ts',root))
+const {inspectLocalStartupUpgrade,localStartupUpgradeKey}=await import(new URL('framework/local-startup-upgrade.ts',root))
 const {localUpgradeResultKey}=await import(new URL('framework/local-upgrade-mapping.ts',root))
 const scratch=await fs.mkdtemp(path.join(os.tmpdir(),'dss-backend-acquire-'))
 let assertions=0
@@ -60,14 +60,16 @@ try {
  // mistake acquisition or mechanical export alone for the full one-time work.
  const old=path.join(scratch,'old'),oldStore=memory();await seed(old);await oldStore.set(key(old),settings(old));const original=await fs.readFile(path.join(old,'dss-files.sqlite'))
  const legacy=await openFrameworkStorage(settings(old),{storage:oldStore});check((await oldStore.get(key(old))).localBackend,undefined);await legacy.close();check(await fs.readFile(path.join(old,'dss-files.sqlite')),original)
- await rejects(()=>materializeLegacyLocalFiles(old,oldStore,{onProgress:({step})=>{if(step==='prepared')throw Error('interrupted accepted export')}}),/interrupted accepted export/)
- check((await oldStore.get(localStartupUpgradeKey(old))).status,'publishing')
+ const source=await fs.stat(path.join(old,'dss-files.sqlite'),{bigint:true})
+ const receipt={kind:'dss-local-sqlite-to-physical',operationId:'historical-interrupted',directory:old,source:{dev:String(source.dev),ino:String(source.ino)},status:'publishing',files:[],issues:[]}
+ await oldStore.set(localStartupUpgradeKey(old),receipt)
  await fs.rename(path.join(old,'dss-files.sqlite'),path.join(old,'retained-original.sqlite'))
  const partial=await openFrameworkStorage(settings(old),{storage:oldStore});check((await oldStore.get(key(old))).localBackend,undefined);await partial.close()
- const missing=await materializeLegacyLocalFiles(old,oldStore);check(missing.status,'incomplete');check(missing.issues[0].code,'source-missing');check(await fs.readFile(path.join(old,'retained-original.sqlite')),original)
+ const missing=await inspectLocalStartupUpgrade(old,oldStore);check(missing.status,'incomplete');check(missing.issues[0].code,'source-missing');check(await fs.readFile(path.join(old,'retained-original.sqlite')),original)
  await fs.rename(path.join(old,'retained-original.sqlite'),path.join(old,'dss-files.sqlite'))
- const report=await materializeLegacyLocalFiles(old,oldStore);check(report.status,'complete')
+ await oldStore.set(localStartupUpgradeKey(old),{...receipt,status:'complete'})
  const mechanical=await openFrameworkStorage(settings(old),{storage:oldStore});check((await oldStore.get(key(old))).localBackend,undefined);await mechanical.close()
+ const report=await inspectLocalStartupUpgrade(old,oldStore);check(report.status,'complete')
  // Exact full AI completion evidence is the existing producer contract, not
  // inferred from empty folders or a mechanical report's status.
  await oldStore.set(localUpgradeResultKey(old),{kind:'dss-local-upgrade-result',directory:old,operationId:report.operationId,completedAt:new Date().toISOString(),report})
@@ -76,5 +78,5 @@ try {
  check(await fs.readFile(path.join(old,'retained-original.sqlite')),original)
  // An unsuccessful acquisition at a file path never publishes the backend fact.
  const file=path.join(scratch,'not-directory'),fileStore=memory();await fs.writeFile(file,'mine');await rejects(()=>openFrameworkStorage(settings(file),{storage:fileStore}),/ENOTDIR|not a directory/);check(await fileStore.get(key(file)),undefined);check(await fs.readFile(file,'utf8'),'mine')
- console.log(JSON.stringify({status:'passed',assertions,sourceHashes:Object.fromEntries(loaded),limits:'Actual default connection acquisition and exact one-time exporter on temporary Linux roots/SQLite. Memory StoragePort and schema/FFI adapters explicit. Completed AI fact is seeded from its existing contract, not a native model run. No Windows/native DSH/full build/user data or multi-process claim.'},null,2))
+ console.log(JSON.stringify({status:'passed',assertions,sourceHashes:Object.fromEntries(loaded),limits:'Actual default connection acquisition with seeded historical receipts on temporary Linux roots/SQLite. Memory StoragePort and schema/FFI adapters explicit. Completed AI fact is seeded from its existing contract, not a native model run. No Windows/native DSH/full build/user data or multi-process claim.'},null,2))
 } finally {hooks.deregister();await fs.rm(scratch,{recursive:true,force:true})}

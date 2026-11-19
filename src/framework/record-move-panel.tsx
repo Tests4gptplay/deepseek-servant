@@ -49,12 +49,7 @@ export function RecordMovePanel({ api, storageScope, settingsRevision, pendingRe
         ? tr('原请求的完成结果尚未确认，本次没有再次搬迁。核对时的记录目录：', 'The original request’s completion is unconfirmed; no move was repeated. Record directory at this check: ') + outcome.directory
         : tr('记录已搬家并应用。宿主原生日志位置未改变。', 'Records moved and applied. Native Host log locations were not changed.')
           + (outcome ? tr(' 核对时的记录目录：', ' Record directory at this check: ') + outcome.directory : '')
-          + (outcome?.sourceCleanup
-            ? outcome.sourceCleanup.retained.length
-              ? tr(' 新地址已生效，以下旧副本未清完：', ' The new location is active; these old copies remain: ')
-                + outcome.sourceCleanup.retained.map(item => item.directory + ' (' + item.reason + ')').join('; ')
-              : tr(' 本次搬迁确认的旧 DSS 副本已删除。', ' The confirmed old DSS copies from this move were removed.')
-            : outcome?.retainedSource ? tr(' 本次未删除原目录：', ' Source directory not deleted by this move: ') + outcome.retainedSource : ''))
+          + (outcome?.retainedSource ? tr(' 原记录目录已保留：', ' Original records folder retained: ') + outcome.retainedSource : ''))
       void changed().catch(reason => { if (active.current) setError(frameworkErrorText(reason)) })
     } catch (reason) {
       if (isRecordMoveNotStarted(reason)) {

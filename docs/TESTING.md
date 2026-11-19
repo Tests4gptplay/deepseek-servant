@@ -46,7 +46,7 @@ an explicitly selected DSH Host dependency tree:
 - `scripts/validate-record-entry-isolation.mjs`
 - `scripts/validate-upgrade-record-categories.mjs`
 - `scripts/validate-physical-record-move.mjs`
-- `scripts/validate-local-upgrade-relocation.mjs`
+- `scripts/validate-w064-retained-source.mjs`
 
 Set `DSS_SDK_HOST_ROOT` to the absolute Host folder containing `node_modules`,
 then run each script with Node. The shared support under `scripts/test-support`

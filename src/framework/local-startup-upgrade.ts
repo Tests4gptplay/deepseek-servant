@@ -1,4 +1,3 @@
-import { mapReplacedLocalInstance, type CurrentLocalUpgradeInstance } from './local-upgrade-instance.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { constants, type BigIntStats } from 'node:fs'
 import fs, { type FileHandle } from 'node:fs/promises'
@@ -7,7 +6,7 @@ import type { StoragePort } from '../contracts/ports.js'
 import { canonicalLocalLocation } from './local-location.js'
 import { localRecordPath } from './local-record-files.js'
 import { withLegacySqliteSnapshot, type LegacySqliteFile, type LegacySqliteIssue } from './legacy-sqlite-reader.js'
-import { inspectLocalUpgradeMapping, localUpgradeResultKey } from './local-upgrade-mapping.js'
+import { localUpgradeResultKey } from './local-upgrade-mapping.js'
 import { publishPreparedUpgradeFile } from './local-upgrade-publish.js'
 
 const sourceName = 'dss-files.sqlite'
@@ -74,9 +73,6 @@ export interface LocalStartupUpgradeReport {
 type UpgradeStep = 'prepared' | 'created' | 'owned' | 'written' | 'ready' | 'moved' | 'published'
 export interface LocalStartupUpgradeOptions {
   requireExisting?: boolean
-  /** Native startup tool defers objects that would admit work until their known owner restores them. */
-  deferActivation?: boolean
-  currentInstance?: CurrentLocalUpgradeInstance
   /** Exact original empty signal: a confirmed publication may already be consumed. */
   publishedSignal?: boolean
   signal?: AbortSignal
@@ -293,210 +289,12 @@ export async function publishLocalUpgradeBytes(directory: string, source: Pick<L
 
 // One already-owned startup operation may be awaited by foreground/background
 // acquisition. Ordinary file reads and writes never join this map or its state.
-const running = new WeakMap<StoragePort, Map<string, Promise<LocalStartupUpgradeReport>>>()
-
-/** A user's exact, non-destructive choice after the one-time Agent reports a
- * real ready-stage conflict. Never infer a successful rename from absence. */
-export async function keepCurrentLocalUpgradeTarget(directory: string, storage: StoragePort,
-  expectedOperationId: string, path: string): Promise<LocalStartupUpgradeReport> {
-  const root = await canonicalLocalLocation(directory, true)
-  localRecordPath(path)
-  // Service admits this only after its one-time owner has fully settled and
-  // disposed the native tool. No second mechanical exporter is started here.
-  const key = localStartupUpgradeKey(root), operation = await storage.get<UpgradeOperation>(key)
-  if (!operation) {
-    const completed = await storage.get<{ operationId: string; report: LocalStartupUpgradeReport }>(localUpgradeResultKey(root))
-    if (completed?.operationId === expectedOperationId && completed.report.keptCurrent?.some(row => row.path === path)) return completed.report
-    throw new Error('The selected original upgrade is no longer pending.')
-  }
-  validateOperation(operation, root)
-  if (operation.operationId !== expectedOperationId) throw new Error('The selected Local upgrade changed; refresh its pending row.')
-  const file = operation.files.find(item => item.path === path)
-  if (!file) throw new Error('The selected original row has no matching publication responsibility.')
-  const sql = join(root, sourceName), source = await fs.lstat(sql, { bigint: true })
-  if (!source.isFile() || source.isSymbolicLink() || String(source.dev) !== operation.source.dev || String(source.ino) !== operation.source.ino)
-    throw new Error('The original SQL source changed; no conflict choice was saved.')
-  if (path.startsWith('state/') || /^tasks\/[^/]+\.json$/.test(path)
-    || /^conversation-(?:index|context)\/local\/[^/]+\/index\.json$/.test(path)
-    || /^skills\/(?:[^/]+\/)+(?:SKILL\.md|record\.json|legacy-git\.json)$/.test(path)
-    || !path.includes('/') && path.endsWith('.md'))
-    throw new Error('This original may admit work and cannot be skipped by a generic physical-file choice.')
-  const original = await withLegacySqliteSnapshot(sql, async snapshot => {
-    if (snapshot.identity.dev !== operation.source.dev || snapshot.identity.ino !== operation.source.ino)
-      throw new Error('The original SQL source changed; no conflict choice was saved.')
-    const entry = await snapshot.read(path)
-    if (entry?.kind === 'issue') throw new Error(entry.issue.message)
-    return entry
-  })
-  if (!original || original.bytes.byteLength !== file.bytes || hash(original.bytes) !== file.sha256)
-    throw new Error('The original SQL row changed; no conflict choice was saved.')
-  if (file.status === 'kept-current-unexported') return report(root, operation)
-  if (operation.status !== 'publishing' || file.status !== 'owned' || !file.ready || !file.owned || !file.stagePath
-    || !operation.issues.some(issue => issue.code === 'target-conflict' && issue.path === path && issue.choice === 'ready-stage-absent'))
-    throw new Error('Only the original unresolved ready-stage target conflict can be kept as current.')
-  const stage = join(root, ...localRecordPath(file.stagePath).split('/')), target = join(root, ...path.split('/'))
-  const stagePresent = await ordinaryDirectory(dirname(stage), false) && await inspectTarget(stage)
-  if (stagePresent) throw new Error('The original staged inode is still available; refresh and retry its normal publication.')
-  const current = await ordinaryDirectory(dirname(target), false) ? await inspectTarget(target) : undefined
-  if (same(file.owned, current)) throw new Error('The original staged inode is already at the target; refresh its normal completion.')
-  file.status = 'kept-current-unexported'
-  file.keptCurrent = { target: current ? 'different-inode' : 'absent', selectedAt: new Date().toISOString() }
-  operation.issues = operation.issues.filter(issue => !(issue.path === path && issue.code === 'target-conflict'))
-  await storage.set(key, structuredClone(operation))
-  return report(root, operation)
-}
-
-/** Record only the user's decision not to clean this exact ambiguous stage.
- * It does not attest to a published source row, stage ownership, or whether
- * the path still exists. The ordinary finish assessment remains responsible
- * for every source row, Task, conversation, skill, and other retained stage. */
-export async function keepRetainedLocalUpgradeStage(directory: string, storage: StoragePort,
-  expectedOperationId: string, path: string): Promise<{ report: LocalStartupUpgradeReport; saved: boolean }> {
-  const root = await canonicalLocalLocation(directory, true)
-  localRecordPath(path)
-  const key = localStartupUpgradeKey(root), operation = await storage.get<UpgradeOperation>(key)
-  if (!operation) {
-    const completed = await storage.get<{ operationId: string; report: LocalStartupUpgradeReport }>(localUpgradeResultKey(root))
-    if (completed?.operationId === expectedOperationId && completed.report.retainedStages?.some(stage => stage.path === path && stage.keptByUser))
-      return { report: completed.report, saved: true }
-    throw new Error('The selected original upgrade is no longer pending.')
-  }
-  validateOperation(operation, root)
-  if (operation.operationId !== expectedOperationId) throw new Error('The selected Local upgrade changed; refresh its pending row.')
-  const stages = operation.retainedStages?.filter(stage => stage.path === path) ?? []
-  if (stages.length !== 1) throw new Error('The selected retained stage is not a unique responsibility in this operation.')
-  if (stages[0]!.keptByUser) return { report: report(root, operation), saved: true }
-  // An exact user-initiated check, not a recurring stage scan. If the known
-  // path has already gone, the existing finish assessment can clear its own
-  // pending item; no keep decision about a missing file is needed.
-  try { await fs.lstat(join(root, ...path.split('/'))) }
-  catch (error) { if (missing(error)) return { report: report(root, operation), saved: false }; throw error }
-  stages[0]!.keptByUser = { selectedAt: new Date().toISOString() }
-  await storage.set(key, structuredClone(operation))
-  return { report: report(root, operation), saved: true }
-}
-
-/** Mechanical execution tool for the one-time AI woken at DSS Host activation. This is
- * an exact one-time mechanical export, not an AI classifier or a fallback SQL
- * store. Unknown but safe logical paths keep their exact names and bytes. The
- * original SQL/WAL is retained; normal SQLite reader SHM bookkeeping is allowed.
- *
- * The old Host must already be stopped, as for any plugin replacement. Portable
- * file APIs cannot make a transaction with another legacy process still writing
- * SQL or a hostile external directory replacer. No cross-process lock is added.
- */
-export async function materializeLegacyLocalFiles(directory: string, storage: StoragePort,
-  options: LocalStartupUpgradeOptions = {}): Promise<LocalStartupUpgradeReport> {
-  options.signal?.throwIfAborted()
-  const root = await canonicalLocalLocation(directory, true)
-  const pending = running.get(storage)?.get(root)
-  if (pending) { const result = await pending; options.signal?.throwIfAborted(); return result }
-  const operation = runUpgrade(root, storage, options)
-  let roots = running.get(storage)
-  if (!roots) running.set(storage, roots = new Map())
-  roots.set(root, operation)
-  try { return await operation }
-  finally { if (roots.get(root) === operation) roots.delete(root) }
-}
 async function completedResult(directory: string, storage: StoragePort): Promise<LocalStartupUpgradeReport | undefined> {
   const value = await storage.get<{ kind: string; directory: string; report: LocalStartupUpgradeReport }>(localUpgradeResultKey(directory))
   if (!value) return undefined
   if (value.kind !== 'dss-local-upgrade-result' || value.directory !== directory || value.report?.status !== 'complete') throw new Error('Invalid one-time Local upgrade result; retained without replaying SQL.')
   return value.report
 }
-async function runUpgrade(directory: string, storage: StoragePort, options: LocalStartupUpgradeOptions): Promise<LocalStartupUpgradeReport> {
-  const priorResult = await completedResult(directory, storage)
-  if (priorResult) return priorResult
-  if (options.requireExisting && !await ordinaryDirectory(directory, false)) throw new Error('The existing Local directory is unavailable. Startup did not create a replacement store.')
-  const key = localStartupUpgradeKey(directory), prior = await storage.get<UpgradeOperation>(key)
-  if (prior) {
-    validateOperation(prior, directory)
-    // Completed physical records are now user-owned. Do not reimport old SQL,
-    // revive removed files, compare versions, or inspect every file on startup.
-    if (prior.status === 'complete') return report(directory, prior)
-  }
-  let sourceExists = false
-  try { sourceExists = !!await fs.lstat(join(directory, sourceName)) } catch (error) { if (!missing(error)) throw error }
-  if (!sourceExists) {
-    const sidecars = []
-    for (const suffix of ['-wal', '-shm']) {
-      try { await fs.lstat(join(directory, sourceName + suffix)); sidecars.push(sourceName + suffix) } catch (error) { if (!missing(error)) throw error }
-    }
-    if (prior || sidecars.length) return { ...report(directory, prior), status: 'incomplete', issues: [{ code: 'source-missing', message: 'The original database is absent while its startup operation or sidecars remain. No empty replacement was created.' }] }
-    return report(directory)
-  }
-  const extracted = await withLegacySqliteSnapshot<{ result: LocalStartupUpgradeReport; prepared?: UpgradeOperation }>(join(directory, sourceName), async snapshot => {
-    if (prior && (prior.source.dev !== snapshot.identity.dev || prior.source.ino !== snapshot.identity.ino)) return { result: {
-      ...report(directory, prior), status: 'incomplete', issues: [{ code: 'source-changed', message: 'The source database file was replaced. Its existing operation was not reset or applied to the replacement.' }],
-    } }
-    const operation: UpgradeOperation = prior ?? { kind: 'dss-local-sqlite-to-physical', operationId: randomUUID(), directory,
-      source: { ...snapshot.identity }, status: 'publishing', files: [], issues: [] }
-    operation.issues = []
-    const save = () => storage.set(key, structuredClone(operation))
-    await save()
-    const taskSources = new Set<string>()
-    if (options.deferActivation) for await (const entry of snapshot.entries('tasks/')) {
-      if (entry.kind !== 'file' || !/^tasks\/[^/]+\.json$/.test(entry.path)) continue
-      try { const task = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(entry.bytes)); if (typeof task.sourcePath === 'string') taskSources.add(task.sourcePath) } catch {}
-    }
-    const digest = createHash('sha256'), seen = new Set<string>()
-    for await (const entry of snapshot.entries()) {
-      options.signal?.throwIfAborted()
-      if (entry.kind === 'issue') { operation.issues.push({ code: 'source-row', path: entry.issue.path, message: entry.issue.message, sourceIssue: entry.issue }); continue }
-      if (seen.has(entry.path)) { operation.issues.push({ code: 'source-row', path: entry.path, message: 'Duplicate logical source path; no row was silently selected.' }); continue }
-      seen.add(entry.path)
-      digest.update(JSON.stringify([entry.path, entry.bytes.byteLength, hash(entry.bytes)]) + '\n')
-      const mapping = await inspectLocalUpgradeMapping(storage, directory, entry)
-      if (mapping === 'mapped') continue
-      if (mapping !== 'source-changed' && options.deferActivation && /^skills\/(?:[^/]+\/)+(?:SKILL\.md|record\.json|legacy-git\.json)$/.test(entry.path)) {
-        operation.issues.push({ code: 'source-row', path: entry.path, message: 'This original skill definition remains in SQL until publish_skill verifies and publishes its native definition and original controls. Generic export must not activate an obsolete definition.' }); continue
-      }
-      if (options.deferActivation && (entry.path.startsWith('state/') || /^tasks\/[^/]+\.json$/.test(entry.path)
-        || /^conversation-(?:index|context)\/local\/[^/]+\/index\.json$/.test(entry.path) || taskSources.has(entry.path)
-        || !entry.path.includes('/') && entry.path.endsWith('.md'))) {
-        operation.issues.push({ code: 'source-row', path: entry.path, message: 'This original can admit work. It remains in SQL until its exact Task/conversation/source restoration publishes its real prerequisites and original signal in order.' }); continue
-      }
-      if (mapping === 'source-changed') { operation.issues.push({ code: 'source-changed', path: entry.path, message: 'This original changed after its recorded conversion. Its physical result was not overwritten.' }); continue }
-      const instance = options.deferActivation ? await mapReplacedLocalInstance(storage, directory, entry, operation.operationId, options.currentInstance) : 'unrelated'
-      if (instance === 'mapped') continue
-      if (instance === 'pending') {
-        operation.issues.push({ code: 'source-row', path: entry.path, message: 'This Host has not yet completed its current instance registration; its original heartbeat remains in SQL.' }); continue
-      }
-      const issue = await publishLocalUpgradeBytes(directory, entry, operation, save, options)
-      if (issue) operation.issues.push(issue)
-    }
-    for (const file of operation.files) if (!seen.has(file.path)) operation.issues.push({ code: 'source-changed', path: file.path,
-      message: 'A previously prepared source row is absent. Its physical publication and recovery state were retained.' })
-    const sourceDigest = digest.digest('hex')
-    operation.sourceDigest = sourceDigest
-    await save()
-    return { result: report(directory, operation), ...(!operation.issues.length ? { prepared: operation } : {}) }
-  }, { signal: options.signal })
-  // The reader verifies its source identity and closes its pinned read view
-  // before cutover can be recorded. A failing callback/readback cannot leave a
-  // falsely completed operation merely because the final body was copied.
-  const completed = extracted.prepared
-  if (completed) {
-    options.signal?.throwIfAborted()
-    // A second short read transaction verifies the actual source visible at
-    // cutover, rather than silently omitting a commit made during extraction.
-    const verified = await withLegacySqliteSnapshot(join(directory, sourceName), async snapshot => {
-      if (snapshot.identity.dev !== completed!.source.dev || snapshot.identity.ino !== completed!.source.ino) return false
-      const digest = createHash('sha256')
-      for await (const entry of snapshot.entries()) {
-        if (entry.kind === 'issue') return false
-        digest.update(JSON.stringify([entry.path, entry.bytes.byteLength, hash(entry.bytes)]) + '\n')
-      }
-      return digest.digest('hex') === completed!.sourceDigest
-    }, { signal: options.signal })
-    if (verified) completed.status = 'complete'
-    else completed.issues.push({ code: 'source-changed', message: 'The committed source changed during extraction. All copied files and the original database were retained; cutover was not claimed.' })
-    await storage.set(key, structuredClone(completed))
-    return report(directory, completed)
-  }
-  return extracted.result
-}
-
 /** Read-only startup/UI status. Inspection never creates migration state,
  * copies a row, starts a model, or opens an SQL writer. A pending conversion
  * does not remove the original source from the independently available reader. */

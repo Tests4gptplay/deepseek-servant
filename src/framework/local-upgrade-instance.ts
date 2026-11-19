@@ -1,10 +1,9 @@
 import { lstat } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { StoragePort } from '../contracts/ports.js'
-import { parseInstancePath, type Heartbeat, type RegisteredInstance, type OriginalInstanceRegistration } from './instances.js'
+import { parseInstancePath, type Heartbeat, type OriginalInstanceRegistration } from './instances.js'
 import { canonicalLocalLocation } from './local-location.js'
-import { withLegacySqliteSnapshot, type LegacySqliteFile } from './legacy-sqlite-reader.js'
-import { rememberLocalUpgradeMapping } from './local-upgrade-mapping.js'
+import { withLegacySqliteSnapshot } from './legacy-sqlite-reader.js'
 import { inspectLocalStartupUpgrade } from './local-startup-upgrade.js'
 
 /** Read only the roster already used by registration. This temporary source
@@ -40,27 +39,4 @@ export async function readOriginalLocalInstances(directory: string, storage: Sto
     }
     return originals
   }, { signal })
-}
-export interface CurrentLocalUpgradeInstance {
-  /** Host's real technical UUID, not a name guessed from a source file. */
-  instanceUUID: string
-  /** Returned only after this Host's actual registration publication succeeded. */
-  registered?: RegisteredInstance
-}
-/** Called only inside the AI's materialize action. The current Host has already
- * replaced its own old heartbeat through normal registration; preserve that
- * historical SQL row as source evidence, not as an instruction to replay it. */
-export async function mapReplacedLocalInstance(storage: StoragePort, directory: string,
-  source: Pick<LegacySqliteFile, 'path' | 'bytes'>, operationId: string,
-  current: CurrentLocalUpgradeInstance | undefined): Promise<'unrelated' | 'pending' | 'mapped'> {
-  const original = parseInstancePath(source.path)
-  if (!original || !current || original.instanceUUID !== current.instanceUUID) return 'unrelated'
-  const registered = current.registered
-  if (!registered) return 'pending'
-  const target = parseInstancePath(registered.path)
-  if (!target || target.instanceUUID !== current.instanceUUID || registered.instanceUUID !== current.instanceUUID
-    || target.member !== registered.member || target.workerSeats !== registered.workerSeats)
-    throw new Error('The successful Local registration does not identify this original instance.')
-  await rememberLocalUpgradeMapping(storage, directory, source, operationId, [registered.path])
-  return 'mapped'
 }

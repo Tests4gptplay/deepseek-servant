@@ -182,11 +182,6 @@ export class DshStorageAdapter implements StoragePort {
       await this.location.table('settings').delete('record-move')
     })
   }
-  recordMoveCopy(commandId: string): RecordTreeCopyState | undefined {
-    const move = this.location.table('settings').get('record-move')?.move
-    return move?.commandId === commandId && move.copy ? structuredClone(move.copy) : undefined
-  }
-
   /** Explicitly relocate the owned technical tree. The caller stops affected
    * Local producers; unrelated Git execution is not stopped. The existing
    * adapter barrier drains/queues technical publications during this copy. */
