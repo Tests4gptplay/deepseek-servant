@@ -992,6 +992,18 @@
   background: var(--dsw-alias-interactive-bg-hover);
   font-weight: 600;
 }
+.page_taskSearch {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-inline-start: auto;
+  width: clamp(160px, 27%, 260px);
+  max-width: 100%;
+}
+.page_taskSearch > :first-child {
+  flex: 1;
+  min-width: 0;
+}
 .page_historyNavigation label {
   display: flex;
   align-items: center;
