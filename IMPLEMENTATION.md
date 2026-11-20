@@ -1,6 +1,6 @@
 # 当前实现与验证边界
 
-> 本文件描述工作分支候选，不是发布公告。候选版本为 `0.5.0`，发布状态见 [版本说明](docs/releases/0.5.0.md)。
+> 本文是代码实现说明，不是发布公告。当前稳定版见 [GitHub 正式发布](https://github.com/Tests4gptplay/deepseek-servant/releases/latest) 和 [变更记录](CHANGELOG.md)。候选包或测试版以各自的 Git 引用和 `package.json` 为准，不代表稳定发布。
 
 ## 入口和模块
 
@@ -93,9 +93,9 @@ Local 会话附件只保留用户选中的原生路径，从原电脑读取；�
 
 构建生成 `lib/host.js` 与 `lib/client.js`。Client 使用宿主 ModuleLoader factory，不能用普通浏览器 ESM 入口代替宿主接线。候选打包后还需核对包文件、构建结果与被测试源码一致；打包不等于发布或安装验收。
 
-历史候选曾开展 SQLite、官方原生技能 registry、受控 Git、客户端及原生宿主验证；这些结果仅属于当时源码及包。当前物理 Local 切换、SQL 退役与后续修改必须分别执行受影响回归，既有历史成功不构成本候选通过。
+历史候选曾开展 SQLite、官方原生技能 registry、受控 Git、客户端及原生宿主验证；这些结果仅属于当时源码及包。物理 Local 切换、SQL 退役与后续修改各有自己的回归范围，不能用旧版本结果代替。
 
-验证结果按测试层级、源码与包分别记录；跨不同真实账户的公网联合协作尚未执行。最终候选验收状态见 [测试说明](docs/TESTING.md)。历史 Windows rc.5 等结果见[旧公开证据](https://github.com/Tests4gptplay/deepseek-servant/blob/d28a4d8538abc966608761bcfd60d568dec11cc9/docs/testing/EVIDENCE.md)，仅适用于对应旧版本。
+验证结果按测试层级、源码与包分别记录。方法和覆盖边界见 [测试说明](docs/TESTING.md)；稳定版实测按对应版本查阅 [发布与测试记录](CHANGELOG.md)。历史 Windows rc.5 等结果见[旧公开证据](https://github.com/Tests4gptplay/deepseek-servant/blob/d28a4d8538abc966608761bcfd60d568dec11cc9/docs/testing/EVIDENCE.md)，仅适用于对应旧版本。
 
 许可证、素材署名及第三方声明见 [README](README.md#来源与开源许可)、[NOTICE](NOTICE) 和 [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES.md)。
 
