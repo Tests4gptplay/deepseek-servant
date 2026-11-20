@@ -6938,7 +6938,7 @@ executionId: binding.executionId, run: persistContext,
     if ([...(this.stopOperations?.values() ?? [])].some((stop) => stop.taskId === taskId && taskLifecycle(stop) === (lifecycleId ?? "") && (!stop.settled || stop.result?.status !== 'stopped'))) stopped = false
     return stopped
   }
-  private async stopOwnedRecord(record: RoleRecord, observation?: ScheduledObservation): Promise<StopResult> {
+  private async stopOwnedRecord(record: RoleRecord, observation?: ScheduledObservation, forStorageMove = false): Promise<StopResult & { historicalOnly?: true }> {
     const result = await this.native.stop(record.identity.workId, record.identity.executionId, observation)
     if (result.status !== 'superseded') return result
     if (observation && this.native.get(record.identity.workId)) return result
@@ -6970,7 +6970,7 @@ executionId: binding.executionId, run: persistContext,
     }
     if (!disposed && (intent?.phase === 'stopping' || current.stopUnknown) && !known.length) return {
       status: 'unconfirmed',
-      reason: 'Stop was not durably confirmed and no producer identity is available to verify; inspect the original session.', jobs: []
+      reason: 'Stop was not durably confirmed and no producer identity is available to verify; inspect the original session.', jobs: [], ...(forStorageMove ? { historicalOnly: true } : {})
     }
     const latest = retired ? this.retiredWorkers?.get(record.identity.executionId) : this.roleRecords.get(record.identity.workId)
     if (latest?.identity.executionId !== record.identity.executionId || latest.sessionId !== record.sessionId) return { status: 'superseded' }
@@ -7789,7 +7789,15 @@ executionId: binding.executionId, run: persistContext,
       if (current && current.identity.executionId !== row.value.identity.executionId) throw new Error('Storage move encountered a replaced execution identity.')
       this.roleRecords.set(row.value.identity.workId, row.value)
         ; (this.roleBases ??= new Map()).set(row.value.identity.workId, structuredClone(row.value))
-      const result = await this.stopOwnedRecord(row.value)
+      const result = await this.stopOwnedRecord(row.value, undefined, true)
+      // A cold, unresolved stop receipt is not itself a writer. The native
+      // history has already been checked for pending jobs; do not turn this
+      // old receipt into a successful stop or let it hold the storage move.
+      if (result.status === 'unconfirmed' && result.historicalOnly) {
+        const session = SessionId(row.value.sessionId)
+        if (!this.ctx.agents.get(session) && !this.ctx.jobs.list(session).some(job =>
+          job.owner === row.value.sessionId && (job.status === 'running' || job.status === 'stopping'))) continue
+      }
       if (result.status !== 'stopped') throw new Error(result.status === 'unconfirmed'
         ? 'Storage has an unconfirmed native producer: ' + result.reason : 'Storage execution ownership changed before its move.')
       await this.saveRole({ ...row.value, stopped: true })
