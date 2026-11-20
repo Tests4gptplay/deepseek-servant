@@ -668,7 +668,8 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
     private settingsView(mode: FrameworkMode): FrameworkClientView {
         const saved = this.config(mode), active = this.running.get(mode), executions = active?.runtime.executionViews() ?? [];
         if (active) this.safetyNet.pruneResolvedProjections(mode, active.connection.scope, executions);
-        return { ...(this.displayOccurrence ? { faultOccurrence: this.displayOccurrence, faultOwner: this.displayOwner } : {}), revision: saved.revision, activeMode: mode, collaborationId: saved.settings.collaborationId, settings: saved.settings,
+        const recordsDirectory = mode === 'local' ? (this.storage as StoragePort & Partial<RecordMovePhysicalStore>).storageView?.().directory : undefined;
+        return { ...(recordsDirectory ? { recordsDirectory } : {}), ...(this.displayOccurrence ? { faultOccurrence: this.displayOccurrence, faultOwner: this.displayOwner } : {}), revision: saved.revision, activeMode: mode, collaborationId: saved.settings.collaborationId, settings: saved.settings,
             ...(active ? { storageScope: active.connection.scope } : {}),
             connection: { participating: !!active, status: active ? 'connected' : 'disconnected', detail: this.userErrors.get(mode), member: active?.connection.registration.member, workerSeats: active?.connection.registration.workerSeats }, messages: [], tasks: [], legacyTasks: [], archives: this.archiveViews.get(mode) ?? [], resources: [], executions: executions.map(row => row.detail === undefined ? row : ({ ...row, detail: this.surfaceFault(mode, 'execution', row.detail, active?.connection.scope, row.workId, row) })) };
     }
@@ -1008,7 +1009,8 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 this.clearResolvedErrors('local', input.commandId); this.changed();
                 const directory = (this.storage as StoragePort & RecordMovePhysicalStore).storageView().directory;
                 return { status: 'applied' as const, commandId: input.commandId,
-                    requestedDirectory: input.directory, directory, ...(applied.sourceRetained ? { retainedSource: applied.sourceRecords } : {}) };
+                    requestedDirectory: input.directory, directory, ...(applied.sourceRetained ? { retainedSource: applied.sourceRecords } : {}),
+                    ...(applied.retainedTargets?.length ? { retainedTargets: applied.retainedTargets } : {}) };
             } catch (error) {
                 try { this.pendingRecordMove = await mover.pendingReceipt() ?? this.pendingRecordMove; } catch { /* Keep the already-owned intent if locator reconciliation remains unknown. */ }
                 this.report('local', error, input.storageScope, input.commandId); throw error;

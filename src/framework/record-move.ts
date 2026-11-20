@@ -8,6 +8,7 @@ import type { StoragePort } from '../contracts/ports.js'
 import { LocalLocationRegistry, canonicalLocalLocation as canonical } from './local-location.js'
 import { localRecordFingerprint, prepareLocalRecordCopy, type LocalRecordBackend } from './maintenance.js'
 import type { RecordTreeCopyState } from './record-tree-copy.js'
+import { publishPreparedUpgradeFile } from './local-upgrade-publish.js'
 
 export const recordMoveKey = 'framework/record-moves'
 export interface RecordMoveRequest {
@@ -19,6 +20,9 @@ export interface RecordMoveRequest {
   settingsBefore: { revision: string; settings: FrameworkClientSettings }
   nextSettingsRevision: string
 }
+type DirectoryIdentity = { dev: string; ino: string; birthtimeNs: string }
+interface RecordDeparture { commandId: string; records: string; local: string; nextLocal: string; scope: string }
+interface RetainedLocalTarget { backup: string; original: DirectoryIdentity }
 export interface RecordMoveReceipt extends RecordMoveRequest {
   commandId: string
   targetLocal?: string
@@ -26,12 +30,18 @@ export interface RecordMoveReceipt extends RecordMoveRequest {
   fingerprint?: string
   localCopy?: RecordTreeCopyState
   sourceRetained?: true
+  returnFrom?: string
+  departures?: RecordDeparture[]
+  retainedTargets?: string[]
+  retainedLocalTarget?: RetainedLocalTarget
   phase: 'prepared' | 'published' | 'reopening' | 'applied' | 'abandoning' | 'abandoned'
   settingsAfter: { revision: string; settings: FrameworkClientSettings }
 }
 export interface RecordMovePhysicalStore {
   storageView(): { directory: string }
-  moveRecords(target: string, expected: string, signal: AbortSignal, verifyPublished?: (directory: string) => Promise<void>, commandId?: string): Promise<{ directory: string }>
+  moveRecords(target: string, expected: string, signal: AbortSignal, verifyPublished?: (directory: string) => Promise<void>, commandId?: string, retainedTarget?: true): Promise<{ directory: string; retainedTarget?: string }>
+  canAbandonRecordMove?(commandId: string, source: string, target: string): Promise<boolean>
+  recordMoveRetainedTarget?(commandId: string, destination: string): Promise<string | undefined>
   abandonRecordMove?(commandId: string, source: string, target: string): Promise<void>
 }
 export interface RecordMoveLifecycle {
@@ -52,17 +62,36 @@ export class RecordMoveOutcomeUnknownError extends Error {
 async function exists(path: string): Promise<boolean> {
   try { await lstat(path); return true } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error }
 }
+async function directoryIdentity(path: string): Promise<DirectoryIdentity | undefined> {
+  try {
+    const stat = await lstat(path, { bigint: true })
+    if (!stat.isDirectory() || stat.isSymbolicLink() || await canonical(path) !== path)
+      throw new Error('Retained Local records are not at their exact original directory: ' + path)
+    return { dev: String(stat.dev), ino: String(stat.ino), birthtimeNs: String(stat.birthtimeNs) }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+}
 const equalRequest = (a: RecordMoveRequest, b: RecordMoveRequest) => a.sourceRecords === b.sourceRecords && a.targetRecords === b.targetRecords
   && a.sourceLocal === b.sourceLocal && (a.localBackend ?? 'sqlite') === (b.localBackend ?? 'sqlite') && a.scope === b.scope && isDeepStrictEqual(a.settingsBefore, b.settingsBefore) && a.nextSettingsRevision === b.nextSettingsRevision
 /** One current applied move supports the existing UI's uncertain retry. A
  * later applied move replaces it; copy inventories end after this move’s one-shot cleanup. */
 function currentReceipts(receipts: RecordMoveReceipt[]): RecordMoveReceipt[] {
   const latest = receipts.filter(receipt => (receipt.phase === 'applied' || receipt.phase === 'abandoned')).at(-1)
-  return receipts.filter(receipt => (receipt.phase !== 'applied' && receipt.phase !== 'abandoned') || receipt === latest).map(receipt => {
+  const applied = receipts.filter(receipt => receipt.phase === 'applied').at(-1)
+  return receipts.filter(receipt => (receipt.phase !== 'applied' && receipt.phase !== 'abandoned') || receipt === latest || receipt === applied).map(receipt => {
     if (receipt.phase !== 'applied' && receipt.phase !== 'abandoned') return receipt
     const { localCopy: _finishedCopy, ...current } = receipt
     return current
   })
+}
+function departureHistory(previous: RecordMoveReceipt | undefined): RecordDeparture[] {
+  const history = previous?.departures ?? []
+  if (!previous?.sourceRetained || previous.localBackend !== 'physical' || !previous.sourceLocal || !previous.targetLocal || !previous.scope) return history
+  return [...history.filter(departure => departure.records !== previous.sourceRecords && departure.records !== previous.targetRecords), {
+    commandId: previous.commandId, records: previous.sourceRecords, local: previous.sourceLocal, nextLocal: previous.targetLocal, scope: previous.scope,
+  }]
 }
 const queues = new WeakMap<StoragePort, Promise<unknown>>()
 const inside = (parent: string, child: string) => { const path = relative(parent, child); return path === '' || !isAbsolute(path) && path !== '..' && !path.startsWith('..' + sep) }
@@ -112,6 +141,16 @@ export class FrameworkRecordMove {
         || Boolean(request.sourceLocal) !== Boolean(request.scope)) throw new RecordMoveNotStartedError('An explicit record move requires its original settings and Local scope identity.')
       if (receipts.some(item => item.phase !== 'applied' && item.phase !== 'abandoned')) throw new Error('Resolve the existing record move before starting another.')
       if (await canonical(this.physical.storageView().directory) !== request.sourceRecords) throw new RecordMoveNotStartedError('Active record storage changed before preparing the move.')
+      const previous = receipts.filter(item => item.phase === 'applied').at(-1)
+      this.checkWrongLocalTarget(previous, request)
+      const departures = departureHistory(previous)
+      const departed = departures.find(item => item.records === request.targetRecords)
+      const returning = departed && previous?.targetRecords === request.sourceRecords
+        && previous.targetLocal === request.sourceLocal && previous.localBackend === 'physical' && request.localBackend === 'physical'
+        && departed.scope === request.scope && request.sourceLocal && request.scope
+        && await this.locations.confirmsDeparture(departed.commandId, departed.local, departed.nextLocal,
+          previous.commandId, request.sourceLocal, request.scope)
+        ? departed : undefined
       const localKind = !request.sourceLocal ? 'none' : request.sourceLocal === join(request.sourceRecords, 'deepseek_servant', 'framework') ? 'owned' : 'custom'
       const targetLocal = localKind === 'none' ? undefined : localKind === 'owned' ? join(request.targetRecords, 'deepseek_servant', 'framework')
         : join(request.targetRecords, 'framework-local-' + createHash('sha256').update(request.scope!).digest('hex'))
@@ -121,13 +160,27 @@ export class FrameworkRecordMove {
         throw new RecordMoveNotStartedError('Record move source and destination trees must not overlap.')
       if (request.localBackend === 'physical' && request.sourceLocal && inside(request.sourceLocal, sourceTree))
         throw new RecordMoveNotStartedError('The selected Local record tree also contains the technical record root; separate these locations before moving them.')
-      if (targetLocal && await exists(request.localBackend === 'physical' ? targetLocal : join(targetLocal, 'dss-files.sqlite')))
-        throw new RecordMoveNotStartedError('Move target already has Local records without this prepared command.')
+      let retainedLocalTarget: RetainedLocalTarget | undefined
+      if (targetLocal && await exists(request.localBackend === 'physical' ? targetLocal : join(targetLocal, 'dss-files.sqlite'))) {
+        // The retained owned Local tree moves together with its technical tree.
+        // A separate custom destination needs its own, exact old-tree backup.
+        if (!returning || returning.local !== targetLocal)
+          throw new RecordMoveNotStartedError('Move target already has Local records without this prepared command.')
+        if (localKind === 'custom') {
+          const original = await directoryIdentity(targetLocal)
+          if (!original) throw new RecordMoveNotStartedError('The old Local folder changed before preparing the return move.')
+          const backup = targetLocal + '.dss-retained-' + createHash('sha256').update(commandId).digest('hex')
+          if (await exists(backup)) throw new RecordMoveNotStartedError('The return move backup location is already occupied; nothing was overwritten.')
+          retainedLocalTarget = { backup, original }
+        }
+      }
       const configuredDefault = request.settingsBefore.settings.localDirectory
         && await canonical(request.settingsBefore.settings.localDirectory) === join(request.sourceRecords, 'deepseek_servant', 'framework')
       const localDirectory = targetLocal ?? (configuredDefault ? join(request.targetRecords, 'deepseek_servant', 'framework') : request.settingsBefore.settings.localDirectory)
       const settingsAfter = { revision: request.nextSettingsRevision, settings: { ...request.settingsBefore.settings, localDirectory } }
-      const receipt: RecordMoveReceipt = { ...request, commandId, localKind, ...(targetLocal ? { targetLocal } : {}), settingsAfter, phase: 'prepared' }
+      const receipt: RecordMoveReceipt = { ...request, commandId, localKind, ...(targetLocal ? { targetLocal } : {}), settingsAfter, phase: 'prepared',
+        ...(returning ? { returnFrom: returning.commandId } : {}), ...(retainedLocalTarget ? { retainedLocalTarget } : {}),
+        ...(departures.length ? { departures } : {}) }
       receipts.push(receipt); await this.save(receipts, commandId)
       return this.advance(receipts, receipt, signal)
     })
@@ -157,6 +210,11 @@ export class FrameworkRecordMove {
       if (await canonical(this.physical.storageView().directory) !== receipt.sourceRecords)
         throw new Error('The target may be active; the original location cannot be restored blindly.')
       if (!this.physical.abandonRecordMove) throw new Error('This Host does not expose record move cancellation.')
+      if (receipt.phase !== 'abandoning') {
+        if (receipt.retainedLocalTarget && await exists(receipt.retainedLocalTarget.backup)
+          || this.physical.canAbandonRecordMove && !await this.physical.canAbandonRecordMove(commandId, receipt.sourceRecords, receipt.targetRecords))
+          throw new Error('The return move already preserved the previous target. Resume it to keep both generations intact.')
+      }
       if (receipt.phase !== 'abandoning') { receipt.phase = 'abandoning'; await this.save(receipts, commandId) }
       return this.finishAbandon(receipts, receipt, signal)
     })
@@ -173,6 +231,30 @@ export class FrameworkRecordMove {
     await this.save(receipts, receipt.commandId)
     return receipt
   }
+  private checkWrongLocalTarget(previous: RecordMoveReceipt | undefined, request: RecordMoveRequest, prepared = false): void {
+    const mistaken = departureHistory(previous).find(item => item.local !== item.records && request.targetRecords === item.local)
+    if (previous?.targetRecords === request.sourceRecords && mistaken) {
+      const detail = 'Choose the previous records folder, not its former Local data folder: ' + mistaken.records
+      if (prepared) throw new Error('Abandon this uncompleted migration first. ' + detail)
+      throw new RecordMoveNotStartedError(detail)
+    }
+  }
+  private async preserveRetainedLocalTarget(receipt: RecordMoveReceipt): Promise<void> {
+    const retained = receipt.retainedLocalTarget
+    if (!retained) return
+    const target = receipt.targetLocal!
+    const atBackup = await directoryIdentity(retained.backup), atTarget = await directoryIdentity(target)
+    if (isDeepStrictEqual(atBackup, retained.original)) {
+      if (atTarget && (atTarget.dev !== receipt.localCopy?.owned['']?.dev || atTarget.ino !== receipt.localCopy?.owned['']?.ino))
+        throw new Error('The return destination changed after the retained Local backup was published; both locations were preserved.')
+      return
+    }
+    if (atBackup || !isDeepStrictEqual(atTarget, retained.original))
+      throw new Error('The retained Local target or backup no longer matches this return move; neither location was replaced.')
+    if (await publishPreparedUpgradeFile(target, retained.backup) !== 'published'
+      || !isDeepStrictEqual(await directoryIdentity(retained.backup), retained.original))
+      throw new Error('The return Local backup was not confirmed; neither location was overwritten.')
+  }
   private async advance(receipts: RecordMoveReceipt[], receipt: RecordMoveReceipt, signal: AbortSignal): Promise<RecordMoveReceipt> {
     if (receipt.phase === 'applied') return receipt
     signal.throwIfAborted()
@@ -185,6 +267,7 @@ export class FrameworkRecordMove {
     let verifiedByMove = false
     if (actual === receipt.sourceRecords) {
       if (receipt.phase !== 'prepared') throw new RecordMoveOutcomeUnknownError(receipt.commandId, new Error('Published receipt disagrees with active root.'))
+      this.checkWrongLocalTarget(receipts.filter(item => item.phase === 'applied').at(-1), receipt, true)
       await this.lifecycle.quiesce(structuredClone(receipt), signal)
       signal.throwIfAborted()
       if (receipt.sourceLocal) {
@@ -194,6 +277,7 @@ export class FrameworkRecordMove {
         const identity = { source: receipt.sourceLocal, target: receipt.targetLocal!, scope: receipt.scope!, fingerprint }
         await this.locations.prepare(receipt.commandId, identity)
         if (receipt.localKind === 'custom') {
+          await this.preserveRetainedLocalTarget(receipt)
           if (receipt.localBackend !== 'physical' && await exists(join(receipt.targetLocal!, 'dss-files.sqlite'))) await verify(receipt.targetRecords)
           else {
             const copy = await prepareLocalRecordCopy(receipt.sourceLocal, receipt.targetLocal!, signal, receipt.localBackend, {
@@ -209,8 +293,13 @@ export class FrameworkRecordMove {
       await this.physical.moveRecords(receipt.targetRecords, receipt.sourceRecords, signal, async directory => {
         await verify(directory)
         verifiedByMove = true
-      }, receipt.commandId)
+      }, receipt.commandId, receipt.returnFrom ? true : undefined)
       if (await canonical(this.physical.storageView().directory) !== receipt.targetRecords) throw new RecordMoveOutcomeUnknownError(receipt.commandId, new Error('Physical move did not confirm the active target.'))
+    }
+    if (receipt.returnFrom && !receipt.retainedTargets?.length) {
+      const technical = await this.physical.recordMoveRetainedTarget?.(receipt.commandId, receipt.targetRecords)
+      const preserved = [technical, receipt.retainedLocalTarget?.backup].filter((path): path is string => !!path)
+      if (preserved.length) { receipt.retainedTargets = preserved; await this.save(receipts, receipt.commandId) }
     }
     if (receipt.phase !== 'reopening') {
       // Reuse only this call's completed callback, never a prior move's result.

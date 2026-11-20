@@ -7781,8 +7781,13 @@ executionId: binding.executionId, run: persistContext,
     // including reports received before a running runtime is available.
     this.environment.error(error, { ...origin, diagnosticContext: context, errorSignature: signature }, { source: identity ? 'agent' : 'runtime', occurrence })
   }
+  private hasLiveStorageWriter(sessionId: string): boolean {
+    const id = SessionId(sessionId)
+    return !!this.ctx.agents.get(id) || this.ctx.jobs.list(id).some(job =>
+      job.owner === sessionId && (job.status === 'running' || job.status === 'stopping'))
+  }
   async settleForStorageMove(): Promise<void> {
-    await this.dispose()
+    await this.dispose(true)
     for (const row of await this.records.list<RoleRecord>(this.prefix + 'roles/')) {
       if (row.value.released || row.value.stopped) continue
       const current = this.roleRecords.get(row.value.identity.workId)
@@ -7793,20 +7798,16 @@ executionId: binding.executionId, run: persistContext,
       // A cold, unresolved stop receipt is not itself a writer. The native
       // history has already been checked for pending jobs; do not turn this
       // old receipt into a successful stop or let it hold the storage move.
-      if (result.status === 'unconfirmed' && result.historicalOnly) {
-        const session = SessionId(row.value.sessionId)
-        if (!this.ctx.agents.get(session) && !this.ctx.jobs.list(session).some(job =>
-          job.owner === row.value.sessionId && (job.status === 'running' || job.status === 'stopping'))) continue
-      }
+      if (result.status === 'unconfirmed' && result.historicalOnly && !this.hasLiveStorageWriter(row.value.sessionId)) continue
       if (result.status !== 'stopped') throw new Error(result.status === 'unconfirmed'
         ? 'Storage has an unconfirmed native producer: ' + result.reason : 'Storage execution ownership changed before its move.')
       await this.saveRole({ ...row.value, stopped: true })
     }
   }
-  dispose(): Promise<void> {
-    return this.disposing ??= this.disposeOwned()
+  dispose(forStorageMove = false): Promise<void> {
+    return this.disposing ??= this.disposeOwned(forStorageMove)
   }
-  private async disposeOwned(): Promise<void> {
+  private async disposeOwned(forStorageMove: boolean): Promise<void> {
     this.closed = true
     this.localWakeAdmissions.clear(); this.reportedAdmissionDiagnostics.clear()
     const skillCacheClosed = this.skillCacheRefresh?.close()
@@ -7856,15 +7857,17 @@ executionId: binding.executionId, run: persistContext,
           })
         } catch (error) { failures.push(error) }
         try {
-          const result = await this.stopOwnedRecord(record)
+          const result = await this.stopOwnedRecord(record, undefined, forStorageMove)
           // Completion capture above can advance a reused role from settled A
           // to settled B. Stop evidence must not restore the old loop snapshot.
           const current = this.roleRecords.get(record.identity.workId)
           if (current?.identity.executionId !== record.identity.executionId || current.sessionId !== record.sessionId) continue
           if (result.status === 'stopped') await this.saveRole({ ...current, stopped: true })
           if (result.status === 'unconfirmed') {
-            failures.push(new Error(result.reason))
-            await this.saveRole({ ...current, stopUnknown: result })
+            const { historicalOnly, ...stopUnknown } = result
+            if (historicalOnly && !this.hasLiveStorageWriter(record.sessionId)) continue
+            failures.push(new Error(stopUnknown.reason))
+            await this.saveRole({ ...current, stopUnknown })
           }
         } catch (error) { failures.push(error) }
       }

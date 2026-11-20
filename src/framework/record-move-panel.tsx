@@ -49,7 +49,8 @@ export function RecordMovePanel({ api, storageScope, settingsRevision, pendingRe
         ? tr('原请求的完成结果尚未确认，本次没有再次搬迁。核对时的记录目录：', 'The original request’s completion is unconfirmed; no move was repeated. Record directory at this check: ') + outcome.directory
         : tr('记录已搬家并应用。宿主原生日志位置未改变。', 'Records moved and applied. Native Host log locations were not changed.')
           + (outcome ? tr(' 核对时的记录目录：', ' Record directory at this check: ') + outcome.directory : '')
-          + (outcome?.retainedSource ? tr(' 原记录目录已保留：', ' Original records folder retained: ') + outcome.retainedSource : ''))
+          + (outcome?.retainedSource ? tr(' 原记录目录已保留：', ' Original records folder retained: ') + outcome.retainedSource : '')
+          + (outcome?.retainedTargets?.length ? tr(' 目标目录原有记录保留在：', ' Existing destination records retained at: ') + outcome.retainedTargets.join('；') : ''))
       void changed().catch(reason => { if (active.current) setError(frameworkErrorText(reason)) })
     } catch (reason) {
       if (isRecordMoveNotStarted(reason)) {
@@ -81,7 +82,7 @@ export function RecordMovePanel({ api, storageScope, settingsRevision, pendingRe
       setPending(undefined); setDirectory(outcome.directory)
       setResult(tr('已放弃本次搬迁，继续使用原记录目录。已复制的文件保留在：', 'Move abandoned. The original records folder remains in use. Copied files remain at: ') + outcome.retainedTarget)
       void changed().catch(reason => { if (active.current) setError(frameworkErrorText(reason)) })
-    } catch (reason) { if (active.current) setError(frameworkErrorText(reason) || tr('未能放弃本次搬迁，请重试。', 'Could not abandon this move. Please retry.')) }
+    } catch (reason) { if (active.current) setError(frameworkErrorText(reason) || errorMessage(reason)) }
     finally { if (active.current) { setBusy(false); setAbandoning(false) } }
   }
   const changeDirectory = (directory: string) => {
@@ -98,6 +99,7 @@ export function RecordMovePanel({ api, storageScope, settingsRevision, pendingRe
         void onPickDirectory(currentDirectory).then(selected => { if (selected !== null && active.current) changeDirectory(selected) }, reason => { if (active.current) setError(frameworkErrorText(reason)) }).finally(() => { if (active.current) setPicking(false) })
       }}>{tr('选择文件夹', 'Choose folder')}</Button>}
     </div>
+    {pending && pending.input.directory !== currentDirectory && <p className={css.muted}>{tr('当前使用：', 'Currently in use: ')}{currentDirectory}</p>}
     <p className={css.muted}>{tr('选择新文件夹，或输入新路径后按回车，即会迁移现有记录。', 'Choose a new folder or type a path and press Enter to move your existing records.')}</p>
     {busy && <div className={css.recordMoveProgress} role="status"><progress aria-label={abandoning ? tr('正在放弃搬迁', 'Abandoning move') : tr('正在迁移记录', 'Moving records')} /><span>{abandoning ? tr('正在放弃本次搬迁…', 'Abandoning this move…') : tr('正在迁移记录…', 'Moving records…')}</span></div>}
     {pending && !busy && <div className={css.actions}><Button type="button" variant="outline" onClick={() => void submit(pending)}>{tr('重试迁移', 'Retry move')}</Button>{api.abandonRecordMove && canAbandon && <Button type="button" variant="outline" onClick={() => void abandon(pending)}>{tr('放弃本次搬迁', 'Abandon this move')}</Button>}</div>}

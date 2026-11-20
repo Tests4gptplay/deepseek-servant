@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { copyRecordTree, recordTreeFingerprint, type RecordTreeCopyState } from '../../framework/record-tree-copy.js'
-import { lstat, mkdir, readFile, realpath, stat } from 'node:fs/promises'
+import { lstat, mkdir, open, readFile, realpath, stat } from 'node:fs/promises'
+import { publishPreparedUpgradeFile } from '../../framework/local-upgrade-publish.js'
 import path from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
@@ -15,9 +16,11 @@ import { RecordFilesBackend, ensureRecordTree, recordFolder, recordFileUsage, co
 interface StoredEnvelope { key: string; value: unknown }
 const storedEnvelope: z.ZodType<StoredEnvelope> = z.object({ key: z.string().min(1), value: z.json() })
 const servantDomain = defineDomain({ name: 'deepseek_servant', version: 1, tables: { records: domainTable<string, StoredEnvelope>(storedEnvelope) } })
+const recordDirectoryIdentity = z.object({ dev: z.string(), ino: z.string() })
+const retainedRecordReturn = z.object({ original: recordDirectoryIdentity, ready: recordDirectoryIdentity.optional() })
 const locationDomain = defineDomain({ name: 'deepseek_servant_location', version: 1,
   tables: { configuration: domainTable<string, StoredEnvelope>(storedEnvelope), settings: domainTable<string, LocationValue>(
-    z.object({ directory: z.string().min(1), layout: z.enum(['folders-v1', 'folders-v2']).optional(), move: z.object({ commandId: z.string().min(1), destination: z.string().min(1), copy: z.object({ version: z.literal(1), source: z.string(), destination: z.string(), fingerprint: z.string(), owned: z.record(z.string(), z.object({ dev: z.string(), ino: z.string() })) }).optional() }).optional() })) } })
+    z.object({ directory: z.string().min(1), layout: z.enum(['folders-v1', 'folders-v2']).optional(), move: z.object({ commandId: z.string().min(1), destination: z.string().min(1), retained: retainedRecordReturn.optional(), copy: z.object({ version: z.literal(1), source: z.string(), destination: z.string(), fingerprint: z.string(), owned: z.record(z.string(), z.object({ dev: z.string(), ino: z.string() })) }).optional() }).optional() })) } })
 const DATA_FOLDER = 'deepseek_servant'
 const LEGACY_FILE = 'deepseek_servant.json'
 interface Records {
@@ -28,7 +31,30 @@ interface Records {
 }
 interface OpenRecords { table: Records; files?: RecordFilesBackend; close(): Promise<void> }
 type Location = Domain<typeof locationDomain>
-type LocationValue = { directory: string; layout?: 'folders-v1' | 'folders-v2'; move?: { commandId: string; destination: string; copy?: RecordTreeCopyState } }
+type RecordDirectoryIdentity = z.infer<typeof recordDirectoryIdentity>
+type RecordReturn = z.infer<typeof retainedRecordReturn>
+type LocationMove = { commandId: string; destination: string; copy?: RecordTreeCopyState; retained?: RecordReturn }
+type LocationValue = { directory: string; layout?: 'folders-v1' | 'folders-v2'; move?: LocationMove }
+
+function returnPaths(destination: string, commandId: string): { stage: string; backup: string } {
+  const base = path.join(destination, '.dss-record-return-' + createHash('sha256').update(commandId).digest('hex'))
+  return { stage: base + '.stage', backup: base + '.backup' }
+}
+async function directoryIdentity(directory: string): Promise<RecordDirectoryIdentity | undefined> {
+  const info = await lstat(directory, { bigint: true }).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return undefined
+    throw error
+  })
+  if (!info) return undefined
+  if (!info.isDirectory() || info.isSymbolicLink() || await realpath(directory) !== directory)
+    throw new Error('Record return requires an ordinary directory: ' + directory)
+  return { dev: String(info.dev), ino: String(info.ino) }
+}
+async function syncReturnDirectory(directory: string): Promise<void> {
+  if (process.platform === 'win32') return
+  const handle = await open(directory, 'r')
+  try { await handle.sync() } finally { await handle.close() }
+}
 
 class LocationCommitUncertainError extends Error {
   constructor(readonly destination: string, cause: unknown) {
@@ -165,6 +191,36 @@ export class DshStorageAdapter implements StoragePort {
     }
     return pending
   }
+  /** Report only this confirmed technical return's exact preserved tree. */
+  recordMoveRetainedTarget(commandId: string, destination: string): Promise<string | undefined> {
+    return this.exclusive(async () => {
+      const locator = this.location.table('settings')
+      const move = locator.get('record-move')?.move
+      if (this.directory !== destination || locator.get('active')?.directory !== destination
+        || move?.commandId !== commandId || move.destination !== destination || !move.retained?.ready) return undefined
+      const { backup } = returnPaths(destination, commandId)
+      if (!isDeepStrictEqual(await directoryIdentity(backup), move.retained.original)
+        || !isDeepStrictEqual(await directoryIdentity(path.join(destination, DATA_FOLDER)), move.retained.ready))
+        throw new Error('The confirmed record return backup or promoted tree was replaced.')
+      return backup
+    })
+  }
+
+  /** Ask before persisting a framework abandonment; never lose a recoverable
+   * replacement command after the earlier tree has changed names. */
+  canAbandonRecordMove(commandId: string, source: string, target: string): Promise<boolean> {
+    return this.exclusive(async () => {
+      await this.location.close()
+      this.location = await this.ctx.storageDomain.open(locationDomain)
+      const active = this.location.table('settings').get('active')
+      if (this.pendingRelocation || this.directory !== source || active?.directory !== source) return false
+      const pending = this.location.table('settings').get('record-move')
+      if (!pending?.move || pending.move.destination === source) return true
+      if (pending.directory !== source || pending.move.commandId !== commandId || pending.move.destination !== target) return false
+      return !pending.move.retained || !await exists(returnPaths(target, commandId).backup)
+    })
+  }
+
   /** Exact accepted relocation evidence only. This does not open a database,
    * scan a tree, or affect ordinary technical reads and writes. */
   abandonRecordMove(commandId: string, source: string, target: string): Promise<void> {
@@ -176,9 +232,13 @@ export class DshStorageAdapter implements StoragePort {
       if (this.pendingRelocation || this.directory !== source || active?.directory !== source)
         throw new Error('The record destination may already be active; continue the original move instead.')
       const pending = this.location.table('settings').get('record-move')
-      if (!pending?.move) return
+      // The active locator itself proves this older receipt already published.
+      // A later request may have been saved only by the framework coordinator.
+      if (!pending?.move || pending.move.destination === source) return
       if (pending.directory !== source || pending.move.commandId !== commandId || pending.move.destination !== target)
         throw new Error('The retained technical move does not match this cancellation.')
+      if (pending.move.retained && await exists(returnPaths(target, commandId).backup))
+        throw new Error('The retained target was already preserved for this return; continue the original move.')
       await this.location.table('settings').delete('record-move')
     })
   }
@@ -186,7 +246,7 @@ export class DshStorageAdapter implements StoragePort {
    * Local producers; unrelated Git execution is not stopped. The existing
    * adapter barrier drains/queues technical publications during this copy. */
   moveRecords(directory: string, expectedDirectory: string, signal: AbortSignal,
-    verifyPublished?: (targetRecordsDirectory: string) => Promise<void>, commandId?: string): Promise<RecordStorageView> {
+    verifyPublished?: (targetRecordsDirectory: string) => Promise<void>, commandId?: string, retainedTarget?: true): Promise<RecordStorageView> {
     return this.exclusive(async () => {
       signal.throwIfAborted()
       if (expectedDirectory !== this.directory) throw new Error('记录目录已变化，请刷新后重试。')
@@ -215,24 +275,38 @@ export class DshStorageAdapter implements StoragePort {
         && (commandId === undefined || pending.move.commandId === commandId)
       if (pending?.move && !sameMove && pending.move.destination !== this.directory)
         throw new Error('Resume the original technical record move before choosing another destination.')
-      const move = sameMove ? structuredClone(pending!.move!) : { commandId: commandId ?? randomUUID(), destination, copy: undefined as RecordTreeCopyState | undefined }
+      const move: LocationMove = sameMove ? structuredClone(pending!.move!) : { commandId: commandId ?? randomUUID(), destination }
+      const saveMove = () => {
+        const { copy, ...metadata } = move
+        return this.location.table('settings').put('record-move', { directory: this.directory, move: { ...structuredClone(metadata), ...(copy ? { copy } : {}) } })
+      }
+      if (await exists(path.join(destination, LEGACY_FILE))) {
+        if (sameMove) throw new Error('The destination gained legacy records; existing contents are preserved.')
+        throw new Error('目标文件夹已有 Servant 记录，请选择其他文件夹；不会覆盖已有记录。')
+      }
       if (!sameMove) {
-        if (await exists(targetTree) || await exists(path.join(destination, LEGACY_FILE)))
-          throw new Error('目标文件夹已有 Servant 记录，请选择其他文件夹；不会覆盖已有记录。')
-        await this.location.table('settings').put('record-move', { directory: this.directory, move })
-      } else if (await exists(path.join(destination, LEGACY_FILE))) throw new Error('The destination gained legacy records; existing contents are preserved.')
+        if (retainedTarget && !commandId) throw new Error('A retained record return requires its original command identity.')
+        if (await exists(targetTree)) {
+          if (!retainedTarget) throw new Error('目标文件夹已有 Servant 记录，请选择其他文件夹；不会覆盖已有记录。')
+          const original = await directoryIdentity(targetTree)
+          const { stage, backup } = returnPaths(destination, move.commandId)
+          if (!original || await exists(stage) || await exists(backup)) throw new Error('The original record return paths cannot be verified; existing contents are preserved.')
+          move.retained = { original }
+        }
+        await saveMove()
+      }
       let target: OpenRecords | undefined
       try {
-        move.copy = await copyRecordTree(sourceTree, targetTree, move.copy, async copy => {
+        if (move.retained) await this.prepareRecordReturn(sourceTree, targetTree, move, saveMove, signal)
+        else move.copy = await copyRecordTree(sourceTree, targetTree, move.copy, async copy => {
           move.copy = copy
-          const { copy: _copy, ...metadata } = move
-          await this.location.table('settings').put('record-move', { directory: this.directory, move: { ...structuredClone(metadata), copy } })
+          await saveMove()
         }, signal)
         target = await openTree(this.ctx, targetTree)
         assertSameRecords(this.records.table, target.table)
         // Opening the record backend must not silently alter arbitrary copied
         // files. The explicit Local verification covers its own backend too.
-        if (await recordTreeFingerprint(targetTree, signal) !== move.copy.fingerprint)
+        if (await recordTreeFingerprint(targetTree, signal) !== move.copy!.fingerprint)
           throw new Error('Opening the copied technical records changed their contents; both copies are preserved.')
         await verifyPublished?.(destination)
         signal.throwIfAborted()
@@ -253,6 +327,51 @@ export class DshStorageAdapter implements StoragePort {
       await this.finishRelocation({ destination, sourceTree, targetTree, target: target!, verifyPublished })
       return this.storageView()
     })
+  }
+
+  /** Exact continuation of an explicit return. The inactive previous tree is
+   * renamed whole, preserving edits and unknown material. The new tree is
+   * verified before the original leaves its name or the active locator moves. */
+  private async prepareRecordReturn(sourceTree: string, targetTree: string, move: LocationMove,
+    save: () => Promise<void>, signal: AbortSignal): Promise<void> {
+    const retained = move.retained!, { stage, backup } = returnPaths(move.destination, move.commandId)
+    const is = async (directory: string, identity: RecordDirectoryIdentity) => isDeepStrictEqual(await directoryIdentity(directory), identity)
+    if (!retained.ready) {
+      if (!await is(targetTree, retained.original) || await exists(backup)) throw new Error('The retained original directory changed before record return.')
+      move.copy = await copyRecordTree(sourceTree, stage, move.copy, async copy => {
+        move.copy = copy
+        await save()
+      }, signal)
+      const staged = await directoryIdentity(stage)
+      if (!staged || !isDeepStrictEqual(staged, move.copy.owned[''])) throw new Error('The prepared record return stage changed.')
+      await syncReturnDirectory(move.destination)
+      retained.ready = staged
+      await save()
+    }
+    const ready = retained.ready
+    if (!move.copy || !isDeepStrictEqual(ready, move.copy.owned[''])) throw new Error('The retained record return has no verified copy.')
+    if (await recordTreeFingerprint(sourceTree, signal) !== move.copy.fingerprint)
+      throw new Error('Active records changed after the record return was prepared; both originals are preserved.')
+    if (await is(targetTree, ready)) {
+      if (await exists(stage) || !await is(backup, retained.original)) throw new Error('The promoted return no longer matches its original backup.')
+      await syncReturnDirectory(move.destination)
+      return
+    }
+    if (!await is(stage, ready) || await recordTreeFingerprint(stage, signal) !== move.copy.fingerprint)
+      throw new Error('The prepared record return stage does not match its verified copy.')
+    signal.throwIfAborted()
+    if (await is(targetTree, retained.original)) {
+      if (await exists(backup)) throw new Error('The record return backup location is occupied; existing contents are preserved.')
+      if (await publishPreparedUpgradeFile(targetTree, backup) !== 'published')
+        throw new Error('The record return backup location became occupied; existing contents are preserved.')
+      await syncReturnDirectory(move.destination)
+    }
+    if (!await is(backup, retained.original) || await exists(targetTree))
+      throw new Error('The retained original could not be verified at its record return backup path.')
+    if (await publishPreparedUpgradeFile(stage, targetTree) !== 'published')
+      throw new Error('The record return destination became occupied; existing contents are preserved.')
+    await syncReturnDirectory(move.destination)
+    if (!await is(targetTree, ready)) throw new Error('The promoted record return copy could not be verified.')
   }
 
   get<T>(key: string): Promise<T | undefined> {

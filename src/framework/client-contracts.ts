@@ -86,9 +86,10 @@ export interface FrameworkClientView {
   foregroundProcessing?: { executionId: string; turnId: string; startedAt?: number }
   foregroundProcessGroups?: FrameworkClientProcessGroup[]
   processGroups?: FrameworkClientProcessGroup[]
+  recordsDirectory?: string
   pendingRecordMove?: { commandId: string; storageScope: string; expectedRevision: string; directory: string; canAbandon?: boolean }
   /** This request's response only; a current location is not an old command receipt. */
-  recordMoveOutcome?: { status: 'applied' | 'current-location'; commandId: string; requestedDirectory: string; directory: string; retainedSource?: string }
+  recordMoveOutcome?: { status: 'applied' | 'current-location'; commandId: string; requestedDirectory: string; directory: string; retainedSource?: string; retainedTargets?: string[] }
   revision: string
   activeMode: FrameworkMode
   collaborationId: string
