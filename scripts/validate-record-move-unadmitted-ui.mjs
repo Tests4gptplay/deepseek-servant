@@ -41,12 +41,24 @@ const container = document.getElementById('root'), root = createRoot(container)
 let assertions = 0
 const check = (value, expected) => { assert.deepEqual(value, expected); assertions++ }
 
-const originalLocal=path.join(scratch,'original-local'),occupied=path.join(scratch,'records'),destination=path.join(scratch,'new-target')
-await fs.mkdir(originalLocal);await fs.mkdir(occupied)
-const sdk=await openDshStorageFixture(path.join(scratch,'records'),path.join(scratch,'locator')),store=sdk.adapter
+const occupied=path.join(scratch,'records'),destination=path.join(scratch,'new-target')
+const scope=JSON.stringify(['local',path.join(scratch,'logical-scope')])
+const originalLocal=path.join(occupied,'framework-local-'+createHash('sha256').update(scope).digest('hex'))
+await fs.mkdir(originalLocal,{recursive:true})
+await fs.writeFile(path.join(originalLocal,'first.txt'),'first from A')
+await fs.writeFile(path.join(occupied,'unrelated.txt'),'do not move or overwrite')
+const sdk=await openDshStorageFixture(occupied,path.join(scratch,'locator')),store=sdk.adapter
 let current={revision:'original-revision',settings:{localDirectory:originalLocal}},quiesced=0
 await store.set('framework-settings/local',current)
-const scope=JSON.stringify(['local',originalLocal]),owner={quiesce:async()=>{quiesced++},applySettings:async r=>{current=r.settingsAfter;await store.set('framework-settings/local',current)},reopen:async()=>{}}
+const { LocalLocationRegistry } = await import('../src/framework/local-location.ts')
+const registry = new LocalLocationRegistry(store)
+// The actual device previously moved this scope from another physical root.
+const logicalOld=path.join(scratch,'logical-scope')
+const seeded={source:logicalOld,target:originalLocal,scope,fingerprint:'previously verified'}
+await registry.prepare('source-before-A',seeded)
+await registry.publish('source-before-A',seeded)
+await registry.applied('source-before-A')
+const owner={quiesce:async()=>{quiesced++},applySettings:async r=>{current=r.settingsAfter;await store.set('framework-settings/local',current)},reopen:async()=>{}}
 const mover=new FrameworkRecordMove(store,store,owner),serviceFile=path.join(source,'src/framework/service.ts'),js=stripTypeScriptTypes(readFileSync(serviceFile,'utf8'),{mode:'transform'}),begin=js.indexOf('    moveRecords(input)'),end=js.indexOf('    async maintenanceView(',begin)
 assert(begin>=0&&end>begin)
 const Service=new Function('PhysicalLocalFiles','randomUUID','return class {\n'+js.slice(begin,end)+'\n}')(PhysicalLocalFiles,randomUUID)
@@ -54,7 +66,7 @@ const service=Object.assign(new Service(),{storage:store,serialMode:(_m,op)=>op(
 const transportJS=stripTypeScriptTypes(readFileSync(path.join(source,'src/framework/transport.ts'),'utf8'),{mode:'transform'}),failureStart=transportJS.indexOf('function frameworkFailure('),failureEnd=transportJS.indexOf('export function installFrameworkTransport',failureStart)
 assert(failureStart>=0&&failureEnd>failureStart)
 const frameworkFailure=new Function('isLocalAttachmentError','HistorySelectionChangedError','requiresUserAction','RecordMoveNotStartedError','FilesConflictError','FilesOutcomeUnknownError',transportJS.slice(failureStart,failureEnd)+';return frameworkFailure')(isLocalAttachmentError,clientErrors.HistorySelectionChangedError,clientErrors.requiresUserAction,clientErrors.RecordMoveNotStartedError,FilesConflictError,FilesOutcomeUnknownError)
-const calls=[],requests=[],failures=[],api={moveRecords:input=>{calls.push(structuredClone(input));const work=service.moveRecords(input).catch(error=>{const response=frameworkFailure({errorPresentation(){}},'moveRecords',error);failures.push(response);throw clientErrors.frameworkRpcError('moveRecords',response.error)});requests.push(work);return work}}
+const calls=[],requests=[],failures=[],outcomes=[],api={moveRecords:input=>{calls.push(structuredClone(input));const work=service.moveRecords(input).then(result=>{outcomes.push(result.recordMoveOutcome);return result}).catch(error=>{const response=frameworkFailure({errorPresentation(){}},'moveRecords',error);failures.push(response);throw clientErrors.frameworkRpcError('moveRecords',response.error)});requests.push(work);return work}}
 async function button(text){const b=[...container.querySelectorAll('button')].find(x=>x.textContent===text);assert(b,text);await act(async()=>{b.dispatchEvent(new dom.window.MouseEvent('click',{bubbles:true}));await Promise.allSettled(requests)})}
 let selected=occupied
 const onPickDirectory=async()=>selected
@@ -67,6 +79,27 @@ try{
  check(container.textContent.includes('记录已搬家并应用'),true)
  check(container.textContent.includes('原记录目录已保留'),true)
  check((await fs.stat(path.join(occupied,'deepseek_servant'))).isDirectory(),true)
+ const localAtB=current.settings.localDirectory
+ await fs.writeFile(path.join(localAtB,'latest.txt'),'new in B')
+ await store.set('framework-instance-uuid','updated in B')
+ // Prove that old DSS contents as well as unrelated destination files survive.
+ await fs.writeFile(path.join(originalLocal,'old-A-edit.txt'),'changed after A was retained')
+ selected=occupied
+ await act(async()=>root.render(React.createElement(RecordMovePanel,{api,storageScope:scope,settingsRevision:current.revision,currentDirectory:destination,onPickDirectory,tr:cn=>cn,changed:async()=>{}})))
+ check(container.querySelector('input').value,destination)
+ await button('选择文件夹');await act(async()=>{await Promise.all(requests)})
+ check(calls.length,2);check(quiesced,2)
+ check(store.storageView().directory,occupied)
+ check(current.settings.localDirectory,originalLocal)
+ check(await fs.readFile(path.join(originalLocal,'latest.txt'),'utf8'),'new in B')
+ check(await fs.readFile(path.join(localAtB,'latest.txt'),'utf8'),'new in B')
+ check(await fs.readFile(path.join(occupied,'unrelated.txt'),'utf8'),'do not move or overwrite')
+ check(await store.get('framework-instance-uuid'),'updated in B')
+ check(outcomes.at(-1).retainedTargets.length,2)
+ const [oldTechnical,oldLocal]=outcomes.at(-1).retainedTargets
+ check((await fs.stat(oldTechnical)).isDirectory(),true)
+ check(await fs.readFile(path.join(oldLocal,'old-A-edit.txt'),'utf8'),'changed after A was retained')
+ check(container.textContent.includes('目标目录原有记录保留在'),true)
  console.log(JSON.stringify({status:'recovered',assertions,calls,failures,serviceSHA256:createHash('sha256').update(readFileSync(serviceFile)).digest('hex'),limits:'Real React/ReactDOM/JSDOM panel, actual FrameworkService.moveRecords, frameworkFailure and frameworkRpcError methods, FrameworkRecordMove and installed DSH storage on temp directories. The existing picker skips the active directory and starts a move from one successful selection with no confirmation button. Button/Input HTML ports with onInput forwarded to product onChange; lifecycle/model/UI view/acquisition unrelated ports controlled. Not actual native UI/Windows.'},null,2))
 }finally{await act(async()=>root.unmount());dom.window.close();await sdk.close();await fs.rm(scratch,{recursive:true,force:true});stop();hooks.deregister()}
 process.exit(0)

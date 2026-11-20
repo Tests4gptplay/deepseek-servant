@@ -38,4 +38,29 @@ assert.equal(Object.hasOwn(ordinaryResult, 'historicalOnly'), false)
 const stopped = runtime({ role: { identity, sessionId: row.sessionId } })
 await stopped.value.settleForStorageMove()
 assert.equal(stopped.writes.at(-1)?.stopped, true)
-console.log(JSON.stringify({ assertions: 10, staleReceiptDoesNotBlock: true, liveProducerProtection: true }))
+// Live Local runtime already loaded the old Helper before the move. Exercise
+// actual shutdown as well as the cold receipt scan above.
+function openedRuntime(options) {
+  const f = runtime(options)
+  const v = f.value
+  delete v.dispose
+  v.roleRecords.set(identity.workId, row)
+  Object.assign(v, {
+    localWakeAdmissions: new Map(), reportedAdmissionDiagnostics: new Map(), cleaner: { close() {} },
+    cleanupResidues: new Map(), pendingControlStops: [], loop: { stop: async () => {} },
+    native: { ...v.native, cancelOpening: async () => ({ status: 'superseded' }) },
+    environment: {}, serialWork: (_id, run) => run(), finishGitAuxiliaryRound: async () => {},
+    targetedPumps: new Map(), settleOperations: async () => {}, observations: { dispose: async () => {} },
+    roleKey: () => 'foreground', organizerWakeWrites: new Map(),
+  })
+  return f
+}
+const loaded = openedRuntime()
+await loaded.value.settleForStorageMove()
+assert.deepEqual(loaded.writes, [], 'Loaded stale Helper must not block or be marked stopped.')
+const ordinary = openedRuntime()
+await assert.rejects(ordinary.value.dispose(), /no producer identity/)
+assert.equal(Object.hasOwn(ordinary.writes.at(-1).stopUnknown, 'historicalOnly'), false)
+const liveLoaded = openedRuntime({ live: true })
+await assert.rejects(liveLoaded.value.settleForStorageMove(), /survives without its owned stop handle/)
+console.log(JSON.stringify({ assertions: 14, staleReceiptDoesNotBlock: true, liveProducerProtection: true, activeRuntimeShutdown: true }))

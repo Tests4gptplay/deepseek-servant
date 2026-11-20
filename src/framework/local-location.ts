@@ -129,6 +129,15 @@ export class LocalLocationRegistry {
       throw new Error('This selected location is the target of a pending explicit move; its publication is not complete.')
     return binding?.scope ?? JSON.stringify(['local', canonical])
   }
+  /** A return move may reuse only the exact departed/current pair published
+   * by its immediately previous successful move, not a directory name. */
+  async confirmsDeparture(commandId: string, source: string, departedTo: string, currentCommandId: string, currentLocation: string, scope: string): Promise<boolean> {
+    location(source); location(departedTo); location(currentLocation)
+    const state = await this.state()
+    const departed = state.bindings[source], current = state.bindings[currentLocation]
+    return departed?.state === 'departed' && departed.commandId === commandId && departed.scope === scope && departed.destination === departedTo
+      && current?.state === 'current' && current.commandId === currentCommandId && current.scope === scope
+  }
   async receipt(commandId: string): Promise<LocalMoveReceipt | undefined> {
     return (await this.state()).moves.find(move => move.commandId === commandId)
   }
