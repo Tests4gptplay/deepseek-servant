@@ -57,7 +57,7 @@ export function RecordMovePanel({ api, storageScope, settingsRevision, pendingRe
         if (active.current) { setPending(undefined); setDirectory(attempt.input.directory); setError(errorMessage(reason)) }
         return
       }
-      attempt.error = frameworkErrorText(reason)
+      attempt.error = frameworkErrorText(reason) || errorMessage(reason)
       if (active.current) {
         setError(attempt.error)
         try { await changed(); if (active.current) setMoveStatusVerified(true) }
