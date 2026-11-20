@@ -31,9 +31,16 @@ The two independently developed projects show **architectural convergence** in s
 - **Conversations, history and results:** Continue discussing ongoing work, add requirements, revisit conversations by date, browse task history and open results or saved attachments.
 - **Working memory and skills:** Save and revisit task records, planning notes and knowledge, and accumulate reusable skills. Local mode provides categorized record cleanup and explicit task reset.
 
+## What’s new in 0.5.1
+
+- Improved task responsiveness, background coordination, archiving, and Git collaboration.
+- Restored the green connection indicator and improved folder selection and records relocation. Failed moves can be retried or abandoned without refreshing.
+
+[Release notes](docs/releases/0.5.1.md) · [0.5.0 / 0.5.1 benchmark](docs/testing/0.5.1.md)
+
 ## Installation & use
 
-In DSH, choose **Plugins → Add plugin** and enter `github:Tests4gptplay/deepseek-servant#v0.5.0`.
+In DSH, choose **Plugins → Add plugin** and enter `github:Tests4gptplay/deepseek-servant#v0.5.1`.
 
 See [Installation & upgrade](docs/INSTALLATION.md) for installation sources, Desktop / Web instructions and upgrade guidance. The linked guide is in Chinese.
 

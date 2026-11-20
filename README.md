@@ -4,7 +4,7 @@
 
 围绕长期任务协调规划、执行与成果评价，保存进展、成果和经验，支持后续接续与方法调整。
 
-[安装与使用](#安装与使用) · [0.5.0 更新说明](docs/releases/0.5.0.md) · [测试记录](docs/testing/0.5.0.md) · [English](https://github.com/Tests4gptplay/deepseek-servant/blob/main/README.en.md)
+[安装与使用](#安装与使用) · [0.5.1 更新说明](docs/releases/0.5.1.md) · [0.5.0／0.5.1 对比测试](docs/testing/0.5.1.md) · [English](https://github.com/Tests4gptplay/deepseek-servant/blob/main/README.en.md)
 
 <p align="center">
 <img src="https://raw.githubusercontent.com/Tests4gptplay/deepseek-servant/v0.3.0/docs/images/deepseek-servant-maids-duo.webp" width="480" alt="DeepSeek Servant 短裙与长裙女仆角色设计">
@@ -38,6 +38,13 @@ DSS 是独立安装的社区插件，使用 [DeepSeek Harness（DSH）](https://
 
 [操作指南](https://github.com/Tests4gptplay/deepseek-servant/blob/main/PRIVATE_GIT.md) · [已测场景与限制](docs/testing/0.5.0.md)
 
+## 0.5.1 的改进
+
+- 优化前台响应、后台协作及归档收尾，减少 Git 协作中的重复访问和推送冲突。
+- 修复连接状态指示，改善文件夹选择和记录搬迁；搬迁失败时可在设置页直接重试或放弃。
+
+[完整更新说明](docs/releases/0.5.1.md) · [测试环境与同场景对比](docs/testing/0.5.1.md)
+
 ## 0.5.0 的改进
 
 - **任务交付与后续整理分开**：成果先交付，记录整理随后继续。
@@ -53,7 +60,7 @@ DSS 是独立安装的社区插件，使用 [DeepSeek Harness（DSH）](https://
 在 DSH 中打开 **插件 → 添加插件**，输入以下安装来源：
 
 ```text
-github:Tests4gptplay/deepseek-servant#v0.5.0
+github:Tests4gptplay/deepseek-servant#v0.5.1
 ```
 
 ### 第一次使用
@@ -63,7 +70,7 @@ github:Tests4gptplay/deepseek-servant#v0.5.0
 3. 在任务页查看进度、结果和需要补充的信息；继续交流、调整目标，或按需暂停、继续和取消。
 4. 使用 DSS-cah 进行远程作业时，按操作指南连接仓库。
 
-[Desktop / Web 安装与升级](https://github.com/Tests4gptplay/deepseek-servant/blob/main/docs/INSTALLATION.md) · [使用指南](https://github.com/Tests4gptplay/deepseek-servant/blob/main/docs/USAGE.md) · [下载 0.5.0](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.0)
+[Desktop / Web 安装与升级](https://github.com/Tests4gptplay/deepseek-servant/blob/main/docs/INSTALLATION.md) · [使用指南](https://github.com/Tests4gptplay/deepseek-servant/blob/main/docs/USAGE.md) · [下载 0.5.1](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.1)
 
 ### 环境与依赖
 
@@ -71,7 +78,7 @@ Python 解释器使用 DSH 配置或环境中已有版本。Node 依赖由 DSH �
 
 Git 能力使用开源项目 **Dulwich**。Dulwich **1.2.21** 与 urllib3 **2.8.0** 随包提供，分别按 Apache-2.0 和 MIT 许可分发；随包第三方组件保留各自的版权及许可声明，详见[第三方声明](THIRD_PARTY_NOTICES.md)。Python 低于 3.12 时另需满足 `typing_extensions` 条件依赖。
 
-已测环境与覆盖范围见[测试记录](docs/testing/0.5.0.md)。
+已测环境与覆盖范围见[测试记录](docs/testing/0.5.1.md)。
 
 ## 记录与数据管理
 
@@ -101,7 +108,7 @@ DeepSeek 于 2026-10-31 公开的 [Super-agent 研究原型](https://github.com/
 
 ## 验证与进一步了解
 
-本版验证范围与测量条件见[测试记录](docs/testing/0.5.0.md)；历史资料按版本单独列出。
+本版验证范围与测量条件见[测试记录](docs/testing/0.5.1.md)；历史资料按版本单独列出。
 
 - [0.5.0 更新说明](docs/releases/0.5.0.md)
 - [使用指南](https://github.com/Tests4gptplay/deepseek-servant/blob/main/docs/USAGE.md)
