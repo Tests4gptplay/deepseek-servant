@@ -751,7 +751,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                     if (input.includeArchives && task.resultPaths?.length) base.archives.push({ path: task.resultPaths[0]!, title: task.sourcePath, taskId: task.taskId, files: task.resultPaths });
                     continue;
                 }
-                base.tasks.push({ taskId: task.taskId, ...(task.parent ? { parentTaskId: task.parent.taskId } : {}), ...(task.lifecycleId ? { lifecycleId: task.lifecycleId } : {}),
+                base.tasks.push({ taskId: task.taskId, ...(task.createdAt === undefined ? {} : { createdAt: task.createdAt }), ...(task.parent ? { parentTaskId: task.parent.taskId } : {}), ...(task.lifecycleId ? { lifecycleId: task.lifecycleId } : {}),
                     title: task.sourcePath.split('/').at(-1)!, route: task.route, owner: task.owner, status: task.status,
                     archived: true, members: [], executions: [], resultPaths: task.resultPaths ?? [],
                     ...(task.workspaceResults ? { workspaceResults: task.workspaceResults } : {}) });
@@ -785,7 +785,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                     if (input.includeArchives && task.resultPaths?.length) base.archives.push({ path: task.resultPaths[0]!, title: task.sourcePath, taskId: task.taskId, originalTaskId: task.taskId, files: task.resultPaths });
                     continue;
                 }
-                base.tasks.push({ taskId: task.taskId, ...(task.parent ? { parentTaskId: task.parent.taskId } : {}), ...(task.lifecycleId ? { lifecycleId: task.lifecycleId } : {}),
+                base.tasks.push({ taskId: task.taskId, ...(task.createdAt === undefined ? {} : { createdAt: task.createdAt }), ...(task.parent ? { parentTaskId: task.parent.taskId } : {}), ...(task.lifecycleId ? { lifecycleId: task.lifecycleId } : {}),
                     title: task.sourcePath.split('/').at(-1)!, route: task.route, owner: task.owner, status: task.status, originalSource: 'local-sql',
                     members, control: controls?.get(task.taskId)?.intent, executions: [], resultPaths: task.resultPaths ?? [],
                     ...(task.workspaceResults ? { workspaceResults: task.workspaceResults } : {}) });
@@ -818,7 +818,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                 }));
                 signal?.throwIfAborted();
                 const control = controls?.get(task.taskId);
-                base.tasks.push({ taskId: task.taskId, ...(task.parent ? { parentTaskId: task.parent.taskId } : {}), ...(task.lifecycleId ? { lifecycleId: task.lifecycleId } : {}), title: task.sourcePath.split('/').at(-1)!, route: task.route, owner: task.owner, status: task.status,
+                base.tasks.push({ taskId: task.taskId, ...(task.createdAt === undefined ? {} : { createdAt: task.createdAt }), ...(task.parent ? { parentTaskId: task.parent.taskId } : {}), ...(task.lifecycleId ? { lifecycleId: task.lifecycleId } : {}), title: task.sourcePath.split('/').at(-1)!, route: task.route, owner: task.owner, status: task.status,
                     ...(pendingOriginalIds.has(task.taskId) ? { originalSource: 'local-sql' as const } : {}), members, control: control?.intent, executions: (active?.runtime.executionViews(task.taskId, taskLifecycle(task)) ?? []).map(row => row.detail === undefined ? row : ({ ...row, detail: this.surfaceFault(mode, 'execution', row.detail, access.connection.scope, row.workId, row) })), resultPaths: task.resultPaths ?? [], ...(task.workspaceResults ? { workspaceResults: task.workspaceResults } : {}) });
             }
             } catch (error) { report(error); }
