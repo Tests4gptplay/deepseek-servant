@@ -1,0 +1,142 @@
+name: Publish DSS packages to npm
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version of the published GitHub release (without v)
+        type: string
+        required: true
+      sha256:
+        description: SHA-256 of the GitHub release installation package
+        type: string
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: dss-npm-publish
+  cancel-in-progress: false
+jobs:
+  publish:
+    name: Publish ${{ matrix.package }}
+    if: github.repository == 'Tests4gptplay/deepseek-servant' && github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [deepseek-servant, '@tests4gptplay/deepseek-servant']
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      DSS_VERSION: ${{ inputs.version }}
+      DSS_RELEASE_SHA: ${{ inputs.sha256 }}
+      DSS_PACKAGE: ${{ matrix.package }}
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
+          registry-url: 'https://registry.npmjs.org'
+      - run: npm install --global npm@11.9.0 --ignore-scripts
+      - name: Prepare and verify the exact npm package
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$DSS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$DSS_RELEASE_SHA" =~ ^[a-f0-9]{64}$ ]]
+          mkdir staging dist
+          curl -fLsS --retry 2 "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${DSS_VERSION}/deepseek-servant-${DSS_VERSION}.tgz" -o release.tgz
+          echo "$DSS_RELEASE_SHA  release.tgz" | sha256sum -c -
+          python3 - <<'PY'
+          import json, os, tarfile
+          from pathlib import Path
+
+          name, version = os.environ['DSS_PACKAGE'], os.environ['DSS_VERSION']
+          with tarfile.open('release.tgz') as tar:
+              assert all(m.isfile() and m.name.startswith('package/') and '..' not in Path(m.name).parts for m in tar.getmembers())
+              tar.extractall('staging', filter='data')
+          base = Path('staging/package')
+          p = base / 'package.json'
+          manifest = json.loads(p.read_bytes())
+          assert manifest['name'] == 'deepseek-servant' and manifest['version'] == version and manifest.pop('private') is True
+          if name != 'deepseek-servant':
+              assert name == '@tests4gptplay/deepseek-servant'
+              manifest['name'] = name
+              manifest['publishConfig'] = {'access': 'public'}
+              for filename, pairs in {
+                  'cordis.patch.yml': (
+                      (b'name: deepseek-servant/cleaner', b"name: '@tests4gptplay/deepseek-servant/cleaner'"),
+                      (b'name: deepseek-servant\n', b"name: '@tests4gptplay/deepseek-servant'\n"),
+                  ),
+                  'lib/client.js': (
+                      (b'window.__ModuleLoader__.load({ id: "deepseek-servant",', b'window.__ModuleLoader__.load({ id: "@tests4gptplay/deepseek-servant",'),
+                  ),
+              }.items():
+                  target = base / filename
+                  content = target.read_bytes()
+                  for original, replacement in pairs:
+                      assert content.count(original) == 1, filename
+                      content = content.replace(original, replacement)
+                  target.write_bytes(content)
+          p.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+          PY
+          (cd staging/package && npm pack --offline --ignore-scripts --pack-destination ../../dist)
+          python3 - <<'PY'
+          import base64, hashlib, json, os, tarfile
+          from pathlib import Path
+
+          def payload(path):
+              with tarfile.open(path) as tar:
+                  rows = {m.name: tar.extractfile(m).read() for m in tar.getmembers()}
+                  assert len(rows) == len(tar.getmembers())
+                  return rows
+
+          p, = Path('dist').glob('*.tgz')
+          old, new = payload('release.tgz'), payload(p)
+          assert old.keys() == new.keys()
+          changed = {n for n in old if old[n] != new[n]}
+          scoped = os.environ['DSS_PACKAGE'].startswith('@')
+          assert changed == ({'package/package.json', 'package/cordis.patch.yml', 'package/lib/client.js'} if scoped else {'package/package.json'}), changed
+          for n in new:
+              assert new[n] == Path('staging', n).read_bytes(), n
+          actual = json.loads(new['package/package.json'])
+          expected = json.loads(old['package/package.json'])
+          del expected['private']
+          if scoped:
+              expected['name'] = '@tests4gptplay/deepseek-servant'
+              expected['publishConfig'] = {'access': 'public'}
+          assert actual == expected
+          assert actual['name'] == os.environ['DSS_PACKAGE'] and actual['version'] == os.environ['DSS_VERSION']
+          data = p.read_bytes()
+          print(json.dumps({'name': actual['name'], 'version': actual['version'], 'files':len(new), 'sha256':hashlib.sha256(data).hexdigest(), 'integrity':'sha512-'+base64.b64encode(hashlib.sha512(data).digest()).decode()}))
+          PY
+      - name: Publish through npm Trusted Publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          tgz=(dist/*.tgz)
+          test "${#tgz[@]}" -eq 1
+          export DSS_INTEGRITY="sha512-$(openssl dgst -sha512 -binary "${tgz[0]}" | openssl base64 -A)"
+          cat > verify-registry.mjs <<'JS'
+          const { DSS_PACKAGE, DSS_VERSION, DSS_INTEGRITY } = process.env
+          const url = 'https://registry.npmjs.org/' + encodeURIComponent(DSS_PACKAGE) + '/' + DSS_VERSION
+          const r = await fetch(url, { cache: 'no-store' })
+          if (r.status === 404) process.exit(2)
+          if (!r.ok) throw new Error('npm registry HTTP ' + r.status)
+          const m = await r.json()
+          if (m.name !== DSS_PACKAGE || m.version !== DSS_VERSION || m.dist?.integrity !== DSS_INTEGRITY) throw new Error('Existing npm version does not match verified package bytes')
+          console.log(JSON.stringify({ name:m.name, version:m.version, integrity:m.dist.integrity, tarball:m.dist.tarball }))
+          JS
+          if node verify-registry.mjs; then
+            echo 'The exact verified version is already published.'
+          else
+            rc=$?
+            test "$rc" -eq 2
+            npm publish "${tgz[0]}" --access public --tag latest --ignore-scripts --registry https://registry.npmjs.org
+          fi
+          for attempt in $(seq 1 15); do
+            if node verify-registry.mjs; then exit 0; else rc=$?; fi
+            test "$rc" -eq 2
+            sleep 4
+          done
+          echo 'The registry has not confirmed the version yet.'
+          exit 1
