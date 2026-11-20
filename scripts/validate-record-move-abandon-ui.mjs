@@ -45,16 +45,23 @@ try {
  await render({pendingRequest:{...request,canAbandon:undefined}});check(!!find('放弃本次搬迁'),false)
  await render({pendingRequest:{...request,commandId:'other'}});check(!!find('放弃本次搬迁'),false)
  await render();check(!!find('放弃本次搬迁'),true);check(container.textContent.includes('已复制到新目录的文件会保留'),true)
- failAbandon=true;await click('放弃本次搬迁');check(calls.length,1);check(container.textContent.includes('已放弃本次搬迁'),false);check(container.textContent.includes('未能放弃本次搬迁，请重试'),true);check(container.querySelector('input').disabled,true)
+ failAbandon=true;await click('放弃本次搬迁');check(calls.length,1);check(container.textContent.includes('已放弃本次搬迁'),false);check(container.textContent.includes('source changed'),true);check(container.querySelector('input').disabled,true)
  failAbandon=false;waitAbandon=new Promise(r=>release=r);await click('放弃本次搬迁');check(container.textContent.includes('正在放弃本次搬迁'),true);check(!!find('重试迁移'),false);check(!!find('放弃本次搬迁'),false)
  await act(async()=>{release();await waitAbandon});check(calls.length,2);check(calls[1].commandId,'move-1');check(container.querySelector('input').value,'/old');check(container.querySelector('input').disabled,false);check(container.textContent.includes('已复制的文件保留在：/new'),true);check(!!find('重试迁移'),false)
- // Fresh instance/API: a failed move cannot itself authorize abandonment.
- const api2={...api,abandonRecordMove:async()=>{throw Error('must not be called')}}
- await act(async()=>root.render(null));await render({api:api2,pendingRequest:{...request,canAbandon:false}})
- await click('重试迁移');check(!!find('放弃本次搬迁'),false);check(!!find('重试迁移'),true)
- // Once the service refresh confirms prepared/source-active, offer abandonment.
- await render({api:api2});check(!!find('放弃本次搬迁'),true)
- await render({api:api2,changed:async()=>{throw Error('view unavailable')}});await click('重试迁移');check(!!find('放弃本次搬迁'),false);check(!!find('重试迁移'),true)
+ // Relocation owns storage, so the conversation/history refresh cannot complete.
+ // The panel must still present the current command's host-confirmed undo.
+ let status, headerReads = 0, historyRefreshes = 0, abandonCalls = 0
+ const api2={...api,view:async input=>{check(input,{mode:'local',headerOnly:true});headerReads++;if(status instanceof Error)throw status;return {pendingRecordMove:status}},
+   abandonRecordMove:async input=>{check(input.commandId,request.commandId);abandonCalls++;return {directory:'/old',retainedTarget:'/new'}}}
+ const changed=async()=>{historyRefreshes++;throw Error('record move owns these locations')}
+ await act(async()=>root.render(null));await render({api:api2,pendingRequest:{...request,canAbandon:false},changed})
+ for (const noUndo of [new Error('view unavailable'),undefined,{...request,canAbandon:false},{...request,commandId:'other'},{...request,storageScope:'other'}]) {
+   status=noUndo;await click('重试迁移');check(!!find('放弃本次搬迁'),false);check(!!find('重试迁移'),true)
+ }
+ status=request;await click('重试迁移')
+ check(!!find('放弃本次搬迁'),true);check(!!find('重试迁移'),true)
+ check(headerReads,6);check(historyRefreshes,0)
+ await click('放弃本次搬迁');check(abandonCalls,1);check(!!find('放弃本次搬迁'),false);check(container.querySelector('input').value,'/old')
  console.log(JSON.stringify({status:'passed',assertions,limits:'Actual React panel with ReactDOM/JSDOM and HTML primitive ports, controlled API responses. Not native DSH or Windows verification.'},null,2))
 } finally {await act(async()=>root.unmount());dom.window.close();await fs.rm(scratch,{recursive:true,force:true});stop()}
 

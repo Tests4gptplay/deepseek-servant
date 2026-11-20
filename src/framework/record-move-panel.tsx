@@ -25,15 +25,15 @@ export function RecordMovePanel({ api, storageScope, settingsRevision, pendingRe
     return restored
   })
   const [directory, setDirectory] = useState(currentDirectory), [busy, setBusy] = useState(false), [result, setResult] = useState(''), [error, setError] = useState(pending?.error ?? '')
-  const [moveStatusVerified, setMoveStatusVerified] = useState(true)
+  const [checkedCanAbandon, setCheckedCanAbandon] = useState<boolean>()
   const [abandoning, setAbandoning] = useState(false)
-  const canAbandon = moveStatusVerified && pendingRequest?.canAbandon === true && pendingRequest.commandId === pending?.input.commandId
+  const canAbandon = checkedCanAbandon ?? (pendingRequest?.canAbandon === true && pendingRequest.commandId === pending?.input.commandId)
   const active = useRef(true)
   const [picking, setPicking] = useState(false)
   useEffect(() => { if (!pending) setDirectory(currentDirectory) }, [currentDirectory])
   const submit = async (attempt: Attempt) => {
     attempt.submitted = true; retained.set(storageScope, attempt)
-    setMoveStatusVerified(false)
+    setCheckedCanAbandon(false)
     setBusy(true); setError('')
     try {
       if (!attempt.confirmed) {
@@ -61,8 +61,13 @@ export function RecordMovePanel({ api, storageScope, settingsRevision, pendingRe
       attempt.error = frameworkErrorText(reason) || errorMessage(reason)
       if (active.current) {
         setError(attempt.error)
-        try { await changed(); if (active.current) setMoveStatusVerified(true) }
-        catch { /* Keep retry available; no confirmed abandonment state was received. */ }
+        try {
+          // A pending move can hold the records closed. Its settings header is
+          // available without waiting for conversation or archive reads.
+          const { pendingRecordMove: status } = await api.view({ mode: 'local', headerOnly: true })
+          if (active.current) setCheckedCanAbandon(status?.canAbandon === true
+            && status.commandId === attempt.input.commandId && status.storageScope === attempt.input.storageScope)
+        } catch { /* Keep retry available; no confirmed abandonment state was received. */ }
       }
     } finally { attempt.promise = undefined; if (active.current) setBusy(false) }
   }
