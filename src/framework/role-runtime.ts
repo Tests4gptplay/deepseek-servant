@@ -1485,7 +1485,8 @@ export class FrameworkRoleRuntime {
     if (binding.role !== 'Planner' || !binding.taskId || binding.member !== this.config.member || binding.direct) return
     const taskId = binding.taskId, member = binding.member
     const workers: PlannerWorkerExecutions['workers'] = []
-    for (const record of this.roleRecords.values()) {
+    for (const nativeRecord of this.roleRecords.values()) {
+      const record = this.workerLineRecord(nativeRecord)
       const identity = record.identity
       if (identity.role !== 'Worker' || identity.taskId !== taskId || identity.member !== member || taskLifecycle(identity) !== taskLifecycle(binding) || !identity.workerId) continue;
       const owned = this.native.get(identity.workId, identity.executionId)
@@ -1512,12 +1513,17 @@ export class FrameworkRoleRuntime {
       reservedWorkerSeats: [...this.workerAdmissions ?? []].filter(workId => this.workerAdmissionTasks?.get(workId) === taskId).length
     }
   }
+  private transferredWorkerLines?: Map<string, { predecessor: string; successor: RoleRecord }>
+  private workerLineRecord(record: RoleRecord): RoleRecord {
+    const line = this.transferredWorkerLines?.get(record.identity.workId)
+    return line?.predecessor === record.identity.executionId ? line.successor : record
+  }
   private workerSeatOccupied(record: RoleRecord): boolean {
-    if (record.identity.role !== 'Worker' || record.stopped || record.businessTransferred) return false
-    if (this.active(record) || record.stopUnknown) return true
-    const intent = record.stopIntent
-    return intent?.workId === record.identity.workId && intent.executionId === record.identity.executionId
-      && intent.phase === 'stopping'
+    const line = this.workerLineRecord(record), delivery = line.delivery
+    if (line.identity.role !== 'Worker' || line.businessTransferred || line.released || line.completedRound || !delivery?.confirmed) return false
+    return this.requestKey(delivery.request) === line.identity.workId
+      && taskLifecycle(delivery.request) === taskLifecycle(line.identity)
+      && line.gitSettledWakeId !== delivery.request.id
   }
   private occupiedWorkerSeats(excluding?: string, taskId?: string, directWorkId?: string): number {
     // A direct Worker is its own short task; normal Workers share only their Task.
@@ -2073,7 +2079,8 @@ export class FrameworkRoleRuntime {
     if (state) { state.ownershipHeld = true; this.clearLocalAdmissionInterval(key, state) }
   }
   private localAdmissionHeld(state: LocalWakeAdmission): boolean {
-    const request = state.wake.request, key = this.requestKey(request), record = this.roleRecords.get(key)
+    const request = state.wake.request, key = this.requestKey(request), nativeRecord = this.roleRecords.get(key)
+    const record = nativeRecord && this.workerLineRecord(nativeRecord)
     const ownAdmission = !!record && (record.delivery?.request.id === request.id || state.executionId === record.identity.executionId)
     const task = request.taskId && this.admissionTask(state, request.taskId)
     const invalidTask = !!task && (taskLifecycle(task) !== taskLifecycle(request) || isTerminalTask(task))
@@ -2083,7 +2090,7 @@ export class FrameworkRoleRuntime {
       || (!!record && !ownAdmission && (this.active(record) || request.role === 'Foreground' && record.completedRound && !record.stopped))
       || (!!record && !record.stopped && this.gitPriorExecutions.has(record.identity.executionId))
       || (!!record && !record.businessTransferred && !record.stopped && !!(record.stopIntent || record.stopUnknown || this.stopOperations?.has(JSON.stringify([key, record.identity.executionId]))))
-      || (request.role === 'Worker' && this.occupiedWorkerSeats(ownAdmission ? key : undefined, request.taskId, key) >= this.config.workerSeats)
+      || (request.role === 'Worker' && this.occupiedWorkerSeats(key, request.taskId, key) >= this.config.workerSeats)
   }
   /** Called from the existing one-second local Host observation. No Git await. */
   private checkWakeAdmissions(): void {
@@ -2505,6 +2512,7 @@ export class FrameworkRoleRuntime {
               return
             }
           }
+          if (record) record = this.workerLineRecord(record)
           if (record && !record.businessTransferred && !record.stopped && this.stopOperations?.has(JSON.stringify([key, record.identity.executionId]))) {
             if (!this.trackedStop(record)) { this.holdAdmissionOwnership(row.key); return }
             record = this.roleRecords.get(key)
@@ -2568,7 +2576,7 @@ export class FrameworkRoleRuntime {
           }
           // A normal Host close ends its Agent, not an unanswered native question.
           // Resume that exact session only after confirmed stop and absent user stop.
-          const questionSession = record?.stopped && (record.identity.role === 'Foreground'
+          const questionSession = record?.stopped && !record.businessTransferred && (record.identity.role === 'Foreground'
             || !!record.identity.taskId && (record.identity.role === 'Planner' || record.identity.role === 'Worker' || record.identity.role === 'Recorder')) && !record.completedRound
             && !await this.controls.execution(record.identity)
             && (await new DshSessionReader(this.ctx).inspect(record.sessionId)).unansweredQuestionCallIds?.length
@@ -3740,6 +3748,40 @@ executionId: binding.executionId, run: persistContext,
       return { target: retiredKey, value: recovered, result: recovered, write: true }
     });
   }
+  /** A Local rollback can restore a predecessor role row while retaining its
+   * successor's accepted recovery and published handoff. Reuse that completed
+   * owner for this logical line, not the predecessor's stale native stop. */
+  private async reconcileTransferredWorkerLine(transfer: PhysicalWorkerBusinessTransfer<RoleRecord>, retired: RoleRecord): Promise<void> {
+    const { record: successor, physical } = transfer
+    const identity = successor.identity, workId = identity.workId, predecessor = this.roleRecords.get(workId)
+    if (!physical?.published || transfer.successorRole !== 'Planner' || transfer.successorId !== identity.member
+      || !predecessor || predecessor.businessTransferred || predecessor.released
+      || !identity.taskId || !identity.workerId || predecessor.generation + 1 !== successor.generation
+      || predecessor.identity.role !== 'Worker' || predecessor.identity.taskId !== identity.taskId
+      || predecessor.identity.member !== identity.member || predecessor.identity.workerId !== identity.workerId
+      || taskLifecycle(predecessor.identity) !== taskLifecycle(identity)
+      || predecessor.identity.executionId === identity.executionId || predecessor.sessionId === successor.sessionId
+      || JSON.stringify(retired.identity) !== JSON.stringify(identity) || retired.sessionId !== successor.sessionId
+      || retired.generation !== successor.generation) return
+    const delivery = successor.delivery
+    if (!delivery?.confirmed || this.requestKey(delivery.request) !== workId
+      || taskLifecycle(delivery.request) !== taskLifecycle(identity)) return
+    const wake = await this.records.get<WakeRecord>(this.prefix + 'wakes/' + hash(delivery.request.id))
+    if (!wake?.delivered || wake.request.id !== delivery.request.id || this.requestKey(wake.request) !== workId
+      || taskLifecycle(wake.request) !== taskLifecycle(identity)
+      || wake.recovery?.targetExecutionId !== predecessor.identity.executionId) return
+    if (this.roleRecords.get(workId) !== predecessor || this.workerAdmissions?.has(workId)) return
+    const retirements = [...retired.nativeRetirements ?? []]
+    for (const item of predecessor.nativeRetirements ?? []) {
+      if (!retirements.some(existing => existing.executionId === item.executionId && existing.sessionId === item.sessionId)) retirements.push(item)
+    }
+    // Project the actual handed-off generation. Keep both persisted records and
+    // their native cleanup evidence; the next owner is saved normally.
+    ;(this.transferredWorkerLines ??= new Map()).set(workId, {
+      predecessor: predecessor.identity.executionId,
+      successor: { ...retired, businessTransferred: true, nativeRetirements: retirements },
+    })
+  }
   private async reconcileWorkerTransfers(cold = false, borrowed?: FilesSnapshot, taskId?: string): Promise<void> {
     const candidates = [...new Map([...this.roleRecords.values(), ...(this.files instanceof PhysicalLocalFiles
       ? this.retiredWorkers?.values() ?? [] : [])].map(record => [record.identity.executionId, record])).values()]
@@ -3776,6 +3818,8 @@ executionId: binding.executionId, run: persistContext,
       const saved = this.records instanceof GitAuthorityStore ? await this.recoverRetiredTransfer(transfer)
         : cold ? await this.records.get<RoleRecord>(this.prefix + 'retired-workers/' + transfer.record.identity.executionId) : undefined
       if (saved) { this.retiredWorkers ??= new Map(); this.retiredWorkers.set(saved.identity.executionId, saved) }
+      if (cold && saved && this.files instanceof PhysicalLocalFiles)
+        await this.reconcileTransferredWorkerLine(transfer as PhysicalWorkerBusinessTransfer<RoleRecord>, saved)
       this.retireWorkerBusiness(saved ?? transfer.record)
       if (this.files instanceof PhysicalLocalFiles && (transfer as PhysicalWorkerBusinessTransfer<RoleRecord>).physical
         && !(transfer as PhysicalWorkerBusinessTransfer<RoleRecord>).physical?.published) {
@@ -4829,7 +4873,8 @@ executionId: binding.executionId, run: persistContext,
         for (const note of await this.files.list(snapshot, root)) {
           if (!note.path.endsWith('/notes.md')) continue
           const workerId = note.path.slice(root.length).split('/')[0];
-          const record = this.roleRecords.get(this.roleKey('Worker', task.taskId, workerId))
+          const current = this.roleRecords.get(this.roleKey('Worker', task.taskId, workerId))
+          const record = current && this.workerLineRecord(current)
           workers.push({
             workerId, executionId: record?.identity.executionId ?? '', notePath: note.path,
             noteHasContent: note.bytes !== undefined ? note.bytes > 0
@@ -5364,7 +5409,7 @@ executionId: binding.executionId, run: persistContext,
     for (const { value } of wakes) if (!value.delivered && value.request.taskId && !['Foreground', 'Helper'].includes(value.request.role))
       this.workspaces.rememberRoot(value.request.taskId)
     const recovered = new Set(wakes
-      .filter(row => !row.value.delivered && row.value.request.reason === 'startup-recovery')
+      .filter(row => !row.value.delivered && row.value.request.reason === 'startup-recovery' && !this.transferredWorkerWake(row.value))
       .map(row => this.requestKey(row.value.request)))
     return this.startupRecoveryFacts = { restoring, recovered }
   }
@@ -5403,7 +5448,7 @@ executionId: binding.executionId, run: persistContext,
         continue
       }
       if (record.identity.role === 'Foreground' && this.pendingForegroundResets?.size) continue
-      if (record.businessTransferred || record.released) continue
+      if (this.workerLineRecord(record).businessTransferred || record.released) continue
       try {
         if (await this.diagnoseMissingTask(record)) {
           const taskId = await this.currentTask(record);
