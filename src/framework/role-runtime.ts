@@ -120,7 +120,9 @@ interface AdmissionControlPublication { task: TaskMetadata; intent: 'running' | 
 type WakeRow = { key: string; value: WakeRecord }
 interface LocalWakeAdmission { taskFacts?: Map<string, TaskMetadata>; pendingControl?: AdmissionControlPublication; wake: WakeRecord; eligibleSince?: number; reportedAt?: number; diagnosticContext?: Record<string, unknown>; accepted?: boolean; held?: boolean; eligibleKnown?: boolean; controlVersion?: number; ownershipHeld?: boolean; replayPending?: boolean; executionId?: string; phase?: NonNullable<WakeRecord['admission']>['phase'] }
 interface SafetyRepairContext { safetyDisplayOwner?: string; safetyFaultIds?: string[]; safetyFaults?: SafetyFault[]; safetyKind?: 'target' | 'host'; safetyAttempt?: { failure: string; terminal: boolean } }
-interface RoleRestore extends SafetyRepairContext { debugPath?: string; taskOwner?: { taskId: string; lifecycleId?: string }; commandId: string; createdAt: string; input: HelperRestoreInput; complete: boolean; resolvedTarget?: WorkIdentity; admissionWakeId?: string; continuationId?: string; outcome?: string }
+/** Exact native boundary for an observed handoff gap, not a wall-clock timeout. */
+interface SilentTaskRound { target: WorkIdentity; sessionId: string; wakeId: string; turn: number; endSequence: number }
+interface RoleRestore extends SafetyRepairContext { silentRound?: SilentTaskRound; debugPath?: string; taskOwner?: { taskId: string; lifecycleId?: string }; commandId: string; createdAt: string; input: HelperRestoreInput; complete: boolean; resolvedTarget?: WorkIdentity; admissionWakeId?: string; continuationId?: string; outcome?: string }
 interface HostRestore extends SafetyRepairContext { debugPath?: string; commandId: string; requester?: FrameworkRoleBinding; input: { facts: string; hypotheses: string; actionsTaken: string; continuation: string }; createdAt: string; complete: boolean; managerPublications?: Array<{ taskId: string; lifecycleId?: string; member: string; role: 'Planner' | 'Organizer' }>; targets?: Array<{ identity: WorkIdentity; sessionId: string; complete?: boolean; outcome?: 'superseded' | 'released' | 'user-stopped' | 'arranged' | 'no-continuation' }> }
 interface ObservationRecord { pending: ScheduledObservation; complete: boolean; stopStarted?: boolean }
 interface StartupRecoveryFacts { restoring: Set<string>; recovered: Set<string> }
@@ -4507,9 +4509,9 @@ executionId: binding.executionId, run: persistContext,
           return changes
         },
         committed: async (binding, published, localPublished) => {
-          // A fresh Local publication has already durably confirmed this record.
-          // Do not resurrect an owner observed/retired/cleaned while publication
-          // ran. The unchanged marker read remains the replay/race fallback.
+          // A fresh Local publication may skip the marker read, but only while
+          // the exact previously confirmed owner is still current.
+          let transfer: WorkerBusinessTransfer<RoleRecord> | undefined
           if (this.files instanceof PhysicalLocalFiles && localPublished) {
             const confirmed = localPublished.record as RoleRecord
             const current = this.roleRecords.get(binding.workId)
@@ -4518,17 +4520,28 @@ executionId: binding.executionId, run: persistContext,
               && current.sessionId === confirmed.sessionId && current.generation === confirmed.generation
               && current.generation === binding.generation && !current.businessTransferred
               && !current.stopped && !current.released && !current.stopIntent && !current.stopUnknown) {
-              // No await between this owner check and the in-memory transition.
-              this.retireWorkerBusiness(confirmed)
-              return
+              transfer = { ...localPublished, record: confirmed }
             }
           }
-          const marker = published?.find(change => change.path === workerTransferPath(this.workerBusinessScope(), binding.executionId))
-          const record = marker?.content ? (JSON.parse(marker.content) as WorkerBusinessTransfer<RoleRecord>).record : this.records instanceof GitAuthorityStore
-            ? await this.records.get<RoleRecord>(this.prefix + 'retired-workers/' + binding.executionId)
-            : await withSnapshot(this.files, async snapshot => (await readJson<WorkerBusinessTransfer<RoleRecord>>(this.files, snapshot,
-              workerTransferPath(this.workerBusinessScope(), binding.executionId)))?.record)
-          if (record?.identity.executionId === binding.executionId) this.retireWorkerBusiness(record)
+          let newHandoff = !!transfer
+          const markerPath = workerTransferPath(this.workerBusinessScope(), binding.executionId)
+          if (!transfer) {
+            const marker = published?.find(change => change.path === markerPath)
+            if (marker?.content) {
+              transfer = JSON.parse(marker.content) as WorkerBusinessTransfer<RoleRecord>
+              newHandoff = true
+            }
+            else if (!(this.records instanceof GitAuthorityStore))
+              transfer = await withSnapshot(this.files, snapshot => readJson<WorkerBusinessTransfer<RoleRecord>>(this.files, snapshot, markerPath))
+          }
+          // A retired Git record alone can finish retirement, but does not
+          // prove a recipient. Only a confirmed business transfer can do that.
+          const record = transfer?.record ?? (this.records instanceof GitAuthorityStore
+            ? await this.records.get<RoleRecord>(this.prefix + 'retired-workers/' + binding.executionId) : undefined)
+          if (record?.identity.executionId !== binding.executionId) return
+          this.retireWorkerBusiness(record)
+          if (newHandoff && transfer)
+            this.scheduleSilentTaskProgress(record, { kind: 'worker-handoff', recipient: transfer.successorRole, successorId: transfer.successorId })
         }
       },
       files: this.files,
@@ -4692,6 +4705,17 @@ executionId: binding.executionId, run: persistContext,
         restore: async (binding, input, commandId) => {
           const key = this.prefix + 'restores/' + hash(commandId)
           const caller = this.roleRecords.get(binding.workId)
+          const incident = input.target && !input.disposition && !input.taskRecovery && caller?.identity.executionId === binding.executionId
+            ? this.helperResponsibilities(caller).map(request => request.context)
+              .find(context => {
+                const round = context?.silentRound as SilentTaskRound | undefined
+                return round && input.target!.workId === round.target.workId && input.target!.executionId === round.target.executionId
+              }) : undefined
+          if (incident?.silentRound) {
+            if (incident.repeated === true) return { arranged: false, verifiedProgress: false, reason: 'The already-corrected role again ended without handoff. Preserve the actual unresolved incident and assess a different authorized repair; do not repeat the same restart.' }
+            await this.acceptSilentTaskCorrection(incident.silentRound as SilentTaskRound, binding, input)
+            return { arranged: true, verifiedProgress: false }
+          }
           const diagnostic = caller?.identity.executionId === binding.executionId ? this.helperResponsibilities(caller).map(request => request.context)
             .find(context => context?.kind === 'admission-timeout' && (input.wakeId === context.wakeId
               || input.target && input.target.workId === context.workId && input.target.executionId === context.executionId)) : undefined
@@ -5028,6 +5052,14 @@ executionId: binding.executionId, run: persistContext,
   private async retainClosedRound(record: RoleRecord, owned: OwnedDshAgent): Promise<void> {
     const request = record.delivery?.request ?? record.lastWake
     if (!request || record.completedRound || record.gitSettledWakeId === request.id) return
+    if (record.identity.role === 'Planner' || record.identity.role === 'Worker') {
+      // Disposing a known stranded role is mechanical, not a business
+      // handoff. Keep its logical responsibility while the successor opens.
+      for (const wake of this.observedHelperWakes.values()) {
+        const incident = wake.request.context?.silentRound as SilentTaskRound | undefined
+        if (incident?.target.executionId === record.identity.executionId && incident.wakeId === request.id) return
+      }
+    }
     const actual = owned.actualAgent, events = actual.session.snapshotEvents()
     if ((record.identity.role === 'Foreground' || !!record.identity.taskId && (record.identity.role === 'Planner' || record.identity.role === 'Worker' || record.identity.role === 'Recorder'))
       && this.ctx.get('sessionProjections')?.snapshot(actual.session, ['userQuestions']).values.userQuestions?.active.length) return
@@ -5071,6 +5103,109 @@ executionId: binding.executionId, run: persistContext,
       await this.retireLoggedHelperInput(record, events)
     }
   }
+  /** Native idle alone does not identify a fault. Check only the current,
+   * genuinely closed round and the actual Task's existing continuation paths. */
+  private async silentTaskRound(record: RoleRecord, expected?: SilentTaskRound): Promise<SilentTaskRound | undefined> {
+    const { identity, sessionId, delivery } = record
+    const { taskId, member, role, workerId, workId } = identity
+    if (this.closed || !taskId || !member || member !== this.config.member || !['Planner', 'Worker'].includes(role)
+      || !delivery?.confirmed || record.released || record.businessTransferred || record.completedRound
+      || expected && (expected.target.executionId !== identity.executionId || expected.sessionId !== sessionId || expected.wakeId !== delivery.request.id)
+      || (!expected && (record.stopped || record.stopIntent || record.stopUnknown))
+      || this.retiredWorkers?.has(identity.executionId) || this.active(record)
+      || await this.controls.execution(identity) || await this.observationTaskHeld(record)) return
+    const sessions = new DshSessionReader(this.ctx)
+    const inspected = await sessions.inspect(sessionId)
+    if (!inspected.exists || !inspected.lifecycleKnown || !inspected.lastTurn?.closed || inspected.lastTurn.reason !== 'completed'
+      || inspected.unresolvedToolCallIds.length || inspected.unansweredQuestionCallIds?.length
+      || inspected.queuedInbox.nextTurn.length || inspected.queuedInbox.nextStep.length) return
+    const events = await sessions.events(sessionId)
+    const boundary = [...events].reverse().find(event => event.type === 'turn/start' || event.type === 'turn/end')
+    if (boundary?.type !== 'turn/end' || boundary.data.reason.kind !== 'completed' || boundary.data.turn !== inspected.lastTurn.turn
+      || deriveNativeInputs(events, undefined, false).get(delivery.messageId)?.state !== 'consumed') return
+    const round = { target: identity, sessionId, wakeId: delivery.request.id, turn: boundary.data.turn, endSequence: boundary.seq }
+    if (expected && expected.endSequence !== round.endSequence) return
+    // A durable queued wake or actual state signal is already a continuation.
+    // A different Worker in the same Task is not continuation of this Worker.
+    const pending = [...this.localWakeAdmissions.values()].map(state => state.wake)
+    const sameTask = (next: Pick<WorkIdentity, 'taskId' | 'lifecycleId'>) =>
+      next.taskId === taskId && taskLifecycle(next) === taskLifecycle(identity)
+    if (pending.some(value => !value.delivered && !this.transferredWorkerWake(value)
+      && sameTask(value.request) && (this.requestKey(value.request) === workId || role === 'Planner' && value.request.role === 'Worker'))) return
+    if (role === 'Planner' && [...this.roleRecords.values()].some(candidate => sameTask(candidate.identity)
+      && candidate.identity.role === 'Worker' && candidate.identity.member === member
+      && (this.workerSeatOccupied(candidate) || this.active(candidate) && !candidate.businessTransferred))) return
+    if (!await withSnapshot(this.files, async snapshot => {
+      const task = await readJson<TaskMetadata>(this.files, snapshot, paths.task(taskId))
+      if (task?.status !== 'running' || task.route !== 'P' || (task.members ?? [task.owner]).includes(member) === false
+        || !sameTask(task) || await this.manuallyCleared(taskId, snapshot)
+        || (await readMemberStatus(this.files, snapshot, paths.memberStatus(taskId, member)))?.state === 'complete') return false
+      const signals = await this.files.listDirectory(snapshot, paths.state(member, taskId))
+      return !signals.some(({ path }) => {
+        const name = path.split('/').at(-1)!
+        return role === 'Planner' ? name.startsWith('Planner_') || signalWorkerId(name) !== undefined
+          : signalWorkerId(name) === workerId
+      })
+    })) return
+    const latest = this.roleRecords.get(workId)
+    const live = this.ctx.sessions.get(SessionId(sessionId))
+    const liveBoundary = live && [...live.snapshotEvents()].reverse().find(event => event.type === 'turn/start' || event.type === 'turn/end')
+    if (this.closed || latest !== record || this.active(record) || live && liveBoundary?.seq !== boundary.seq) return
+    return round
+  }
+  private silentTaskWakeId(round: SilentTaskRound): string {
+    return 'silent-task-round:' + hash(JSON.stringify([round.target.workId, round.target.executionId, round.sessionId, round.wakeId, round.endSequence]))
+  }
+  private silentTaskRestoreId(round: SilentTaskRound): string {
+    return 'correct:' + this.silentTaskWakeId(round)
+  }
+  private async acceptSilentTaskCorrection(round: SilentTaskRound, binding: FrameworkRoleBinding, input: HelperRestoreInput): Promise<void> {
+    const commandId = this.silentTaskRestoreId(round)
+    const createdAt = new Date().toISOString()
+    const taskOwner = { taskId: round.target.taskId!, lifecycleId: round.target.lifecycleId }
+    await this.createSafetyRestoreRow(this.prefix + 'restores/' + hash(commandId), {
+      commandId, requester: binding, taskOwner, input: { target: round.target, facts: input.facts, hypotheses: input.hypotheses, actionsTaken: input.actionsTaken, continuation: input.continuation },
+      silentRound: round, complete: false, createdAt, debugPath: helperDebugPath(taskOwner.taskId, createdAt.slice(0, 10))
+    } satisfies RoleRestore & { requester: FrameworkRoleBinding })
+  }
+  /** If Helper ends without acting, do not report repair or let the original
+   * execution strand the Task. Submit the same scoped correction as its tool;
+   * the existing restoration lane rechecks the live incident before stopping. */
+  private async continueUncorrectedSilentTaskRounds(record: RoleRecord): Promise<void> {
+    if (this.closed || record.identity.role !== 'Helper') return
+    const initial = record.delivery?.request ?? record.lastWake
+    const requests = new Map([...(initial ? [initial] : []), ...this.helperResponsibilities(record)].map(item => [item.id, item]))
+    for (const request of requests.values()) {
+      const round = request.context?.silentRound as SilentTaskRound | undefined
+      if (!round || request.context?.repeated === true || request.id !== this.silentTaskWakeId(round)) continue
+      const owner = this.roleRecords.get(round.target.workId)
+      if (!owner || !await this.silentTaskRound(owner, round)) continue
+      await this.acceptSilentTaskCorrection(round, this.binding(record, request), {
+        target: round.target,
+        facts: 'Helper ended its native turn; the original Task is still running and the same confirmed handoff gap remains.',
+        hypotheses: 'The role ended without making a valid continuation. This is not evidence of a Host outage.',
+        actionsTaken: 'Host rechecked the exact original native turn and current Task continuation paths; it has not yet recovered the work.',
+        continuation: 'Resume the exact original role and Task from saved progress. Perform the outstanding work, then publish an actual handoff or completion through the existing role tool. Do not just describe a next step or end silently.'
+      })
+    }
+  }
+  private scheduleSilentTaskProgress(record: RoleRecord, evidence: Record<string, unknown>): void {
+    const request = record.delivery?.request ?? record.lastWake
+    const origin = request?.context?.silentCorrection as SilentTaskRound | undefined
+    if (!origin || !request || request.id !== 'restore-role:' + this.silentTaskRestoreId(origin)) return
+    const target = record.identity
+    if (target.executionId === origin.target.executionId || target.workId !== origin.target.workId
+      || taskLifecycle(target) !== taskLifecycle(origin.target)) return
+    const id = 'verified-continuation:' + this.silentTaskWakeId(origin)
+    this.startMaintenance(id, async () => {
+      await this.wake({ id, role: 'Helper', taskId: target.taskId, lifecycleId: target.lifecycleId,
+        reason: 'helper', sources: [], context: {
+          kind: 'task-silent-round-progress', originalIncident: this.silentTaskWakeId(origin),
+          originalTarget: origin.target, target, evidence,
+          instruction: 'The corrected role published a new actual continuation. Verify this exact published evidence, finish the running-task incident in its dated Debug and do not wake another role or restart Host merely for reporting.'
+        } })
+    }, { identity: target, stage: 'silent-task-progress' })
+  }
   private async finishGitAuxiliaryRound(record: RoleRecord): Promise<void> {
     // A delivered Worker is retired by the transfer drain, not by another wake
     // inspection. A queued poll may still hold its pre-transfer RoleRecord.
@@ -5113,6 +5248,34 @@ executionId: binding.executionId, run: persistContext,
     if (direct) {
       if (!directDeliveryCompleted(events)) return
     }
+    if (!this.closed && (record.identity.role === 'Planner' || record.identity.role === 'Worker')) {
+      const round = await this.silentTaskRound(record)
+      if (round) {
+        const repeated = request.context?.silentCorrection !== undefined
+        await this.wake({ id: this.silentTaskWakeId(round), role: 'Helper', taskId: round.target.taskId,
+          lifecycleId: round.target.lifecycleId, reason: 'helper', sources: [], context: {
+            kind: 'task-silent-round', target: round.target, silentRound: round, repeated,
+            facts: 'The Host is operational, the exact accepted native round ended, and the same Task is still running with no observed handoff, valid wait or pending continuation for this responsibility.',
+            instruction: repeated
+              ? 'The corrected role again ended without a handoff. The previous identical restart did not repair it. Look for a different concrete authorized correction. If none is possible, report this exact unresolved incident through Foreground. Do not repeat the same restart or claim progress.'
+              : 'Inspect the exact role and work line. Repair its handoff or use dss_restore with this target to force that role to resume its original work. An arranged restore is not progress. Verify an actual new work result or valid handoff before recording recovery.'
+          } })
+        // A stranded Worker's business line still belongs to this responsibility.
+        // Do not release its seat merely for a model-level turn/end.
+        return
+      }
+    }
+    if (!this.closed && record.identity.role === 'Planner' && request.context?.silentCorrection) {
+      const amended = await sessions.events(record.sessionId)
+      const lastStart = [...amended].reverse().find(event => event.type === 'turn/start')?.seq
+      if (lastStart !== undefined) {
+        const assigned = new NativeCommandSuccess(new Set(['dss_worker_assign']))
+        for (const event of amended) if (event.seq > lastStart) assigned.accept(event)
+        if (assigned.callIds().length)
+          this.scheduleSilentTaskProgress(record, { kind: 'worker-assigned', sessionId: record.sessionId, commandIds: assigned.callIds() })
+      }
+    }
+    await this.continueUncorrectedSilentTaskRounds(record)
     await this.saveRole({ ...record, gitSettledWakeId: request.id }, false, undefined, record.identity.role === 'Recorder',
       completed?.callIds().map(id => record.sessionId + ':' + id))
     this.scheduleCompletedHostRestoreRetirement(record, events)
@@ -7680,7 +7843,7 @@ executionId: binding.executionId, run: persistContext,
     }
     const input: HelperRestoreInput & { target: WorkIdentity } = { ...row.value.input, target: (row.value.resolvedTarget ?? row.value.input.target)! } as HelperRestoreInput & { target: WorkIdentity };
     const busy = this.workOperations?.get(input.target.workId)
-    if (busy) {
+    if (busy && !row.value.silentRound) {
       const current = this.roleRecords.get(input.target.workId)
       if (!current || current.identity.executionId !== input.target.executionId) {
         if (row.value.safetyFaultIds?.length) await this.completeRestore(row, 'superseded')
@@ -7723,6 +7886,16 @@ executionId: binding.executionId, run: persistContext,
         return;
       }
       if (['Planner', 'Worker', 'Organizer', 'Recorder'].includes(record.identity.role) && await this.manuallyCleared(await this.currentTask(record))) { await this.completeRestore(row, 'superseded'); return }
+      if (row.value.silentRound) {
+        if (await this.controls.execution(record.identity) || await this.observationTaskHeld(record)
+          || record.businessTransferred || record.released) { await this.completeRestore(row, 'superseded'); return }
+        // Once this precise restore has started stopping the previous owner,
+        // retain the existing stop/continuation responsibility across ticks.
+        const stop = this.stopOperations?.get(JSON.stringify([input.target.workId, input.target.executionId]))
+        if (!record.stopped && !record.stopIntent && !stop && !await this.silentTaskRound(record, row.value.silentRound)) {
+          await this.completeRestore(row, 'superseded'); return
+        }
+      }
       const date = row.value.createdAt.slice(0, 10)
       const debugPath = await this.recordRestoreDebug(row, input)
       record = this.roleRecords.get(input.target.workId)
@@ -7778,7 +7951,7 @@ executionId: binding.executionId, run: persistContext,
         const task = await readJson<TaskMetadata>(this.files, snapshot, paths.task(taskId));
         return task ? await this.files.read(snapshot, task.sourcePath) : void 0;
       }) : void 0;
-      const continuation = await this.arrangeNativeContinuation(owner, { ...input, ...(debugPath ? { debugPath } : {}), ...recoverySource ? { recoveredTaskSource: recoverySource } : {} }, void 0, 'restore-role:' + row.value.commandId, pending?.value.request ?? reconstructedInput);
+      const continuation = await this.arrangeNativeContinuation(owner, { ...input, ...(row.value.silentRound ? { silentCorrection: row.value.silentRound } : {}), ...(debugPath ? { debugPath } : {}), ...recoverySource ? { recoveredTaskSource: recoverySource } : {} }, void 0, 'restore-role:' + row.value.commandId, pending?.value.request ?? reconstructedInput);
       const terminal = !continuation && !pending && !record.delivery && !record.lastWake
         && record.identity.taskId && ['Planner', 'Worker'].includes(record.identity.role) && await withSnapshot(this.files, async (snapshot) => {
           const task = await readJson<TaskMetadata>(this.files, snapshot, paths.task(record.identity.taskId!));
