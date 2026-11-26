@@ -31,11 +31,15 @@ try{
  assert.match(planner,/legitimate wait must be supported by existing Task state, with the actual next owner and concrete trigger/)
  const helper=frameworkRolePrompt('Helper')
  assert.match(helper,/absence of a new assignment does not resolve a still-open original recovery obligation/)
- assert.match(helper,/Do not exit while the Task you are recovering is still stalled/)
+ const approvedRecovery = '你的职责是解除阻塞，让原任务从已有进度继续执行。遇到阻塞，先用针对当前卡点的恢复办法。一种办法无效，就换一种。常规办法无法解除阻塞时，再判断是否需要重置 Host 状态。重置是解除相关阻塞的兜底策略，不是例行动作，也不重投任务。\n\n不论用了哪种办法，只有确认原任务越过卡点、取得实质新进展，才算恢复。工具返回成功、Host 状态重置成功、角色被唤起，都不能代替这个判断。\n\n能在内部解决的问题，不报前台。只有适用于当前阻塞的内部恢复办法都试过，兜底也未能让任务继续，才向前台说明实际卡点、已经试过什么、还缺什么才能继续。上报后，确认前台响应后可退出。'
+ assert.ok(helper.includes(approvedRecovery))
+ assert.match(helper,/Foreground’s response is not a Host receipt and does not mark the original Task or recovery complete/)
+ assert.doesNotMatch(helper,/If progress is impossible without a missing permission, input, or user decision, route/)
+ assert.ok((await fs.readFile(new URL('../lib/host.js', import.meta.url), 'utf8')).includes(approvedRecovery))
  assert.match(helper,/An assignment or start by itself does not prove that the blocked work progressed/)
  assert.match(helper,/use dss_restore_host once for that distinct Host fault/)
  assert.match(helper,/do not wait for an extra Host receipt or invent a producer settlement/)
  assert.doesNotMatch(helper,/confirms it stopped before replacement/)
  assert.ok(tools.includes('dss_snapshot')&&tools.includes('dss_claim')&&tools.includes('dss_complete'))
- console.log(JSON.stringify({status:'passed',checks:19,scope:'Installed Organizer prompt, Planner continuation priority, Helper guidance and registered existing DSS tools; no model compliance or business outcome asserted.',sdk:evidence()},null,2))
+ console.log(JSON.stringify({status:'passed',checks:22,scope:'Installed Organizer prompt, Planner continuation priority, Helper guidance and registered existing DSS tools; no model compliance or business outcome asserted.',sdk:evidence()},null,2))
 }finally{await files.close();await fs.rm(root,{recursive:true,force:true})}
