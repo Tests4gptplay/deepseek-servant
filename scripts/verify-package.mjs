@@ -18,7 +18,22 @@ assert.ok(packed?.filename)
 const tarball = join(directory, packed.filename)
 const manifest = JSON.parse(await readFile('package.json', 'utf8'))
 assert.ok(manifest.files.every(path => typeof path === 'string' && !/[?*\[\]]/.test(path)), 'Verify explicit file entries before expanding package patterns.')
-const allowed = new Set(['package.json', ...manifest.files].map(path => 'package/' + path))
+// The bundled Python runtime is the only directory entry. Its existing index
+// supplies exact member paths and hashes instead of trusting an npm directory glob.
+const vendor = 'python/vendor'
+const vendorManifest = vendor + '/manifest.json'
+assert.ok(manifest.files.includes(vendor), 'The bundled Python runtime must be included.')
+const vendorManifestBytes = await readFile(vendorManifest)
+const vendorFiles = Object.entries(JSON.parse(vendorManifestBytes).files).map(([path, sha256]) => {
+  assert.match(path, /^(?:common|native)\/(?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+$/)
+  assert.ok(path.split('/').every(part => part !== '.' && part !== '..'), 'Unsafe Python vendor path: ' + path)
+  assert.match(sha256, /^[a-f0-9]{64}$/, 'Missing Python vendor SHA-256: ' + path)
+  return [vendor + '/' + path, sha256]
+})
+assert.ok(vendorFiles.length > 0, 'The bundled Python runtime index is empty.')
+const allowed = new Set(['package.json', ...manifest.files.flatMap(path =>
+  path === vendor ? [vendorManifest, ...vendorFiles.map(([vendorPath]) => vendorPath)] : [path]
+)].map(path => 'package/' + path.replace(/^\.\//, '')))
 const listing = execFileSync('tar', ['-tzf', tarball], { encoding: 'utf8' }).trim().split('\n')
 for (const path of listing) {
   assert.ok(allowed.has(path), 'File outside the explicit package manifest: ' + path)
@@ -32,6 +47,9 @@ assert.equal(new Set(listing).size, listing.length, 'Duplicate package entries a
 const detailed = execFileSync('tar', ['-tvzf', tarball], { encoding: 'utf8' }).trim().split('\n')
 assert.ok(detailed.every(line => line.startsWith('-')), 'Package may contain only regular files, not links or special entries.')
 execFileSync('tar', ['-xzf', tarball, '-C', directory])
+assert.deepEqual(await readFile(join(directory, 'package', vendorManifest)), vendorManifestBytes)
+for (const [path, sha256] of vendorFiles)
+  assert.equal(createHash('sha256').update(await readFile(join(directory, 'package', path))).digest('hex'), sha256, 'Packed Python vendor hash differs: ' + path)
 const pkg = JSON.parse(await readFile(join(directory, 'package/package.json'), 'utf8'))
 assert.equal(pkg.name, manifest.name)
 assert.equal(pkg.version, manifest.version)
@@ -53,7 +71,7 @@ assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).tr
 const evidence = { commit: initialCommit,
   workingTreeDirty: !!execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim(), tarball,
   sha256: createHash('sha256').update(await readFile(tarball)).digest('hex'), files: listing,
-  verified: ['offline npm pack', 'package file allowlist', 'packed bundle byte equality', 'packed host module import/config', 'client registration envelope captured; factory not executed'],
+  verified: ['offline npm pack', 'package file allowlist', 'packed Python vendor member hashes', 'packed bundle byte equality', 'packed host module import/config', 'client registration envelope captured; factory not executed'],
   dependencies: 'Host import resolves existing repository node_modules; not a fresh dependency installation',
   notVerified: ['complete Host startup', 'real Agent loop', 'browser interaction', 'remote Git account'] }
 await writeFile(join(directory, 'verification.json'), JSON.stringify(evidence, null, 2) + '\n')

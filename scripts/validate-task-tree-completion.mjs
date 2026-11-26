@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
 import { readFileSync, existsSync } from 'node:fs'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { registerHooks, stripTypeScriptTypes } from 'node:module'
@@ -54,6 +57,7 @@ const { installFrameworkRoleTools } = await import('../src/framework/role-tools.
 const { FrameworkHostLoop } = await import('../src/framework/host-loop.ts')
 const { FrameworkCleaner, observeCleanup } = await import('../src/framework/cleaner.ts')
 const { PhysicalLocalFiles } = await import('../src/framework/physical-local-files.ts')
+const { taskArchiveHostKey, updateTaskArchiveState } = await import('../src/framework/task-archive.ts')
 const { taskLifecycle, readJson } = await import('../src/framework/task-files.ts')
 const { FilesConflictError, withSnapshot } = await import('../src/framework/transactions.ts')
 let assertions = 0
@@ -126,7 +130,7 @@ function roleTools(files, selected, role = selected.route === 'P' ? 'Planner' : 
   const tools = new Map(), errors = []
   const agent = { id: role + ':' + selected.taskId, session: {} }
   const ctx = { on: () => () => {}, effect: () => {}, systemPrompt: { section: () => {} }, tools: { register: tool => tools.set(tool.name, tool) } }
-  const binding = { role, taskId: selected.taskId, owner: selected.owner, member: selected.owner, workId: agent.id, executionId: agent.id + ':execution' }
+  const binding = { role, taskId: selected.taskId, owner: selected.owner, member: selected.owner, workId: agent.id, executionId: agent.id + ':execution', ...(role === 'Worker' ? { workerId: 'cancelled-worker' } : {}) }
   installFrameworkRoleTools(ctx, agent, binding, {
     files, transact, notifications: async () => [], claimNotifications: async () => ({ signals: [] }), onError: error => errors.push(error), ...extraServices
   })
@@ -247,7 +251,14 @@ try {
     const storageMap = new Map()
     const storage = { get: async key => storageMap.get(key), set: async (key, value) => storageMap.set(key, value) }
     const actions = { wake: async request => { events.push(['wake', request.role]); return true }, executing: () => false,
-      sealBusiness: async () => { events.push(['seal']) }, cancelledBusinessStopped: async () => true,
+      sealBusiness: async task => {
+        events.push(['seal'])
+        const key = taskArchiveHostKey(undefined, 'validation', ids[4])
+        await updateTaskArchiveState(files, task.taskId, async (_snapshot, _identity, state) => ({
+          state: { ...state, lifecycles: { ...state.lifecycles, [taskLifecycle(task)]: { hosts: { [key]: { sealed: true } } } } },
+          result: undefined, write: true
+        }))
+      },
       clean: async () => { events.push(['clean']); return true }, releaseTask: async () => { events.push(['release']) }, error: error => errors.push(error) }
     for (let restart = 0; restart < 2; restart++) {
       const loop = new FrameworkHostLoop(files, {}, storage, { member: selected.owner, primary: true, scope: 'validation', instanceUUID: ids[4] }, () => [selected.owner], actions)
@@ -259,22 +270,66 @@ try {
     for (const [path, value] of retained) check(files.data.get(path), value)
   }
 
-  // Root Host behavior remains reachable, and a failed stop on a cancelled
-  // root still defers Recorder, but never gates an existing Cleaner handoff.
-  for (const stopped of [false, true]) {
-    const { files, root } = fixture()
-    const selected = { ...root, status: 'cancelled' }
-    files.seed(paths.task(root.taskId), encodeJson(selected))
-    files.seed(paths.state(root.owner, root.taskId) + '/Recorder', '')
-    const events = [], errors = [], state = new Map()
-    const loop = new FrameworkHostLoop(files, {}, { get: async key => state.get(key), set: async (key, value) => state.set(key, value) },
-      { member: root.owner, primary: true, scope: 'validation', instanceUUID: ids[4] }, () => [root.owner], {
-        wake: async request => { events.push(request.role); return true }, executing: () => false, sealBusiness: async () => {},
-        cancelledBusinessStopped: async () => stopped, clean: async () => { events.push('Cleaner-observation'); return false }, error: error => errors.push(error)
-      })
-    await loop.scanTask(selected, await files.snapshot(), performance.now())
-    check(errors, [])
-    check(events, stopped ? ['Recorder'] : [])
+  // Cancelled root admission requires a Recorder signal and the real Task
+  // seal, not another Host native-stop or Local completion-cache write.
+  for (const physical of [false, true]) {
+    const fixtureView = fixture()
+    const directory = physical ? await mkdtemp(join(tmpdir(), 'dss-cancel-recorder-')) : undefined
+    const files = directory ? new PhysicalLocalFiles(directory) : fixtureView.files
+    try {
+      if (directory) for (const [path, content] of fixtureView.files.data) await files.replace(path, content)
+      const selected = { ...fixtureView.root, status: 'cancelled' }
+      const write = (path, content) => directory ? files.replace(path, content) : files.seed(path, content)
+      await write(paths.task(selected.taskId), encodeJson(selected))
+      const events = [], errors = []
+      let sealBlocked = true
+      const loop = new FrameworkHostLoop(files, {}, { get: async () => undefined, set: async () => { throw Error('Unneeded Host cache acknowledgement') } },
+        { member: selected.owner, primary: true, scope: 'validation', instanceUUID: ids[4] }, () => [selected.owner], {
+          wake: async request => { events.push(request.role); return true }, executing: () => false,
+          sealBusiness: async () => { events.push('seal'); if (sealBlocked) throw Error('Authoritative seal failure') },
+          cancelledBusinessStopped: async () => { throw Error('Obsolete native-stop receipt must not be consulted') },
+          clean: async () => { events.push('Cleaner-observation'); return false }, error: error => errors.push(error.message)
+        })
+      const scan = () => withSnapshot(files, snapshot => loop.scanTask(selected, snapshot, performance.now()))
+      await scan()
+      check(events, ['seal'])
+      check(errors, ['Authoritative seal failure'])
+      sealBlocked = false
+      await scan()
+      check(events, ['seal', 'seal']) // no Recorder signal yet
+      await write(paths.state(selected.owner, selected.taskId) + '/Recorder', '')
+      await scan()
+      check(events, ['seal', 'seal', 'Recorder'])
+      check(errors, ['Authoritative seal failure'])
+    } finally {
+      if (directory) { await files.close(); await rm(directory, { recursive: true, force: true }) }
+    }
+  }
+
+  // A previously created role binding still cannot mutate the now cancelled
+  // Task after a fresh write evaluation in either storage implementation.
+  for (const physical of [false, true]) {
+    const source = fixture(), directory = physical ? await mkdtemp(join(tmpdir(), 'dss-cancel-write-')) : undefined
+    const files = directory ? new PhysicalLocalFiles(directory) : source.files
+    try {
+      if (directory) for (const [path, content] of source.files.data) await files.replace(path, content)
+      for (const [role, selected, recordPath] of [
+        ['Organizer', source.root, paths.run(source.root.taskId) + '/Organizer_Note.md'],
+        ['Planner', source.leaf, paths.member(source.leaf.taskId, source.leaf.owner) + '/Plan_Note.md'],
+        ['Worker', source.sibling, paths.member(source.sibling.taskId, source.sibling.owner) + '/workers/cancelled-worker/notes.md'],
+      ]) {
+        const port = roleTools(files, selected, role)
+        const view = await port.call('dss_snapshot', {})
+        const cancelled = encodeJson({ ...selected, status: 'cancelled' })
+        if (directory) await files.replace(paths.task(selected.taskId), cancelled)
+        else files.seed(paths.task(selected.taskId), cancelled)
+        const previous = await withSnapshot(files, snapshot => files.read(snapshot, recordPath))
+        await rejects(() => port.call('dss_record', { snapshotId: view.snapshotId, path: recordPath, text: 'late stale mutation' }), /Task was cancelled/)
+        check(await withSnapshot(files, snapshot => files.read(snapshot, recordPath)), previous)
+      }
+    } finally {
+      if (directory) { await files.close(); await rm(directory, { recursive: true, force: true }) }
+    }
   }
 
   // Total Cleaner discovery trusts its notification/continuation independently
@@ -589,9 +644,10 @@ try {
   for (const member of [uncertain.root, uncertain.group, uncertain.leaf, uncertain.sibling]) uncertain.files.seed(paths.task(member.taskId), encodeJson({ ...member, status: 'complete' }))
   uncertain.files.seed(paths.state(uncertain.root.owner, uncertain.root.taskId) + '/Cleaner', '')
   let nativeStopConfirmed = false
-  const releaseEvents = [], oldExecution = { identity: { taskId: uncertain.leaf.taskId, executionId: 'retained-native' }, stopped: false }
+  const releaseEvents = [], oldExecution = { identity: { taskId: uncertain.leaf.taskId, workId: 'retained-native', executionId: 'retained-native' }, stopped: false }
   const releaseRuntime = {
     files: uncertain.files, cleanupResidues: new Map(), roleRecords: new Map([['retained-native', oldExecution]]),
+    serialWork: async (_workId, operation) => operation(),
     stopOwnedRecord: async record => { releaseEvents.push(['stop', record.identity.taskId]); return nativeStopConfirmed ? { status: 'stopped' } : { status: 'unconfirmed', reason: 'Native stop remains unknown' } },
     saveRole: async record => { releaseRuntime.roleRecords.set('retained-native', record); releaseEvents.push(['saved-stop', record.identity.taskId]) },
     releaseTask: async member => { releaseEvents.push(['released', member.taskId]) }

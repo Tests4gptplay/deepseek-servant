@@ -10,8 +10,8 @@ export function createUiDirectoryBrowser(ctx: Context) {
   const capability = async () => {
     ready ??= scope.plugin(BrowseDirectoryPicker).await().then(() => undefined)
     await ready
-    const value = scope.get('directoryPicker', true).capability()
-    if (value.kind !== 'browse') throw new Error('Directory browsing is unavailable.')
+    const value = scope.get('directoryPicker', true)?.capability()
+    if (value?.kind !== 'browse') throw new Error('Directory browsing is unavailable.')
     return value
   }
   return {

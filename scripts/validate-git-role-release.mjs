@@ -30,6 +30,7 @@ const { installFrameworkRoleTools } = await import('../src/framework/role-tools.
 const { initializeTask, paths, readJson, taskLifecycle } = await import('../src/framework/task-files.ts')
 const { Repository, put, head } = await import('./test-support/controlled-git/repository.mjs')
 const { readTaskArchiveState, taskArchiveHostFacts } = await import('../src/framework/task-archive.ts')
+const { cancelTask } = await import('../src/framework/task-cancellation.ts')
 const { GitConflictError } = await import('../src/experimental/private-git/github.ts')
 const checks = [], transactions = []
 const check = (name, actual, expected) => { assert.deepEqual(actual, expected, name); checks.push(name) }
@@ -150,6 +151,49 @@ async function deliver(h, task, record) {
   await Promise.all([...h.runtime.workerDrains?.values() ?? []])
 }
 try {
+  // Actual Git authority cancels while an older Planner record reaches CAS.
+  // The retried evaluation rejects old business authority; Recorder trusts the
+  // terminal Task and its signal, not a native stop return from the old owner.
+  {
+    const f = await fixture('cancelled-recorder-no-stop-ack'), h = hostFor(f, 'A')
+    const predecessor = await roleFor(h, f.task)
+    h.failures.add(predecessor.identity.executionId)
+    const role = toolsFor(f, f.task, 'Planner'), view = await role.call('dss_snapshot', {})
+    const note = paths.member(f.task.taskId, f.task.owner) + '/Plan_Note.md'
+    const before = await read(f, note)
+    const original = f.repo.commitPrepared.bind(f.repo)
+    let cancelled
+    f.repo.commitPrepared = async (snapshot, changes, message, operation) => {
+      if (!cancelled && changes.some(change => change.path === 'dss-coop/' + note && String(change.content).includes('late stale write'))) {
+        cancelled = await cancelTask({ files: f.files, member: 'A', transact: (...args) => f.tx.run(...args) },
+          { taskId: f.task.taskId, lifecycleId: f.task.lifecycleId }, 'other-writer')
+      }
+      return original(snapshot, changes, message, operation)
+    }
+    await assert.rejects(() => role.call('dss_record', { snapshotId: view.snapshotId, path: note, text: 'late stale write', append: false }), /Task was cancelled/)
+    check('cancel was committed by production Git transaction', cancelled?.status, 'cancelled')
+    check('stale Planner Git CAS did not change original record', await read(f, note), before)
+    f.task = await withSnapshot(f.files, s => readJson(f.files, s, paths.task(f.task.taskId)))
+    const woke = [], nativeEntered = defer(), nativeResume = defer()
+    h.host.actions.wake = async request => { woke.push(request.role); return false }
+    h.runtime.native.beforeStop = async () => { nativeEntered.resolve(); await nativeResume.promise }
+    h.runtime.ownedAsyncContext = operation => operation()
+    h.runtime.trackedStop(predecessor)
+    try {
+      await nativeEntered.promise
+      await withSnapshot(h.files, s => h.host.scanTask(f.task, s, performance.now()))
+      check('cancelled Recorder signal admitted while old native stop is still pending', woke, ['Recorder'])
+      check('archive admission did not call a separate native stop', h.stopped, [predecessor.identity.executionId])
+      check('actual authority retained independent cancelled business seal',
+        taskArchiveHostFacts(await state(f), f.task, h.key)?.sealed, true)
+    } finally {
+      nativeResume.resolve()
+      await Promise.all([...h.runtime.stopOperations.values()].map(operation => operation.promise))
+    }
+    check('native uncertainty was not treated as business/cleanup completion',
+      h.runtime.roleRecords.get(predecessor.identity.workId).stopped, undefined)
+  }
+
   const f = await fixture('actual-two-host-role-release'), a = hostFor(f, 'A'), b = hostFor(f, 'B')
   const pa = await roleFor(a, f.task), pb = await roleFor(b, f.task)
   const foreground = await roleFor(a, undefined, 'Foreground')

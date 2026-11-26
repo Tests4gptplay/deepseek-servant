@@ -8,24 +8,36 @@ const {GitFiles} = await import(new URL('framework/transactions.ts',src))
 const {SessionGitOperations} = await import(new URL('framework/git-authority.ts',src))
 const {RemoteGitRepository} = await import(new URL('experimental/private-git/remote-git-repository.ts',src))
 const {GitBackendError} = await import(new URL('experimental/private-git/git-object-backend.ts',src))
-function gitFixture(directory, objectFormat, beforeExecute = async () => {}) {
+function gitFixture(directory, objectFormat, beforeExecute = async () => {}, reopen = false, memoizeObjects = false) {
   execFileSync('git', ['init', '--bare', '--quiet', '--object-format=' + objectFormat, directory])
   const git = (args, input) => execFileSync('git', ['--git-dir=' + directory, ...args], { input, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env,
     GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: devNull, GIT_AUTHOR_NAME: 'Recovery fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
     GIT_COMMITTER_NAME: 'Recovery fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' } })
-  const tree = git(['mktree'], '').toString().trim(), initial = git(['commit-tree', tree], 'Initial fixture\n').toString().trim()
-  git(['update-ref', 'refs/heads/main', initial]); const events = []
+  const immutable = new Map()
+  const object = args => {
+    if (!memoizeObjects) return git(args)
+    const key = JSON.stringify(args)
+    if (!immutable.has(key)) immutable.set(key, git(args))
+    return immutable.get(key)
+  }
+  if (!reopen) {
+    const tree = git(['mktree'], '').toString().trim(), initial = git(['commit-tree', tree], 'Initial fixture\n').toString().trim()
+    git(['update-ref', 'refs/heads/main', initial])
+  }
+  const events = []
   class Backend {
     constructor(channel) { this.channel = channel }
     closed = false; ids = new Set()
     async ready() {}
     async release() { this.closed = true }
-    async storageBytes() { return [...this.ids].reduce((n, id) => n + Number(git(['cat-file', '-s', id])), 0) }
+    async storageBytes() { return [...this.ids].reduce((n, id) => n + Number(object(['cat-file', '-s', id])), 0) }
     metadata(id) {
-      this.ids.add(id); const commit = git(['cat-file', 'commit', id]).toString(), root = commit.match(/^tree (\w+)/)[1]
-      const visit = id => { this.ids.add(id); for (const line of git(['ls-tree', '-z', id]).toString().split('\0').filter(Boolean)) {
-        const m = line.match(/^\d+ (\w+) (\w+)\t/); if (m[1] === 'tree') visit(m[2])
-      } }; visit(root)
+      this.ids.add(id); const commit = object(['cat-file', 'commit', id]).toString(), root = commit.match(/^tree (\w+)/)[1]
+      this.ids.add(root)
+      for (const line of object(['ls-tree', '-r', '-t', '-z', root]).toString().split('\0')) {
+        const m = line.match(/^\d+ tree (\w+)\t/)
+        if (m) this.ids.add(m[1])
+      }
     }
     async execute(command, { signal, input }) {
       signal.throwIfAborted(); assert.equal(this.closed, false); events.push({ op: command.op, kind: command.kind, id: command.id, channel: this.channel })
@@ -33,9 +45,9 @@ function gitFixture(directory, objectFormat, beforeExecute = async () => {}) {
       signal.throwIfAborted()
       if (command.op === 'fetchHead') { const id = git(['rev-parse', 'refs/heads/main']).toString().trim(); this.metadata(id); return Buffer.from(id) }
       if (command.op === 'fetchMetadata') { this.metadata(command.revision); return Buffer.alloc(0) }
-      if (command.op === 'ensureObjects') { for (const id of command.ids) { git(['cat-file', '-e', id]); this.ids.add(id) } return command.kind === 'commit' ? git(['rev-list', '--max-count=' + String(command.commitDepth ?? 1), ...command.ids]) : Buffer.alloc(0) }
-      if (command.op === 'readObject') return git(['cat-file', command.kind, command.id])
-      if (command.op === 'readTree') return git(['ls-tree', '-z', command.id])
+      if (command.op === 'ensureObjects') { for (const id of command.ids) { object(['cat-file', '-e', id]); this.ids.add(id) } return command.kind === 'commit' ? object(['rev-list', '--max-count=' + String(command.commitDepth ?? 1), ...command.ids]) : Buffer.alloc(0) }
+      if (command.op === 'readObject') return object(['cat-file', command.kind, command.id])
+      if (command.op === 'readTree') return object(['ls-tree', '-z', command.id])
       if (command.op === 'writeBlob' || command.op === 'writeTree') {
         const id = git(command.op === 'writeBlob' ? ['hash-object', '-t', 'blob', '-w', '--stdin'] : ['mktree', '-z'], input).toString().trim(); this.ids.add(id); return Buffer.from(id)
       }

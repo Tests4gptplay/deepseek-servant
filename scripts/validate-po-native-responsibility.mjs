@@ -53,9 +53,9 @@ class Model extends LlmAdapter{
  command(id,action){const d=this.waiting.get(id);assert(d,'Actual model must be waiting');d.resolve(action)}
 }
 async function fixture(name='fixture',reopen=false){const dir=path.join(root,name);await fs.mkdir(path.join(dir,'workspace'),{recursive:true});const sdk=await openDshStorageFixture(path.join(dir,'storage'),path.join(dir,'locator'))
- new AgentRegistry(sdk.ctx);new SessionStore(sdk.ctx);new SessionProjectionRegistry(sdk.ctx);new LlmRuntime(sdk.ctx);new SystemPrompt(sdk.ctx,{});new ToolRuntime(sdk.ctx);new LocalJobRegistry(sdk.ctx,{})
+ new SessionStore(sdk.ctx);new SessionProjectionRegistry(sdk.ctx);const registry=sdk.ctx.plugin(AgentRegistry);await registry.await();new LlmRuntime(sdk.ctx);new SystemPrompt(sdk.ctx,{});new ToolRuntime(sdk.ctx);new LocalJobRegistry(sdk.ctx,{})
  const jp=sdk.ctx.plugin(jsonl,{root:path.join(dir,'sessions'),compression:'none'});await jp.await()
- new LocalFileSystem(sdk.ctx,{cwd:path.join(dir,'workspace'),diffBasisMaxBytes:1048576});new WorkingDirectoryService(sdk.ctx,{defaultDirectory:path.join(dir,'workspace')});const wp=sdk.ctx.plugin(WorkspaceRegistry);await wp.await();const lp=sdk.ctx.plugin(AgentLoop,{agents:[],maxParallelToolCalls:10});await lp.await()
+ new LocalFileSystem(sdk.ctx,{cwd:path.join(dir,'workspace'),diffBasisMaxBytes:1048576});const wd=sdk.ctx.plugin(WorkingDirectoryService,{defaultDirectory:path.join(dir,'workspace')});await wd.await();const executor=sdk.ctx.plugin(await import('@deepseek-ai/dsh-tool-executor-native'));await executor.await();const wp=sdk.ctx.plugin(WorkspaceRegistry);await wp.await();const lp=sdk.ctx.plugin(AgentLoop,{agents:[],maxParallelToolCalls:10});await lp.await()
  const model=new Model();sdk.ctx.llm.registerAdapter(['isolated-wire'],model)
  sdk.ctx.on('session/event',(session,event)=>{if(['tool/call','tool/result'].includes(event.type)){mark('tool',{id:session.header.id,type:event.type,data:event.data});if(event.type==='tool/result'&&!event.data.message.isError){for(const c of event.data.message.content??[])if(c.type==='text'){try{const v=JSON.parse(c.text);lastResults.set(session.header.id,v);if(v.snapshotId)results.set(session.header.id,v)}catch{}}}}})
  await cleaner.apply(sdk.ctx,{}, {onFailure(e,stage){throw Error(stage,{cause:e})}})
