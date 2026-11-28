@@ -1115,7 +1115,8 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
     }
     async cleanupPreview(input: Parameters<FrameworkClientApi['cleanupPreview']>[0]) {
         await this.initializing;
-        return this.withAccessOperation(input, access => this.withManualCleanup(access, async cleanup => input.action === 'conversation' ? cleanup.previewConversation()
+        return this.withAccessOperation(input, access => this.withManualCleanup(access, async cleanup => input.action === 'all' ? cleanup.previewAll()
+            : input.action === 'conversation' ? cleanup.previewConversation()
             : input.action && input.action !== 'tasks' ? cleanup.previewFiles(input.action) : cleanup.previewTasks()));
     }
     async cleanupRecords(input: Parameters<FrameworkClientApi['cleanupRecords']>[0]) {
@@ -1132,12 +1133,13 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                     return result;
                 }
                 if (input.action === 'conversation') return cleanup.clearConversation(input.commandId, input.confirmation, input.preview);
+                if (input.action === 'all') return cleanup.clearAll(input.commandId, input.preview, input.confirmation);
                 if (input.action === 'archives') return cleanup.clearArchives(input.commandId, input.preview, input.confirmation);
                 if (input.action === 'debug') return cleanup.clearDebug(input.commandId, input.preview, input.confirmation);
                 return cleanup.clearPlanning(input.commandId, input.confirmation, input.preview);
             });
             this.archiveViews.delete(input.mode); access.legacyExports = undefined; access.legacyArtifacts = undefined; this.changed(); return result;
-        }, undefined, input.action === 'conversation');
+        }, undefined, input.action === 'conversation' || input.action === 'all');
         return operation;
     }
     private knowledge(access: Access, mode: FrameworkMode): FrameworkKnowledge {

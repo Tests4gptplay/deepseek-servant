@@ -1,4 +1,4 @@
-import { HEARTBEAT_RECORD_DIRECTORY, LEGACY_HEARTBEAT_RECORD_DIRECTORY, parseInstancePath } from './instances.js'
+import { HEARTBEAT_RECORD_DIRECTORY, LEGACY_HEARTBEAT_RECORD_DIRECTORY } from './instances.js'
 import { helperDebugRoot, isHelperDebugRecord } from './helper-debug-path.js'
 import { PhysicalLocalFiles } from './physical-local-files.js'
 import { isHostRecoveryDebugPath } from './recovery-debug-record.js'
@@ -40,12 +40,26 @@ export interface ManualTaskCleanupPreview {
   bytes: number
   preservedPaths: string[]
 }
-type FileCleanupKind = 'planning' | 'debug' | 'archives'
+type FileCleanupKind = 'planning' | 'debug' | 'archives' | 'heartbeats'
 export interface ManualFileCleanupPreview {
   id: string
   kind: FileCleanupKind
   files: Array<{ path: string; version: string; bytes: number }>
+  /** Fixed roots removed directly by the OS. Their children are intentionally
+   * not enumerated or copied into the confirmation payload. */
+  roots?: string[]
   bytes: number
+}
+export interface ManualAllCleanupPreview {
+  id: string
+  kind: 'all'
+  scope: string
+  tasks: ManualTaskCleanupPreview
+  conversation: ManualConversationCleanupPreview
+  planning: ManualFileCleanupPreview
+  debug: ManualFileCleanupPreview
+  archives: ManualFileCleanupPreview
+  heartbeats: ManualFileCleanupPreview
 }
 export interface ManualCleanupResult {
   cleared: true
@@ -75,7 +89,6 @@ interface Plan {
 interface Intent { version: 1; kind: Kind; commandId: string; scope: string; confirmation: string; preview?: ManualTaskCleanupPreview; filePreview?: ManualFileCleanupPreview; conversation?: Plan; conversationPreview?: ManualConversationCleanupPreview; completed?: true }
 interface MessageIndex { version: number; messages: Array<{ id: string; path: string; notification?: string; role?: string; replyTo?: string }>; processGroups?: ConversationProcessGroup[] }
 interface Candidate { legacySelections: LegacySelection[]; taskId: string; targets: Target[]; guards: FileEntry[]; preservedPaths: string[]; bytes: number; signature: string }
-interface ArchiveGroup { task: TaskHistoryIdentity; nested: string[]; files: FileEntry[] }
 type Migrated = MigrationManifest & { clearedTasks?: Array<{ oldId: string; taskId: string; preservedArtifacts?: string[] }> }
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const json = (value: unknown) => JSON.stringify(value, null, 2) + '\n'
@@ -431,6 +444,45 @@ export class FrameworkManualCleanup {
       || group.beforeMessageId !== undefined && capturedMessageIds.includes(group.beforeMessageId)).map(group => group.id)
     return { version: 1, kind: 'conversation', scope: this.scope, targets: mergeTargets(targets), taskIds: [], messagePaths, messageIds, processGroupIds, preservedPaths: unique(preservedPaths), ...(missingEntries.length ? { missingEntries } : {}) }
   }
+  async previewAll(): Promise<ManualAllCleanupPreview> {
+    this.local()
+    const tasks = await this.previewTasks()
+    const conversation = await this.previewConversation()
+    const planning = await this.previewFiles('planning')
+    const debug = await this.previewFiles('debug')
+    const archives = await this.previewFiles('archives')
+    const heartbeats = await this.previewFiles('heartbeats')
+    const selection = { kind: 'all' as const, scope: this.scope, tasks, conversation, planning, debug, archives, heartbeats }
+    return { id: this.allPreviewId(selection), ...selection }
+  }
+  async clearAll(commandId: string, preview: ManualAllCleanupPreview, confirmation: 'clear-all-records', signal?: AbortSignal): Promise<ManualCleanupResult> {
+    signal?.throwIfAborted()
+    this.local(); this.confirm(commandId, confirmation, 'clear-all-records')
+    if (!preview || preview.kind !== 'all' || preview.scope !== this.scope || preview.id !== this.allPreviewId(preview))
+      throw new Error('Clear all requires its exact reviewed selection.')
+    const child = (kind: string) => commandId + ':all:' + kind
+    const tasks = await this.clearTasks(child('tasks'), preview.tasks, 'clear-ended-task-records')
+    for (const task of preview.tasks.tasks) await this.lifecycle.prepareTaskCleanup(task.taskId)
+    const results = [
+      tasks,
+      await this.clearConversation(child('conversation'), 'clear-foreground-conversation', preview.conversation),
+      await this.clearPlanning(child('planning'), 'clear-work-planning-notes', preview.planning, signal),
+      await this.clearDebug(child('debug'), preview.debug, 'clear-debug-records', signal),
+      await this.clearArchives(child('archives'), preview.archives, 'clear-task-archives', signal),
+      await this.clearHeartbeats(child('heartbeats'), preview.heartbeats, 'clear-heartbeat-records', signal),
+    ]
+    const removedRoots = [...(preview.archives.roots ?? []), ...(preview.heartbeats.roots ?? [])]
+    const preservedPaths = unique(results.flatMap(result => result.preservedPaths)).filter(path =>
+      !removedRoots.some(root => path === root.slice(0, -1) || path.startsWith(root)))
+    const missingEntries = unique(results.flatMap(result => result.missingEntries ?? []))
+    return { cleared: true,
+      receipt: { revision: await withSnapshot(this.files, async snapshot => snapshot.revision), replay: results.every(result => result.receipt.replay) },
+      deletedPaths: unique(results.flatMap(result => result.deletedPaths)), preservedPaths,
+      ...(missingEntries.length ? { missingEntries } : {}) }
+  }
+  private allPreviewId(preview: Omit<ManualAllCleanupPreview, 'id'>): string {
+    return hash(json([this.scope, 'all', preview.tasks, preview.conversation, preview.planning, preview.debug, preview.archives, preview.heartbeats]))
+  }
   async clearPlanning(commandId: string, confirmation: 'clear-work-planning-notes', preview?: ManualFileCleanupPreview, signal?: AbortSignal): Promise<ManualCleanupResult> {
     signal?.throwIfAborted()
     this.local(); this.confirm(commandId, confirmation, 'clear-work-planning-notes')
@@ -438,69 +490,43 @@ export class FrameworkManualCleanup {
     if (!preview) throw new Error('Review the current List and Cache before clearing.')
     return this.clearPhysicalFiles(this.local(), commandId, 'planning', confirmation, preview, signal)
   }
-  /** Only the Local file category explicitly selected by the user. */
+  /** Only the Local file category explicitly selected by the user. Fixed
+   * directory clears return their roots without inspecting any children. */
   async previewFiles(kind: FileCleanupKind): Promise<ManualFileCleanupPreview> {
     this.local()
-    if (kind !== 'planning' && kind !== 'debug' && kind !== 'archives') throw new Error('Invalid manual file cleanup kind.')
+    if (kind !== 'planning' && kind !== 'debug' && kind !== 'archives' && kind !== 'heartbeats') throw new Error('Invalid manual file cleanup kind.')
+    const roots = this.fixedRoots(kind)
+    if (roots.length) return this.fileSelection(kind, [], roots)
     if (kind === 'planning') await this.conversation.prepare()
     return withSnapshot(this.files, async snapshot => {
       const entries = kind === 'planning'
-        ? (await Promise.all([this.conversation.foregroundRoot + '/', HEARTBEAT_RECORD_DIRECTORY, LEGACY_HEARTBEAT_RECORD_DIRECTORY]
-          .map(root => this.files.listDirectory(snapshot, root)))).flat().filter(entry => this.ownsFile(kind, entry.path))
-        : kind === 'archives' ? [...(await this.archiveFiles(snapshot)).values()].flatMap(group => group.files)
+        ? (await this.files.listDirectory(snapshot, this.conversation.foregroundRoot + '/')).filter(entry => this.ownsFile(kind, entry.path))
         : (await Promise.all([this.files.listDirectory(snapshot, 'debug/'), this.files.listDirectory(snapshot, 'debug/helper-reports/'), this.files.list(snapshot, helperDebugRoot)])).flat().filter(entry => this.ownsFile(kind, entry.path))
-      const files = entries.map(({ path, version, bytes }) => ({ path, version, bytes: bytes ?? 0 })).sort((a, b) => a.path.localeCompare(b.path))
-      return { id: hash(json([this.scope, kind, files])), kind, files, bytes: files.reduce((sum, file) => sum + file.bytes, 0) }
+      return this.fileSelection(kind, entries.map(({ path, version, bytes }) => ({ path, version, bytes: bytes ?? 0 })))
     })
   }
-  private async archiveFiles(snapshot: FilesSnapshot): Promise<Map<string, ArchiveGroup>> {
-    const current = await this.files.listDirectory(snapshot, 'tasks/')
-    const currentIds = new Set(current.map(entry => /^tasks\/([^/]+)\.json$/.exec(entry.path)?.[1]).filter(id => id !== undefined))
-    const histories = await listTaskHistory(this.files, snapshot, error => { throw error })
-    const byId = new Map(histories.map(task => [task.taskId, task]))
-    const currentResults = new Set<string>(), roots = histories.map(task => paths.archive(task).toLowerCase())
-    for (const id of currentIds) {
-      const task = await readJson<TaskMetadata>(this.files, snapshot, paths.task(id))
-      if (task?.taskId === id) roots.push(paths.archive(task).toLowerCase())
-      for (const path of task?.resultPaths ?? []) currentResults.add(filePath(path).toLowerCase())
-    }
-    const result = new Map<string, ArchiveGroup>()
-    for (const task of histories) {
-      if (!isTerminalTask(task) || currentIds.has(task.taskId) || !await this.lifecycle.taskCleanupComplete(task.taskId, task.lifecycleId)) continue
-      let parent = task.parent?.taskId
-      const seen = new Set([task.taskId])
-      while (parent && !seen.has(parent) && !currentIds.has(parent)) {
-        seen.add(parent)
-        parent = byId.get(parent)?.parent?.taskId
-      }
-      if (parent) continue
-      const root = paths.archive(task).toLowerCase()
-      if (root.startsWith('archives/task-identities/') || root === 'archives/task-identities'
-        || [...currentResults].some(path => path === root || path.startsWith(root + '/') || root.startsWith(path + '/'))
-        || roots.indexOf(root) !== roots.lastIndexOf(root)) continue
-      const nested = roots.filter(path => path !== root && path.startsWith(root + '/')).map(path => path + '/')
-      const identity = taskHistoryPath(task.taskId)
-      const entry = (await this.files.listDirectory(snapshot, 'archives/task-identities/', { paths: [identity] })).find(entry => entry.path === identity)
-      if (entry) result.set(identity, { task, nested, files: [...await this.archiveEntries(snapshot, task, nested), entry] })
-    }
-    return result
-  }
-  private async archiveEntries(snapshot: FilesSnapshot, task: TaskHistoryIdentity, nested: readonly string[]): Promise<FileEntry[]> {
-    const root = paths.archive(task)
-    return (await this.files.list(snapshot, root, taskArchiveSelection(task)))
-      .filter(entry => entry.path.startsWith(root + '/') && taskArchiveOwnsPath(task, entry.path)
-        && !nested.some(path => entry.path.toLowerCase().startsWith(path)))
+  private fileSelection(kind: FileCleanupKind, files: ManualFileCleanupPreview['files'], roots: string[] = []): ManualFileCleanupPreview {
+    const selected = [...files].sort((a, b) => a.path.localeCompare(b.path))
+    return { id: hash(json([this.scope, kind, roots, selected])), kind, files: selected,
+      ...(roots.length ? { roots } : {}), bytes: selected.reduce((sum, file) => sum + file.bytes, 0) }
   }
   private ownsFile(kind: FileCleanupKind, path: string): boolean {
     filePath(path)
-    if (kind === 'archives') return path.startsWith('archives/')
-    return kind === 'planning' ? parseInstancePath(path) !== undefined
-      || ['Foreground_List.md', 'Foreground_Cache.md'].some(name => path === this.conversation.foregroundRoot + '/' + name)
-      : isHelperDebugRecord(path) || /^debug\/\d{4}-\d{2}-\d{2}\.md$/.test(path) || isHostRecoveryDebugPath(path) || /^debug\/helper-reports\/[^/]+\.md$/.test(path)
+    if (kind === 'planning') return ['Foreground_List.md', 'Foreground_Cache.md'].some(name => path === this.conversation.foregroundRoot + '/' + name)
+    if (kind === 'debug') return isHelperDebugRecord(path) || /^debug\/\d{4}-\d{2}-\d{2}\.md$/.test(path)
+      || isHostRecoveryDebugPath(path) || /^debug\/helper-reports\/[^/]+\.md$/.test(path)
+    return false
+  }
+  private fixedRoots(kind: FileCleanupKind): string[] {
+    return kind === 'archives' ? ['archives/']
+      : kind === 'heartbeats' ? [HEARTBEAT_RECORD_DIRECTORY, LEGACY_HEARTBEAT_RECORD_DIRECTORY] : []
   }
   private filePreview(kind: FileCleanupKind, preview: ManualFileCleanupPreview): void {
-    if (!preview || preview.kind !== kind || !Array.isArray(preview.files)
-      || preview.id !== hash(json([this.scope, kind, preview.files])) || new Set(preview.files.map(file => file.path)).size !== preview.files.length
+    const roots = preview?.roots ?? []
+    if (!preview || preview.kind !== kind || !Array.isArray(preview.files) || !Array.isArray(roots)
+      || preview.id !== hash(json([this.scope, kind, roots, preview.files]))
+      || new Set(preview.files.map(file => file.path)).size !== preview.files.length
+      || json(roots) !== json(this.fixedRoots(kind))
       || preview.files.some(file => !this.ownsFile(kind, file.path) || typeof file.version !== 'string' || !file.version))
       throw new Error('Manual cleanup requires its exact reviewed file selection.')
   }
@@ -514,6 +540,11 @@ export class FrameworkManualCleanup {
     this.local(); this.confirm(commandId, confirmation, 'clear-task-archives')
     return this.clearPhysicalFiles(this.local(), commandId, 'archives', confirmation, preview, signal)
   }
+  private async clearHeartbeats(commandId: string, preview: ManualFileCleanupPreview, confirmation: 'clear-heartbeat-records', signal?: AbortSignal): Promise<ManualCleanupResult> {
+    signal?.throwIfAborted()
+    this.local(); this.confirm(commandId, confirmation, 'clear-heartbeat-records')
+    return this.clearPhysicalFiles(this.local(), commandId, 'heartbeats', confirmation, preview, signal)
+  }
   private async clearPhysicalFiles(files: PhysicalLocalFiles, commandId: string, kind: FileCleanupKind, confirmation: string,
     preview: ManualFileCleanupPreview, signal?: AbortSignal): Promise<ManualCleanupResult> {
     signal?.throwIfAborted()
@@ -526,21 +557,14 @@ export class FrameworkManualCleanup {
       return { value: undefined, ...(bytes === undefined ? { content: json(intent) } : {}) }
     })
     const deletedPaths: string[] = [], preservedPaths: string[] = []
-    const archiveGroups = kind === 'archives' ? await withSnapshot(files, snapshot => this.archiveFiles(snapshot)) : undefined
-    const identities = new Set(archiveGroups?.keys())
-    const eligible = new Set(archiveGroups && [...archiveGroups.values()].flatMap(group => group.files.map(entry => entry.path)))
-    const selection = [...preview.files].sort((a, b) => Number(identities.has(a.path)) - Number(identities.has(b.path)))
-    for (const file of selection) {
+    for (const root of preview.roots ?? []) {
       signal?.throwIfAborted()
-      if (kind === 'archives' && (!eligible.has(file.path)
-        || identities.has(file.path) && await withSnapshot(files, async snapshot => {
-          const group = archiveGroups!.get(file.path)!
-          return (await this.archiveEntries(snapshot, group.task, group.nested)).length > 0
-        }))) {
-        if (await withSnapshot(files, snapshot => this.version(snapshot, file.path)) !== null) preservedPaths.push(file.path)
-        continue
-      }
-      if (kind !== 'planning' || parseInstancePath(file.path)) {
+      await files.removeDirectory(root.slice(0, -1))
+      deletedPaths.push(root)
+    }
+    for (const file of preview.files) {
+      signal?.throwIfAborted()
+      if (kind !== 'planning') {
         if (await files.deleteObserved(file.path, file.version)) deletedPaths.push(file.path)
         else if (await withSnapshot(files, snapshot => this.version(snapshot, file.path)) !== null) preservedPaths.push(file.path)
       } else {
@@ -584,7 +608,7 @@ export class FrameworkManualCleanup {
       return result
     })
     if (!deferFiles) return this.resumeIntents(pending, onError)
-    const files = pending.filter(intent => intent.kind === 'planning' || intent.kind === 'debug' || intent.kind === 'archives')
+    const files = pending.filter(intent => intent.kind === 'planning' || intent.kind === 'debug' || intent.kind === 'archives' || intent.kind === 'heartbeats')
     const results = await this.resumeIntents(pending.filter(intent => !files.includes(intent)), onError)
     if (files.length) deferFiles(signal => this.resumeIntents(files, onError, signal))
     return results
@@ -599,6 +623,7 @@ export class FrameworkManualCleanup {
         else if (intent.kind === 'planning') results.push(await this.clearPlanning(intent.commandId, intent.confirmation as 'clear-work-planning-notes', intent.filePreview, signal))
         else if (intent.kind === 'debug' && intent.filePreview) results.push(await this.clearDebug(intent.commandId, intent.filePreview, intent.confirmation as 'clear-debug-records', signal))
         else if (intent.kind === 'archives' && intent.filePreview) results.push(await this.clearArchives(intent.commandId, intent.filePreview, intent.confirmation as 'clear-task-archives', signal))
+        else if (intent.kind === 'heartbeats' && intent.filePreview) results.push(await this.clearHeartbeats(intent.commandId, intent.filePreview, intent.confirmation as 'clear-heartbeat-records', signal))
         else if (intent.kind === 'tasks' && intent.preview) results.push(await this.clearTasks(intent.commandId, intent.preview, intent.confirmation as 'clear-ended-task-records'))
         else throw new Error('Invalid confirmed cleanup action.')
       } catch (error) {

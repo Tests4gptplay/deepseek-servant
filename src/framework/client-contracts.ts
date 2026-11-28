@@ -4,7 +4,7 @@ import type { DshForegroundProcessGroup } from '../adapters/dsh/foreground-proce
 import { frameworkErrorText } from './client-error.js'
 import type { SafetyPresentation } from './safety-net.js'
 import type { StorageUsageStats } from '../contracts/retention.js'
-import type { ManualTaskCleanupPreview, ManualFileCleanupPreview, ManualConversationCleanupPreview, ManualCleanupResult } from './manual-cleanup.js'
+import type { ManualTaskCleanupPreview, ManualFileCleanupPreview, ManualConversationCleanupPreview, ManualAllCleanupPreview, ManualCleanupResult } from './manual-cleanup.js'
 import type { FrameworkKnowledge, KnowledgeEdit } from './knowledge.js'
 export type FrameworkMode = 'local' | 'git'
 export interface FrameworkTaskStateCursor { owner: string; generation: number }
@@ -124,13 +124,14 @@ export interface FrameworkClientApi {
   maintenanceView(input: { mode: 'local'; storageScope?: string }): Promise<{ localDirectory: string; recordsDirectory?: string; nativeDirectory?: string; debugDirectory?: string; usage: StorageUsageStats }>
   openMaintenancePath(input: { mode: 'local'; storageScope?: string; target: 'records' | 'native-logs' | 'debug' }): Promise<{ path: string }>
   exportRecords(input: { mode: 'local'; storageScope?: string; recordPath?: string; taskId?: string; migrationId?: string; oldTaskId?: string }): Promise<{ path: string; sha256: string; bytes: number }>
-  cleanupPreview(input: { mode: 'local'; storageScope?: string; action?: 'tasks' | 'conversation' | 'planning' | 'debug' | 'archives' }): Promise<ManualTaskCleanupPreview | ManualFileCleanupPreview | ManualConversationCleanupPreview>
+  cleanupPreview(input: { mode: 'local'; storageScope?: string; action?: 'tasks' | 'conversation' | 'planning' | 'debug' | 'archives' | 'all' }): Promise<ManualTaskCleanupPreview | ManualFileCleanupPreview | ManualConversationCleanupPreview | ManualAllCleanupPreview>
   cleanupRecords(input: { mode: 'local'; storageScope?: string; commandId: string } & (
     { action: 'tasks'; preview: ManualTaskCleanupPreview; confirmation: 'clear-ended-task-records' }
     | { action: 'conversation'; preview: ManualConversationCleanupPreview; confirmation: 'clear-foreground-conversation' }
     | { action: 'planning'; preview?: ManualFileCleanupPreview; confirmation: 'clear-work-planning-notes' }
     | { action: 'archives'; preview: ManualFileCleanupPreview; confirmation: 'clear-task-archives' }
-    | { action: 'debug'; preview: ManualFileCleanupPreview; confirmation: 'clear-debug-records' })): Promise<ManualCleanupResult>
+    | { action: 'debug'; preview: ManualFileCleanupPreview; confirmation: 'clear-debug-records' }
+    | { action: 'all'; preview: ManualAllCleanupPreview; confirmation: 'clear-all-records' })): Promise<ManualCleanupResult>
   view(input: { mode?: FrameworkMode; includeArchives?: boolean; headerOnly?: boolean; panelsOnly?: boolean; refreshOriginalTasks?: boolean }, signal?: AbortSignal): Promise<FrameworkClientView>
   history(input: { mode: FrameworkMode; collaborationId: string; storageScope?: string; beforeId?: string; afterId?: string; date?: string; limit: number; live?: boolean }, signal?: AbortSignal): Promise<{ messages: FrameworkClientMessage[]; processGroups?: FrameworkClientProcessGroup[]; moreBefore?: string; moreAfter?: string; revision: string; order: string[]; selectedIds?: string[]; missingBodies?: Array<{ id: string; path: string }>; storageScope?: string; reset?: boolean; day?: string; cursor?: string }>
   send(input: FrameworkSendInput): Promise<{ storageScope: string }>

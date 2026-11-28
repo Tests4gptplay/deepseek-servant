@@ -2,15 +2,15 @@ import { frameworkErrorText } from './client-error.js'
 import { useEffect, useState } from 'react'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { FrameworkClientApi } from './client-contracts.js'
-import type { ManualTaskCleanupPreview, ManualFileCleanupPreview, ManualConversationCleanupPreview } from './manual-cleanup.js'
+import type { ManualTaskCleanupPreview, ManualFileCleanupPreview, ManualConversationCleanupPreview, ManualAllCleanupPreview } from './manual-cleanup.js'
 import css from '../client/page.module.css'
 
-type Action = 'tasks' | 'conversation' | 'planning' | 'debug' | 'archives'
+type Action = 'tasks' | 'conversation' | 'planning' | 'debug' | 'archives' | 'all'
 /** Separate explicit Local confirmations; no scheduled retention. */
 export function ManualCleanupPanel({ api, storageScope, tr, changed }: {
   api: FrameworkClientApi; storageScope: string; tr: (cn: string, en: string) => string; changed(): Promise<void>
 }) {
-  const [pending, setPending] = useState<{ action: Action; commandId: string; preview?: ManualTaskCleanupPreview; filePreview?: ManualFileCleanupPreview; conversationPreview?: ManualConversationCleanupPreview; submitted?: boolean }>()
+  const [pending, setPending] = useState<{ action: Action; commandId: string; preview?: ManualTaskCleanupPreview; filePreview?: ManualFileCleanupPreview; conversationPreview?: ManualConversationCleanupPreview; allPreview?: ManualAllCleanupPreview; submitted?: boolean }>()
   const [busy, setBusy] = useState(false), [error, setError] = useState('')
   const [result, setResult] = useState('')
   const [debug, setDebug] = useState<ManualFileCleanupPreview>()
@@ -41,6 +41,7 @@ export function ManualCleanupPanel({ api, storageScope, tr, changed }: {
     planning: tr('清空工作清单与缓存', 'Clear working List and Cache'),
     archives: tr('清理归档', 'Clear archives'),
     debug: tr('清理调试记录', 'Clear debug records'),
+    all: tr('清理全部', 'Clear all'),
   }
   const prepare = async (action: Action) => {
     setBusy(true); setError(''); setResult('')
@@ -53,6 +54,9 @@ export function ManualCleanupPanel({ api, storageScope, tr, changed }: {
       } else if (action === 'conversation') {
         if (!('kind' in preview) || preview.kind !== 'conversation') throw new Error('Cleanup preview belongs to another action.')
         setPending({ action, commandId, conversationPreview: preview })
+      } else if (action === 'all') {
+        if (!('kind' in preview) || preview.kind !== 'all') throw new Error('Cleanup preview belongs to another action.')
+        setPending({ action, commandId, allPreview: preview })
       } else if ('kind' in preview && preview.kind === action) {
         setPending({ action, commandId, filePreview: preview })
       } else throw new Error('Cleanup preview belongs to another action.')
@@ -68,6 +72,7 @@ export function ManualCleanupPanel({ api, storageScope, tr, changed }: {
       const result = await api.cleanupRecords(pending.action === 'tasks'
         ? { ...base, action: 'tasks', preview: pending.preview!, confirmation: 'clear-ended-task-records' }
         : pending.action === 'conversation' ? { ...base, action: 'conversation', preview: pending.conversationPreview!, confirmation: 'clear-foreground-conversation' }
+        : pending.action === 'all' ? { ...base, action: 'all', preview: pending.allPreview!, confirmation: 'clear-all-records' }
         : pending.action === 'archives' ? { ...base, action: 'archives', preview: pending.filePreview!, confirmation: 'clear-task-archives' }
         : pending.action === 'debug' ? { ...base, action: 'debug', preview: pending.filePreview!, confirmation: 'clear-debug-records' }
         : { ...base, action: 'planning', preview: pending.filePreview, confirmation: 'clear-work-planning-notes' })
@@ -125,17 +130,25 @@ export function ManualCleanupPanel({ api, storageScope, tr, changed }: {
       </dl>
       <p className={css.muted}>{tr('以上为记录内容大小，不包含宿主会话日志。', 'Sizes show record content, excluding Host session logs.')}</p>
     </details>}
-    {!pending && <div className={css.actions}>{(Object.keys(labels) as Action[]).map(action => <Button type="button" variant="outline" key={action} disabled={busy} onClick={() => void prepare(action)}>{labels[action]}</Button>)}</div>}
+    {!pending && <div className={css.actions}>{(Object.keys(labels) as Action[]).map(action => <Button type="button" variant={action === 'all' ? 'primary' : 'outline'} key={action} disabled={busy} onClick={() => void prepare(action)}>{labels[action]}</Button>)}</div>}
     {pending && <div role="group" aria-label={tr('确认清理', 'Confirm cleanup')}>
       <h4>{labels[pending.action]}</h4>
       <p>{pending.action === 'tasks' ? tr('只删除本次预览的已结束任务历史；成果、技能和知识保留。', 'Only the ended task history in this preview is removed; artifacts, skills and knowledge remain.')
         : pending.action === 'conversation' ? tr('只清理本次选择的前台聊天；若原前台执行仍在运行，会先停止并收取其尾部输出。之后的新聊天、后台任务及工作清单、缓存保留。', 'Clears only this selected Foreground conversation. If its original execution is still running, it is stopped and its final output is collected. Later messages, background tasks, List and Cache remain.')
+        : pending.action === 'all' ? tr('执行全部清理项，并直接清空 archives/、heartbeats/ 和旧 instances/ 目录。运行中的实例可重新写入心跳；技能、知识、宿主会话日志和用户工作区保留。', 'Runs every cleanup action and directly clears the archives/, heartbeats/ and legacy instances/ directories. Running instances can write their heartbeat again; skills, knowledge, Host session logs and user workspaces remain.')
         : pending.action === 'debug' ? tr('只删除本次预览的调试记录；之后新增或改写的记录保留，其他长期记录和任务不受影响。', 'Only the debug records in this preview are removed. Later additions or changes and other long-term records and tasks remain.')
-        : pending.action === 'archives' ? tr('删除本次预览的已结束任务归档及其中的成果文件，不删除任务工作区。', 'Deletes the reviewed archives of ended tasks, including their archived artifacts, but not task workspaces.')
-        : tr('清空本次预览的工作清单与缓存，删除列出的心跳记录。运行中的心跳会自动重新写入；聊天和任务档案保留。', 'Clears the reviewed List and Cache and removes the listed heartbeat records. Running instances write their heartbeat again automatically; conversations and task archives remain.')}</p>
+        : pending.action === 'archives' ? tr('直接清空整个 DSS archives/ 目录，不扫描或逐项筛选其中内容；任务工作区不受影响。', 'Directly clears the entire DSS archives/ directory without scanning or filtering its contents; task workspaces are not affected.')
+        : tr('只清空本次预览的工作清单与缓存；心跳、聊天和任务档案保留。', 'Clears only the reviewed List and Cache; heartbeats, conversations and task archives remain.')}</p>
       {pending.conversationPreview && <p>{pending.conversationPreview.messageIds.length} {tr('条已选聊天记录', 'selected conversation messages')}</p>}
       {pending.preview && <p>{pending.preview.tasks.length} {tr('个任务', 'tasks')} · {pending.preview.fileCount} {tr('个文件', 'files')} · {pending.preview.bytes} bytes</p>}
-      {pending.filePreview && <div><p>{pending.filePreview.files.length} {tr('个文件', 'files')} · {pending.filePreview.bytes} bytes</p>{pending.filePreview.files.map(file => <p key={file.path}>{file.path}</p>)}</div>}
+      {pending.filePreview && <div>{pending.filePreview.files.length > 0 && <p>{pending.filePreview.files.length} {tr('个文件', 'files')} · {pending.filePreview.bytes} bytes</p>}
+        {pending.filePreview.roots?.map(root => <p key={root}>{root}</p>)}
+        {pending.filePreview.files.map(file => <p key={file.path}>{file.path}</p>)}</div>}
+      {pending.allPreview && <div>
+        <p>{pending.allPreview.tasks.tasks.length} {tr('个已结束任务', 'ended tasks')} · {pending.allPreview.conversation.messageIds.length} {tr('条前台聊天记录', 'Foreground conversation messages')}</p>
+        <p>{pending.allPreview.planning.files.length + pending.allPreview.debug.files.length} {tr('个已预览文件', 'reviewed files')}</p>
+        {[...(pending.allPreview.archives.roots ?? []), ...(pending.allPreview.heartbeats.roots ?? [])].map(root => <p key={root}>{root}</p>)}
+      </div>}
       <Button type="button" variant="primary" disabled={busy} onClick={() => void confirm()}>{tr('确认清理', 'Confirm cleanup')}</Button>
       <Button type="button" variant="outline" disabled={busy} onClick={() => { setPending(undefined); setError('') }}>{pending.submitted ? tr('关闭（不撤销已发送请求）', 'Close (does not cancel the submitted request)') : tr('取消', 'Cancel')}</Button>
       {pending.submitted && <p>{tr('请求已发送。结果未确认时，请用同一操作重试；关闭面板不会撤销已接纳的清理。', 'The request was sent. Retry this same operation if its outcome is unknown; closing the panel does not revoke an accepted cleanup.')}</p>}
