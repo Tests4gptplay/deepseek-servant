@@ -121,18 +121,6 @@ export async function planTaskArchiveState(files: FilesStore, snapshot: FilesSna
   }
   return { path: taskArchiveStatePath(identity), content: encodeJson(next) }
 }
-export async function planTaskArchiveHostFacts(files: FilesStore, snapshot: FilesSnapshot, task: TaskArchiveIdentity,
-  hostKey: string, facts: TaskArchiveHostFacts): Promise<FileChange> {
-  if (!hostKey) throw new Error('A task Host identity is required.')
-  return planTaskArchiveState(files, snapshot, task, current => {
-    const key = taskLifecycle(task), lifecycle = taskArchiveLifecycle(current, task) ?? {}, hosts = lifecycle.hosts ?? {}, own = taskArchiveHostFacts(current, task, hostKey) ?? {}
-    const resolvedSafetyFaultIds = [...new Set([...(own.resolvedSafetyFaultIds ?? []), ...(facts.resolvedSafetyFaultIds ?? [])])].sort()
-    current.lifecycles = { ...current.lifecycles, [key]: { ...lifecycle, hosts: { ...hosts, [hostKey]: { ...own,
-      ...(facts.sealed ? { sealed: true as const } : {}), ...(facts.runtimeReleased ? { runtimeReleased: true as const } : {}), ...(facts.released ? { released: true as const } : {}),
-      ...(resolvedSafetyFaultIds.length ? { resolvedSafetyFaultIds } : {}) } } } }
-    return facts.released && !(files instanceof GitFiles) ? compactTaskArchiveCleanup(current, task) : current
-  })
-}
 /** Reuse an already planned Git state write. The deletion fact remains; each
  * Host's released slot owns its teardown. Do not validate or preserve obsolete
  * inventories, and do not inspect other lifecycles or create a cleanup write. */

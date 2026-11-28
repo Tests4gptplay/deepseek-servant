@@ -65,9 +65,3 @@ export function createRoleGuideInitialization(files: FilesStore, transactions: F
     return result
   }
 }
-
-/** A new explicit acquisition, distinct from continuation of an accepted one. */
-export function initializeRoleGuides(files: FilesStore, transactions: FrameworkTransactions, signal?: AbortSignal,
-  options: { missingOnly?: boolean } = {}): Promise<RoleGuideInitialization> {
-  return createRoleGuideInitialization(files, transactions, options)(signal)
-}

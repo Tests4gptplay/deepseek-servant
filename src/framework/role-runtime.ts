@@ -56,14 +56,14 @@ import { ExecutionObservations, type ScheduledObservation } from './execution-ob
 import { FrameworkTransactions, gitCommandReceiptPath } from './command-transactions.js'
 import type { ObservedInstance } from './instances.js'
 import { FrameworkArtifacts } from './artifacts.js'
-import { type CleanupRecord, FrameworkCleaner, type CleanupObservation, readTaskCleanupRecord } from './cleaner.js'
+import { FrameworkCleaner, type CleanupObservation, readTaskCleanupRecord } from './cleaner.js'
 import { FrameworkConversation, isLocalConversationSignal, ownsGitConversationPublication, localForegroundRoleRecordPath, scopedLocalForegroundSourceNotification, type ConversationSend } from './conversation.js'
 import { localUpgradeMappingKey, type LocalUpgradeMapping } from './local-upgrade-mapping.js'
 import type { ManualConversationCleanupPreview } from './manual-cleanup.js'
 import { FrameworkHostLoop, helperSignalWakeHash, type RoleWake, type TaskRoleNotification, type DirectRoleNotification } from './host-loop.js'
 import { installFrameworkRoleTools, parseDirectSignal, signalWorkerId, workerPaths, type FrameworkRoleBinding, type FrameworkRoleServices, type PlannerWorkerExecutions, type HelperRestoreInput, type HelperRepairAttempt } from './role-tools.js'
 import { withReevaluatedFileTarget } from './file-read-observation.js'
-import { foregroundTaskSignal, parseForegroundTaskSignal, taskArchiveOwnsPath, taskArchiveSelection, paths, readJson, readMemberStatus, taskIdentity, taskLifecycle, taskLifecycleKey, assertTaskLifecycle, checkTaskLifecycle, isTerminalTask, encodeJson, type TaskMetadata, type MemberStatus } from './task-files.js'
+import { foregroundTaskSignal, parseForegroundTaskSignal, taskArchiveOwnsPath, taskArchiveSelection, paths, readJson, readMemberStatus, taskIdentity, taskLifecycle, taskLifecycleKey, assertTaskLifecycle, checkTaskLifecycle, isTerminalTask, encodeJson, type TaskMetadata } from './task-files.js'
 import { FilesConflictError, FilesOutcomeUnknownError, GitFiles, withOperationChannel, withSnapshot, type FileChange, type FilesStore, type FilesSnapshot, type FilesReadRound } from './transactions.js'
 import {
   scanMemberRecovery, memberRecoveryEligible, createRecoveryWatch, dueRecoveryWatch,
@@ -4579,7 +4579,7 @@ executionId: binding.executionId, run: persistContext,
         foregroundRoot: this.conversation.foregroundRoot,
         prepare: path => ['Foreground_List.md', 'Foreground_Cache.md'].some(name => path === this.conversation.foregroundRoot + '/' + name)
           ? this.conversation.prepare() : Promise.resolve(),
-        read: async (input, binding) => {
+        read: async (input) => {
           if (input.mode === 'search') return this.conversation.search(input.query ?? '', input.cursor, input.limit)
           if (input.mode === 'text') return this.conversation.readText(input.reference ?? '', input.cursor, input.limit)
           if (input.mode === 'message') return this.conversation.read(input.reference ?? '')
@@ -4663,7 +4663,7 @@ executionId: binding.executionId, run: persistContext,
           catch (error) { this.conversationError(error, binding, 'conversation-notification') }
           return { sent: true, messageId: input.id };
         },
-        claim: (input, binding) => this.consumeWakeSignals(binding)
+        claim: (_input, binding) => this.consumeWakeSignals(binding)
       },
       workspace: {
         instanceUUID: this.config.instanceUUID,
@@ -6625,7 +6625,7 @@ executionId: binding.executionId, run: persistContext,
       throw error
     }
   }
-  private async cleanAt(task: TaskMetadata, snapshot: FilesSnapshot, observation: CleanupObservation): Promise<boolean> {
+  private async cleanAt(task: TaskMetadata, _snapshot: FilesSnapshot, observation: CleanupObservation): Promise<boolean> {
     if (task.parent) return false
     if (observation.status === 'not-requested' && !observation.error) { this.cleanupResidues.delete(task.taskId); return false }
     // Recorder's total Cleaner handoff is the cleanup request. Host starts

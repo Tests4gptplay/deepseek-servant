@@ -17,7 +17,6 @@ export interface LocalUpgradeMapping {
   disposition: 'converted' | 'physical-original-retained'
   targets: string[]
 }
-export const localSkillUpgradeKey = (directory: string, sourcePath: string) => 'framework-upgrade-skill/' + hash(directory + '\0' + sourcePath)
 export const localUpgradeResultKey = (directory: string) => 'framework-local-upgrade-result/' + hash(directory)
 export const localUpgradeMappingKey = (directory: string, path: string) => 'framework-upgrade-source/' + hash(directory + '\0' + path)
 export async function rememberLocalUpgradeMapping(storage: StoragePort, directory: string, source: Pick<LegacySqliteFile, 'path' | 'bytes'>,

@@ -9,10 +9,10 @@ import { FrameworkTaskIndex } from './task-index.js'
 import { randomUUID, createHash } from 'node:crypto'
 import type { StoragePort } from '../contracts/ports.js'
 import { signalWorkerId, parseDirectSignal } from './role-tools.js'
-import { observeCleanup, type CleanupObservation, type CleanupRecord } from './cleaner.js'
+import { observeCleanup, type CleanupObservation } from './cleaner.js'
 import type { RecoveryRole } from './recovery.js'
 import { CommandInputsChangedError, type FrameworkTransactions } from './command-transactions.js'
-import { initializeTask, preparePhysicalTask, taskIdentity, paths, foregroundTaskSignal, parseForegroundTaskSignal, readJson, encodeJson, isTerminalTask, taskLifecycle, taskLifecycleKey, type TaskMetadata, type TaskHostWorkspace } from './task-files.js'
+import { initializeTask, preparePhysicalTask, taskIdentity, paths, foregroundTaskSignal, parseForegroundTaskSignal, readJson, isTerminalTask, taskLifecycle, taskLifecycleKey, type TaskMetadata, type TaskHostWorkspace } from './task-files.js'
 import { FilesConflictError, FilesOutcomeUnknownError, GitFiles, withOperationChannel, withSnapshot, type FileChange, type FileEntry, type FilesSnapshot, type FilesStore, type FilesReadRound } from './transactions.js'
 
 export interface RoleWake {

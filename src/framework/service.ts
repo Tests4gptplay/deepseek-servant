@@ -14,7 +14,6 @@ import { parseTaskReference, referenceTaskId, readPublishedReference } from './p
 import { submitTaskCancellation } from './task-cancellation.js'
 import { physicalControlSignalSources } from './physical-control-signal-sources.js'
 import { publishTaskResume } from './task-resume.js'
-import { taskFamily } from './task-relations.js'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { FrameworkSafetyNet, type SafetyFault, type SafetyFaultContext, type SafetyPresentation } from './safety-net.js'
 import { HistorySelectionChangedError, requiresUserAction } from './client-error.js'
@@ -39,13 +38,13 @@ import { z } from 'zod';
 import type { StoragePort } from '../contracts/ports.js';
 import { DshWorkspaceAdapter } from '../adapters/dsh/workspace.js';
 import { openFrameworkConnection, openFrameworkStorage, type FrameworkConnection, type FrameworkStorage, type FrameworkConnectionDependencies } from './connection.js';
-import { resumeLegacyTask, answerLegacyTask, type LegacyTask, type MigrationManifest } from './legacy-migration.js';
+import { resumeLegacyTask, answerLegacyTask, type MigrationManifest } from './legacy-migration.js';
 import { ExecutionControls, LegacyLocalControlReadError, type TaskControl } from './execution-control.js';
 import { physicalForegroundSignalSources, FrameworkConversation } from './conversation.js';
 import { FrameworkRoleRuntime } from './role-runtime.js';
 import { createRecorderCapacity } from './capacity.js';
-import { paths, readJson, readMemberStatus, taskLifecycle, isTerminalTask, type TaskMetadata, type MemberStatus } from './task-files.js';
-import { withOperationChannel, withReadOperation, withSnapshot, FilesConflictError, FilesOutcomeUnknownError, type FilesStore, type FilesSnapshot, type FileChange } from './transactions.js';
+import { paths, readJson, readMemberStatus, taskLifecycle, isTerminalTask, type TaskMetadata } from './task-files.js';
+import { withOperationChannel, withReadOperation, withSnapshot, FilesConflictError, FilesOutcomeUnknownError, type FilesStore, type FilesSnapshot } from './transactions.js';
 import { readArchivedReference, resolveTaskRequirementReference } from './recorder-retention.js';
 import { InstanceRegistration, type ObservedInstance } from './instances.js';
 import type { FrameworkClientApi, FrameworkTaskControlSubmission, FrameworkExecutionStopSubmission, FrameworkClientChange, FrameworkClientSettings, FrameworkClientView, FrameworkMode, FrameworkSendInput } from './client-contracts.js';
@@ -89,7 +88,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
     private readonly errors = new Map<FrameworkMode, string>();
     private readonly userErrors = new Map<FrameworkMode, string>();
     private readonly displayOwner = randomUUID();
-    private readonly safetyNet = new FrameworkSafetyNet(this.displayOwner);
+    private readonly safetyNet = new FrameworkSafetyNet();
     private readonly safetyOperations = new AsyncLocalStorage<{ context: SafetyFaultContext; occurrence: number }>();
     private readonly safetyErrors = new WeakMap<object, SafetyPresentation>();
     private readonly safetyDeliveries = new Set<string>();
@@ -942,7 +941,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             },
         });
     }
-    private async quiesceRecords(_receipt: Readonly<RecordMoveReceipt>, signal: AbortSignal): Promise<void> {
+    private async quiesceRecords(_receipt: Readonly<RecordMoveReceipt>, _signal: AbortSignal): Promise<void> {
         this.pendingRecordMove = structuredClone(_receipt);
         // Materialize only the configured access owners before blocking new
         // acquisitions. A mechanical runtime reads existing execution evidence;
@@ -1735,7 +1734,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         return taskId ? await readPublishedReference(files, snapshot, taskId, path) ?? await readArchivedReference(files, snapshot, taskId, path)
             ?? await readPublishedReference(files, snapshot, taskId, path, true) ?? await readArchivedReference(files, snapshot, taskId, path, true) : undefined;
     }
-    private async physicalMaterial(active: Access, mode: FrameworkMode, reference: PhysicalWorkspaceReference) {
+    private async physicalMaterial(active: Access, reference: PhysicalWorkspaceReference) {
         if (!isPhysicalWorkspaceReference(reference) || reference.instanceUUID !== active.connection.identity.instanceUUID)
             throw new Error('This material belongs to another Host instance. Open the original physical path on its source Host.');
         const files = this.ctx.fs, mapped = files.processPathFromHostPath(reference.path);
@@ -1782,7 +1781,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
 
             if (input.reference) {
                 if (input.path !== input.reference.path) throw new Error('Physical material path does not match its source reference.');
-                const material = await this.physicalMaterial(active, input.mode, input.reference);
+                const material = await this.physicalMaterial(active, input.reference);
                 const downloadUrl = '/api/deepseek-servant-framework/download?mode=' + input.mode + '&path=' + encodeURIComponent(input.path) + '&storageScope=' + encodeURIComponent(active.connection.scope) + '&reference=' + encodeURIComponent(JSON.stringify(input.reference));
                 const revision = 'workspace:' + material.sha256;
                 try {
@@ -1812,7 +1811,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         return this.foreground(active, async () => {
             if (reference) {
                 if (path !== reference.path) throw new Error('Physical material path does not match its source reference.');
-                return (await this.physicalMaterial(active, mode, reference)).data;
+                return (await this.physicalMaterial(active, reference)).data;
             }
             return withSnapshot(active.connection.files, async snapshot => {
                 const bytes = await this.readFileBytes(active.connection.files, snapshot, path, mode === 'local' ? originalTaskId : undefined);

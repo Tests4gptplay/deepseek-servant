@@ -6,7 +6,6 @@ export interface SkillReadBase { id: string; path: string; revision: string; tex
 export interface SkillCreationBase { path: string; revision: string; text: null; kind: 'creation-precondition' }
 export type SkillMergeBase = SkillReadBase | SkillCreationBase
 export const isSkillFile = (path: string): boolean => path.startsWith('skills/') && path.split('/').length >= 3
-export const skillTextHash = (text: string | null): string | null => text === null ? null : createHash('sha256').update(text).digest('hex')
 
 /** Only complete text actually returned to this Agent is eligible. Never filled
  * by a catalog scan, an internal native projection read, or save-time snapshot.

@@ -197,7 +197,7 @@ async function prepareArchive(files: PhysicalLocalFiles, snapshot: FilesSnapshot
   }
   return archive
 }
-async function publishArchiveBody(files: PhysicalLocalFiles, snapshot: FilesSnapshot, pending: PendingRecorder,
+async function publishArchiveBody(files: PhysicalLocalFiles, _snapshot: FilesSnapshot, pending: PendingRecorder,
   progress: RecorderProgress, body: ArchiveBody, beforeAttempt: () => void | Promise<void>): Promise<void> {
   const saveProgress = () => files.replace(progressPath(pending), encodeJson(progress))
   if (progress.attempting) {

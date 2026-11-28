@@ -1,4 +1,4 @@
-import type { ArchiveTaskCommand, PurgeArchiveCommand, TaskArchive } from './retention.js'
+import type { TaskArchive } from './retention.js'
 
 export type Role = 'foreground' | 'planner' | 'worker' | 'helper'
 export type ControlIntent = 'running' | 'paused' | 'cancelled'
@@ -267,8 +267,6 @@ export type TaskCommand = CommandBase & (
   | { type: 'action.finish'; actionId: string; evidence?: string; notificationId?: string; admission?: { ownerId: string; executionId: string } }
   | { type: 'action.reconcile'; actionId: string; resolution: 'not_started' | 'completed' | 'unknown'; evidence: string; notificationId?: string }
   | { type: 'delivery.read' }
-  | ArchiveTaskCommand
-  | PurgeArchiveCommand
 )
 
 export interface Transition { task?: Task; receipt: CommandReceipt; changed: boolean }

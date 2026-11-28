@@ -10,7 +10,7 @@ import { canonicalLocalLocation } from './local-location.js'
 import { localRecordPath } from './local-record-files.js'
 import { PhysicalLocalFiles } from './physical-local-files.js'
 import { withLegacySqliteSnapshot, type LegacySqliteFile } from './legacy-sqlite-reader.js'
-import { inspectLocalUpgradeMapping, rememberLocalUpgradeMapping, localUpgradeResultKey } from './local-upgrade-mapping.js'
+import { rememberLocalUpgradeMapping, localUpgradeResultKey } from './local-upgrade-mapping.js'
 import { publishLocalUpgradeBytes, type LocalUpgradePublication, type LocalUpgradeIssue, type LocalStartupUpgradeOptions } from './local-startup-upgrade.js'
 
 const hash = (value: string | Uint8Array) => createHash('sha256').update(value).digest('hex')

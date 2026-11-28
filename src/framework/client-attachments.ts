@@ -1,6 +1,6 @@
 import type { ClientTransportHooks, RpcFetch } from '@deepseek-ai/dsh-client-connection/client'
 import type { FrameworkClientApi } from './client-contracts.js'
-import { GIT_ATTACHMENT_MAX_BYTES, isNativeAttachmentPath, LocalAttachmentError, isLocalAttachmentError, validateConversationAttachment, type ConversationAttachmentReference } from './conversation-attachment-reference.js'
+import { GIT_ATTACHMENT_MAX_BYTES, isNativeAttachmentPath, isLocalAttachmentError, validateConversationAttachment, type ConversationAttachmentReference } from './conversation-attachment-reference.js'
 import { frameworkErrorText, frameworkRpcError } from './client-error.js'
 
 export const gitAttachmentByteLimit = GIT_ATTACHMENT_MAX_BYTES

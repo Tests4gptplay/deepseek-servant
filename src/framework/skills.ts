@@ -15,8 +15,6 @@ const providerName = 'deepseek-servant-framework'
 const hash = (value: string | Uint8Array) => createHash('sha256').update(value).digest('hex')
 const skillFileNames = ['SKILL.md']
 const isSkillFile = (path: string) => path.startsWith('skills/') && skillFileNames.some(name => path.endsWith('/' + name))
-/** Only definitions contribute derived catalog metadata; resources do not. */
-export const isFrameworkSkillDefinitionPath = isSkillFile
 const decode = (bytes: Uint8Array) => new TextDecoder('utf-8', { fatal: true }).decode(bytes)
 type NativeSkillMetadata = Pick<SkillDefinition, 'whenToUse' | 'metadata'>
 interface IndexedSkill extends Pick<SkillDefinition, 'whenToUse'> {
@@ -167,10 +165,6 @@ export function createFrameworkSkillIndexInitialization(files: FilesStore, trans
     if (files instanceof GitFiles && receipt.operationId) await files.operations.delete?.(receipt.operationId)
     return result
   }
-}
-
-export function initializeFrameworkSkillIndex(files: FilesStore, transactions: FrameworkTransactions, signal?: AbortSignal): Promise<FrameworkSkillIndexInitialization> {
-  return createFrameworkSkillIndexInitialization(files, transactions)(signal)
 }
 
 async function controls(files: FilesStore, snapshot: FilesSnapshot): Promise<FrameworkSkillControls> {

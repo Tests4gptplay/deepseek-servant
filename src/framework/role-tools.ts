@@ -710,7 +710,7 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
       }
     })
   if (binding.role !== 'Helper') register('dss_claim', 'Consume the exact ordinary state signals supplied by this wake before reading their task contents. For Foreground, Planner, Worker, and Organizer, another ordinary claim consumes later matching notifications before you read and evaluate their current contents. Foreground adopts current top-level Foreground signals across task, conversation and report sources. Returned signals and claimedNotifications retain accepted context; use a fresh dss_snapshot notifications list to check what remains pending. A bound Planner also receives refreshed workerExecutions facts, separate from the file snapshot.',
-    z.object({}).strict(), async (input, exec) => {
+    z.object({}).strict(), async (_input, exec) => {
       const epoch = viewEpoch
       const consumed = await services.claimNotifications(binding, command(exec))
       const selected = consumed.taskId ?? binding.taskId

@@ -3,7 +3,6 @@
  */
 export type RecoveryRole = 'Foreground' | 'Organizer' | 'Planner' | 'Worker' | 'Recorder' | 'Helper'
 export const OBSERVATION_INTERVALS_MS = [5 * 60_000, 5 * 60_000, 30 * 60_000] as const
-export const OBSERVATION_CYCLE_MS = OBSERVATION_INTERVALS_MS.reduce((sum, value) => sum + value, 0)
 export type ObservationStage = 0 | 1 | 2 | 3
 export interface WorkIdentity {
   /** Stable for the same work across a replacement execution. */

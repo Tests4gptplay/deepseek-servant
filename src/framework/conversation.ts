@@ -106,8 +106,6 @@ const localConversationSignal = /^state\/Foreground_[^/]+-GMT-?\d+(?:m\d{2})?-\d
 const scopedLocalSignal = /-g([a-f0-9]{31})[a-f0-9]{32}$/
 const scopedLocalSourceSignal = /^state\/Foreground_Conversation-g([a-f0-9]{31})[a-f0-9]{32}$/
 export const isLocalConversationSignal = (path: string): boolean => localConversationSignal.test(path) || scopedLocalSourceSignal.test(path)
-export const localConversationSignalScopeTag = (path: string): string | undefined =>
-  scopedLocalSourceSignal.exec(path)?.[1] ?? (localConversationSignal.test(path) ? scopedLocalSignal.exec(path)?.[1] : undefined)
 const oldLocalSignalHash = /-([a-f0-9]{64})$/
 const json = (value: unknown) => JSON.stringify(value, null, 2) + '\n'
 const segment = (value: string) => { filePath(value); if (value.includes('/')) throw new Error('Identity must be a single path segment.'); return value }

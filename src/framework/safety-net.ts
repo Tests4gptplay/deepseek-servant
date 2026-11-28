@@ -41,7 +41,6 @@ interface FaultRecord {
 /** Display-only incidents. A failed operation stays failed throughout recovery.
  * Occurrences are captured before work, not when its delayed error arrives. */
 export class FrameworkSafetyNet {
-  constructor(private readonly displayOwner?: string) {}
   private sequence = 0
   private readonly records = new Map<string, FaultRecord>()
   private readonly byId = new Map<string, FaultRecord>()

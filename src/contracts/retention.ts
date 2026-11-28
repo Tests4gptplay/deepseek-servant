@@ -1,5 +1,3 @@
-import type { CommandBase } from './task.js'
-
 export interface NativeSessionRetirement {
   sessionId: string
   state: 'pending' | 'archived' | 'absent' | 'blocked'
@@ -20,22 +18,6 @@ export interface TaskArchive {
   memoryReason?: string
   unresolvedAtCancellation?: { waits: number; incidents: number }
 }
-export interface ArchiveTaskCommand extends CommandBase {
-  type: 'task.archive'
-  expectedRevision: number
-  purgeId: string
-  /** Additional knowledge references; accepted Child results and Delivery results are always kept. */
-  retainedResultIds: string[]
-}
-export interface PurgeArchiveCommand extends CommandBase {
-  type: 'task.purgeArchive'
-  expectedRevision: number
-  purgeId: string
-  session?: NativeSessionRetirement
-  memoryState?: 'done'
-  memoryReason?: string
-}
-
 /** Actual owned record-file bytes; native Session logs and artifacts are separate. */
 export interface StorageUsageStats {
   totalBytes: number

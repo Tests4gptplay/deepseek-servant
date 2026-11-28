@@ -5,7 +5,7 @@ import { dirname, join, parse, sep } from 'node:path'
 import type { StoragePort } from '../contracts/ports.js'
 import { canonicalLocalLocation } from './local-location.js'
 import { localRecordPath } from './local-record-files.js'
-import { withLegacySqliteSnapshot, type LegacySqliteFile, type LegacySqliteIssue } from './legacy-sqlite-reader.js'
+import type { LegacySqliteFile, LegacySqliteIssue } from './legacy-sqlite-reader.js'
 import { localUpgradeResultKey } from './local-upgrade-mapping.js'
 import { publishPreparedUpgradeFile } from './local-upgrade-publish.js'
 
@@ -320,37 +320,4 @@ export async function inspectLocalStartupUpgrade(directory: string, storage: Sto
     return sourceMissing()
   }
   return report(root)
-}
-
-export interface LegacyLocalInventory {
-  directory: string
-  sourcePath: string
-  files: Array<{ path: string; bytes: number; representation: 'text' | 'binary'; issues: readonly LegacySqliteIssue[] }>
-  issues: LegacySqliteIssue[]
-}
-/** A requested one-time inventory, not a recurring whole-store scan. */
-export async function inspectLegacyLocalInventory(directory: string, options: { signal?: AbortSignal } = {}): Promise<LegacyLocalInventory> {
-  const root = await canonicalLocalLocation(directory, true), sourcePath = join(root, sourceName)
-  return withLegacySqliteSnapshot(sourcePath, async snapshot => {
-    const result: LegacyLocalInventory = { directory: root, sourcePath, files: [], issues: [] }
-    for await (const entry of snapshot.entries()) {
-      if (entry.kind === 'issue') result.issues.push(entry.issue)
-      else result.files.push({ path: entry.path, bytes: entry.bytes.byteLength, representation: entry.source.representation, issues: entry.issues })
-    }
-    return result
-  }, options)
-}
-
-/** Original SQL bytes stay readable independently of publication. Never returns
- * a physical conflict file under the label of the old SQL original. */
-export async function readLegacyLocalOriginal(directory: string, path: string, options: { signal?: AbortSignal } = {}): Promise<{
-  sourcePath: string; path: string; bytes: Uint8Array; representation: 'text' | 'binary'
-} | undefined> {
-  const root = await canonicalLocalLocation(directory, true), sourcePath = join(root, sourceName)
-  return withLegacySqliteSnapshot(sourcePath, async snapshot => {
-    const entry = await snapshot.read(path)
-    if (entry?.kind === 'issue') throw new Error(entry.issue.message)
-    const found = entry
-    return found ? { sourcePath, path, bytes: found.bytes, representation: found.source.representation } : undefined
-  }, options)
 }

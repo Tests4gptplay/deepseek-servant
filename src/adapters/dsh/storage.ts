@@ -11,7 +11,7 @@ import { z } from 'zod'
 import type { StoragePort } from '../../contracts/ports.js'
 import type { RecordStorageView } from '../../contracts/views.js'
 import { omitAbsentFields } from './json-record.js'
-import { RecordFilesBackend, ensureRecordTree, recordFolder, recordFileUsage, configurationCarryRequired, carryCurrentConfigurations, finishConfigurationCarry, retirePreviousConfigurations, readPreviousLocalConfiguration } from './record-files.js'
+import { RecordFilesBackend, ensureRecordTree, recordFileUsage, configurationCarryRequired, carryCurrentConfigurations, finishConfigurationCarry, retirePreviousConfigurations, readPreviousLocalConfiguration } from './record-files.js'
 
 interface StoredEnvelope { key: string; value: unknown }
 const storedEnvelope: z.ZodType<StoredEnvelope> = z.object({ key: z.string().min(1), value: z.json() })

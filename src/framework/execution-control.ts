@@ -69,7 +69,7 @@ export class ExecutionControls {
   private readonly writes: Map<string, Promise<void>>
   /** Git scoped request address. Physical Local roles select taskRecordPath instead. */
   readonly recordPath: string
-  constructor(private readonly storage: StoragePort, scope: string, private readonly now = () => new Date().toISOString(), private readonly files?: FilesStore, private readonly releaseAuthority: StoragePort = storage, instanceUUID?: string, private readonly reportOldLocalControl?: (error: Error, taskId?: string) => void, private readonly oldLocalControlRecovered?: (taskId?: string) => void) {
+  constructor(private readonly storage: StoragePort, scope: string, private readonly now = () => new Date().toISOString(), private readonly files?: FilesStore, releaseAuthority: StoragePort = storage, instanceUUID?: string, private readonly reportOldLocalControl?: (error: Error, taskId?: string) => void, private readonly oldLocalControlRecovered?: (taskId?: string) => void) {
     this.scope = scope
     this.releaseHostKey = files ? taskArchiveHostKey(releaseAuthority instanceof GitAuthorityStore ? releaseAuthority.root : undefined, scope, instanceUUID) : undefined
     this.key = 'framework-user-controls/' + hash(scope)
