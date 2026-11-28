@@ -1,6 +1,6 @@
 {
   "name": "deepseek-servant",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "description": "DeepSeek Harness Local/Git 协作助理：原生六角色执行、持久会话、任务恢复与成果归档。",
   "private": true,
   "type": "module",

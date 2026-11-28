@@ -4,7 +4,7 @@
 
 围绕长期任务协调规划、执行与成果评价，保存进展、成果和经验，支持后续接续与方法调整。
 
-[安装与使用](#安装与使用) · [0.5.4 正式发布](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.4) · [0.5.2 更新说明](docs/releases/0.5.2.md) · [0.5.1 更新说明](docs/releases/0.5.1.md) · [0.5.0／0.5.1 对比测试](docs/testing/0.5.1.md) · [English](https://github.com/Tests4gptplay/deepseek-servant/blob/main/README.en.md)
+[安装与使用](#安装与使用) · [0.5.5 正式发布](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.5) · [0.5.2 更新说明](docs/releases/0.5.2.md) · [0.5.1 更新说明](docs/releases/0.5.1.md) · [0.5.0／0.5.1 对比测试](docs/testing/0.5.1.md) · [English](https://github.com/Tests4gptplay/deepseek-servant/blob/main/README.en.md)
 
 <p align="center">
 <img src="https://raw.githubusercontent.com/Tests4gptplay/deepseek-servant/v0.3.0/docs/images/deepseek-servant-maids-duo.webp" width="480" alt="DeepSeek Servant 短裙与长裙女仆角色设计">
@@ -38,12 +38,12 @@ DSS 是独立安装的社区插件，使用 [DeepSeek Harness（DSH）](https://
 
 [操作指南](https://github.com/Tests4gptplay/deepseek-servant/blob/main/PRIVATE_GIT.md) · [已测场景与限制](docs/testing/0.5.0.md)
 
-## 0.5.4 的改进
+## 0.5.5 的改进
 
 - **取消运行时锁版**：继续使用 DSH 原生文件夹浏览组件，DSS 不再指定该组件的版本。
 - **延续席位交接修复**：同一工作线换人不提前释放席位。
 
-[完整更新说明与下载](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.4)
+[完整更新说明与下载](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.5)
 
 ## 0.5.3 的改进（版本已撤下）
 
@@ -80,10 +80,10 @@ DSS 是独立安装的社区插件，使用 [DeepSeek Harness（DSH）](https://
 在 DSH 中打开 **插件 → 添加插件**，输入：
 
 ```text
-github:Tests4gptplay/deepseek-servant#v0.5.4
+github:Tests4gptplay/deepseek-servant#v0.5.5
 ```
 
-也可下载正式发布页的 TGZ。npm 上同号的 0.5.4 是此前的构建，不包含本次恢复的 DSH 原生目录实现；请使用 GitHub 入口安装本构建。
+也可下载正式发布页的 TGZ。0.5.5 尚未发布到 npm，请使用 GitHub 入口安装本构建。
 
 ### 第一次使用
 
@@ -92,7 +92,7 @@ github:Tests4gptplay/deepseek-servant#v0.5.4
 3. 在任务页查看进度、结果和需要补充的信息；继续交流、调整目标，或按需暂停、继续和取消。
 4. 使用 DSS-cah 进行远程作业时，按操作指南连接仓库。
 
-[Desktop / Web 安装与升级](https://github.com/Tests4gptplay/deepseek-servant/blob/main/docs/INSTALLATION.md) · [使用指南](https://github.com/Tests4gptplay/deepseek-servant/blob/main/docs/USAGE.md) · [下载 0.5.4](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.4)
+[Desktop / Web 安装与升级](https://github.com/Tests4gptplay/deepseek-servant/blob/main/docs/INSTALLATION.md) · [使用指南](https://github.com/Tests4gptplay/deepseek-servant/blob/main/docs/USAGE.md) · [下载 0.5.5](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.5)
 
 ### 环境与依赖
 
@@ -130,7 +130,7 @@ DeepSeek 于 2026-10-31 公开的 [Super-agent 研究原型](https://github.com/
 
 ## 验证与进一步了解
 
-0.5.2 的长跑记录与新版的席位回归分开统计，详见[0.5.2 测试记录](docs/testing/0.5.2.md)和[0.5.4 版本说明](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.4)。历史资料按版本单独列出。
+0.5.2 的长跑记录与新版的席位回归分开统计，详见[0.5.2 测试记录](docs/testing/0.5.2.md)和[0.5.5 版本说明](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.5)。历史资料按版本单独列出。
 
 - [0.5.0 更新说明](docs/releases/0.5.0.md)
 - [使用指南](https://github.com/Tests4gptplay/deepseek-servant/blob/main/docs/USAGE.md)
