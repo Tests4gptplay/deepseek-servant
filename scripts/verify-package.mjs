@@ -21,12 +21,14 @@ assert.ok(manifest.files.every(path => typeof path === 'string' && !/[?*\[\]]/.t
 // The bundled Python runtime is the only directory entry. Its existing index
 // supplies exact member paths and hashes instead of trusting an npm directory glob.
 const vendor = 'python/vendor'
+const vendorDevelopmentPath = /(?:^|\/)(?:test|tests|__tests__|fixture|fixtures|test-support)(?:\/|$)|\.data\/scripts(?:\/|$)/i
 const vendorManifest = vendor + '/manifest.json'
 assert.ok(manifest.files.includes(vendor), 'The bundled Python runtime must be included.')
 const vendorManifestBytes = await readFile(vendorManifest)
 const vendorFiles = Object.entries(JSON.parse(vendorManifestBytes).files).map(([path, sha256]) => {
   assert.match(path, /^(?:common|native)\/(?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+$/)
   assert.ok(path.split('/').every(part => part !== '.' && part !== '..'), 'Unsafe Python vendor path: ' + path)
+  assert.ok(!vendorDevelopmentPath.test(path), 'Development or standalone CLI file in bundled runtime: ' + path)
   assert.match(sha256, /^[a-f0-9]{64}$/, 'Missing Python vendor SHA-256: ' + path)
   return [vendor + '/' + path, sha256]
 })
