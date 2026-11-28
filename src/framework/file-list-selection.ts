@@ -30,7 +30,7 @@ export function matchesFileSelection(path: string, selected?: FileListSelection)
     if (childTaskIds.some(id => first === id.toLowerCase() || first.endsWith('_' + id.toLowerCase()))) return false
   }
   if (selected.instanceRegistration) {
-    const match = /^instances\/([^/]+)_Workers(\d+)_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json$/i.exec(path)
+    const match = /^(?:instances|heartbeats)\/([^/]+)_Workers(\d+)_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json$/i.exec(path)
     if (!match || /[\\\0\r\n]/.test(match[1]!) || match[1] === '.' || match[1] === '..' || !Number.isSafeInteger(Number(match[2]))) return false
   }
   const name = path.slice(path.lastIndexOf('/') + 1)

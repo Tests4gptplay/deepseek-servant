@@ -5,6 +5,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import type { StoragePort } from '../contracts/ports.js'
 import { FilesConflictError, FilesOutcomeUnknownError, GitFiles, type FilesSnapshot, type FileChange, withSnapshot, withReadOperation, withFileDependencies, withOperationChannel } from './transactions.js'
 
+export const HEARTBEAT_RECORD_DIRECTORY = 'heartbeats/'
+export const LEGACY_HEARTBEAT_RECORD_DIRECTORY = 'instances/'
 export const HEARTBEAT_INTERVAL_MS = 30_000
 export const HEARTBEAT_OFFLINE_MS = 180_000
 export interface InstanceConfig {
@@ -81,7 +83,7 @@ export function loadOrCreateInstanceUuid(storage: StoragePort): Promise<string> 
 }
 const validMember = (value: string) => value.length > 0 && !/[\\/\0\r\n]/.test(value) && value !== '.' && value !== '..'
 export function parseInstancePath(path: string): Omit<RegisteredInstance, 'primary'> | undefined {
-  const match = /^instances\/([^/]+)_Workers(\d+)_([0-9a-f-]+)\.json$/i.exec(path)
+  const match = /^(?:instances|heartbeats)\/([^/]+)_Workers(\d+)_([0-9a-f-]+)\.json$/i.exec(path)
   if (!match || !validMember(match[1]!) || !uuidPattern.test(match[3]!)) return
   const workerSeats = Number(match[2])
   if (!Number.isSafeInteger(workerSeats) || workerSeats < 0) return
@@ -166,13 +168,16 @@ export class InstanceRegistration {
   }
   private registration(member: string): RegisteredInstance {
     const { instanceUUID, workerSeats, repositoryOwner, login } = this.config
-    return { member, instanceUUID, workerSeats, path: `instances/${member}_Workers${workerSeats}_${instanceUUID}.json`,
+    const directory = this.files instanceof PhysicalLocalFiles ? HEARTBEAT_RECORD_DIRECTORY : LEGACY_HEARTBEAT_RECORD_DIRECTORY
+    return { member, instanceUUID, workerSeats, path: `${directory}${member}_Workers${workerSeats}_${instanceUUID}.json`,
       primary: login.toLowerCase() === repositoryOwner.toLowerCase() && member.toLowerCase() === login.toLowerCase() }
   }
   private async rows(snapshot: FilesSnapshot, signal?: AbortSignal): Promise<Array<{ registration: Omit<RegisteredInstance, 'primary'>; heartbeat?: Heartbeat; error?: string }>> {
     const rows = []
     const current = new Map<string, HeartbeatObservation>()
-    const entries = await this.files.listDirectory(snapshot, 'instances/')
+    const entries = await this.files.listDirectory(snapshot, LEGACY_HEARTBEAT_RECORD_DIRECTORY)
+    if (this.files instanceof PhysicalLocalFiles)
+      entries.push(...await this.files.listDirectory(snapshot, HEARTBEAT_RECORD_DIRECTORY))
     await this.files.prefetch?.(snapshot, { signal, isolatePathErrors: true, files: entries.filter(entry => parseInstancePath(entry.path) && this.heartbeatObservations.get(entry.path)?.version !== entry.version).map(entry => entry.path) })
     for (const entry of entries) {
       const registration = parseInstancePath(entry.path)
@@ -190,6 +195,17 @@ export class InstanceRegistration {
     }
     // A removed or renamed path must not retain an observation indefinitely.
     this.heartbeatObservations = current
+    // Moving a physical heartbeat writes its new pathname before retiring the
+    // previous one. During that interval, report one observation for its UUID.
+    if (this.files instanceof PhysicalLocalFiles) {
+      const byId = new Map<string, (typeof rows)[number]>()
+      for (const row of rows) {
+        const prior = byId.get(row.registration.instanceUUID)
+        if (!prior || (row.heartbeat?.sequence ?? -1) >= (prior.heartbeat?.sequence ?? -1))
+          byId.set(row.registration.instanceUUID, row)
+      }
+      return [...byId.values()]
+    }
     return rows
   }
   private async publishRunning(signal?: AbortSignal, reevaluateConflict = false): Promise<RegisteredInstance> {
@@ -381,9 +397,12 @@ export class InstanceRegistration {
                 signal?.throwIfAborted()
                 // Name occupancy is path metadata. An unrelated damaged body must not
                 // prevent this Host from saving its own valid registration.
-                const entries = this.files.listDirectoryNames
-                  ? (await this.files.listDirectoryNames(snapshot, 'instances/', { instanceRegistration: true })).map(path => ({ path, version: '' }))
-                  : await this.files.listDirectory(snapshot, 'instances/', { instanceRegistration: true })
+                const registrationNames = async (directory: string) => this.files.listDirectoryNames
+                  ? (await this.files.listDirectoryNames(snapshot, directory, { instanceRegistration: true })).map(path => ({ path }))
+                  : this.files.listDirectory(snapshot, directory, { instanceRegistration: true })
+                const entries = this.files instanceof PhysicalLocalFiles
+                  ? [...await registrationNames(HEARTBEAT_RECORD_DIRECTORY), ...await registrationNames(LEGACY_HEARTBEAT_RECORD_DIRECTORY)]
+                  : await registrationNames(LEGACY_HEARTBEAT_RECORD_DIRECTORY)
                 const physicalRegistrations = entries
                   .map(entry => parseInstancePath(entry.path)).filter((entry): entry is Omit<RegisteredInstance, 'primary'> => entry !== undefined)
                 const originals = this.files instanceof PhysicalLocalFiles && this.originalInstances ? await this.originalInstances() : []

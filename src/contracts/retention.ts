@@ -57,6 +57,7 @@ export interface StorageUsageStats {
     plannerNoteBytes: number
     workerReplyBytes: number
     executionBytes: number
+    heartbeatBytes: number
     recoveryBytes: number
   }
 }

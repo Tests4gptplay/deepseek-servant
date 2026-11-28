@@ -1133,6 +1133,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                     return result;
                 }
                 if (input.action === 'conversation') return cleanup.clearConversation(input.commandId, input.confirmation, input.preview);
+                if (input.action === 'archives') return cleanup.clearArchives(input.commandId, input.preview, input.confirmation);
                 if (input.action === 'debug') return cleanup.clearDebug(input.commandId, input.preview, input.confirmation);
                 return cleanup.clearPlanning(input.commandId, input.confirmation, input.preview);
             });

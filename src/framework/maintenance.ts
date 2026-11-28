@@ -4,6 +4,7 @@ import { lstat, mkdir, mkdtemp, open, realpath, rm, unlink } from 'node:fs/promi
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { backup, DatabaseSync } from 'node:sqlite'
 import type { StorageUsageStats } from '../contracts/retention.js'
+import { parseInstancePath } from './instances.js'
 import { ensureWriteDirectory, openNewOutput } from './write-directories.js'
 import { readTaskArchiveIdentity, taskArchivePath, taskArchiveReadPath } from './task-archive.js'
 import { filePath, withSnapshot, type FilesStore } from './transactions.js'
@@ -17,7 +18,7 @@ export async function frameworkStorageUsage(files: FilesStore, now = new Date())
     const usage: StorageUsageStats = {
       totalBytes: 0, permanentBytes: 0, temporaryBytes: 0, recordedAt: now.toISOString(),
       permanent: { chatBytes: 0, assistantBytes: 0, knowledgeBytes: 0, originBytes: 0, archiveBytes: 0, planningBytes: 0, debugBytes: 0 },
-      temporary: { taskBytes: 0, plannerMemoryBytes: 0, plannerNoteBytes: 0, workerReplyBytes: 0, executionBytes: 0, recoveryBytes: 0 },
+      temporary: { taskBytes: 0, plannerMemoryBytes: 0, plannerNoteBytes: 0, workerReplyBytes: 0, executionBytes: 0, heartbeatBytes: 0, recoveryBytes: 0 },
     }
     for (const entry of await files.list(snapshot, '')) {
       // Local directory metadata contains exact byte sizes. A store without sizes
@@ -40,6 +41,7 @@ export async function frameworkStorageUsage(files: FilesStore, now = new Date())
         else usage.temporary.taskBytes += bytes
       } else if (p.startsWith('tasks/')) usage.temporary.taskBytes += bytes
       else if (p.startsWith('state/') || p.startsWith('technical/recovery-inputs/') || p.startsWith('technical/worker-transfers/')) usage.temporary.recoveryBytes += bytes
+      else if (parseInstancePath(p)) usage.temporary.heartbeatBytes += bytes
       else if (p.startsWith('instances/') || p.startsWith('Recorder Cache/')) usage.temporary.executionBytes += bytes
     }
     usage.temporaryBytes = Object.values(usage.temporary).reduce((sum, bytes) => sum + bytes, 0)

@@ -5,7 +5,7 @@ import type { FrameworkClientApi } from './client-contracts.js'
 import type { ManualTaskCleanupPreview, ManualFileCleanupPreview, ManualConversationCleanupPreview } from './manual-cleanup.js'
 import css from '../client/page.module.css'
 
-type Action = 'tasks' | 'conversation' | 'planning' | 'debug'
+type Action = 'tasks' | 'conversation' | 'planning' | 'debug' | 'archives'
 /** Separate explicit Local confirmations; no scheduled retention. */
 export function ManualCleanupPanel({ api, storageScope, tr, changed }: {
   api: FrameworkClientApi; storageScope: string; tr: (cn: string, en: string) => string; changed(): Promise<void>
@@ -39,6 +39,7 @@ export function ManualCleanupPanel({ api, storageScope, tr, changed }: {
     tasks: tr('清理已结束任务记录', 'Clear ended task records'),
     conversation: tr('清理前台聊天记录', 'Clear Foreground conversation'),
     planning: tr('清空工作清单与缓存', 'Clear working List and Cache'),
+    archives: tr('清理归档', 'Clear archives'),
     debug: tr('清理调试记录', 'Clear debug records'),
   }
   const prepare = async (action: Action) => {
@@ -52,7 +53,7 @@ export function ManualCleanupPanel({ api, storageScope, tr, changed }: {
       } else if (action === 'conversation') {
         if (!('kind' in preview) || preview.kind !== 'conversation') throw new Error('Cleanup preview belongs to another action.')
         setPending({ action, commandId, conversationPreview: preview })
-      } else if ('kind' in preview && (preview.kind === 'planning' || preview.kind === 'debug') && preview.kind === action) {
+      } else if ('kind' in preview && preview.kind === action) {
         setPending({ action, commandId, filePreview: preview })
       } else throw new Error('Cleanup preview belongs to another action.')
     } catch (error) { setError(frameworkErrorText(error)) }
@@ -67,6 +68,7 @@ export function ManualCleanupPanel({ api, storageScope, tr, changed }: {
       const result = await api.cleanupRecords(pending.action === 'tasks'
         ? { ...base, action: 'tasks', preview: pending.preview!, confirmation: 'clear-ended-task-records' }
         : pending.action === 'conversation' ? { ...base, action: 'conversation', preview: pending.conversationPreview!, confirmation: 'clear-foreground-conversation' }
+        : pending.action === 'archives' ? { ...base, action: 'archives', preview: pending.filePreview!, confirmation: 'clear-task-archives' }
         : pending.action === 'debug' ? { ...base, action: 'debug', preview: pending.filePreview!, confirmation: 'clear-debug-records' }
         : { ...base, action: 'planning', preview: pending.filePreview, confirmation: 'clear-work-planning-notes' })
       setPending(undefined); setDebug(undefined); setDebugRecord(undefined); setUsage(undefined)
@@ -95,7 +97,7 @@ export function ManualCleanupPanel({ api, storageScope, tr, changed }: {
     { title: tr('运行资料', 'Task data'), total: usage?.usage.temporaryBytes, rows: [
       [tr('任务资料', 'Task files'), usage?.usage.temporary.taskBytes], [tr('规划记忆', 'Planner memory'), usage?.usage.temporary.plannerMemoryBytes],
       [tr('规划笔记', 'Planner notes'), usage?.usage.temporary.plannerNoteBytes], [tr('执行回复', 'Worker replies'), usage?.usage.temporary.workerReplyBytes],
-      [tr('执行记录', 'Execution records'), usage?.usage.temporary.executionBytes], [tr('恢复资料', 'Recovery data'), usage?.usage.temporary.recoveryBytes],
+      [tr('执行记录', 'Execution records'), usage?.usage.temporary.executionBytes], [tr('心跳记录', 'Heartbeat records'), usage?.usage.temporary.heartbeatBytes], [tr('恢复资料', 'Recovery data'), usage?.usage.temporary.recoveryBytes],
     ] },
   ]
   return <section className={css.retention} aria-label={tr('记录管理', 'Record management')}>
@@ -129,7 +131,8 @@ export function ManualCleanupPanel({ api, storageScope, tr, changed }: {
       <p>{pending.action === 'tasks' ? tr('只删除本次预览的已结束任务历史；成果、技能和知识保留。', 'Only the ended task history in this preview is removed; artifacts, skills and knowledge remain.')
         : pending.action === 'conversation' ? tr('只清理本次选择的前台聊天；若原前台执行仍在运行，会先停止并收取其尾部输出。之后的新聊天、后台任务及工作清单、缓存保留。', 'Clears only this selected Foreground conversation. If its original execution is still running, it is stopped and its final output is collected. Later messages, background tasks, List and Cache remain.')
         : pending.action === 'debug' ? tr('只删除本次预览的调试记录；之后新增或改写的记录保留，其他长期记录和任务不受影响。', 'Only the debug records in this preview are removed. Later additions or changes and other long-term records and tasks remain.')
-        : tr('只清空本次预览的工作清单与缓存正文；之后写入的新内容、聊天和任务档案保留。', 'Only the reviewed List and Cache bodies are cleared. Later writes, conversation and task archives remain.')}</p>
+        : pending.action === 'archives' ? tr('删除本次预览的已结束任务归档及其中的成果文件，不删除任务工作区。', 'Deletes the reviewed archives of ended tasks, including their archived artifacts, but not task workspaces.')
+        : tr('清空本次预览的工作清单与缓存，删除列出的心跳记录。运行中的心跳会自动重新写入；聊天和任务档案保留。', 'Clears the reviewed List and Cache and removes the listed heartbeat records. Running instances write their heartbeat again automatically; conversations and task archives remain.')}</p>
       {pending.conversationPreview && <p>{pending.conversationPreview.messageIds.length} {tr('条已选聊天记录', 'selected conversation messages')}</p>}
       {pending.preview && <p>{pending.preview.tasks.length} {tr('个任务', 'tasks')} · {pending.preview.fileCount} {tr('个文件', 'files')} · {pending.preview.bytes} bytes</p>}
       {pending.filePreview && <div><p>{pending.filePreview.files.length} {tr('个文件', 'files')} · {pending.filePreview.bytes} bytes</p>{pending.filePreview.files.map(file => <p key={file.path}>{file.path}</p>)}</div>}
