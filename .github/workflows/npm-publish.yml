@@ -10,14 +10,6 @@ on:
         description: SHA-256 of the GitHub release installation package
         type: string
         required: true
-      package_target:
-        description: Which existing npm package names to publish
-        type: choice
-        options:
-          - both
-          - unscoped
-          - scoped
-        default: both
 permissions:
   contents: read
 concurrency:
@@ -30,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: ${{ fromJSON(inputs.package_target == 'unscoped' && '["deepseek-servant"]' || inputs.package_target == 'scoped' && '["@tests4gptplay/deepseek-servant"]' || '["deepseek-servant","@tests4gptplay/deepseek-servant"]') }}
+        package: [deepseek-servant, '@tests4gptplay/deepseek-servant']
     runs-on: ubuntu-24.04
     permissions:
       contents: read

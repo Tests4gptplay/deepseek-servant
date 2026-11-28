@@ -56,7 +56,6 @@ export interface FrameworkClientExecution {
 export interface FrameworkClientTask {
   taskId: string; title: string; route: 'P' | 'O'; owner: string; status: 'running' | 'complete' | 'cancelled'; lifecycleId?: string
   control?: 'running' | 'paused' | 'cancelled'
-  createdAt?: number
   /** Existing Task relation; used to describe root versus child finalization. */
   parentTaskId?: string
   /** Original identity is visible while its own one-time physical restoration remains unfinished. */

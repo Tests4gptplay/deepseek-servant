@@ -63,8 +63,9 @@ export interface HostLoopActions {
   notifyTask?(request: TaskRoleNotification): Promise<void>
   notifyDirect?(request: DirectRoleNotification): Promise<void>
   executing(role: RecoveryRole, taskId?: string, workerId?: string, directId?: string): boolean
-  /** Persist the existing terminal business seal, not Foreground or Recorder teardown. */
+  /** Normal total completion ends business roles, not Foreground or Recorder. */
   sealBusiness(task: TaskMetadata): Promise<void>
+  cancelledBusinessStopped?(task: TaskMetadata): Promise<boolean>
   workspaceRoot?(taskId: string): string
   restoreWorkspaces?(initial: readonly { taskId: string; workspace?: TaskHostWorkspace }[]): void
   releaseWorkspace?(taskId: string): void
@@ -971,14 +972,18 @@ export class FrameworkHostLoop {
         }
         if (isTerminalTask(task)) {
           const completion = this.record.completed[lifecycleKey] ??= {}
-          // Terminal Task state and the Recorder signal own archive admission.
-          // Seal cancelled business before archive admission; native teardown is
-          // independent and cannot hold the signal or the already handed-off Cleaner.
-          if (task.status === 'cancelled' && !completion.sealed) {
-            try { await this.actions.sealBusiness(task); completion.sealed = true }
-            catch (error) { this.actions.error(error); return }
+          let recorderReady = true
+          if (task.status === 'cancelled') {
+            if (!completion.sealed) {
+              try { await this.actions.sealBusiness(task); await this.persistCompletion(task, completion, 'sealed') }
+              catch (error) { this.actions.error(error); recorderReady = false }
+            }
+            try { if (!await this.actions.cancelledBusinessStopped?.(task)) recorderReady = false }
+            catch (error) { this.actions.error(error); recorderReady = false }
           }
-          if (!task.parent && task.owner === this.identity.member) {
+          // Cancellation stopping governs Recorder admission, not a Cleaner
+          // handoff already published by that Recorder. The latter is trusted.
+          if (recorderReady && !task.parent && task.owner === this.identity.member) {
             const signals = await stateSignals()
             for (const source of signals.filter(entry => entry.path.split('/').at(-1) === 'Recorder')) {
               scheduled = deferAdmission(await this.wake('Recorder', snapshot, [source], task.taskId, undefined, completionLocations(task.taskId, task), task.lifecycleId), ready) || scheduled
@@ -986,7 +991,7 @@ export class FrameworkHostLoop {
           }
           if (completion.released) return
           if (!completion.sealed) {
-            try { await this.actions.sealBusiness(task); completion.sealed = true }
+            try { await this.actions.sealBusiness(task); await this.persistCompletion(task, completion, 'sealed') }
             catch (error) { this.actions.error(error) }
           }
           // Terminal children retain their work and Host associations. A stale

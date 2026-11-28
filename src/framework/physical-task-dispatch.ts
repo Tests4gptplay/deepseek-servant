@@ -287,7 +287,7 @@ export async function dispatchPhysicalChild(files: PhysicalLocalFiles, input: Ph
       } else {
         const taskId = randomUUID()
         child = { version: 1, taskId, route: input.route, sourcePath: 'tasks/' + taskId + '_' + input.route + '.md', owner: input.member,
-          status: 'running', createdAt: Date.now(), archiveFolder: paths.archive(task).slice('archives/'.length) + '/' + taskId, members,
+          status: 'running', archiveFolder: paths.archive(task).slice('archives/'.length) + '/' + taskId, members,
           parent: { taskId: task.taskId, owner: task.owner, objectiveId: input.objectiveId } }
       }
       await files.replace(root(ref) + '/input.txt', input.plan)

@@ -6,7 +6,7 @@ import { isPhysicalWorkspaceReference, taskWorkspaceFolder } from './workspace-p
  * metadata: members, role state, controls and cleanup responsibility never live
  * here. The original source supplies the same title the existing UI displayed. */
 export interface TaskHistoryIdentity extends Pick<TaskMetadata, 'taskId' | 'route' | 'sourcePath' | 'owner' | 'status'
-  | 'createdAt' | 'lifecycleId' | 'parent' | 'children' | 'resultPaths' | 'workspaceResults' | 'workspaceRootTaskId' | 'workspaceFolder'> {
+  | 'lifecycleId' | 'parent' | 'children' | 'resultPaths' | 'workspaceResults' | 'workspaceRootTaskId' | 'workspaceFolder'> {
   version: 1
   kind: 'task-history'
   archiveFolder: string
@@ -105,7 +105,6 @@ export function taskHistoryChange(task: TaskMetadata, resultPaths = task.resultP
     version: 1, kind: 'task-history', taskId: task.taskId, route: task.route,
     sourcePath: task.sourcePath, owner: task.owner, status: task.status,
     archiveFolder: paths.archive(task).slice('archives/'.length),
-    ...(task.createdAt === undefined ? {} : { createdAt: task.createdAt }),
     ...(task.lifecycleId ? { lifecycleId: task.lifecycleId } : {}),
     ...(task.parent ? { parent: structuredClone(task.parent) } : {}),
     ...(task.children ? { children: structuredClone(task.children) } : {}),

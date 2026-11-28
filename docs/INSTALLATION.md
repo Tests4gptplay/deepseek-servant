@@ -2,18 +2,18 @@
 
 ## 安装
 
-在 DSH 的 **插件 → 添加插件 → 包名或地址** 中填写 npm 包名 `deepseek-servant`。固定安装 0.5.3 时，可填写 `deepseek-servant@0.5.3`，或填写 GitHub 地址 `github:Tests4gptplay/deepseek-servant#v0.5.3`。安装后启用插件，按宿主提示重启。
+在 DSH 的 **插件 → 添加插件 → 包名或地址** 中填写 `github:Tests4gptplay/deepseek-servant#v0.5.1`，与 README 的 固定版本入口一致。安装后启用插件，按宿主提示重启。
 
-已有插件 TGZ 时，也可填写 `deepseek-servant-0.5.3.tgz` 在运行 DSH 的电脑上的完整绝对路径，无需解压。
+已有插件 TGZ 时，也可填写 `deepseek-servant-0.5.1.tgz` 在运行 DSH 的电脑上的完整绝对路径，无需解压。
 
 **升级与资料保留：** 先正常停止 DSS 执行并保留原数据备份，通过相同的包名或地址入口更新，按宿主实际提示操作。保留 DSH 数据目录、Local 库及任务工作区，不手工删除记录或数据。Desktop 需要时完整退出托盘进程后再打开；升级后检查设置、对话、任务记录与成果可读取。
 
 **Web：** 先停止对应 profile，在运行该服务的环境执行，之后重启：
 
 ```sh
-dsh plugin --profile web add 'deepseek-servant@0.5.3'
+dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.5.1'
 # 已有 TGZ 时改用其实际绝对路径：
-# dsh plugin --profile web add '/absolute/path/deepseek-servant-0.5.3.tgz'
+# dsh plugin --profile web add '/absolute/path/deepseek-servant-0.5.1.tgz'
 ```
 
 使用 TGZ 入口时，将示例替换为安装包在运行 DSH 的电脑上的实际绝对路径。Desktop 与 Web 分别管理安装。模型提供者与工具权限仍由 DSH 管理。

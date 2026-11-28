@@ -4,6 +4,7 @@ export interface GitCommandOptions {
   signal: AbortSignal
   token?: string
   input?: Uint8Array | string
+  fixtureTransport?: boolean
 }
 export type GitObjectCommand =
   | { op: 'fetchHead'; remote: string; ref: string; tip?: string }

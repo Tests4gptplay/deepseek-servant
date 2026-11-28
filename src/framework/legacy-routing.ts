@@ -46,7 +46,7 @@ export async function routeLegacyTask(files: FilesStore, snapshot: FilesSnapshot
   }) + '\nPreserve participant pauses, pending questions, cancellations and completed effects. Intake of this requirement does not authorize reopening held work.\n\n## Foreground routing decision\n' + input.decision
   const overlay = Object.create(files) as FilesStore
   overlay.read = (view, path) => path === sourcePath ? Promise.resolve(source) : files.read(view, path)
-  const initialized = await initializeTask(overlay, snapshot, sourcePath, manifest.owner, mapped.members, taskId, undefined, 'preserved')
+  const initialized = await initializeTask(overlay, snapshot, sourcePath, manifest.owner, mapped.members, taskId)
   const changes = new Map(initialized.changes.map(change => [change.path, change]))
   changes.set(sourcePath, { path: sourcePath, content: source })
   if (input.route === 'P') {

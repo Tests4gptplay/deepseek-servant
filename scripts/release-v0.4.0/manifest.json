@@ -1,0 +1,38 @@
+{
+  "version": "0.4.0",
+  "archive": "deepseek-servant-0.4.0.tgz",
+  "bytes": 5585975,
+  "sha256": "abf7e46ce83e151ceee428f099d3e61fb6e3ff00448a60e907313d0cc11c8de3",
+  "payloadFiles": 20,
+  "payloadSHA256": {
+    "LICENSE": "d8a6cc31abc16b6748c7a21f21611f5a1ec33f67d22ca23d7da1c19b95496bee",
+    "NOTICE": "4b79ad85ac136dad309b9c4c624bd47b8853add94e5420e6d51dfb2ec8e7924c",
+    "lib/client.js": "76da8994f6bff2de91304e02d24819a1d321536a21783efffd19ae782483113f",
+    "lib/host.js": "1afbc39639f2c0a89e015e49e47f6787cd92ced63943eb2ad4ce362daba94553",
+    "package.json": "de3f6606109a576b6d67ed435a6514aa1a752963d2bad2dd5a2bb17192f66639",
+    "IMPLEMENTATION.md": "4633af0e87d0964d57c52e251542d5d8a611c15ebb4443885fc4fcc54f6a6a93",
+    "docs/INSTALLATION.md": "50656abca7779e9ec871218cfaf7c58554e4ea2ddcb2eb817fa608d59b03c28e",
+    "PRIVATE_GIT.md": "0afc52637c82efe3e5fcfbbb0bbd8216e988d35612a5296098197c8a63ce6b1c",
+    "README.md": "764ee657f39b7527b7da1fdb616dc870d7c040c498689aaae9e6e7ecc3e07821",
+    "RETENTION.md": "18ca856932c82bee7d44e8a2419d6d0f44a071b6f4dd4e970a845880cff658da",
+    "SPONSOR.md": "064c92c860aaee1c6a4f1c95dfe5899f6ed2ebec14c9cacbba6c1bf41ede6d1a",
+    "THIRD_PARTY_NOTICES.md": "d82ea8fb51c9d144578639ed555647ad1a1981e75430de4059a4b0158b52ce0c",
+    "docs/USAGE.md": "210197b1a5e71737686c518c6982b5a6d50ba915c674fce755f0eddcc345e602",
+    "icon.png": "7e7f540a765d4c9a5f69d80f38d3c451b7b9be26dabb70efeebd2445a2370d5f",
+    "assets/page-icon.png": "7e7f540a765d4c9a5f69d80f38d3c451b7b9be26dabb70efeebd2445a2370d5f",
+    "assets/statusbar-icon-black.png": "c69a4fc2750b3646b8567351252976917a85f58e494a8930db364c668a3fc2b8",
+    "assets/statusbar-icon.png": "90861567c9a21374de55f21e0ee00a56a16de2b42ef5efd69d1ec82a30dbd78d",
+    "assets/task-empty-character.png": "174ab2e69457f50ac5f835835fe77b9ad487320d1cb7be99afabdf3e9f293e32",
+    "assets/welcome-character.png": "54e644ea108b6e3fa5b573074028c2de1f48b7013331ded54ebe30118a34c1a1",
+    "cordis.patch.yml": "223667362d682e315d8e5f84c474f140589eeed220af4bbcf0bee25e9b24e1de"
+  },
+  "comparedCandidate": "3b44654ea641f3072d4057bba2b037b83ec2de50",
+  "changedPayloadFiles": [
+    "package/package.json",
+    "package/docs/INSTALLATION.md",
+    "package/README.md"
+  ],
+  "runtimeExactCandidate": true,
+  "sourceTests": "312/312 PASS before metadata-only 0.4.0 rename",
+  "modelSettingsIntegration": "PASS before metadata-only 0.4.0 rename"
+}

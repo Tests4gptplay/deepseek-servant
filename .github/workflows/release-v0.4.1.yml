@@ -1,0 +1,62 @@
+name: Publish verified DeepSeek Servant 0.4.1
+on:
+  push:
+    branches: ['main']
+    paths:
+      - '.github/workflows/release-v0.4.1.yml'
+      - 'scripts/release-v0.4.1/**'
+permissions:
+  contents: read
+concurrency:
+  group: deepseek-servant-release-v0.4.1
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'Tests4gptplay/deepseek-servant'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Match tested package tooling
+        run: npm install -g npm@11.9.0 --ignore-scripts
+      - name: Rebuild and verify exact tested 22-file package
+        run: |
+          test "$(node -p 'require("./package.json").version')" = "0.4.1"
+          mkdir dist
+          npm pack --ignore-scripts --pack-destination dist
+          python scripts/release-v0.4.1/verify-package.py dist
+          cp scripts/release-v0.4.1/SHA256SUMS.txt dist/
+          cd dist
+          sha256sum -c SHA256SUMS.txt
+      - name: Publish formal 0.4.1 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: Tests4gptplay/deepseek-servant
+        run: |
+          set -euo pipefail
+          TAG='v0.4.1'
+          if gh api "repos/$GH_REPO/releases/tags/$TAG" > "$RUNNER_TEMP/existing-release.json" 2> "$RUNNER_TEMP/release-query.err"; then
+            echo 'Release already exists; refusing to overwrite any assets.'
+            exit 1
+          fi
+          grep -q 'HTTP 404' "$RUNNER_TEMP/release-query.err" || { cat "$RUNNER_TEMP/release-query.err"; exit 1; }
+          if gh api "repos/$GH_REPO/git/ref/tags/$TAG" > "$RUNNER_TEMP/existing-tag.json" 2> "$RUNNER_TEMP/tag-query.err"; then
+            echo 'Tag already exists; refusing to reuse or move it.'
+            exit 1
+          fi
+          grep -q 'HTTP 404' "$RUNNER_TEMP/tag-query.err" || { cat "$RUNNER_TEMP/tag-query.err"; exit 1; }
+          gh release create "$TAG" \
+            --target '${{ github.sha }}' \
+            --title 'DeepSeek Servant 0.4.1' \
+            --notes-file scripts/release-v0.4.1/NOTES.md \
+            --latest=true \
+            dist/deepseek-servant-0.4.1.tgz dist/SHA256SUMS.txt
