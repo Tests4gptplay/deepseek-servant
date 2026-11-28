@@ -78,7 +78,7 @@ interface TaskNotice { version: string; messageId: string; delivered: boolean }
 interface TaskNoticeState { consumedAt: number; signals: Map<string, TaskNotice>; consumptions: Map<string, Map<string, { version: string; notices: Set<TaskNotice> }>> }
 interface ClaimedNotificationContext { taskId?: string; signals: string[] }
 interface NotificationClaim { helperWakes?: RoleWake[]; lifecycleId?: string; claimedNotifications?: ClaimedNotificationContext[]; commandId: string; executionId: string; wakeId: string; taskId?: string; initialSignals: string[]; sources: Array<{ path: string; version: string }> }
-interface RoleRecord { foregroundCollaborationId?: string; nativeRetirements?: Array<{ sessionId: string; executionId: string; wakeId?: string; helper?: Pick<RoleRecord, 'delivery' | 'lastWake' | 'notificationClaims'> }>; taskWorkspace?: TaskWorkspaceLocation; notificationClaims?: Record<string, NotificationClaim>; businessTransferred?: boolean; foregroundOutputIds?: string[]; gitSettledWakeId?: string; identity: WorkIdentity; sessionId: string; generation: number; completedRound?: boolean; lastWake?: RoleWake; delivery?: { request: RoleWake; messageId: string; text?: string; confirmed: boolean; sequence?: number }; released?: boolean; stopped?: boolean; stopIntent?: NativeStopEvidence; stopUnknown?: { reason: string; jobs: string[] } }
+interface RoleRecord { foregroundCollaborationId?: string; nativeRetirements?: Array<{ sessionId: string; executionId: string; wakeId?: string; helper?: Pick<RoleRecord, 'delivery' | 'lastWake' | 'notificationClaims'> }>; taskWorkspace?: TaskWorkspaceLocation; notificationClaims?: Record<string, NotificationClaim>; businessTransferred?: boolean; workerRelayPending?: true; foregroundOutputIds?: string[]; gitSettledWakeId?: string; identity: WorkIdentity; sessionId: string; generation: number; completedRound?: boolean; lastWake?: RoleWake; delivery?: { request: RoleWake; messageId: string; text?: string; confirmed: boolean; sequence?: number }; released?: boolean; stopped?: boolean; stopIntent?: NativeStopEvidence; stopUnknown?: { reason: string; jobs: string[] } }
 /** Fold only on explicit Foreground cancel; ordinary waiting/polling never reads this history.
  * An actual appended input leaves the inbox; a nonempty queue alone cannot prove the turn was pure. */
 function foregroundAbortEvidence(messageId: string) {
@@ -1092,7 +1092,7 @@ export class FrameworkRoleRuntime {
         const live = this.roleRecords.get(workId)
         if (live?.identity.executionId === record.identity.executionId && live.sessionId === record.sessionId) {
           ; (this.roleBases ??= new Map()).set(workId, structuredClone(saved))
-          this.roleRecords.set(workId, { ...saved, ...(live.businessTransferred ? { businessTransferred: true } : {}) })
+          this.roleRecords.set(workId, { ...saved, ...(live.businessTransferred ? { businessTransferred: true } : {}), workerRelayPending: live.workerRelayPending })
           if (saved.stopped || saved.released) this.wakeConsumptions?.delete(saved.identity.executionId)
           const stopping = this.stopOperations?.get(JSON.stringify([workId, saved.identity.executionId]))
           if (stopping && saved.stopped) { stopping.persistedStopped = true; if (stopping.settled) stopping.result = { status: 'stopped' } }
@@ -1159,6 +1159,12 @@ export class FrameworkRoleRuntime {
               : { ...incomingDelivery, sequence: (delivery?.sequence ?? 0) + 1 }
           }
         }
+      }
+      // A same-line relay owns the seat while the new native delivery opens,
+      // including retries and a restart before that delivery is confirmed.
+      if (record.identity.role === 'Worker') record = {
+        ...record, workerRelayPending: deliveryUpdate !== 'confirm' && latest?.workerRelayPending
+          && taskLifecycle(latest.identity) === taskLifecycle(record.identity) ? true : undefined
       }
       if (latest) {
         const retirements = [...latest.nativeRetirements ?? []]
@@ -1245,6 +1251,13 @@ export class FrameworkRoleRuntime {
           && current.sessionId === record.sessionId && current.generation === record.generation) record = {
           ...record, foregroundOutputIds: [...new Set([...(record.foregroundOutputIds ?? []), ...(current.foregroundOutputIds ?? [])])]
         }
+      }
+      const currentOwner = this.roleRecords.get(workId)
+      // A committed transfer can retire this exact producer during the save.
+      // Its business state wins over the preceding native write's snapshot.
+      if (record.identity.role === 'Worker' && !record.released && currentOwner?.businessTransferred
+        && currentOwner.identity.executionId === record.identity.executionId) {
+        record = { ...record, businessTransferred: true, workerRelayPending: currentOwner.workerRelayPending }
       }
       this.roleRecords.set(workId, record)
       this.continueNativeRetirements(record)
@@ -1522,7 +1535,12 @@ export class FrameworkRoleRuntime {
   }
   private workerSeatOccupied(record: RoleRecord): boolean {
     const line = this.workerLineRecord(record), delivery = line.delivery
-    if (line.identity.role !== 'Worker' || line.businessTransferred || line.released || line.completedRound || !delivery?.confirmed) return false
+    if (line.identity.role !== 'Worker' || line.released) return false
+    if (line.workerRelayPending) {
+      const { taskId, lifecycleId } = line.identity
+      return !!taskId && !this.observedTerminalTasks.has(taskLifecycleKey({ taskId, lifecycleId }))
+    }
+    if (line.businessTransferred || line.completedRound || !delivery?.confirmed) return false
     return this.requestKey(delivery.request) === line.identity.workId
       && taskLifecycle(delivery.request) === taskLifecycle(line.identity)
       && line.gitSettledWakeId !== delivery.request.id
@@ -3667,13 +3685,21 @@ executionId: binding.executionId, run: persistContext,
     if (stop && record.stopped) { stop.persistedStopped = true; if (stop.settled) stop.result = { status: 'stopped' } }
     this.continueNativeRetirements(record, true)
   }
-  private retireWorkerBusiness(record: RoleRecord): void {
+  private sameLineWorkerRelay({ record: { identity }, successorId, successorRole }: WorkerBusinessTransfer<RoleRecord>): boolean {
+    return identity.role === 'Worker' && !!identity.taskId && !!identity.workerId && successorId === identity.workerId
+      && successorRole !== 'Planner' && identity.workId === this.roleKey('Worker', identity.taskId, identity.workerId)
+  }
+  private retireWorkerBusiness(record: RoleRecord, keepSeat = record.workerRelayPending === true): void {
     const id = record.identity.executionId
     this.retiredWorkers ??= new Map()
     if (!this.retiredWorkers.has(id)) this.retiredWorkers.set(id, record)
     const current = this.roleRecords.get(record.identity.workId)
+    if (current?.identity.executionId === id && !current.released && (!current.businessTransferred || keepSeat)) {
+      // Establish ownership of the same logical seat before removing the old
+      // execution's reservation. No new wake or acknowledgement is required.
+      this.roleRecords.set(record.identity.workId, { ...current, businessTransferred: true, workerRelayPending: keepSeat ? true : undefined })
+    }
     if (current?.identity.executionId === id && !current.businessTransferred) {
-      this.roleRecords.set(record.identity.workId, { ...current, businessTransferred: true })
       this.workerAdmissions?.delete(record.identity.workId)
       this.workerAdmissionTasks?.delete(record.identity.workId)
       for (const operations of [this.workOperations, this.admissions]) {
@@ -3765,7 +3791,7 @@ executionId: binding.executionId, run: persistContext,
     // their native cleanup evidence; the next owner is saved normally.
     ;(this.transferredWorkerLines ??= new Map()).set(workId, {
       predecessor: predecessor.identity.executionId,
-      successor: { ...retired, businessTransferred: true, nativeRetirements: retirements },
+      successor: { ...retired, businessTransferred: true, workerRelayPending: undefined, nativeRetirements: retirements },
     })
   }
   private async reconcileWorkerTransfers(cold = false, borrowed?: FilesSnapshot, taskId?: string): Promise<void> {
@@ -3806,7 +3832,7 @@ executionId: binding.executionId, run: persistContext,
       if (saved) { this.retiredWorkers ??= new Map(); this.retiredWorkers.set(saved.identity.executionId, saved) }
       if (cold && saved && this.files instanceof PhysicalLocalFiles)
         await this.reconcileTransferredWorkerLine(transfer as PhysicalWorkerBusinessTransfer<RoleRecord>, saved)
-      this.retireWorkerBusiness(saved ?? transfer.record)
+      this.retireWorkerBusiness(saved ?? transfer.record, this.sameLineWorkerRelay(transfer))
       if (this.files instanceof PhysicalLocalFiles && (transfer as PhysicalWorkerBusinessTransfer<RoleRecord>).physical
         && !(transfer as PhysicalWorkerBusinessTransfer<RoleRecord>).physical?.published) {
         const files = this.files, identity = transfer.record.identity
@@ -4488,6 +4514,9 @@ executionId: binding.executionId, run: persistContext,
             ...authoritative.nativeRetirements ?? [], { sessionId: authoritative.sessionId, executionId: binding.executionId }
           ] }
           const transfer: WorkerBusinessTransfer<RoleRecord> = { version: 1, record: authoritative, successorId, ...(successorRole ? { successorRole } : {}) }
+          // Retain the seat fact in the existing retirement record as well, so
+          // an idempotent Git receipt does not need another read of the transfer.
+          authoritative = transfer.record = { ...authoritative, workerRelayPending: this.sameLineWorkerRelay(transfer) ? true : undefined }
           const changes = [{ path: markerPath, content: JSON.stringify(transfer) + '\n' }]
           if (this.records instanceof GitAuthorityStore) changes.push((this.records.change(this.prefix + 'retired-workers/' + binding.executionId, authoritative) as { path: string; content: string }));
           return changes
@@ -4523,7 +4552,7 @@ executionId: binding.executionId, run: persistContext,
           const record = transfer?.record ?? (this.records instanceof GitAuthorityStore
             ? await this.records.get<RoleRecord>(this.prefix + 'retired-workers/' + binding.executionId) : undefined)
           if (record?.identity.executionId !== binding.executionId) return
-          this.retireWorkerBusiness(record)
+          this.retireWorkerBusiness(record, transfer ? this.sameLineWorkerRelay(transfer) : record.workerRelayPending === true)
           if (newHandoff && transfer)
             this.scheduleSilentTaskProgress(record, { kind: 'worker-handoff', recipient: transfer.successorRole, successorId: transfer.successorId })
         }
