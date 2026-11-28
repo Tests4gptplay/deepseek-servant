@@ -1,0 +1,43 @@
+{
+  "publishedExtract": true,
+  "checkedFrom": "2026-11-27T00:05:15.184959+00:00",
+  "checkedTo": "2026-11-27T00:05:15.456812+00:00",
+  "priorEntries": 12022,
+  "initialReportedMissingUnverified": 12022,
+  "newEntries": 12022,
+  "previouslyInBoundNowOut": 592,
+  "matchedFileCount": 592,
+  "physicalBytes": 98872335,
+  "nativeWorkerToolEvidence": [
+    {
+      "seq": 41,
+      "at": "2026-11-26T23:56:31.210000+00:00",
+      "rawSha256": "23cc7b5bb73fb18868bd0802466f2d407d694fdd0e85e89ed6c3308889720041",
+      "error": false
+    },
+    {
+      "seq": 48,
+      "at": "2026-11-26T23:57:34.492000+00:00",
+      "rawSha256": "6c20e4f0f9460e6e581cf6fd07795975e063ceb4def7dd4b5727cc836f3d8678",
+      "error": false
+    },
+    {
+      "seq": 57,
+      "at": "2026-11-26T23:58:30.279000+00:00",
+      "rawSha256": "b7a451486567357ddd27720f7b5e939d79ae665f038e363b07d6962c4b9268aa",
+      "error": false
+    },
+    {
+      "seq": 64,
+      "at": "2026-11-26T23:59:17.491000+00:00",
+      "rawSha256": "5af69b1275aaa0c8b09338cb486174e8ffa283165bc409995fdc15dfae429b60",
+      "error": false
+    },
+    {
+      "seq": 71,
+      "at": "2026-11-27T00:00:02.315000+00:00",
+      "rawSha256": "2d0975bbabef051a7560556ffad6979e20f4dd1697776af1f62195c799d3eab7",
+      "error": false
+    }
+  ]
+}

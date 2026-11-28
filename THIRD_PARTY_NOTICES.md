@@ -6,6 +6,12 @@ The browser bundle includes the official DirectoryBrowser component from
 `@deepseek-ai/dsh-client-ui-directory-picker-browse` 0.2.2-rc.3,
 under the DeepSeek MIT license reproduced below.
 
+The Host bundle adapts the filesystem behavior and data types of the directory
+browse backend and its service definition (`@deepseek-ai/dsh-host-directory-picker-browse` and
+`@deepseek-ai/dsh-host-directory-picker`) under the DeepSeek MIT license below.
+The browser stays in DSS's existing authenticated connection and does not
+register or replace the native picker.
+
 deepseek-servant uses DeepSeek Harness runtime services and external host peers.
 The development API reference is `0.2.1-rc.2`; alpha.39 was exercised on the
 Windows `0.2.1-rc.3` host. The exact earlier reference source is

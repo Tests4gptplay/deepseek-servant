@@ -31,6 +31,24 @@ The two independently developed projects show **architectural convergence** in s
 - **Conversations, history and results:** Continue discussing ongoing work, add requirements, revisit conversations by date, browse task history and open results or saved attachments.
 - **Working memory and skills:** Save and revisit task records, planning notes and knowledge, and accumulate reusable skills. Local mode provides categorized record cleanup and explicit task reset.
 
+## What’s new in 0.5.4
+
+- Folder browsing and creation no longer depend on a pinned DSH directory-browser version at runtime.
+- Retains the same-line Worker seat handoff fix from 0.5.3.
+
+[Release notes and downloads](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.4)
+
+## What changed in 0.5.3 (withdrawn)
+
+- **Worker handoffs retain their seat:** a replacement Worker on the same work line inherits its seat. Queued work waits until a seat is actually free.
+- **Handoffs survive interruption:** a restart or a retry after a failed Worker launch continues the original work line without resubmitting it.
+
+## What’s new in 0.5.2
+
+Search tasks and archives by title or ID, with newest tasks first when creation time is available. The candidate also improves recovery from silent rounds and ownership during same-workline handoffs.
+
+[Release notes](docs/releases/0.5.2.en.md) · [Verification status](docs/testing/0.5.2.en.md)
+
 ## What’s new in 0.5.1
 
 - Improved task responsiveness, background coordination, archiving, and Git collaboration.
@@ -40,7 +58,7 @@ The two independently developed projects show **architectural convergence** in s
 
 ## Installation & use
 
-In DSH, choose **Plugins → Add plugin** and enter `github:Tests4gptplay/deepseek-servant#v0.5.1`.
+In DSH, choose **Plugins → Add plugin** and enter `deepseek-servant`. To pin 0.5.4, enter `deepseek-servant@0.5.4` or use `github:Tests4gptplay/deepseek-servant#v0.5.4`.
 
 See [Installation & upgrade](docs/INSTALLATION.md) for installation sources, Desktop / Web instructions and upgrade guidance. The linked guide is in Chinese.
 
