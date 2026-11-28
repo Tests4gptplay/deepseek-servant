@@ -35,7 +35,7 @@ The two independently developed projects show **architectural convergence** in s
 
 Search tasks and archives by title or ID, with newest tasks first when creation time is available. The candidate also improves recovery from silent rounds and ownership during same-workline handoffs.
 
-[Release notes](docs/releases/0.5.2.md#english) · [Verification status](docs/testing/0.5.2.md)
+[Release notes](docs/releases/0.5.2.en.md) · [Verification status](docs/testing/0.5.2.en.md)
 
 ## What’s new in 0.5.1
 
