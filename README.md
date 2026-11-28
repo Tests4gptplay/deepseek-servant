@@ -4,7 +4,7 @@
 
 围绕长期任务协调规划、执行与成果评价，保存进展、成果和经验，支持后续接续与方法调整。
 
-[安装与使用](#安装与使用) · [0.5.2 预发行说明](docs/releases/0.5.2.md) · [0.5.1 更新说明](docs/releases/0.5.1.md) · [0.5.0／0.5.1 对比测试](docs/testing/0.5.1.md) · [English](https://github.com/Tests4gptplay/deepseek-servant/blob/main/README.en.md)
+[安装与使用](#安装与使用) · [实测案例](#实测案例) · [0.5.2 预发行说明](docs/releases/0.5.2.md) · [0.5.1 更新说明](docs/releases/0.5.1.md) · [0.5.0／0.5.1 对比测试](docs/testing/0.5.1.md) · [English](https://github.com/Tests4gptplay/deepseek-servant/blob/main/README.en.md)
 
 <p align="center">
 <img src="https://raw.githubusercontent.com/Tests4gptplay/deepseek-servant/v0.3.0/docs/images/deepseek-servant-maids-duo.webp" width="480" alt="DeepSeek Servant 短裙与长裙女仆角色设计">
@@ -38,6 +38,16 @@ DSS 是独立安装的社区插件，使用 [DeepSeek Harness（DSH）](https://
 
 [操作指南](https://github.com/Tests4gptplay/deepseek-servant/blob/main/PRIVATE_GIT.md) · [已测场景与限制](docs/testing/0.5.0.md)
 
+## 实测案例
+
+### 《鲸骨以北》：中断后能否接着做？
+
+用一款网页游戏的制作与验收，测试 DSS 在云机断连、工作盘不可用和模型额度耗尽后，能否接回原任务，而不是从头重做。
+
+从任务下达到归档共 **41 小时 46 分 42 秒**，含等待和中断；原规划角色实际读到 **71 次**成果交接。记录线在 10 次环境或存储恢复后都有新产出，制作线有 7 次，另外 3 次受同一个内部卡点影响，换版后才继续。
+
+[阅读完整测试报告](docs/testing/0.5.2/work-long-run/REPORT.md) · [查看时间轴与证据索引](docs/testing/0.5.2/work-long-run/README.md)
+
 ## 0.5.2 的改进
 
 - **任务与成果检索**：按标题或任务 ID 搜索当前任务和成果档案。
@@ -45,8 +55,6 @@ DSS 是独立安装的社区插件，使用 [DeepSeek Harness（DSH）](https://
 - **原任务接续**：执行轮次结束却没有有效交接时，针对原任务排查；Worker 换人时沿用原工作线的席位，从已有进度继续。
 
 [完整更新说明](docs/releases/0.5.2.md) · [增量验收](docs/testing/0.5.2.md)
-
-**实测案例：《鲸骨以北》长线压力测试。** 以游戏制作为负载，记录 DSS 在云环境、存储和模型中断后如何接回原任务、继续产出，以及哪些故障需要人工介入。[查看测试报告与证据](docs/testing/0.5.2/work-long-run/README.md)
 
 ## 0.5.1 的改进
 
