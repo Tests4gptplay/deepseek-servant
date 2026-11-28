@@ -11,8 +11,10 @@
 - [委托补充的送达与执行](internal/20261125T145419Z/changes.md) · [外部观察：中断与取证](external/20261125T145419743845Z/0012-continuity-priority-and-host-loss.md) · [外部观察：桥接发布环境](external/20261125T145419743845Z/0016-external-publisher-recovery.md)
 - [归档引用复核](external/20261125T145419743845Z/native-close/root-archive-and-22-verified-references.json) · [原制作负责人续接成果](internal/20261125T145419Z/checks/real-game-planner-g11-receipt-and-first-new-integrated-work.json) · [缺失误报复核](internal/20261125T145419Z/checks/g14-self-correction-actual-five-native-results-and-independent-592-file-recheck.json)
 
+- [试玩包与启动说明](REPORT.md#game-delivery)
+
 ## 证据范围
 
-这里是原记录的公开版。委托补充用事实转述，保留时间、因果和执行结果；内部身份标识做了去识别处理。随附的 JSON 是运行证据摘录。完整原始请求与响应、会话附件、截图及试玩包仍在私有归档，未随本页公开。文中出现但无公开链接的资料名称，指该归档保留的材料。
+这里是原记录的公开版。委托补充用事实转述，保留时间、因果和执行结果；内部身份标识做了去识别处理。随附的 JSON 是运行证据摘录。完整原始请求与响应、会话附件和截图仍在私有归档，未随本页公开。文中出现但无公开链接的资料名称，指该归档保留的材料。
 
 [返回 0.5.2 增量验收](../../0.5.2.md)
