@@ -15,6 +15,8 @@ export interface TaskMetadata {
   sourcePath: string
   owner: string
   status: 'running' | 'complete' | 'cancelled'
+  /** Epoch milliseconds at first native admission; missing for preserved older Tasks. */
+  readonly createdAt?: number
   lifecycleId?: string
   /** Git's existing cleanup and per-Host facts live with this Task, outside archives. */
   runtimeState?: Pick<TaskArchiveState, 'lifecycles'>
@@ -207,7 +209,7 @@ export async function preparePhysicalTask(store: PhysicalLocalFiles, snapshot: F
     throw new Error('The top-level Task source does not match its existing metadata: ' + sourcePath)
   if (existing && existing.status !== 'running') return existing
   const task: TaskMetadata = existing ?? {
-    version: 1, taskId: assignment.taskId, route, sourcePath, owner: assignment.owner, status: 'running',
+    version: 1, taskId: assignment.taskId, route, sourcePath, owner: assignment.owner, status: 'running', createdAt: Date.now(),
     archiveFolder: taskWorkspaceFolder(taskSourceName(sourcePath), assignment.taskId),
     workspaceFolder: taskWorkspaceFolder(taskSourceName(sourcePath), assignment.taskId),
     members: [...new Set([assignment.owner, ...assignment.members])],
@@ -232,13 +234,13 @@ export async function preparePhysicalTask(store: PhysicalLocalFiles, snapshot: F
  * Foreground admission signal. It is committed with that delivery.
  */
 export async function initializeTask(store: FilesStore, snapshot: FilesSnapshot, sourcePath: string,
-  owner: string, members: readonly string[], assignedTaskId?: string, workspace?: TaskHostWorkspace): Promise<PlannedChange<TaskMetadata>> {
+  owner: string, members: readonly string[], assignedTaskId?: string, workspace?: TaskHostWorkspace, initialization: 'new' | 'preserved' = 'new'): Promise<PlannedChange<TaskMetadata>> {
   const source = await store.read(snapshot, filePath(sourcePath))
   if (source === undefined) throw new Error('Task source is missing: ' + sourcePath)
-  return planTask(store, snapshot, sourcePath, owner, members, source, assignedTaskId, workspace)
+  return planTask(store, snapshot, sourcePath, owner, members, source, assignedTaskId, workspace, initialization)
 }
 async function planTask(store: FilesStore, snapshot: FilesSnapshot, sourcePath: string,
-  owner: string, members: readonly string[], source: string, assignedTaskId?: string, workspace?: TaskHostWorkspace): Promise<PlannedChange<TaskMetadata>> {
+  owner: string, members: readonly string[], source: string, assignedTaskId?: string, workspace?: TaskHostWorkspace, initialization: 'new' | 'preserved' = 'new'): Promise<PlannedChange<TaskMetadata>> {
   filePath(sourcePath); segment(owner)
   const route = /^tasks\/[^/]+_(P|O)\.md$/.exec(sourcePath)?.[1] as TaskRoute | undefined
   if (!route) throw new Error('New tasks use tasks/<name>_P.md or tasks/<name>_O.md.')
@@ -246,7 +248,7 @@ async function planTask(store: FilesStore, snapshot: FilesSnapshot, sourcePath: 
   const taskId = taskIdentity(source) ?? assignedTaskId ?? randomUUID()
   const existing = await readJson<TaskMetadata>(store, snapshot, paths.task(taskId))
   if (existing) return { value: existing, changes: await restoreTaskInitialization(store, snapshot, existing) }
-  const metadata: TaskMetadata = { version: 1, taskId, route, sourcePath, owner, status: 'running', archiveFolder: taskWorkspaceFolder(taskSourceName(sourcePath), taskId), workspaceFolder: taskWorkspaceFolder(taskSourceName(sourcePath), taskId), members: [...new Set([owner, ...members])], ...(workspace ? { hostWorkspaces: { [workspace.instanceUUID]: workspace.root } } : {}) }
+  const metadata: TaskMetadata = { version: 1, taskId, route, sourcePath, owner, status: 'running', ...(initialization === 'new' ? { createdAt: Date.now() } : {}), archiveFolder: taskWorkspaceFolder(taskSourceName(sourcePath), taskId), workspaceFolder: taskWorkspaceFolder(taskSourceName(sourcePath), taskId), members: [...new Set([owner, ...members])], ...(workspace ? { hostWorkspaces: { [workspace.instanceUUID]: workspace.root } } : {}) }
   const changes = new Map<string, FileChange>()
   const add = (change: FileChange) => changes.set(change.path, change)
   add({ path: sourcePath, content: taskIdentity(source) ? source : 'Task ID: ' + taskId + '\n' + source })

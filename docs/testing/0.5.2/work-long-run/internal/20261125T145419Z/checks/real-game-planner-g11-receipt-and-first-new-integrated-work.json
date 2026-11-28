@@ -1,0 +1,154 @@
+{
+  "publishedExtract": true,
+  "capturedAt": "2026-11-26T03:34:07.087858+00:00",
+  "events": [
+    {
+      "tool": "dss_claim",
+      "callAt": "2026-11-26T03:25:14.974000+00:00",
+      "returnAt": "2026-11-26T03:25:15.019000+00:00",
+      "isError": false,
+      "callSHA256LF": "9a2aeb5a888999ab8a0fec8d820393380a0d6cd55008da92913691bb9fef049d",
+      "returnSHA256LF": "c3ceb2b22521bdfd3223a7852593e184f7c42ce68dd654207579b546d85918ee"
+    },
+    {
+      "tool": "dss_claim",
+      "callAt": "2026-11-26T03:25:46.445000+00:00",
+      "returnAt": "2026-11-26T03:25:46.500000+00:00",
+      "isError": false,
+      "callSHA256LF": "7c2a71f0580790a55d8309d89204f7207f724aa95f769b34ba91c9a63ea443e2",
+      "returnSHA256LF": "085dde75c1be990ca99d775f9ec48f0b5373ef522690b62051cf14276b47106e"
+    },
+    {
+      "tool": "dss_read",
+      "callAt": "2026-11-26T03:25:46.501000+00:00",
+      "returnAt": "2026-11-26T03:25:46.521000+00:00",
+      "isError": false,
+      "callSHA256LF": "10b4d0f93278c78885b3d0d075ad384f9d17fc5643b1ae84b00697df146ef9b1",
+      "returnSHA256LF": "7559f32047ac7c666b84ecd954e1ae376e59351ec2a4ef9a579a59e4c42f5714"
+    },
+    {
+      "tool": "dss_read",
+      "callAt": "2026-11-26T03:25:46.522000+00:00",
+      "returnAt": "2026-11-26T03:25:46.528000+00:00",
+      "isError": false,
+      "callSHA256LF": "78a10852517f18539df445c9ce88757d1de805543d1e0104bfb38f548acad66a",
+      "returnSHA256LF": "c82118fb8cc1b950b02c485800d6ad1095a16fd2d6df31505c341c34346841fb"
+    },
+    {
+      "tool": "dss_read",
+      "callAt": "2026-11-26T03:25:46.528000+00:00",
+      "returnAt": "2026-11-26T03:25:46.533000+00:00",
+      "isError": false,
+      "callSHA256LF": "142a7e59ec7bef94a9fe34be2d2e607867d1e165b86b8ef6df583217a2cb5832",
+      "returnSHA256LF": "6076c0aff69d66aaea2940444d92178b0dfbb98bf61ca6e5f76123bbabc98f5a"
+    },
+    {
+      "tool": "dss_read",
+      "callAt": "2026-11-26T03:25:46.533000+00:00",
+      "returnAt": "2026-11-26T03:25:46.538000+00:00",
+      "isError": false,
+      "callSHA256LF": "22b58328c8325cc75cc106dccce55bbc56dea42a8ab824d2b6a80587afa78fd9",
+      "returnSHA256LF": "57bdd8e02a52054ca3d33c06a5b8cf6c00003de1a92c3a2e21b07d6b7bc83219"
+    },
+    {
+      "tool": "dss_read",
+      "callAt": "2026-11-26T03:25:46.539000+00:00",
+      "returnAt": "2026-11-26T03:25:46.544000+00:00",
+      "isError": false,
+      "callSHA256LF": "cd8551a71de515f4031365f53b9d55effa09e892e4ec0a1afc1f4ef16a52cd61",
+      "returnSHA256LF": "aa95036ebc631ef81b8be72536fede4452b9e7804e009badd2a17fc27d96225c"
+    },
+    {
+      "tool": "bash",
+      "callAt": "2026-11-26T03:25:46.545000+00:00",
+      "returnAt": "2026-11-26T03:25:46.585000+00:00",
+      "isError": false,
+      "callSHA256LF": "8635f020affb0907222321107c7f822d323a74e3c9760141be1e426db4dcfb46",
+      "returnSHA256LF": "3a628883854a6434a8678882c2ba934bb811159474011d1c9a7aad5cb759a571"
+    },
+    {
+      "tool": "dss_record",
+      "callAt": "2026-11-26T03:26:39.083000+00:00",
+      "returnAt": "2026-11-26T03:26:39.094000+00:00",
+      "isError": false,
+      "callSHA256LF": "b434d0c1ceaac5c49973eed0674153e28411d1e4707a742b4d97a434103c84f8",
+      "returnSHA256LF": "d2bc7e98ba95896f500f94b1fc90d92468b294125c02140657a3023bb9ed5744"
+    },
+    {
+      "tool": "bash",
+      "callAt": "2026-11-26T03:27:29.194000+00:00",
+      "returnAt": "2026-11-26T03:27:31.811000+00:00",
+      "isError": false,
+      "callSHA256LF": "0196cb1dbbb00d8b48da76291ebea8608f6be3206c7a3cc8c21354092d2e76df",
+      "returnSHA256LF": "79d54b18ddb7c6098f8695aaaec74aed02b2afaf4d70cc20f136864212402c23"
+    },
+    {
+      "tool": "bash",
+      "callAt": "2026-11-26T03:27:31.812000+00:00",
+      "returnAt": "2026-11-26T03:27:32.406000+00:00",
+      "isError": false,
+      "callSHA256LF": "b8c0d9fb53da1b92d2d46e2835a863c26599d32abeea4a207bdafe7410523d82",
+      "returnSHA256LF": "65a780a033973c7af1eff502dce61dfe3143d88fa75c87a097b94684429d937c"
+    },
+    {
+      "tool": "bash",
+      "callAt": "2026-11-26T03:27:32.407000+00:00",
+      "returnAt": "2026-11-26T03:27:32.603000+00:00",
+      "isError": false,
+      "callSHA256LF": "7960beeef1db7053da76b42e14ffa4e105d99ed7d7e86c7d4f948e7437aa7bf0",
+      "returnSHA256LF": "f62056491957a9e88bbfa5c89ecc17f992dce863f369019639f85019ecbb558a"
+    },
+    {
+      "tool": "dss_worker_assign",
+      "callAt": "2026-11-26T03:28:33.419000+00:00",
+      "returnAt": "2026-11-26T03:28:33.472000+00:00",
+      "isError": false,
+      "callSHA256LF": "d3996a875b1ce8dd997a9ee2ecd60ce0509ff26674906c7255baef85ec806cee",
+      "returnSHA256LF": "14ea0537414db1a4bbf1f38e6072ea7b9315a95a0f166d0dd0b283318dfec187"
+    },
+    {
+      "tool": "dss_worker_assign",
+      "callAt": "2026-11-26T03:28:33.473000+00:00",
+      "returnAt": "2026-11-26T03:28:33.515000+00:00",
+      "isError": false,
+      "callSHA256LF": "18397d2c2f5427c72218d0f4ac4afc28330d40a0b8851de7597bbcd398b6912a",
+      "returnSHA256LF": "356477257c634d2c58c931709eaff807d71c17391002e8c85e63295631d6b43e"
+    },
+    {
+      "tool": "dss_record",
+      "callAt": "2026-11-26T03:28:33.516000+00:00",
+      "returnAt": "2026-11-26T03:28:33.525000+00:00",
+      "isError": false,
+      "callSHA256LF": "53e0cfa05008bb5624f376a811de2d82ccff145d659f9d245f49e54ee606e15a",
+      "returnSHA256LF": "45087b8975c4ac067a8f9aa2af4d07a9001eb6e5a19fd9ae29533f8500362daa"
+    },
+    {
+      "tool": "dss_recovery_consume",
+      "callAt": "2026-11-26T03:29:11.344000+00:00",
+      "returnAt": "2026-11-26T03:29:11.378000+00:00",
+      "isError": false,
+      "callSHA256LF": "4e5e748d8c21e7e37af55c33b5ad8babc8cad9cda39990fb4a6d7dec594581ec",
+      "returnSHA256LF": "2a66c24a936b7ed2790d6acd1976f74be028f087aab71a3cb4fe6537f09b43f6"
+    },
+    {
+      "tool": "bash",
+      "callAt": "2026-11-26T03:29:50.975000+00:00",
+      "returnAt": "2026-11-26T03:29:51.588000+00:00",
+      "isError": false,
+      "callSHA256LF": "5f4f13c2bd0dc5164e42a25c19b72cc15a8c51ea40ea2047c85a47ca7b2d8992",
+      "returnSHA256LF": "a88a7ae537d72e469650d363d461c24467579a96d84c0c2083fa2142f0c6e2e3"
+    }
+  ],
+  "liveMaterials": [
+    {
+      "exists": true,
+      "filesObserved": 154,
+      "bytesObserved": 701665
+    },
+    {
+      "exists": true,
+      "filesObserved": 152,
+      "bytesObserved": 571714
+    }
+  ]
+}

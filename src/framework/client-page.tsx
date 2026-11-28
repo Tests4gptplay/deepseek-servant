@@ -18,7 +18,7 @@ import { ManualCleanupPanel } from './manual-cleanup-panel.js'
 import { KnowledgeRecordView } from './knowledge-records.js'
 import type { SkillMergeIssue } from './skill-merge.js'
 import { Fragment, useMemo, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
-import { Button, Input, Modal, Menu, SegmentedControl, StateDot, IconSettingsOutlineRegular, IconChevronDownOutlineRegular, IconPlusOutlineMedium, IconPaperclipOutlineRegular, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Input, Modal, Menu, SegmentedControl, StateDot, IconSettingsOutlineRegular, IconChevronDownOutlineRegular, IconPlusOutlineMedium, IconPaperclipOutlineRegular, IconSearchOutlineRegular, IconCloseOutlineRegular, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import { FrameworkClientController, getFrameworkClientController, frameworkScopeKey, type FrameworkClientExecution, type FrameworkClientApi, type FrameworkClientSettings, type FrameworkClientModel, type FrameworkClientView, type FrameworkClientRole, type FrameworkLegacyTask, type FrameworkClientProcessGroup } from './client-contracts.js'
 import css from '../client/page.module.css'
 
@@ -59,6 +59,8 @@ export function FrameworkPage(props: FrameworkPageProps) {
   const [error, setError] = useState('')
   const [exported, setExported] = useState('')
   const [selectedTask, setSelectedTask] = useState<string>()
+  const [taskSearch, setTaskSearch] = useState('')
+  const taskSearchInput = useRef<HTMLInputElement>(null)
   const scope = view ? frameworkScopeKey(view.activeMode, view.collaborationId, view.storageScope) : ''
   const draftsByScope = controller.composerDrafts
   const savedDraft = draftsByScope.get(scope)
@@ -450,6 +452,23 @@ export function FrameworkPage(props: FrameworkPageProps) {
     if (upward && element.scrollTop < element.clientHeight / 2) loadOlder()
   }
   const task = view?.tasks.find(item => item.taskId === selectedTask)
+  const taskKeyword = taskSearch.trim().toLowerCase()
+  const matchesSearch = (item: { title: string; taskId?: string }) =>
+    item.title.toLowerCase().includes(taskKeyword) || item.taskId?.toLowerCase().includes(taskKeyword)
+  const relatedMatches = taskKeyword && tab !== 'conversation' ? new Set((tab === 'archives' ? view?.tasks : view?.archives)
+    ?.flatMap(item => item.taskId && matchesSearch(item) ? [item.taskId] : [])) : undefined
+  const taskCreationTime = (value?: number) => typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : 0
+  const visibleTasks = tab === 'tasks' ? view?.tasks
+    .filter(item => !taskKeyword || matchesSearch(item) || relatedMatches?.has(item.taskId))
+    .sort((a, b) => {
+      const aTime = taskCreationTime(a.createdAt), bTime = taskCreationTime(b.createdAt)
+      return bTime - aTime || (aTime ? a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0 : 0)
+    })
+    : undefined
+  const visibleArchives = tab === 'archives' && taskKeyword
+    ? view?.archives.filter(item => matchesSearch(item) || (item.taskId && relatedMatches?.has(item.taskId)))
+    : view?.archives
+  const searchLabel = tr('搜索任务标题或 ID', 'Search task title or ID')
   const empty = !view || (tab === 'conversation' ? !view.messages.length && !view.missingBodies?.length : tab === 'tasks' ? !view.tasks.length : false)
   const imageFor = (page: 'conversation' | 'tasks') => illustrationFor(page, view?.settings ?? blankSettings) === 'welcome' ? __SERVANT_WELCOME_CHARACTER_DATA_URI__ : __SERVANT_TASK_EMPTY_CHARACTER_DATA_URI__
   const corner = showCornerIllustration(!empty, view?.settings ?? blankSettings)
@@ -491,7 +510,7 @@ export function FrameworkPage(props: FrameworkPageProps) {
         onSelect={id => { setModeOpen(false); const request = ++modeNavigation.current; setChangingMode(true); run(controller.selectMode(id === 'git' ? 'git' : 'local').finally(() => { if (request === modeNavigation.current) setChangingMode(false) })) }}
         onClose={() => setModeOpen(false)} anchor={<Button variant="outline" size="sm" aria-label={tr('模式', 'Mode')} aria-haspopup="menu" aria-expanded={modeOpen}
           onClick={() => setModeOpen(!modeOpen)}><span>{!view ? tr('模式', 'Mode') : view.activeMode === 'git' ? 'DSS-cah' : 'local'}</span><IconChevronDownOutlineRegular size={14} /></Button>} />
-    </div>{view && <div className={css.workspaceSummary}><span>{view.settings.workspace}</span>{view.connection.workerSeats !== undefined && <span>{tr('已生效每任务 Worker 席位', 'Applied Worker seats per task')}: {view.connection.workerSeats}{view.connection.workerSeats !== view.settings.workerSeats && <> ({tr('已保存设置', 'Saved setting')}: {view.settings.workerSeats})</>}</span>}</div>}</nav>
+    </div>{view && <div className={css.workspaceSummary}><span>{view.settings.workspace}</span>{view.connection.workerSeats !== undefined && <span>{tr('每任务 Worker 席位', 'Worker seats per task')}: {view.connection.workerSeats}{view.connection.workerSeats !== view.settings.workerSeats && <> ({tr('已保存设置', 'Saved setting')}: {view.settings.workerSeats})</>}</span>}</div>}</nav>
     {(error || snapshot.error || view?.connection.detail) && <div className={css.notice} role="alert">{error || snapshot.error || view?.connection.detail}</div>}
     {exported && <p className={css.notice} role="status" style={{ flexShrink: 0, minWidth: 0, overflowWrap: 'anywhere' }}>{tr('记录已导出到', 'Records exported to')}: {exported}</p>}
     <Fragment key={scope}>{!changingMode && props.transportConnected !== false && view && props.nativePending?.(view, zh, taskId => { setSelectedTask(taskId); setTab('tasks') }, () => setTab('conversation'))}{!changingMode && props.transportConnected !== false && props.nativeInteractions?.((view?.executions ?? []).filter(row => row.role !== 'Foreground' && !view?.tasks.some(task => task.executions.some(item => item.sessionId === row.sessionId))), zh, true)}</Fragment>
@@ -583,11 +602,17 @@ export function FrameworkPage(props: FrameworkPageProps) {
       {(tab === 'tasks' || tab === 'archives') && <div style={{ width: '100%', minWidth: 0 }}><nav className={css.historyNavigation} aria-label={tr('任务视图', 'Task views')}>
         <Button size="sm" aria-current={tab === 'tasks' ? 'page' : undefined} onClick={() => setTab('tasks')}>{t('tasks.current')}</Button>
         <Button size="sm" aria-current={tab === 'archives' ? 'page' : undefined} onClick={() => { setTab('archives'); refresh(true) }}>{tr('成果档案', 'Archives')}</Button>
+        <div className={css.taskSearch} role="search" aria-label={searchLabel}>
+          <Input ref={taskSearchInput} icon={<IconSearchOutlineRegular size={16} />} aria-label={searchLabel}
+            placeholder={searchLabel} value={taskSearch} onChange={event => setTaskSearch(event.target.value)} />
+          {taskSearch && <Button size="sm" aria-label={tr('清除搜索', 'Clear search')} onClick={() => { setTaskSearch(''); taskSearchInput.current?.focus() }}><IconCloseOutlineRegular size={14} /></Button>}
+        </div>
       </nav>
       {tab === 'tasks' && <div className={`${css.taskLayout} ${task ? css.hasSelection : ''}`}><div className={css.taskList}>
         <OriginalTaskReadStatus status={view?.originalTaskRead} tr={tr} />
         {empty && !view?.originalTaskRead && <div className={`${css.empty} ${css.illustratedEmpty}`}><img className={css.welcomeIcon} src={imageFor('tasks')} alt="" /><h2>{t('tasks.empty')}</h2><p>{t('tasks.hint')}</p></div>}
-        {view?.tasks.map(item => <button key={item.taskId} aria-current={task?.taskId === item.taskId ? true : undefined} className={`${css.taskRow} ${task?.taskId === item.taskId ? css.selected : ''}`} onClick={() => setSelectedTask(item.taskId)}>
+        {!!taskKeyword && !empty && !visibleTasks?.length && <p className={css.muted} role="status">{tr('没有匹配的任务，试试其他关键词。', 'No matching tasks. Try a different keyword.')}</p>}
+        {visibleTasks?.map(item => <button key={item.taskId} aria-current={task?.taskId === item.taskId ? true : undefined} className={`${css.taskRow} ${task?.taskId === item.taskId ? css.selected : ''}`} onClick={() => setSelectedTask(item.taskId)}>
           <span className={css.taskRowTitle}>{item.title}</span><span className={css.rowMeta} title={[item.taskId, item.route, item.owner].join(' · ')}><StateDot state={item.status === 'complete' ? 'done' : item.status === 'cancelled' ? 'idle' : item.control === 'paused' || item.control === 'cancelled' ? 'warning' : 'ongoing'} />{item.status === 'complete' ? tr('已完成', 'Completed') : item.status === 'cancelled' ? tr('已取消', 'Cancelled') : item.control === 'paused' || item.control === 'cancelled' ? tr('已暂停', 'Paused') : frameworkStateLabel(item.status, tr)}</span>
         </button>)}</div>{task && <section className={css.taskDetail}><Button size="sm" onClick={() => setSelectedTask(undefined)}>{tr('返回', 'Back')}</Button><h2>{task.title}</h2>
           <p>{task.route === 'P' ? tr('Planner 规划与验收', 'Planner planning and acceptance') : tr('Organizer 分派与总验收', 'Organizer assignment and total acceptance')}</p>
@@ -599,7 +624,9 @@ export function FrameworkPage(props: FrameworkPageProps) {
           <section className={css.section}><h3>{tr('成果与证据', 'Results and evidence')}</h3>{task.resultPaths.map(path => <button key={path} className={css.artifact} title={path} onClick={() => { setError(''); void open(path, undefined, task.originalSource === 'local-sql' ? task.taskId : undefined) }}><code>{path}</code></button>)}{task.workspaceResults?.map(workspaceResult)}</section>
         </section>}</div>}
       {(tab === 'tasks' || tab === 'archives') && view && <LegacyTasks tasks={view.legacyTasks} controller={controller} mode={view.activeMode} storageScope={view.storageScope} open={open} openRecords={openLegacyRecords} exportRecords={exportLegacyRecords} tr={tr} />}
-      {tab === 'archives' && <div className={css.knowledge}>{view?.archives.map(item => <section className={css.knowledgeCard} key={item.path}><h3>{item.title}</h3><code>{item.taskId}</code><button className={css.artifact} title={item.path} onClick={() => { setError(''); void open(item.path, undefined, item.originalTaskId) }}>{item.path}</button>{item.files?.map(path => <button className={css.artifact} key={path} title={path} onClick={() => { setError(''); void open(path, undefined, item.originalTaskId) }}>{path}</button>)}{!!item.missingReferences?.length && <section className={css.section}><h4><StateDot state="warning" />{tr('未保存的原件', 'Originals not retained')}</h4><p>{tr('归档时未找到这些原件，未保存副本。', 'These originals were not found when the archive was saved; no copy was retained.')}</p>{item.missingReferences.map(path => <p key={path}><code>{path}</code></p>)}</section>}{item.skillPublication && <section className={css.section}>
+      {tab === 'archives' && <div className={css.knowledge}>
+        {!!taskKeyword && !!view && !visibleArchives?.length && <p className={css.muted} role="status">{tr('没有匹配的档案，试试其他关键词。', 'No matching archives. Try a different keyword.')}</p>}
+        {view && visibleArchives?.map(item => <section className={css.knowledgeCard} key={item.path}><h3>{item.title}</h3><code>{item.taskId}</code><button className={css.artifact} title={item.path} onClick={() => { setError(''); void open(item.path, undefined, item.originalTaskId) }}>{item.path}</button>{item.files?.map(path => <button className={css.artifact} key={path} title={path} onClick={() => { setError(''); void open(path, undefined, item.originalTaskId) }}>{path}</button>)}{!!item.missingReferences?.length && <section className={css.section}><h4><StateDot state="warning" />{tr('未保存的原件', 'Originals not retained')}</h4><p>{tr('归档时未找到这些原件，未保存副本。', 'These originals were not found when the archive was saved; no copy was retained.')}</p>{item.missingReferences.map(path => <p key={path}><code>{path}</code></p>)}</section>}{item.skillPublication && <section className={css.section}>
           {!!item.skillPublication.unmerged.length && <><h4><StateDot state="warning" />{tr('待处理技能提案', 'Skill proposals needing attention')}</h4>{item.skillPublication.unmerged.map((proposal, index) => <div className={css.child} key={proposal.proposalPreservedAt + ':' + index}>
             <p>{tr('技能路径：', 'Skill path: ')}<code>{proposal.path}</code></p><p className={css.errorDetail}>{proposal.reason}</p>
             <button className={css.artifact} title={proposal.proposalPreservedAt} onClick={() => { setError(''); void open(proposal.proposalPreservedAt) }}>{tr('查看保存的原提案：', 'Open saved original proposal: ')}{proposal.proposalPreservedAt}</button>
@@ -705,9 +732,9 @@ function FrameworkSettingsForm(props: FrameworkPageProps & { afterSettings?: Rea
   {props.afterSettings}
     <section className={css.experimental}><h3>{tr('实验性', 'Experimental')}</h3><div className={css.experimentalGroups}><section className={css.experimentalCard}>
       <h4>{tr('页面插画', 'Page illustrations')}</h4>
-      <p className={css.muted}>{tr('更改插画后，点击上方的“保存并连接”应用设置。', 'After changing the illustrations, select “Save and connect” above to apply your changes.')}</p>
-      <label className={css.illustrationOption}><span>{tr('显示右下角人物', 'Show the bottom-right character')}</span><input type="checkbox" checked={settings.showCornerCharacter !== false} onChange={event => edit('showCornerCharacter', event.target.checked)} /></label>
-      <label className={css.illustrationOption}><span>{tr('互换对话与任务页插画', 'Swap conversation and task illustrations')}</span><input type="checkbox" checked={settings.swapPageIllustrations === true} onChange={event => edit('swapPageIllustrations', event.target.checked)} /></label>
+      <p className={css.muted}>{tr('插画设置会自动保存。', 'Illustration settings are saved automatically.')}</p>
+      <label className={css.illustrationOption}><span>{tr('显示右下角人物', 'Show the bottom-right character')}</span><input type="checkbox" checked={settings.showCornerCharacter !== false} onChange={event => edit('showCornerCharacter', event.target.checked, true)} /></label>
+      <label className={css.illustrationOption}><span>{tr('互换对话与任务页插画', 'Swap conversation and task illustrations')}</span><input type="checkbox" checked={settings.swapPageIllustrations === true} onChange={event => edit('swapPageIllustrations', event.target.checked, true)} /></label>
     </section></div></section>
   </>
 }

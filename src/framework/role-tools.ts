@@ -129,7 +129,7 @@ export interface FrameworkRoleServices {
     claim(input: Record<string, never>, binding: FrameworkRoleBinding, commandId: string): Promise<{ signals: string[] }>
   }
   artifacts?: { preserve(agent: Agent, input: { sourcePath: string; destinationPath: string; taskId: string }, binding: FrameworkRoleBinding,
-    commandId: string, options: { signal?: AbortSignal; beforeAttempt?: () => void | Promise<void>; taskOwner?: TaskCommandOwner }): Promise<unknown> }
+    commandId: string, options: { signal?: AbortSignal; beforeAttempt?: () => void | Promise<void>; beforeWrite?: (snapshot: FilesSnapshot) => Promise<void>; taskOwner?: TaskCommandOwner }): Promise<unknown> }
   capacity?(agent: Agent, input: { taskId: string; paths: string[] }, snapshot?: FilesSnapshot): Promise<unknown>
   observation?: { reset(binding: FrameworkRoleBinding, input: { probeId?: string; recoveryCheckId?: string }, commandId: string, signal: AbortSignal): Promise<unknown> }
   helper?: {
@@ -381,6 +381,10 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
     const epoch = viewEpoch
     return () => { exec.signal.throwIfAborted(); assertViewLifetime(epoch) }
   }
+  const assertBusinessNotCancelled = (selected: TaskMetadata | undefined): void => {
+    if (!binding.direct && ['Planner', 'Worker', 'Organizer'].includes(binding.role) && selected?.status === 'cancelled')
+      throw new Error('The bound Task was cancelled; its business roles can no longer write.');
+  }
   const mutate = async (id: string, request: unknown, exec: ToolRunContext,
     build: (snapshot: FilesSnapshot, value: View) => Promise<readonly FileChange[]>, suffix = '', preserveInputs = false, transferring = false,
     deriveChanges?: CommandOptions['deriveChanges']) => {
@@ -405,11 +409,11 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
           // lifecycle predicate, without rereading or re-encoding metadata.
           observedFileBytes(snapshot, paths.task(binding.taskId!), text === undefined ? undefined : Buffer.from(text, 'utf8'))
         } else if (binding.taskId && !binding.direct && ['Planner', 'Worker', 'Organizer', 'Recorder'].includes(binding.role))
-          await assertTaskLifecycle(files, snapshot, binding.taskId, binding)
+          selected = await assertTaskLifecycle(files, snapshot, binding.taskId, binding)
         if (binding.taskId && !binding.direct && ['Planner', 'Worker'].includes(binding.role)) {
-          if (!carry) selected = await readJson<TaskMetadata>(files, snapshot, paths.task(binding.taskId))
           if (selected?.route !== 'P') throw new Error('Planner and Worker mutations require their bound independent P Task.')
         }
+        assertBusinessNotCancelled(selected)
         if (binding.role === 'Worker' && !binding.direct) {
           await services.workerBusiness?.assert(binding, snapshot, carry ? selected : undefined)
         }
@@ -662,6 +666,7 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
           assertLive()
           const selectedTask = binding.taskId && !binding.direct && ['Planner', 'Worker', 'Organizer', 'Recorder'].includes(binding.role)
             ? await assertTaskLifecycle(files, snapshot, binding.taskId, binding) : undefined
+          assertBusinessNotCancelled(selectedTask)
           if (binding.taskId && !binding.direct && ['Planner', 'Worker'].includes(binding.role)) {
             if (selectedTask?.route !== 'P') throw new Error('Planner and Worker records require their bound independent P Task.')
           }
@@ -841,6 +846,7 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
         const consume = async () => {
           if (files instanceof PhysicalLocalFiles) {
             await assertRecord(current, paths.member(id, binding.member!) + '/Planner_Memory.md')
+            await withSnapshot(files, async snapshot => assertBusinessNotCancelled(await assertTaskLifecycle(files, snapshot, id, binding)))
             return consumePhysicalRecovery(files, { commandId: command(exec), taskId: id,
               lifecycleId: binding.lifecycleId, member: binding.member!, continuation: input.continuation }, liveAttempt(exec))
           }
@@ -1260,6 +1266,7 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
             if (!bytes) throw new Error('Task metadata does not exist.')
             const selected = JSON.parse(Buffer.from(bytes).toString('utf8')) as TaskMetadata
             if (selected.taskId !== id) throw new Error('Task workspace metadata identity differs.')
+            assertBusinessNotCancelled(selected)
             await assertTaskLifecycle(files, snapshot, id, binding.taskId ? binding : current)
             if (!binding.direct && ['Planner', 'Worker'].includes(binding.role) && selected.route !== 'P')
               throw new Error('Planner and Worker mutations require their bound independent P Task.')
@@ -1292,7 +1299,14 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
       const current = mutationView(input.snapshotId), id = taskId(current)
       filePath(input.destinationPath)
       return services.artifacts!.preserve(agent, { sourcePath: input.sourcePath, destinationPath: input.destinationPath, taskId: id }, binding,
-        files instanceof PhysicalLocalFiles ? physicalPublicationCommand(exec) : command(exec), { signal: exec.signal, beforeAttempt: liveAttempt(exec), taskOwner: services.taskCommandOwner?.({ taskId: id, lifecycleId: current.lifecycleId ?? binding.lifecycleId }) })
+        files instanceof PhysicalLocalFiles ? physicalPublicationCommand(exec) : command(exec), {
+          signal: exec.signal, beforeAttempt: liveAttempt(exec),
+          ...(binding.taskId && !binding.direct && ['Planner', 'Worker', 'Organizer'].includes(binding.role)
+            ? { beforeWrite: async (snapshot: FilesSnapshot) => {
+                assertBusinessNotCancelled(await assertTaskLifecycle(files, snapshot, id, binding))
+              } } : {}),
+          taskOwner: services.taskCommandOwner?.({ taskId: id, lifecycleId: current.lifecycleId ?? binding.lifecycleId })
+        })
     })
   if (binding.role !== 'Foreground' && services.observation) register('dss_reset_observation',
     'After actually receiving a native Host probe or warning, reset this execution’s inactivity cycle once using one received probeId. Other notices from an already-reset cycle return superseded with reset:false; repeating a handled probe returns already-handled. Helper may instead finish its own inspected member recovery check using recoveryCheckId: the exact id of that original helperNotifications item. This restarts only that check’s 30-minute interval; repeating an older check cannot reset a newer interval. Neither form consumes the recovery marker or sends a text reply.',
