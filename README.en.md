@@ -31,6 +31,12 @@ The two independently developed projects show **architectural convergence** in s
 - **Conversations, history and results:** Continue discussing ongoing work, add requirements, revisit conversations by date, browse task history and open results or saved attachments.
 - **Working memory and skills:** Save and revisit task records, planning notes and knowledge, and accumulate reusable skills. Local mode provides categorized record cleanup and explicit task reset.
 
+## 0.5.2 prerelease candidate
+
+Search tasks and archives by title or ID, with newest tasks first when creation time is available. The candidate also improves recovery from silent rounds and ownership during same-workline handoffs.
+
+[Release notes](docs/releases/0.5.2.md#english) · [Verification status](docs/testing/0.5.2.md)
+
 ## What’s new in 0.5.1
 
 - Improved task responsiveness, background coordination, archiving, and Git collaboration.

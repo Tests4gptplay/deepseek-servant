@@ -4,7 +4,7 @@
 
 围绕长期任务协调规划、执行与成果评价，保存进展、成果和经验，支持后续接续与方法调整。
 
-[安装与使用](#安装与使用) · [0.5.1 更新说明](docs/releases/0.5.1.md) · [0.5.0／0.5.1 对比测试](docs/testing/0.5.1.md) · [English](https://github.com/Tests4gptplay/deepseek-servant/blob/main/README.en.md)
+[安装与使用](#安装与使用) · [0.5.2 预发行说明](docs/releases/0.5.2.md) · [0.5.1 更新说明](docs/releases/0.5.1.md) · [0.5.0／0.5.1 对比测试](docs/testing/0.5.1.md) · [English](https://github.com/Tests4gptplay/deepseek-servant/blob/main/README.en.md)
 
 <p align="center">
 <img src="https://raw.githubusercontent.com/Tests4gptplay/deepseek-servant/v0.3.0/docs/images/deepseek-servant-maids-duo.webp" width="480" alt="DeepSeek Servant 短裙与长裙女仆角色设计">
@@ -37,6 +37,12 @@ DSS 是独立安装的社区插件，使用 [DeepSeek Harness（DSH）](https://
 试用时需配置专用私有仓库，并确认参与者的访问权限。
 
 [操作指南](https://github.com/Tests4gptplay/deepseek-servant/blob/main/PRIVATE_GIT.md) · [已测场景与限制](docs/testing/0.5.0.md)
+
+## 0.5.2 预发行候选
+
+任务与成果档案支持按标题或任务 ID 检索，有创建时间的新任务优先显示。后台改进静默轮次、原任务接续及 Worker 席位交接。
+
+[完整更新说明](docs/releases/0.5.2.md) · [增量验收](docs/testing/0.5.2.md)
 
 ## 0.5.1 的改进
 
