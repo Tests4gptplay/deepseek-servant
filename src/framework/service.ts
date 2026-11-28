@@ -6,7 +6,7 @@ import { frameworkArchiveSkillPublication } from './client-presentation.js'
 import { PhysicalLocalFiles } from './physical-local-files.js'
 import { legacyConversationNeedsRestoration, prepareLocalConversation } from './local-upgrade-conversation.js'
 import { LegacyLocalConversationView } from './legacy-local-conversation-view.js'
-import { taskArchiveReadPath } from './task-archive.js'
+import { taskArchiveHostKey, taskArchiveReadPath, taskMetadataRuntimeState } from './task-archive.js'
 import { ConversationAttachments, type ConversationAttachmentUpload } from './conversation-attachments.js'
 import { validateConversationAttachment, isConversationAttachmentPath, isLocalAttachmentError, LocalAttachmentError, type ConversationAttachmentReference } from './conversation-attachment-reference.js'
 import { isPhysicalWorkspaceReference, type PhysicalWorkspaceReference } from './workspace-paths.js'
@@ -27,7 +27,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { listLegacyRecordExports, readLegacyRecordExport, type LegacyRecordExportIdentity } from './legacy-record-export.js'
 import { frameworkStorageUsage, exportFrameworkRecords, exportFrameworkDocument, exportFrameworkBytes } from './maintenance.js'
 import { FrameworkManualCleanup } from './manual-cleanup.js'
-import { readTaskCleanupRecord } from './cleaner.js'
+import { readTaskCleanupRecord, taskCleanupRecord } from './cleaner.js'
 import { FrameworkKnowledge } from './knowledge.js'
 import { FrameworkTaskIndex } from './task-index.js'
 import { FrameworkTaskHistoryCache, readTaskReferenceIdentity } from './task-history.js'
@@ -44,12 +44,11 @@ import { physicalForegroundSignalSources, FrameworkConversation } from './conver
 import { FrameworkRoleRuntime } from './role-runtime.js';
 import { createRecorderCapacity } from './capacity.js';
 import { paths, readJson, readMemberStatus, taskLifecycle, isTerminalTask, type TaskMetadata } from './task-files.js';
-import { withOperationChannel, withReadOperation, withSnapshot, FilesConflictError, FilesOutcomeUnknownError, type FilesStore, type FilesSnapshot } from './transactions.js';
+import { withOperationChannel, withReadOperation, withSnapshot, FilesConflictError, FilesOutcomeUnknownError, GitFiles, type FilesStore, type FilesSnapshot } from './transactions.js';
 import { readArchivedReference, resolveTaskRequirementReference } from './recorder-retention.js';
 import { InstanceRegistration, type ObservedInstance } from './instances.js';
 import type { FrameworkClientApi, FrameworkTaskControlSubmission, FrameworkExecutionStopSubmission, FrameworkClientChange, FrameworkClientSettings, FrameworkClientView, FrameworkMode, FrameworkSendInput } from './client-contracts.js';
 import { GitAuthorityStore } from './git-authority.js'
-import { taskArchiveHostKey } from './task-archive.js'
 const model = z.object({ provider: z.string(), model: z.string(), reasoningEffort: z.string().optional() });
 const settingsSchema = z.object({ name: z.string(), userName: z.string(), localDirectory: z.string(), ownerRepo: z.string(), repositoryDirectory: z.string(),
     collaborationId: z.string().min(1), workerSeats: z.number().int().nonnegative(), workspace: z.string(), presetId: z.string().optional(), permissionPreset: z.string().optional(),
@@ -740,11 +739,13 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             access.taskIndex ??= new FrameworkTaskIndex(access.connection.files, error => this.report(mode, error));
             const taskEntries = await access.connection.files.listDirectory(snapshot, 'tasks/');
             const tasks = await access.taskIndex.list(snapshot, taskEntries, signal);
+            const currentTaskIds = new Set(tasks.map(task => task.taskId));
             for (const task of tasks) { archiveTasks.set(taskArchiveReadPath(task), task); archiveTasks.set(paths.archive(task), task); }
             access.taskHistoryCache ??= new FrameworkTaskHistoryCache(access.connection.files);
             const history = await access.taskHistoryCache.list(snapshot, report, signal);
+            const historyIds = new Set(history.map(task => task.taskId));
             for (const task of history) {
-                if (tasks.some(current => current.taskId === task.taskId)) continue;
+                if (currentTaskIds.has(task.taskId)) continue;
                 archiveTasks.set(paths.archive(task), task);
                 if (task.historyCleared) {
                     if (input.includeArchives && task.resultPaths?.length) base.archives.push({ path: task.resultPaths[0]!, title: task.sourcePath, taskId: task.taskId, files: task.resultPaths });
@@ -772,10 +773,10 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
                     }
                     const originalView = access.originalTasks.view(signal);
                     base.originalTaskRead = originalView.status;
-                    pendingOriginalTasks = originalView.rows.filter(row => !history.some(task => task.taskId === row.task.taskId));
+                    pendingOriginalTasks = originalView.rows.filter(row => !historyIds.has(row.task.taskId));
                 } catch (error) { report(error); }
             }
-            const originalTasks = pendingOriginalTasks.filter(row => !tasks.some(task => task.taskId === row.task.taskId));
+            const originalTasks = pendingOriginalTasks.filter(row => !currentTaskIds.has(row.task.taskId));
             const pendingOriginalIds = new Set(pendingOriginalTasks.map(row => row.task.taskId));
             const allVisibleTasks = [...tasks, ...originalTasks.map(row => row.task)];
             const controls = allVisibleTasks.length ? await this.controls(access).taskStates(allVisibleTasks, snapshot) : undefined;
@@ -795,7 +796,11 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             signal?.throwIfAborted();
             for (const task of tasks) {
                 signal?.throwIfAborted();
-                const storedCleanup = (isTerminalTask(task) || mode === 'local') ? await readTaskCleanupRecord(access.connection.files, snapshot, task) : undefined;
+                const storedCleanup = (isTerminalTask(task) || mode === 'local')
+                    ? access.connection.files instanceof GitFiles
+                        ? taskCleanupRecord(task, taskMetadataRuntimeState(task))
+                        : await readTaskCleanupRecord(access.connection.files, snapshot, task)
+                    : undefined;
                 const cleanup = storedCleanup && taskLifecycle(storedCleanup) === taskLifecycle(task) ? storedCleanup : undefined;
                 signal?.throwIfAborted();
                 if (cleanup?.version === 1 && cleanup.taskId === task.taskId && cleanup.historyCleared === true) {
@@ -1095,7 +1100,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
     /** Explicit maintenance uses the existing background owner when present. A
      * disconnected Local scope gets only a mechanical lifecycle owner: no
      * registration, heartbeat, loop or Agent is started. */
-    private async withManualCleanup<T>(access: Access, operation: (cleanup: FrameworkManualCleanup, runtime: FrameworkRoleRuntime) => Promise<T>, owned?: FrameworkRoleRuntime): Promise<T> {
+    private async withManualCleanup<T>(access: Access, operation: (cleanup: FrameworkManualCleanup) => Promise<T>, owned?: FrameworkRoleRuntime): Promise<T> {
         if (access.conversation.scope.mode !== 'local') throw new Error('Manual record cleanup is a Local user action.');
         const settings = this.config('local').settings;
         const active = owned ?? this.running.get('local')?.runtime;
@@ -1107,7 +1112,7 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
         if (runtime.config.scope !== access.connection.scope) throw new Error('Cleanup belongs to another Local storage scope.');
         const cleanup = new FrameworkManualCleanup(access.connection.files, access.connection.transactions, access.conversation, runtime);
         let result: T | undefined; const failures: unknown[] = [];
-        try { result = await operation(cleanup, runtime); } catch (error) { failures.push(error); }
+        try { result = await operation(cleanup); } catch (error) { failures.push(error); }
         finally { if (!active) try { await runtime.dispose(); } catch (error) { failures.push(error); } }
         if (failures.length === 1) throw failures[0];
         if (failures.length) throw new AggregateError(failures, 'Manual cleanup and lifecycle disposal failed.');
@@ -1115,9 +1120,12 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
     }
     async cleanupPreview(input: Parameters<FrameworkClientApi['cleanupPreview']>[0]) {
         await this.initializing;
-        return this.withAccessOperation(input, access => this.withManualCleanup(access, async cleanup => input.action === 'all' ? cleanup.previewAll()
-            : input.action === 'conversation' ? cleanup.previewConversation()
-            : input.action && input.action !== 'tasks' ? cleanup.previewFiles(input.action) : cleanup.previewTasks()));
+        return this.withAccessOperation<Awaited<ReturnType<FrameworkClientApi['cleanupPreview']>>>(input, async access => {
+            if (input.action === 'planning' || input.action === 'debug' || input.action === 'archives')
+                return await new FrameworkManualCleanup(access.connection.files, access.connection.transactions, access.conversation).previewFiles(input.action);
+            return await this.withManualCleanup(access, async cleanup => input.action === 'all' ? cleanup.previewAll()
+                : input.action === 'conversation' ? cleanup.previewConversation() : cleanup.previewTasks());
+        });
     }
     async cleanupRecords(input: Parameters<FrameworkClientApi['cleanupRecords']>[0]) {
         // Reserve the existing conversation boundary before readiness can yield.
@@ -1126,18 +1134,18 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             await this.modeReady(input.mode);
             this.assertOpen();
             const access = await this.access(input.mode); this.checkScope(access, input.storageScope);
-            const result = await this.withManualCleanup(access, async (cleanup, runtime) => {
-                if (input.action === 'tasks') {
-                    const result = await cleanup.clearTasks(input.commandId, input.preview, input.confirmation);
-                    for (const task of input.preview.tasks) await runtime.prepareTaskCleanup(task.taskId);
-                    return result;
-                }
+            const run = async (cleanup: FrameworkManualCleanup) => {
+                if (input.action === 'tasks') return cleanup.clearTasks(input.commandId, input.preview, input.confirmation);
                 if (input.action === 'conversation') return cleanup.clearConversation(input.commandId, input.confirmation, input.preview);
                 if (input.action === 'all') return cleanup.clearAll(input.commandId, input.preview, input.confirmation);
                 if (input.action === 'archives') return cleanup.clearArchives(input.commandId, input.preview, input.confirmation);
                 if (input.action === 'debug') return cleanup.clearDebug(input.commandId, input.preview, input.confirmation);
                 return cleanup.clearPlanning(input.commandId, input.confirmation, input.preview);
-            });
+            };
+            const fileOnly = input.action === 'planning' || input.action === 'debug' || input.action === 'archives';
+            const result = fileOnly
+                ? await run(new FrameworkManualCleanup(access.connection.files, access.connection.transactions, access.conversation))
+                : await this.withManualCleanup(access, cleanup => run(cleanup));
             this.archiveViews.delete(input.mode); access.legacyExports = undefined; access.legacyArtifacts = undefined; this.changed(); return result;
         }, undefined, input.action === 'conversation' || input.action === 'all');
         return operation;

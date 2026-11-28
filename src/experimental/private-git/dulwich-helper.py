@@ -698,7 +698,7 @@ class Engine:
             store = self.next_store
             self.next_store += 1
             self.stores[store] = candidate
-        return {'store': store, 'objects': len(candidate.object_store._data), 'packBytes': 0,
+        return {'store': store,
                 'rawBytes': sum(obj.raw_length() for obj in candidate.object_store._data.values()), 'roots': roots}
 
     def execute(self, request):
@@ -706,10 +706,6 @@ class Engine:
         if request['op'] == 'hello':
             import dulwich
             return {'python': list(sys.version_info[:3]), 'dulwich': list(dulwich.__version__), 'urllib3': urllib3.__version__}
-        if request['op'] == 'diagnostics':
-            with self.lock:
-                stores = list(self.stores.items())
-                return {'pid': os.getpid(), 'stores': [{'store': key, 'objects': len(repo.object_store._data), 'rawBytes': sum(obj.raw_length() for obj in repo.object_store._data.values())} for key, repo in stores]}
         store = request.get('store', 0)
         if request['op'] == 'release':
             with self.lock:

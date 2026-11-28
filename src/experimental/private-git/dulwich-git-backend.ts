@@ -281,9 +281,9 @@ export class DulwichGitBackend implements GitObjectBackend {
   async storageBytes(): Promise<number> { return await this.call({ op: 'storageBytes' }) as number }
   async replacement(roots: readonly { head: string; tree?: string }[], signal: AbortSignal, retainedBlobIds?: ReadonlySet<string>) {
     const result = await this.call({ op: 'replacement', roots, blobs: [...retainedBlobIds ?? []] }, signal) as {
-      store: number; objects: number; packBytes: number; rawBytes: number; roots: { head: string; tree: string }[]
+      store: number; rawBytes: number; roots: { head: string; tree: string }[]
     }
-    return { ...result, transport: new DulwichGitBackend({}, { helper: this.helper, store: result.store }) }
+    return { transport: new DulwichGitBackend({}, { helper: this.helper, store: result.store }), rawBytes: result.rawBytes, roots: result.roots }
   }
   async release(): Promise<void> {
     if (this.closed) return

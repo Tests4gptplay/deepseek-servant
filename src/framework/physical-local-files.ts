@@ -166,6 +166,9 @@ export class PhysicalLocalFiles implements FilesStore {
   removeDirectory(path: string, coordinateRemoval = false): Promise<void> {
     return this.own(() => this.records.removeDirectory(path, coordinateRemoval))
   }
+  removeDirectoryObserved(path: string, observedVersion: string | null, coordinateRemoval = false): Promise<'removed' | 'missing' | 'changed'> {
+    return this.own(() => this.records.removeDirectoryObserved(path, observedVersion, coordinateRemoval))
+  }
   removeEmptyDirectory(path: string): Promise<boolean> { return this.own(() => this.records.removeEmptyDirectory(path)) }
   async commit(snapshot: FilesSnapshot, changes: readonly FileChange[], message: string, _options?: FileCommitOptions): Promise<FileReceipt> {
     this.assertOpen(); this.view(snapshot); validateChanges(changes)

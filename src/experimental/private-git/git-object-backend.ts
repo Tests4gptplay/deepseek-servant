@@ -48,7 +48,7 @@ export interface GitObjectBackend {
   execute(command: GitObjectCommand, options: GitCommandOptions): Promise<Buffer>
   storageBytes(): Promise<number>
   replacement(roots: readonly { head: string; tree?: string }[], signal: AbortSignal, retainedBlobIds?: ReadonlySet<string>): Promise<{
-    transport: GitObjectBackend; objects: number; packBytes: number; rawBytes: number; roots: { head: string; tree: string }[]
+    transport: GitObjectBackend; rawBytes: number; roots: { head: string; tree: string }[]
   }>
   release(): Promise<void>
 }

@@ -29,22 +29,45 @@ export class SkillReadBases {
   clear(): void { this.reads.clear(); this.latest.clear() }
 }
 
-interface Edit { start: number; end: number; lines: string[] }
+interface Edit { start: number; end: number; lines: string[]; characters: number }
 export interface SkillMergeRegion { baseStartLine: number; baseEndLine: number; base: string; proposed: string; current: string }
-export type SkillTextMerge = { merged: true; text: string } | { merged: false; reason: 'overlapping-edits' | 'delete-modify' | 'concurrent-create'; conflicts: SkillMergeRegion[] }
+export type SkillTextMerge = { merged: true; text: string } | { merged: false; reason: 'overlapping-edits' | 'delete-modify' | 'concurrent-create' | 'merge-budget-exceeded'; conflicts: SkillMergeRegion[] }
 const lines = (text: string): string[] => text.match(/[^\n]*\n|[^\n]+$/g) ?? []
 const sameLines = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((line, index) => line === b[index])
+const mergeWorkBudget = 4_000_000, mergeConflictLimit = 128, mergeConflictCharacterBudget = 4_000_000
+interface MergeBudget { work: number; conflictCharacters: number }
+
+function spendWork(budget: MergeBudget, amount: number): boolean {
+  if (amount > budget.work) return false
+  budget.work -= amount
+  return true
+}
+
+function spendProduct(budget: MergeBudget, left: number, right: number): boolean {
+  if (left && right && left > Math.floor(budget.work / right)) return false
+  return spendWork(budget, left * right)
+}
 
 /** Exact Hirschberg LCS. Only linear rows are retained, so file size is not
  * a business conflict. Ties consistently choose the earliest next-side split.
  * Every emitted edit still refers to the original base, including newlines. */
-function edits(base: readonly string[], next: readonly string[]): Edit[] {
+function edits(base: readonly string[], next: readonly string[], budget: MergeBudget): Edit[] | undefined {
   let prefix = 0, suffix = 0
-  while (prefix < base.length && prefix < next.length && base[prefix] === next[prefix]) prefix++
-  while (suffix < base.length - prefix && suffix < next.length - prefix && base[base.length - suffix - 1] === next[next.length - suffix - 1]) suffix++
+  while (prefix < base.length && prefix < next.length) {
+    if (!spendWork(budget, 1)) return
+    if (base[prefix] !== next[prefix]) break
+    prefix++
+  }
+  while (suffix < base.length - prefix && suffix < next.length - prefix) {
+    if (!spendWork(budget, 1)) return
+    if (base[base.length - suffix - 1] !== next[next.length - suffix - 1]) break
+    suffix++
+  }
   const aEnd = base.length - suffix, bEnd = next.length - suffix
-  const row = (aStart: number, aEnd: number, bStart: number, bEnd: number, reverse: boolean): Uint32Array => {
-    const width = bEnd - bStart, lengths = new Uint32Array(width + 1)
+  const row = (aStart: number, aEnd: number, bStart: number, bEnd: number, reverse: boolean): Uint32Array | undefined => {
+    const width = bEnd - bStart
+    if (!spendProduct(budget, aEnd - aStart, width)) return
+    const lengths = new Uint32Array(width + 1)
     for (let i = 0; i < aEnd - aStart; i++) {
       let diagonal = 0
       for (let j = 1; j <= width; j++) {
@@ -57,11 +80,16 @@ function edits(base: readonly string[], next: readonly string[]): Edit[] {
     return lengths
   }
   // Return only the split, so neither DP row is retained by recursive frames.
-  const split = (aStart: number, middle: number, aEnd: number, bStart: number, bEnd: number): number => {
-    const left = row(aStart, middle, bStart, bEnd, false), right = row(middle, aEnd, bStart, bEnd, true)
+  const split = (aStart: number, middle: number, aEnd: number, bStart: number, bEnd: number): number | undefined => {
+    const left = row(aStart, middle, bStart, bEnd, false)
+    if (!left) return
+    const right = row(middle, aEnd, bStart, bEnd, true)
+    if (!right) return
+    const width = bEnd - bStart
+    if (!spendWork(budget, width + 1)) return
     let best = -1, at = 0
-    for (let j = 0; j <= bEnd - bStart; j++) {
-      const length = left[j]! + right[bEnd - bStart - j]!
+    for (let j = 0; j <= width; j++) {
+      const length = left[j]! + right[width - j]!
       if (length > best) { best = length; at = j }
     }
     return bStart + at
@@ -69,20 +97,31 @@ function edits(base: readonly string[], next: readonly string[]): Edit[] {
   const result: Edit[] = []
   let cursorA = prefix, cursorB = prefix
   const match = (i: number, j: number) => {
-    if (i > cursorA || j > cursorB) result.push({ start: cursorA, end: i, lines: next.slice(cursorB, j) })
+    if (i > cursorA || j > cursorB) {
+      const replacement = next.slice(cursorB, j)
+      result.push({ start: cursorA, end: i, lines: replacement,
+        characters: replacement.reduce((total, line) => total + line.length, 0) })
+    }
     cursorA = i + 1; cursorB = j + 1
   }
-  const visit = (aStart: number, aEnd: number, bStart: number, bEnd: number): void => {
-    if (aStart === aEnd || bStart === bEnd) return
+  const visit = (aStart: number, aEnd: number, bStart: number, bEnd: number): boolean => {
+    if (aStart === aEnd || bStart === bEnd) return true
     if (aEnd - aStart === 1) {
-      for (let j = bStart; j < bEnd; j++) if (base[aStart] === next[j]) { match(aStart, j); break }
-      return
+      for (let j = bStart; j < bEnd; j++) {
+        if (!spendWork(budget, 1)) return false
+        if (base[aStart] === next[j]) { match(aStart, j); break }
+      }
+      return true
     }
     const middle = aStart + Math.floor((aEnd - aStart) / 2), at = split(aStart, middle, aEnd, bStart, bEnd)
-    visit(aStart, middle, bStart, at); visit(middle, aEnd, at, bEnd)
+    return at !== undefined && visit(aStart, middle, bStart, at) && visit(middle, aEnd, at, bEnd)
   }
-  visit(prefix, aEnd, prefix, bEnd)
-  if (cursorA < aEnd || cursorB < bEnd) result.push({ start: cursorA, end: aEnd, lines: next.slice(cursorB, bEnd) })
+  if (!visit(prefix, aEnd, prefix, bEnd)) return
+  if (cursorA < aEnd || cursorB < bEnd) {
+    const replacement = next.slice(cursorB, bEnd)
+    result.push({ start: cursorA, end: aEnd, lines: replacement,
+      characters: replacement.reduce((total, line) => total + line.length, 0) })
+  }
   return result
 }
 const overlaps = (a: Edit, b: Edit): boolean => {
@@ -104,12 +143,36 @@ export function mergeSkillText(baseText: string | null, proposed: string, curren
   if (baseText === null || current === null) return { merged: false,
     reason: baseText === null ? 'concurrent-create' : 'delete-modify', conflicts: [] }
   if (proposed === baseText) return { merged: true, text: current }
-  const base = lines(baseText), own = edits(base, lines(proposed)), published = edits(base, lines(current))
+  const base = lines(baseText), proposedLines = lines(proposed), currentLines = lines(current)
+  const budget: MergeBudget = { work: mergeWorkBudget, conflictCharacters: mergeConflictCharacterBudget }
+  const own = edits(base, proposedLines, budget)
+  if (!own) return { merged: false, reason: 'merge-budget-exceeded', conflicts: [] }
+  const published = edits(base, currentLines, budget)
+  if (!published || !spendProduct(budget, own.length, published.length))
+    return { merged: false, reason: 'merge-budget-exceeded', conflicts: [] }
   const duplicates = new Set<Edit>(), conflicts: SkillMergeRegion[] = []
+  let baseCharacterOffsets: Float64Array | undefined
+  const baseCharacters = (start: number, end: number): number => {
+    if (!baseCharacterOffsets) {
+      baseCharacterOffsets = new Float64Array(base.length + 1)
+      for (let index = 0; index < base.length; index++) baseCharacterOffsets[index + 1] = baseCharacterOffsets[index]! + base[index]!.length
+    }
+    return baseCharacterOffsets[end]! - baseCharacterOffsets[start]!
+  }
+  const appliedCharacters = (change: Edit, start: number, end: number): number =>
+    baseCharacters(start, change.start) + change.characters + baseCharacters(change.end, end)
   for (const left of own) for (const right of published) {
     if (left.start === right.start && left.end === right.end && sameLines(left.lines, right.lines)) { duplicates.add(left); continue }
     if (!overlaps(left, right)) continue
+    if (conflicts.length === mergeConflictLimit)
+      return { merged: false, reason: 'merge-budget-exceeded', conflicts: [] }
     const start = Math.min(left.start, right.start), end = Math.max(left.end, right.end)
+    if (!baseCharacterOffsets && !spendWork(budget, base.length))
+      return { merged: false, reason: 'merge-budget-exceeded', conflicts: [] }
+    const characters = baseCharacters(start, end) + appliedCharacters(left, start, end) + appliedCharacters(right, start, end)
+    if (characters > budget.conflictCharacters)
+      return { merged: false, reason: 'merge-budget-exceeded', conflicts: [] }
+    budget.conflictCharacters -= characters
     conflicts.push({ baseStartLine: start + 1, baseEndLine: end,
       base: base.slice(start, end).join(''), proposed: apply(base, [left], start, end), current: apply(base, [right], start, end) })
   }

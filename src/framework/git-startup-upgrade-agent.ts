@@ -43,7 +43,7 @@ export async function inspectGitUpgradeName(files: FilesStore, name: string, sig
 /** Explicit assignment in the authorized Git Files root. Only the one-time
  * package signal may prepare it; ordinary activation never recreates it. */
 export const gitUpgradeWakePath = 'technical/upgrades/g09-skills-once.json'
-export interface GitUpgradeItem { sourcePath: string; originals: Array<{ path: string; sha256: string }> }
+export interface GitUpgradeItem { sourcePath: string; originals: Array<{ path: string }> }
 export interface GitUpgradeWake { version: 1; nativeSessions: string[]; kind: 'dss-g09-git-skills'; operationId: string; pending: GitUpgradeItem[] }
 const hash = (value: string | Uint8Array) => createHash('sha256').update(value).digest('hex')
 const folderOf = (path: string) => path.slice(0, path.lastIndexOf('/') + 1)
@@ -62,10 +62,12 @@ export function parseGitUpgradeWake(text: string): GitUpgradeWake {
     folders.add(folder)
     const paths = new Set<string>()
     for (const original of item.originals) {
-      if (![folder + 'record.json', folder + 'legacy-git.json'].includes(original.path) || !/^[0-9a-f]{64}$/.test(original.sha256) || paths.has(original.path)) throw new Error('Invalid assigned original hash.')
+      if (!original || typeof original.path !== 'string'
+        || ![folder + 'record.json', folder + 'legacy-git.json'].includes(original.path) || paths.has(original.path))
+        throw new Error('Invalid assigned original path.')
       paths.add(original.path)
     }
-    if (!paths.has(item.sourcePath)) throw new Error('Selected source has no original hash.')
+    if (!paths.has(item.sourcePath)) throw new Error('Selected source is absent from its assigned originals.')
   }
   return wake
 }

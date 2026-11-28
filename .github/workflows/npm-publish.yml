@@ -32,6 +32,7 @@ jobs:
       matrix:
         package: ${{ fromJSON(inputs.package_target == 'unscoped' && '["deepseek-servant"]' || inputs.package_target == 'scoped' && '["@tests4gptplay/deepseek-servant"]' || '["deepseek-servant","@tests4gptplay/deepseek-servant"]') }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
       contents: read
       id-token: write
@@ -40,7 +41,7 @@ jobs:
       DSS_RELEASE_SHA: ${{ inputs.sha256 }}
       DSS_PACKAGE: ${{ matrix.package }}
     steps:
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24.22.1'
           registry-url: 'https://registry.npmjs.org'
@@ -52,7 +53,7 @@ jobs:
           [[ "$DSS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$DSS_RELEASE_SHA" =~ ^[a-f0-9]{64}$ ]]
           mkdir staging dist
-          curl -fLsS --retry 2 "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${DSS_VERSION}/deepseek-servant-${DSS_VERSION}.tgz" -o release.tgz
+          curl -fLsS --retry 2 --connect-timeout 15 --max-time 120 "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${DSS_VERSION}/deepseek-servant-${DSS_VERSION}.tgz" -o release.tgz
           echo "$DSS_RELEASE_SHA  release.tgz" | sha256sum -c -
           python3 - <<'PY'
           import json, os, tarfile
@@ -89,7 +90,7 @@ jobs:
           PY
           (cd staging/package && npm pack --offline --ignore-scripts --pack-destination ../../dist)
           python3 - <<'PY'
-          import base64, hashlib, json, os, tarfile
+          import hashlib, json, os, tarfile
           from pathlib import Path
 
           def payload(path):
@@ -115,7 +116,7 @@ jobs:
           assert actual == expected
           assert actual['name'] == os.environ['DSS_PACKAGE'] and actual['version'] == os.environ['DSS_VERSION']
           data = p.read_bytes()
-          print(json.dumps({'name': actual['name'], 'version': actual['version'], 'files':len(new), 'sha256':hashlib.sha256(data).hexdigest(), 'integrity':'sha512-'+base64.b64encode(hashlib.sha512(data).digest()).decode()}))
+          print(json.dumps({'name': actual['name'], 'version': actual['version'], 'files':len(new), 'sha256':hashlib.sha256(data).hexdigest()}))
           PY
       - name: Publish through npm Trusted Publishing
         shell: bash
@@ -127,7 +128,7 @@ jobs:
           cat > verify-registry.mjs <<'JS'
           const { DSS_PACKAGE, DSS_VERSION, DSS_INTEGRITY } = process.env
           const url = 'https://registry.npmjs.org/' + encodeURIComponent(DSS_PACKAGE) + '/' + DSS_VERSION
-          const r = await fetch(url, { cache: 'no-store' })
+          const r = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(15_000) })
           if (r.status === 404) process.exit(2)
           if (!r.ok) throw new Error('npm registry HTTP ' + r.status)
           const m = await r.json()
@@ -136,15 +137,20 @@ jobs:
           JS
           if node verify-registry.mjs; then
             echo 'The exact verified version is already published.'
+            exit 0
           else
             rc=$?
             test "$rc" -eq 2
-            npm publish "${tgz[0]}" --access public --tag latest --ignore-scripts --registry https://registry.npmjs.org
           fi
+          publish_rc=0
+          timeout --signal=TERM --kill-after=30s 5m npm publish "${tgz[0]}" --access public --tag latest --ignore-scripts --registry https://registry.npmjs.org || publish_rc=$?
           for attempt in $(seq 1 15); do
             if node verify-registry.mjs; then exit 0; else rc=$?; fi
             test "$rc" -eq 2
-            sleep 4
+            if [ "$attempt" -lt 15 ]; then sleep 4; fi
           done
+          if [ "$publish_rc" -ne 0 ]; then
+            echo "npm publish returned ${publish_rc}; registry did not confirm the exact bytes."
+          fi
           echo 'The registry has not confirmed the version yet.'
           exit 1

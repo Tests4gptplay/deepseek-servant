@@ -53,7 +53,10 @@ export function observeDshProgress(agent: Agent, listener: (event: DshProgress) 
     if (kind) listener({ kind, source: 'assistant-stream', observedAt: now() })
   })
   const tool = agent.ctx.on('tools/result', (exec, result) => {
-    if (exec.agent === agent && !result.isError) listener({ kind: 'tool-progress', source: 'tools/result', observedAt: now() })
+    // The legacy observation acknowledgement is not business progress and must
+    // never postpone the very inactivity stages it acknowledges.
+    if (exec.agent === agent && exec.name !== 'dss_reset_observation' && !result.isError)
+      listener({ kind: 'tool-progress', source: 'tools/result', observedAt: now() })
     return undefined
   })
   const jobs = registry?.events.subscribe({ owner: agent.id }, event => {

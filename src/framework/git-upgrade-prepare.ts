@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import { gitUpgradeWakePath, parseGitUpgradeWake, type GitUpgradeWake } from './git-startup-upgrade-agent.js'
 import { readLegacySkillSource } from './legacy-skill-source.js'
 import type { FilesSnapshot, FilesStore } from './transactions.js'
@@ -11,14 +11,14 @@ export async function prepareGitUpgradeWake(files: FilesStore, snapshot: FilesSn
   const current = await files.read(snapshot, gitUpgradeWakePath)
   if (current !== undefined) return { status: 'existing', wake: parseGitUpgradeWake(current), issues: [] }
   const entries = await files.list(snapshot, 'skills', { names: ['record.json', 'legacy-git.json'] })
-  const folders = new Map<string, Array<{ path: string; sha256: string }>>(), issues: Preparation['issues'] = []
+  const folders = new Map<string, Array<{ path: string }>>(), issues: Preparation['issues'] = []
   for (const entry of entries) {
     signal.throwIfAborted()
     if (!/^skills\/(?:[^/\\\0\r\n]+\/)+(?:record\.json|legacy-git\.json)$/.test(entry.path)) continue
     const bytes = await files.readBytes(snapshot, entry.path)
     if (bytes === undefined) throw new Error('Listed original is unavailable in this exact snapshot: ' + entry.path)
     const folder = entry.path.slice(0, entry.path.lastIndexOf('/') + 1), originals = folders.get(folder) ?? []
-    originals.push({ path: entry.path, sha256: createHash('sha256').update(bytes).digest('hex') }); folders.set(folder, originals)
+    originals.push({ path: entry.path }); folders.set(folder, originals)
     try { readLegacySkillSource(entry.path, new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)) }
     catch (error) { issues.push({ path: entry.path, reason: error instanceof Error ? error.message : String(error) }) }
   }

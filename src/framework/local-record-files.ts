@@ -63,6 +63,8 @@ const mutationKey = (target: string): string => process.platform === 'win32' ? t
 const fileIdentity = (info: BigIntStats): string => [info.dev, info.ino, info.birthtimeNs].join(':')
 const fileObservation = (info: BigIntStats): string =>
   'local-file:' + [info.dev, info.ino, info.size, info.mtimeNs, info.ctimeNs, info.birthtimeNs].join(':')
+const directoryObservation = (info: BigIntStats): string =>
+  'local-directory:' + [info.dev, info.ino, info.birthtimeNs].join(':')
 
 /** Preserve the existing slash-separated filePath contract. Windows-only name
  * restrictions apply on Windows, not to valid POSIX filenames. The explicit
@@ -199,14 +201,14 @@ export class LocalRecordFiles {
     finally { await handle.close() }
   }
   /** Exact file-or-directory observation for callers that accept either. */
-  async entryInfo(path: string): Promise<{ bytes: number; version: string; directory?: false } | { directory: true } | undefined> {
+  async entryInfo(path: string): Promise<{ bytes: number; version: string; directory?: false } | { directory: true; version: string } | undefined> {
     const target = this.target(path)
     if (!await this.directory(dirname(target), false)) return undefined
-    let named
-    try { named = await fs.lstat(target) }
+    let named: BigIntStats
+    try { named = await fs.lstat(target, { bigint: true }) }
     catch (error) { if (missing(error)) return undefined; throw error }
     if (named.isSymbolicLink() || !named.isFile() && !named.isDirectory()) throw new Error('Not an ordinary Local record file or directory: ' + target)
-    if (named.isDirectory()) return { directory: true }
+    if (named.isDirectory()) return { directory: true, version: directoryObservation(named) }
     let handle
     try { handle = await fs.open(target, constants.O_RDONLY | noFollow | nonBlock) }
     catch (error) { if (missing(error)) return undefined; throw error }
@@ -821,6 +823,24 @@ export class LocalRecordFiles {
     const remove = async () => {
       if (!await this.directory(target, false)) return
       await fs.rm(target, { recursive: true, force: true })
+    }
+    return coordinateRemoval ? mutate(target, remove) : remove()
+  }
+  /** Remove only the fixed directory observed by a manual clear preview. This
+   * checks the directory itself and never enumerates or hashes its children. A
+   * directory recreated after an interrupted clear has a different identity and
+   * is preserved instead of being consumed by replay. */
+  removeDirectoryObserved(path: string, observedVersion: string | null, coordinateRemoval = false): Promise<'removed' | 'missing' | 'changed'> {
+    const target = this.target(path)
+    const remove = async (): Promise<'removed' | 'missing' | 'changed'> => {
+      if (!await this.directory(dirname(target), false)) return 'missing'
+      let info: BigIntStats
+      try { info = await fs.lstat(target, { bigint: true }) }
+      catch (error) { if (missing(error)) return 'missing'; throw error }
+      if (!info.isDirectory() || info.isSymbolicLink() || observedVersion === null
+        || directoryObservation(info) !== observedVersion) return 'changed'
+      try { await fs.rm(target, { recursive: true, force: true }); return 'removed' }
+      catch (error) { if (missing(error)) return 'missing'; throw error }
     }
     return coordinateRemoval ? mutate(target, remove) : remove()
   }

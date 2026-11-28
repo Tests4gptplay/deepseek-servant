@@ -1,6 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { PluginPackages, ProfileContext } from '@deepseek-ai/dsh-app-boot'
-import { createHash } from 'node:crypto'
 import { realpath } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -15,7 +14,7 @@ export interface GitUpgradePackageFacts {
   resolution: { scope: 'installation' | 'profile'; declarer: string } | undefined
   profileLocal: boolean | undefined
   linkedRoot: string | undefined
-  startup: { state: 'absent' } | { state: 'present'; sha256: string; version: string }
+  startup: { state: 'absent' } | { state: 'present'; version: string }
 }
 export type GitUpgradePackageObservation =
   | { state: 'observed'; facts: GitUpgradePackageFacts }
@@ -46,7 +45,7 @@ export async function observeGitUpgradePackage(ctx: Context, hostModuleURL: stri
     if (marker?.kind !== 'dss-g09-git-skills-bootstrap' || marker.version !== 1) {
       throw new Error('Unrecognized DSS Git upgrade startup file.')
     }
-    startup = { state: 'present', version: observed.version, sha256: createHash('sha256').update(bytes).digest('hex') }
+    startup = { state: 'present', version: observed.version }
   }
   return { state: 'observed', facts: { packageDirectory, packageVersion: selected.version, hostModulePath,
     profile: profile ? { directory: profile.dir, installAnchor: profile.installAnchor } : undefined,

@@ -1,7 +1,7 @@
 import { rebuildGitDirectoryIndex, type GitDirectoryIndex, type GitDirectoryIndexOptions } from '../../framework/git-directory-index.js'
 import { matchesFileSelection, mayContainSelectedFiles } from '../../framework/file-list-selection.js'
 import type { GitReadDependencies } from './contracts.js'
-import { annotateFailure, failureDetails, type FailureDetails } from '../../diagnostics/failure-details.js'
+import { annotateFailure, failureDetails } from '../../diagnostics/failure-details.js'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
@@ -18,13 +18,6 @@ export interface RemoteGitOptions {
   dulwich?: DulwichGitOptions
   signal?: AbortSignal
   fetcher?: GitHubFetch
-  /** Optional safe timing seam: no URL, token, arguments, input or content.
-   * These are semantic operations; network/pack counts remain unknown. */
-  onOperation?: (event: { channel: GitOperationChannel; operation: GitObjectCommand['op']; phase: 'start' | 'end'; elapsedMs?: number; success?: boolean; failureDetails?: FailureDetails; httpRequests: null; packBytes: null }) => void
-  /** Growth trigger for background transport reclamation; not a hard cap on live snapshots. */
-  cacheGrowthBytes?: number
-  /** Optional diagnostics; no credentials or business contents. */
-  onCacheReplacement?: (event: { channel: GitOperationChannel; status: 'replaced' | 'failed'; elapsedMs: number; beforeBytes?: number; afterBytes?: number; error?: unknown }) => void
 }
 interface Entry { path: string; sha: string; type: 'blob' | 'tree' | 'commit'; mode: string; size?: number }
 interface Commit { tree: string; parents: string[]; message: string; timestamp: number }
@@ -47,6 +40,9 @@ interface Session { token?: ResolvedToken; scope: Scope; cache: ObjectCache; sig
 interface State { observedHead: boolean; publicationSequence: number; scope: Scope; cache: ObjectCache; signal?: AbortSignal; loaded: Set<string>; pathErrors: Map<string, unknown> }
 const oid = (value: string) => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value)
 const sha256 = (value: string | Uint8Array) => createHash('sha256').update(value).digest('hex')
+const emptyGitBlobSha1 = createHash('sha1').update('blob 0\0').digest('hex')
+const emptyGitBlobSha256 = createHash('sha256').update('blob 0\0').digest('hex')
+const isEmptyGitBlob = (value: string): boolean => value === (value.length === 64 ? emptyGitBlobSha256 : emptyGitBlobSha1)
 type CapturedGitChange = { path: string; deleteTree?: true } & ({ content: null; bytes?: never } | { bytes: Buffer; content?: never })
 const changeBytes = (change: GitChange): Buffer | null => {
   if (change.deleteTree !== undefined && (change.deleteTree !== true || change.content !== null)) throw new Error('A directory deletion must explicitly carry null content.')
@@ -88,7 +84,6 @@ export class RemoteGitRepository implements GitRepository {
   constructor(private readonly binding: () => RepoBinding, private readonly tokens: TokenSource,
     private readonly options: RemoteGitOptions = {}) {
     this.signal = options.signal ? AbortSignal.any([this.epoch.signal, options.signal]) : this.epoch.signal
-    if (options.cacheGrowthBytes !== undefined && (!Number.isSafeInteger(options.cacheGrowthBytes) || options.cacheGrowthBytes <= 0)) throw new Error('Git cache growth trigger must be a positive byte count.')
   }
   private channel(): GitOperationChannel {
     const owner = this.channels.getStore()
@@ -158,10 +153,9 @@ export class RemoteGitRepository implements GitRepository {
     // background generation replacement, never a timer or a reader barrier.
     if (scope.signal.aborted || scope.channels.get(cache.channel) !== cache || cache.replacing || !cache.dirty || !cache.negotiationTip) return
     cache.dirty = false
-    const start = performance.now()
     const replacing = (async () => {
       const beforeBytes = await cache.transport.storageBytes()
-      const growth = this.options.cacheGrowthBytes ?? 40 * 1024 * 1024
+      const growth = 40 * 1024 * 1024
       if (beforeBytes < Math.max(growth, cache.floorBytes + growth / 2)) return
       this.check(scope)
       const head = cache.negotiationTip!, selected = new Set<string>()
@@ -184,11 +178,8 @@ export class RemoteGitRepository implements GitRepository {
         next.floorBytes = result.rawBytes
         this.check(scope)
         scope.caches.add(next); scope.channels.set(cache.channel, next); cache.retired = true
-        this.options.onCacheReplacement?.({ channel: cache.channel, status: 'replaced', elapsedMs: performance.now() - start, beforeBytes, afterBytes: next.floorBytes })
       } catch (error) { await result.transport.release(); throw error }
-    })().catch(error => {
-      if (!scope.signal.aborted) this.options.onCacheReplacement?.({ channel: cache.channel, status: 'failed', elapsedMs: performance.now() - start, error })
-    }).finally(() => {
+    })().catch(() => {}).finally(() => {
       cache.replacing = undefined; this.sweepCaches(scope)
       if (cache.dirty && scope.channels.get(cache.channel) === cache && !scope.signal.aborted) this.maintainCache(scope, cache)
     })
@@ -351,19 +342,11 @@ export class RemoteGitRepository implements GitRepository {
   private async run(session: Session, command: GitObjectCommand, input?: Uint8Array | string): Promise<Buffer> {
     if (!session.active || !session.token) throw new Error('Read operation ownership has ended.')
     this.check(session.scope); session.signal.throwIfAborted()
-    const started = performance.now()
-    let success = false, details: FailureDetails | undefined
-    const notify = (phase: 'start' | 'end') => {
-      try { this.options.onOperation?.({ channel: session.cache.channel, operation: command.op, phase, ...(phase === 'end' ? { elapsedMs: performance.now() - started, success, ...(details ? { failureDetails: details } : {}) } : {}), httpRequests: null, packBytes: null }) } catch { /* Diagnostics cannot change operation semantics. */ }
-    }
-    notify('start')
     try {
       const output = await session.cache.transport.execute(command, { signal: session.signal, token: session.token.value, input })
       this.check(session.scope); session.signal.throwIfAborted()
-      success = true
       return output
     } catch (error) {
-      details = failureDetails(error)
       if (error instanceof GitBackendError && error.kind === 'fatal') {
         // A failed/cancelled process invalidates only its owning lane and stores.
         // Persisted operation metadata remains available for remote reconciliation.
@@ -383,7 +366,7 @@ export class RemoteGitRepository implements GitRepository {
         throw Object.assign(new GitHubError(403, error.message), { cause: error })
       }
       throw error
-    } finally { notify('end') }
+    }
   }
   async connect(): Promise<RepoConnection> { return this.session(async session => { session.scope.canonicalPending = true; return session.scope.connection }, true) }
   /** Reuse only actual immutable objects requested in this same cache.
@@ -638,7 +621,7 @@ export class RemoteGitRepository implements GitRepository {
       for (const { path, version } of sources) {
         const entry = await this.entry(session, snapshot, path)
         if (entry?.type === 'blob' && entry.mode === '100644' && entry.sha === version
-          && version === createHash(version.length === 64 ? 'sha256' : 'sha1').update('blob 0\0').digest('hex')) result.push(path)
+          && isEmptyGitBlob(version)) result.push(path)
       }
       return result
     })

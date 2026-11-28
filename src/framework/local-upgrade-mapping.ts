@@ -28,15 +28,6 @@ export async function rememberLocalUpgradeMapping(storage: StoragePort, director
     throw new Error('The original source changed after its recorded conversion; both source and physical files were retained.')
   await storage.set(key, value)
 }
-export async function inspectLocalUpgradeMapping(storage: StoragePort, directory: string, source: Pick<LegacySqliteFile, 'path' | 'bytes'>): Promise<'absent' | 'mapped' | 'source-changed'> {
-  const value = await storage.get<LocalUpgradeMapping>(localUpgradeMappingKey(directory, source.path))
-  if (!value) return 'absent'
-  if (value.kind !== 'dss-once-source-mapping' || value.directory !== directory || value.sourcePath !== source.path || !value.operationId
-    || !['converted', 'physical-original-retained'].includes(value.disposition) || !Array.isArray(value.targets) || !value.targets.length)
-    throw new Error('The exact source conversion record is invalid; it was retained.')
-  return value.sourceHash === hash(source.bytes) && value.sourceBytes === source.bytes.byteLength ? 'mapped' : 'source-changed'
-}
-
 /** Only an addressed old UI selection uses this existing conversion mapping;
  * ordinary native paths do not read it or create another redirect index. */
 export async function convertedLocalSkillPath(directory: string, sourcePath: string, storage: StoragePort): Promise<string | undefined> {

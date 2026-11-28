@@ -183,6 +183,10 @@ export class FrameworkTransactions {
         options.readPlan?.signal?.throwIfAborted()
         try { return await this.executeGit(id, requestHash, options, attemptBuild, recovery, observed) } catch (error) {
           if (!retryable || !(error instanceof FilesConflictError)) throw error
+          // Continuous writers must not hold an Agent command forever. A
+          // settled conflict is safe to surface: the caller can retry later
+          // under its existing stable command/input rules.
+          if (retry >= 63) throw error
           if (this.files instanceof GitFiles) this.assertGitOpen()
           const delay = Math.min(160, 5 * 2 ** retry)
           await new Promise(resolve => setTimeout(resolve, delay + Math.floor(Math.random() * delay)))

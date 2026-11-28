@@ -1,9 +1,9 @@
-import { questionNoteInstruction } from './question-note-prompt.js'
+import { previousQuestionNoteInstruction, questionNoteInstruction } from './question-note-prompt.js'
 import { createHash } from 'node:crypto'
 import { foregroundFullGuide, foregroundStorageRecoveryNote } from './role-prompts.js'
 import { foregroundGuideUpgradeRules } from './foreground-guide-upgrade-rules.js'
 
-export const foregroundGuideUpgradeVersion = 'foreground-helper-debug-v12'
+export const foregroundGuideUpgradeVersion = 'foreground-question-wait-v13'
 export interface ForegroundGuideUpgrade {
   text: string
   changedRules: number
@@ -27,6 +27,10 @@ export function upgradeForegroundGuide(text: string): ForegroundGuideUpgrade {
     return { text: currentGuide, changedRules: 1, unreviewedSections: [] }
   // Add the naming suggestion only to the exact previous default, preserving custom guides.
   if (text === currentGuide.replace('Keep task titles concise and prefer short English names when they still make the task recognizable. ', ''))
+    return { text: currentGuide, changedRules: 1, unreviewedSections: [] }
+  // Replace only the exact previous official question paragraph. Customized
+  // guidance remains byte-for-byte authoritative.
+  if (text === currentGuide.replace(questionNoteInstruction, previousQuestionNoteInstruction))
     return { text: currentGuide, changedRules: 1, unreviewedSections: [] }
   // Only the exact previous official default gains the current question guidance.
   // Custom guide text remains untouched; the current core supplies the same rule.

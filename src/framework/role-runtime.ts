@@ -64,7 +64,7 @@ import { FrameworkHostLoop, helperSignalWakeHash, type RoleWake, type TaskRoleNo
 import { installFrameworkRoleTools, parseDirectSignal, signalWorkerId, workerPaths, type FrameworkRoleBinding, type FrameworkRoleServices, type PlannerWorkerExecutions, type HelperRestoreInput, type HelperRepairAttempt } from './role-tools.js'
 import { withReevaluatedFileTarget } from './file-read-observation.js'
 import { foregroundTaskSignal, parseForegroundTaskSignal, taskArchiveOwnsPath, taskArchiveSelection, paths, readJson, readMemberStatus, taskIdentity, taskLifecycle, taskLifecycleKey, assertTaskLifecycle, checkTaskLifecycle, isTerminalTask, encodeJson, type TaskMetadata } from './task-files.js'
-import { FilesConflictError, FilesOutcomeUnknownError, GitFiles, withOperationChannel, withSnapshot, type FileChange, type FilesStore, type FilesSnapshot, type FilesReadRound } from './transactions.js'
+import { FilesConflictError, FilesOutcomeUnknownError, GitFiles, isEmptyGitBlob, withOperationChannel, withSnapshot, type FileChange, type FilesStore, type FilesSnapshot, type FilesReadRound } from './transactions.js'
 import {
   scanMemberRecovery, memberRecoveryEligible, createRecoveryWatch, dueRecoveryWatch,
   type RecoveryWatch, type MemberRecoveryInput, type WorkIdentity, type RecoveryRole
@@ -275,7 +275,7 @@ export class FrameworkRoleRuntime {
       discoverTask: async (task, snapshot) => {
         if (await environment.beforeTaskDiscovery?.(task) === false) return false;
         this.rememberTerminalTask(task);
-        this.applyTaskArchiveFacts(task.taskId, task.lifecycleId, await this.taskSealAt(snapshot, task.taskId, task.lifecycleId))
+        this.applyTaskArchiveFacts(task.taskId, task.lifecycleId, await this.taskSealAt(snapshot, task.taskId, task.lifecycleId, task))
         for (const record of this.roleRecords.values()) if (record.identity.taskId === task.taskId && taskLifecycle(record.identity) !== taskLifecycle(task) && !record.stopped) this.trackedStop(record);
         if (task.status === 'cancelled') this.drainCancelledBusiness(task)
         await this.reconcileWorkerTransfers(false, snapshot, task.taskId)
@@ -860,9 +860,10 @@ export class FrameworkRoleRuntime {
     return withSnapshot(this.files, async snapshot => this.taskCommandOwner(await readJson<TaskMetadata>(this.files, snapshot, paths.task(taskId))))
   }
   private archiveHostKey(): string { return taskArchiveHostKey(this.records instanceof GitAuthorityStore ? this.records.root : undefined, this.config.scope, this.config.instanceUUID) }
-  private async taskSealAt(snapshot: FilesSnapshot, taskId: string, lifecycleId?: string): Promise<TaskArchiveHostFacts | undefined> {
-    const task = await readJson<TaskMetadata>(this.files, snapshot, paths.task(taskId))
+  private async taskSealAt(snapshot: FilesSnapshot, taskId: string, lifecycleId?: string, observed?: TaskMetadata): Promise<TaskArchiveHostFacts | undefined> {
+    const task = observed ?? await readJson<TaskMetadata>(this.files, snapshot, paths.task(taskId))
     if (!task) return undefined
+    if (task.taskId !== taskId) throw new Error('Task runtime metadata identity differs: ' + taskId)
     // Git already returned the current metadata from this same immutable view.
     // Local archive state is a separate file; preserve that read and its lifecycle checks.
     const state = this.files instanceof GitFiles && task.taskId === taskId
@@ -1016,7 +1017,7 @@ export class FrameworkRoleRuntime {
         if (!same(latest)) return
         const previousBase = this.roleBases?.get(workId)
         const known = delivery.request.sources.filter(source => ownsGitConversationPublication(source.path, this.config.collaborationId)
-          && source.version === createHash(source.version.length === 64 ? 'sha256' : 'sha1').update('blob 0\0').digest('hex'))
+          && isEmptyGitBlob(source.version))
         if (!known.length) return // Old timestamp paths and unverified inputs remain available.
         const saved = await authority.updateWithReads<RoleRecord, RoleRecord | undefined>(this.roleRecordPath(workId), [], async (owner, _reads, snapshot) => {
           if (!same(owner)) return { write: false, result: undefined }
@@ -4698,6 +4699,8 @@ executionId: binding.executionId, run: persistContext,
       },
       ...(this.environment.capacity ? { capacity: this.environment.capacity } : {}),
       observation: { reset: (binding, input, commandId, signal) => {
+        if (input.probeId !== undefined && input.recoveryCheckId !== undefined)
+          throw new Error('Select either the received probeId or the Helper’s actual recoveryCheckId, not both.')
         if (input.probeId !== undefined) return this.resetObservation(binding, input.probeId, commandId, signal)
         if (input.recoveryCheckId !== undefined) return this.resetRecoveryCheck(binding, input.recoveryCheckId, signal)
         throw new Error('Select the received probeId or the Helper’s actual recoveryCheckId.')
@@ -6526,7 +6529,7 @@ executionId: binding.executionId, run: persistContext,
         await agent.send(JSON.stringify({
           kind, probeId: pending.id, identity: action.identity,
           cycleStartedAt: pending.cycleStartedAt, elapsedMs: action.elapsedMs, silentMs: action.silentMs,
-          instruction: 'After actually receiving this Host inactivity notice, call dss_reset_observation once per cycleStartedAt using one received probeId. A probe and warning with the same cycleStartedAt share one cycle. After reset or an already-handled/superseded result, do not reset other notices from that cycle. Organize your current status in existing role records and continue the original work. Queued delivery alone is not a response.'
+          instruction: 'Continue the original work and organize current status in existing role records. Actual model, tool and Job progress is observed automatically; do not call a proof-of-life or inactivity-reset tool. This notice does not change the separate member recovery marker or its check interval.'
         }),
           pending.id, 'steer', 'deepseek-servant')
       } catch (error) {

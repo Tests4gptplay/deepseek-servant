@@ -1309,8 +1309,9 @@ export function installFrameworkRoleTools(ctx: Context, agent: Agent, binding: F
         })
     })
   if (binding.role !== 'Foreground' && services.observation) register('dss_reset_observation',
-    'After actually receiving a native Host probe or warning, reset this execution’s inactivity cycle once using one received probeId. Other notices from an already-reset cycle return superseded with reset:false; repeating a handled probe returns already-handled. Helper may instead finish its own inspected member recovery check using recoveryCheckId: the exact id of that original helperNotifications item. This restarts only that check’s 30-minute interval; repeating an older check cannot reset a newer interval. Neither form consumes the recovery marker or sends a text reply.',
+    'Compatibility acknowledgement for an older session that explicitly instructed you to acknowledge a received Host probe with probeId. The acknowledgement itself does not reset or postpone the Host inactivity stages; current notices require no call. Helper may instead finish its own inspected member recovery check using recoveryCheckId: the exact id of that original helperNotifications item. That separate form restarts only the check’s 30-minute interval; repeating an older check cannot reset a newer interval. Neither form consumes the recovery marker or sends a text reply.',
     binding.role === 'Helper' ? z.object({ probeId: z.string().optional(), recoveryCheckId: z.string().optional() })
+      .refine(input => (input.probeId !== undefined) !== (input.recoveryCheckId !== undefined), 'Supply exactly one selector: probeId or recoveryCheckId.')
       : z.object({ probeId: z.string() }),
     (input, exec) => services.observation!.reset(binding, input, command(exec), exec.signal))
   if (services.helper) {

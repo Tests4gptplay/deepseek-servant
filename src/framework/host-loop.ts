@@ -1,6 +1,6 @@
 import { isPhysicalLegacyPendingPath, resumePhysicalLegacyPublication } from './physical-legacy-publication.js'
 import { resumePhysicalTaskRequirement } from './physical-task-dispatch.js'
-import { compactTaskArchiveCleanup, taskArchiveHostKey, taskArchiveLifecycle, taskArchiveHostFacts, taskArchiveCleanup, taskArchiveStatePath, readTaskArchiveState, updateTaskArchiveState } from './task-archive.js'
+import { compactTaskArchiveCleanup, taskArchiveHostKey, taskArchiveLifecycle, taskArchiveHostFacts, taskArchiveCleanup, taskArchiveStatePath, taskMetadataRuntimeState, readTaskArchiveState, updateTaskArchiveState } from './task-archive.js'
 import { readTaskHistoryIdentity, taskHistoryPath } from './task-history.js'
 import { PhysicalLocalFiles } from './physical-local-files.js'
 import { resumePhysicalTaskTerminalHandoff, isPhysicalForegroundPendingPath, resumePhysicalForegroundTaskNotice } from './physical-task-terminal.js'
@@ -668,7 +668,8 @@ export class FrameworkHostLoop {
           }
           const sourceMetadata = await readJson<TaskMetadata>(this.files, snapshot, paths.task(sourceTask))
           const sourceKey = taskLifecycleKey({ taskId: sourceTask, lifecycleId: sourceMetadata?.lifecycleId })
-          const released = sourceMetadata && taskArchiveHostFacts(await readTaskArchiveState(this.files, snapshot, sourceMetadata), sourceMetadata, this.archiveHostKey)?.released
+          const released = sourceMetadata && taskArchiveHostFacts(this.files instanceof GitFiles
+            ? taskMetadataRuntimeState(sourceMetadata) : await readTaskArchiveState(this.files, snapshot, sourceMetadata), sourceMetadata, this.archiveHostKey)?.released
           if (released || this.record.completed[sourceKey]?.released) {
             this.seenSources.set(current.path, current.version)
             return
@@ -793,10 +794,9 @@ export class FrameworkHostLoop {
     }
     const scanning = Promise.resolve().then(() => this.runOperation(async () => {
       if (this.stopping) return
-      const snapshot = round ? await round.acquireSnapshot() : await this.pollingSnapshot(revision)
       let scheduled = false
       const ready: Array<() => void> = []
-      try {
+      const scan = async (snapshot: FilesSnapshot) => {
         if (this.stopping) return
         // A task lane never borrows a poll view that another Task can hold open.
         // Git borrows an independent lease of the actual poll observation. Refresh the
@@ -826,9 +826,20 @@ export class FrameworkHostLoop {
           && await this.files.read(snapshot, paths.state(task.owner, task.taskId) + '/Cleaner') !== undefined
         if (!physicalCleanup && await this.actions.discoverTask?.(task, snapshot) === false) return
         if (!this.stopping) scheduled = await this.scanTask(task, snapshot, startedAt, enqueue, observation, ready)
-      } finally {
-        await snapshot.release()
-        if (!this.stopping) for (const [key, queue] of dispatches) {
+      }
+      // Keep scan failures until the view has been released. This preserves the
+      // original rule: a scan failure may still dispatch work it discovered,
+      // while acquisition/release failures must not admit that work.
+      let scanFailure: { error: unknown } | undefined
+      const captureScan = async (snapshot: FilesSnapshot) => {
+        try { await scan(snapshot) } catch (error) { scanFailure = { error } }
+      }
+      if (round) await round.withSnapshot(captureScan)
+      else {
+        const snapshot = await this.pollingSnapshot(revision)
+        try { await captureScan(snapshot) } finally { await snapshot.release() }
+      }
+      if (!this.stopping) for (const [key, queue] of dispatches) {
           // An existing role flight owns its writes. Do not attach another
           // timer waiter, but let discovery and other roles keep progressing.
           if (this.taskRoleLanes.has(key)) continue
@@ -851,12 +862,12 @@ export class FrameworkHostLoop {
           }))
           this.taskRoleLanes.set(key, operation); roleOperations.push(operation)
           void operation.catch(error => this.actions.error(error)).finally(() => { if (this.taskRoleLanes.get(key) === operation) this.taskRoleLanes.delete(key) })
-        }
-        if (!this.stopping) {
-          if (scheduled || ready.length > 1) await this.actions.admitDiscovered?.()
-          else ready[0]?.()
-        }
       }
+      if (!this.stopping) {
+        if (scheduled || ready.length > 1) await this.actions.admitDiscovered?.()
+        else ready[0]?.()
+      }
+      if (scanFailure) throw scanFailure.error
     }))
     // The metadata lane ends once reads are released and role flights are
     // registered. Explicit poll and stop still own every newly admitted write,
@@ -918,7 +929,7 @@ export class FrameworkHostLoop {
         task = await resumePhysicalTaskRequirement(this.files, task, this.actions.physicalSignalSources)
         task = await resumePhysicalTaskTerminalHandoff(this.files, task, this.actions.physicalSignalSources)
       }
-      const archiveState = await readTaskArchiveState(this.files, snapshot, task)
+      const archiveState = this.files instanceof GitFiles ? taskMetadataRuntimeState(task) : await readTaskArchiveState(this.files, snapshot, task)
       const saved = taskArchiveHostFacts(archiveState, task, this.archiveHostKey)
       if (this.files instanceof PhysicalLocalFiles && !task.parent && task.owner === this.identity.member && saved?.released) {
         // unlink(Cleaner) can finish immediately before process exit, leaving

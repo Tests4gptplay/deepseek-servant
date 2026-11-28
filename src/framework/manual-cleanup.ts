@@ -47,11 +47,10 @@ export interface ManualFileCleanupPreview {
   files: Array<{ path: string; version: string; bytes: number }>
   /** Fixed roots removed directly by the OS. Their children are intentionally
    * not enumerated or copied into the confirmation payload. */
-  roots?: string[]
+  roots?: Array<{ path: string; version: string | null }>
   bytes: number
 }
 export interface ManualAllCleanupPreview {
-  id: string
   kind: 'all'
   scope: string
   tasks: ManualTaskCleanupPreview
@@ -101,8 +100,12 @@ const unique = (paths: readonly string[]) => [...new Set(paths)].sort()
 export class FrameworkManualCleanup {
   private readonly scope: string
   constructor(readonly files: FilesStore, readonly transactions: FrameworkTransactions,
-    readonly conversation: FrameworkConversation, private readonly lifecycle: ManualCleanupLifecycle) {
+    readonly conversation: FrameworkConversation, private readonly lifecycle?: ManualCleanupLifecycle) {
     this.scope = JSON.stringify(conversation.scope)
+  }
+  private owner(): ManualCleanupLifecycle {
+    if (!this.lifecycle) throw new Error('This cleanup action requires its Local lifecycle owner.')
+    return this.lifecycle
   }
   private local(): PhysicalLocalFiles {
     if (!(this.files instanceof PhysicalLocalFiles) || this.conversation.scope.mode !== 'local') throw new Error('Manual record cleanup is a Local user action.')
@@ -171,7 +174,7 @@ export class FrameworkManualCleanup {
         }
         const historyHashes: Record<string, string> = {}
         for (const task of selected) {
-          await this.lifecycle.prepareTaskCleanup(task.taskId)
+          await this.owner().prepareTaskCleanup(task.taskId)
           const history = await files.read(snapshot, taskHistoryPath(task.taskId))
           if (history !== undefined) historyHashes[task.taskId] = hash(history)
         }
@@ -184,7 +187,7 @@ export class FrameworkManualCleanup {
       return { value: plan, content: json(plan) }
     })
     if (!plan || plan.kind !== 'tasks' || plan.scope !== this.scope) throw new Error('Confirmed Task history selection is unavailable.')
-    for (const taskId of plan.taskIds) await this.lifecycle.prepareTaskCleanup(taskId)
+    for (const taskId of plan.taskIds) await this.owner().prepareTaskCleanup(taskId)
     await withSnapshot(files, async snapshot => {
       for (const [taskId, expected] of Object.entries(plan.historyHashes ?? {})) {
         const text = await files.read(snapshot, taskHistoryPath(taskId))
@@ -262,7 +265,7 @@ export class FrameworkManualCleanup {
   }
   async previewConversation(): Promise<ManualConversationCleanupPreview> {
     this.local()
-    const owner = await this.lifecycle.previewForegroundReset()
+    const owner = await this.owner().previewForegroundReset()
     return this.conversation.withPhysicalPublication(async snapshot => {
       const index = await this.conversationIndex(snapshot)
       return { kind: 'conversation', scope: this.scope,
@@ -286,11 +289,11 @@ export class FrameworkManualCleanup {
       throw new Error('Conversation cleanup requires its original Local selection.')
   }
   private async clearPhysicalConversation(files: PhysicalLocalFiles, commandId: string, confirmation: string, preview?: ManualConversationCleanupPreview): Promise<ManualCleanupResult> {
-    const completed = await this.lifecycle.isForegroundResetComplete(commandId)
+    const completed = await this.owner().isForegroundResetComplete(commandId)
     if (completed) {
       const done = await this.completed(commandId, 'conversation')
       await this.retirePhysicalConversation(files, commandId)
-      if (preview) await this.lifecycle.retireForegroundResetComplete(commandId)
+      if (preview) await this.owner().retireForegroundResetComplete(commandId)
       return done ?? { cleared: true, receipt: { revision: (await withSnapshot(files, async snapshot => snapshot.revision)), replay: true }, deletedPaths: [], preservedPaths: [] }
     }
     const intentPath = 'technical/manual-cleanup/intents/' + hash(this.scope + '\0' + commandId) + '.json'
@@ -308,7 +311,7 @@ export class FrameworkManualCleanup {
         throw new Error('Conversation cleanup belongs to another original selection.')
       return intent
     })
-    const result = await this.lifecycle.withForegroundReset(commandId, (capturedMessageIds, capturedProcessGroupIds) => this.conversation.withPhysicalPublication(async snapshot => {
+    const result = await this.owner().withForegroundReset(commandId, (capturedMessageIds, capturedProcessGroupIds) => this.conversation.withPhysicalPublication(async snapshot => {
       const path = this.planPath(commandId)
       let plan = await readJson<Plan>(files, snapshot, path)
       if (!plan) {
@@ -355,7 +358,7 @@ export class FrameworkManualCleanup {
     // Native retirement has now persisted its existing complete phase. An old
     // command can no longer select later input, so its temporary selection retires.
     await this.retirePhysicalConversation(files, commandId)
-    if (original.conversationPreview) await this.lifecycle.retireForegroundResetComplete(commandId)
+    if (original.conversationPreview) await this.owner().retireForegroundResetComplete(commandId)
     return result
   }
   private async retirePhysicalConversation(files: PhysicalLocalFiles, commandId: string): Promise<void> {
@@ -452,36 +455,34 @@ export class FrameworkManualCleanup {
     const debug = await this.previewFiles('debug')
     const archives = await this.previewFiles('archives')
     const heartbeats = await this.previewFiles('heartbeats')
-    const selection = { kind: 'all' as const, scope: this.scope, tasks, conversation, planning, debug, archives, heartbeats }
-    return { id: this.allPreviewId(selection), ...selection }
+    return { kind: 'all', scope: this.scope, tasks, conversation, planning, debug, archives, heartbeats }
   }
   async clearAll(commandId: string, preview: ManualAllCleanupPreview, confirmation: 'clear-all-records', signal?: AbortSignal): Promise<ManualCleanupResult> {
     signal?.throwIfAborted()
     this.local(); this.confirm(commandId, confirmation, 'clear-all-records')
-    if (!preview || preview.kind !== 'all' || preview.scope !== this.scope || preview.id !== this.allPreviewId(preview))
+    if (!preview || preview.kind !== 'all' || preview.scope !== this.scope)
       throw new Error('Clear all requires its exact reviewed selection.')
     const child = (kind: string) => commandId + ':all:' + kind
-    const tasks = await this.clearTasks(child('tasks'), preview.tasks, 'clear-ended-task-records')
-    for (const task of preview.tasks.tasks) await this.lifecycle.prepareTaskCleanup(task.taskId)
     const results = [
-      tasks,
-      await this.clearConversation(child('conversation'), 'clear-foreground-conversation', preview.conversation),
+      await this.clearTasks(child('tasks'), preview.tasks, 'clear-ended-task-records'),
       await this.clearPlanning(child('planning'), 'clear-work-planning-notes', preview.planning, signal),
       await this.clearDebug(child('debug'), preview.debug, 'clear-debug-records', signal),
       await this.clearArchives(child('archives'), preview.archives, 'clear-task-archives', signal),
       await this.clearHeartbeats(child('heartbeats'), preview.heartbeats, 'clear-heartbeat-records', signal),
     ]
-    const removedRoots = [...(preview.archives.roots ?? []), ...(preview.heartbeats.roots ?? [])]
+    // Foreground reset is deliberately last. Once it succeeds, only in-memory
+    // aggregation remains, so a failed earlier category cannot make a retry
+    // reset a newer conversation.
+    const conversation = await this.clearConversation(child('conversation'), 'clear-foreground-conversation', preview.conversation)
+    results.push(conversation)
+    const removedRoots = [...(preview.archives.roots ?? []), ...(preview.heartbeats.roots ?? [])].map(root => root.path)
     const preservedPaths = unique(results.flatMap(result => result.preservedPaths)).filter(path =>
       !removedRoots.some(root => path === root.slice(0, -1) || path.startsWith(root)))
     const missingEntries = unique(results.flatMap(result => result.missingEntries ?? []))
     return { cleared: true,
-      receipt: { revision: await withSnapshot(this.files, async snapshot => snapshot.revision), replay: results.every(result => result.receipt.replay) },
+      receipt: { revision: conversation.receipt.revision, replay: results.every(result => result.receipt.replay) },
       deletedPaths: unique(results.flatMap(result => result.deletedPaths)), preservedPaths,
       ...(missingEntries.length ? { missingEntries } : {}) }
-  }
-  private allPreviewId(preview: Omit<ManualAllCleanupPreview, 'id'>): string {
-    return hash(json([this.scope, 'all', preview.tasks, preview.conversation, preview.planning, preview.debug, preview.archives, preview.heartbeats]))
   }
   async clearPlanning(commandId: string, confirmation: 'clear-work-planning-notes', preview?: ManualFileCleanupPreview, signal?: AbortSignal): Promise<ManualCleanupResult> {
     signal?.throwIfAborted()
@@ -495,8 +496,15 @@ export class FrameworkManualCleanup {
   async previewFiles(kind: FileCleanupKind): Promise<ManualFileCleanupPreview> {
     this.local()
     if (kind !== 'planning' && kind !== 'debug' && kind !== 'archives' && kind !== 'heartbeats') throw new Error('Invalid manual file cleanup kind.')
-    const roots = this.fixedRoots(kind)
-    if (roots.length) return this.fileSelection(kind, [], roots)
+    const rootPaths = this.fixedRoots(kind)
+    if (rootPaths.length) {
+      const roots = await Promise.all(rootPaths.map(async path => {
+        const entry = await this.local().entryInfo(path.slice(0, -1))
+        if (entry && !entry.directory) throw new Error('Manual cleanup root is not a directory: ' + path)
+        return { path, version: entry?.version ?? null }
+      }))
+      return this.fileSelection(kind, [], roots)
+    }
     if (kind === 'planning') await this.conversation.prepare()
     return withSnapshot(this.files, async snapshot => {
       const entries = kind === 'planning'
@@ -505,7 +513,7 @@ export class FrameworkManualCleanup {
       return this.fileSelection(kind, entries.map(({ path, version, bytes }) => ({ path, version, bytes: bytes ?? 0 })))
     })
   }
-  private fileSelection(kind: FileCleanupKind, files: ManualFileCleanupPreview['files'], roots: string[] = []): ManualFileCleanupPreview {
+  private fileSelection(kind: FileCleanupKind, files: ManualFileCleanupPreview['files'], roots: NonNullable<ManualFileCleanupPreview['roots']> = []): ManualFileCleanupPreview {
     const selected = [...files].sort((a, b) => a.path.localeCompare(b.path))
     return { id: hash(json([this.scope, kind, roots, selected])), kind, files: selected,
       ...(roots.length ? { roots } : {}), bytes: selected.reduce((sum, file) => sum + file.bytes, 0) }
@@ -526,13 +534,16 @@ export class FrameworkManualCleanup {
     if (!preview || preview.kind !== kind || !Array.isArray(preview.files) || !Array.isArray(roots)
       || preview.id !== hash(json([this.scope, kind, roots, preview.files]))
       || new Set(preview.files.map(file => file.path)).size !== preview.files.length
-      || json(roots) !== json(this.fixedRoots(kind))
+      || new Set(roots.map(root => root?.path)).size !== roots.length
+      || json(roots.map(root => root?.path)) !== json(this.fixedRoots(kind))
+      || roots.some(root => !root || typeof root.path !== 'string'
+        || root.version !== null && (typeof root.version !== 'string' || !root.version.startsWith('local-directory:')))
       || preview.files.some(file => !this.ownsFile(kind, file.path) || typeof file.version !== 'string' || !file.version))
       throw new Error('Manual cleanup requires its exact reviewed file selection.')
   }
   async clearDebug(commandId: string, preview: ManualFileCleanupPreview, confirmation: 'clear-debug-records', signal?: AbortSignal): Promise<ManualCleanupResult> {
     signal?.throwIfAborted()
-    this.local(); this.confirm(commandId, confirmation, 'clear-debug-records'); this.filePreview('debug', preview)
+    this.local(); this.confirm(commandId, confirmation, 'clear-debug-records')
     return this.clearPhysicalFiles(this.local(), commandId, 'debug', confirmation, preview, signal)
   }
   async clearArchives(commandId: string, preview: ManualFileCleanupPreview, confirmation: 'clear-task-archives', signal?: AbortSignal): Promise<ManualCleanupResult> {
@@ -559,8 +570,9 @@ export class FrameworkManualCleanup {
     const deletedPaths: string[] = [], preservedPaths: string[] = []
     for (const root of preview.roots ?? []) {
       signal?.throwIfAborted()
-      await files.removeDirectory(root.slice(0, -1))
-      deletedPaths.push(root)
+      const outcome = await files.removeDirectoryObserved(root.path.slice(0, -1), root.version)
+      if (outcome === 'changed') preservedPaths.push(root.path)
+      else deletedPaths.push(root.path)
     }
     for (const file of preview.files) {
       signal?.throwIfAborted()
@@ -654,10 +666,10 @@ export class FrameworkManualCleanup {
   }
   private async taskCleanupReady(task: TaskMetadata, cleanup: CleanupRecord | undefined): Promise<boolean> {
     if (this.files instanceof PhysicalLocalFiles && 'kind' in task && task.kind === 'task-history')
-      return isTerminalTask(task) && await this.lifecycle.taskCleanupComplete(task.taskId, task.lifecycleId)
+      return isTerminalTask(task) && await this.owner().taskCleanupComplete(task.taskId, task.lifecycleId)
     return isTerminalTask(task) && cleanup?.version === 1 && cleanup.taskId === task.taskId
       && taskLifecycle(cleanup) === taskLifecycle(task) && ['files-cleaned', 'released'].includes(cleanup.phase)
-      && await this.lifecycle.taskCleanupComplete(task.taskId, task.lifecycleId)
+      && await this.owner().taskCleanupComplete(task.taskId, task.lifecycleId)
   }
   private async migrations(snapshot: FilesSnapshot): Promise<Array<{ path: string; manifest: Migrated }>> {
     const index = await readJson<{ migrations: Array<{ manifestPath: string }> }>(this.files, snapshot, 'technical/legacy-migrations/index.json')

@@ -142,12 +142,12 @@ export function ManualCleanupPanel({ api, storageScope, tr, changed }: {
       {pending.conversationPreview && <p>{pending.conversationPreview.messageIds.length} {tr('条已选聊天记录', 'selected conversation messages')}</p>}
       {pending.preview && <p>{pending.preview.tasks.length} {tr('个任务', 'tasks')} · {pending.preview.fileCount} {tr('个文件', 'files')} · {pending.preview.bytes} bytes</p>}
       {pending.filePreview && <div>{pending.filePreview.files.length > 0 && <p>{pending.filePreview.files.length} {tr('个文件', 'files')} · {pending.filePreview.bytes} bytes</p>}
-        {pending.filePreview.roots?.map(root => <p key={root}>{root}</p>)}
+        {pending.filePreview.roots?.map(root => <p key={root.path}>{root.path}</p>)}
         {pending.filePreview.files.map(file => <p key={file.path}>{file.path}</p>)}</div>}
       {pending.allPreview && <div>
         <p>{pending.allPreview.tasks.tasks.length} {tr('个已结束任务', 'ended tasks')} · {pending.allPreview.conversation.messageIds.length} {tr('条前台聊天记录', 'Foreground conversation messages')}</p>
         <p>{pending.allPreview.planning.files.length + pending.allPreview.debug.files.length} {tr('个已预览文件', 'reviewed files')}</p>
-        {[...(pending.allPreview.archives.roots ?? []), ...(pending.allPreview.heartbeats.roots ?? [])].map(root => <p key={root}>{root}</p>)}
+        {[...(pending.allPreview.archives.roots ?? []), ...(pending.allPreview.heartbeats.roots ?? [])].map(root => <p key={root.path}>{root.path}</p>)}
       </div>}
       <Button type="button" variant="primary" disabled={busy} onClick={() => void confirm()}>{tr('确认清理', 'Confirm cleanup')}</Button>
       <Button type="button" variant="outline" disabled={busy} onClick={() => { setPending(undefined); setError('') }}>{pending.submitted ? tr('关闭（不撤销已发送请求）', 'Close (does not cancel the submitted request)') : tr('取消', 'Cancel')}</Button>

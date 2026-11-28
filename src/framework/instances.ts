@@ -554,6 +554,8 @@ export class InstanceRegistration {
     try {
       const inspect = async (snapshot: FilesSnapshot) => {
         const rows = await this.rows(snapshot, signal), now = this.now()
+        const present = new Set(rows.map(row => row.registration.instanceUUID))
+        for (const id of this.observations.keys()) if (!present.has(id)) this.observations.delete(id)
         if (this.interrupted) {
           // Reset elapsed continuity, not the highest sequence already established.
           for (const [id, observed] of this.observations) this.observations.set(id, { ...observed, advancedAt: now, confirmed: false })

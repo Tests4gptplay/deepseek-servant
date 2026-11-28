@@ -10,6 +10,10 @@ import type { GitSnapshot, GitChange, GitReceipt, RepoConnection, GitReadPlan, G
 import { GitConflictError } from '../experimental/private-git/github.js'
 import { GitCommitOutcomeUnknownError, type GitCommitOperation, type GitCommitResolution } from '../experimental/private-git/contracts.js'
 
+const emptyGitBlobSha1 = createHash('sha1').update('blob 0\0').digest('hex')
+const emptyGitBlobSha256 = createHash('sha256').update('blob 0\0').digest('hex')
+export const isEmptyGitBlob = (sha: string): boolean => sha === (sha.length === 64 ? emptyGitBlobSha256 : emptyGitBlobSha1)
+
 export type FileChange = ({ path: string; content: string | null; bytes?: never } | { path: string; bytes: Uint8Array; content?: never }) & { /** Explicit Git directory deletion; ordinary null still means file deletion. */ deleteTree?: true }
 export interface FileEntry { path: string; version: string; bytes?: number; empty?: boolean }
 export interface FilesSnapshot { readonly revision: string; /** Physical views identify an observation scope, not an immutable database state. */ readonly consistency?: 'physical-live'; release(): Promise<void> }
@@ -236,24 +240,25 @@ export class GitFiles implements FilesStore {
   readRound(channel?: GitOperationChannel): FilesReadRound {
     let view: Promise<GitSnapshot> | undefined
     const reads = new WeakMap<object, Map<string, Promise<unknown>>>()
-    const acquireSnapshot = async (): Promise<FilesSnapshot> => {
+    const acquireOwned = async (): Promise<FilesSnapshot> => {
       // Select only the immutable discovery snapshot's transport. Every lease
       // has its own dependency set and release, while preserving the actual
       // remote observation (unlike reopening an arbitrary historical commit).
-      const acquire = () => this.withReadOperation(async () => {
-        const current = await (view ??= this.repository.snapshot())
-        await this.repository.prefetch(current, {})
-        return current
-      })
-      const native = await (channel ? this.withChannel(channel, acquire) : acquire())
+      const native = await (view ??= this.repository.snapshot())
+      await this.repository.prefetch(native, {})
       return this.wrap(native, true)
     }
+    const withinRound = <T>(operation: () => Promise<T>): Promise<T> => {
+      const read = () => this.withReadOperation(operation)
+      return channel ? this.withChannel(channel, read) : read()
+    }
+    const acquireSnapshot = (): Promise<FilesSnapshot> => withinRound(acquireOwned)
     return {
       acquireSnapshot,
-      withSnapshot: async operation => {
-        const snapshot = await acquireSnapshot()
+      withSnapshot: operation => withinRound(async () => {
+        const snapshot = await acquireOwned()
         try { return await operation(snapshot) } finally { await snapshot.release() }
-      },
+      }),
       once: <T>(owner: object, key: string, read: () => Promise<T>): Promise<T> => {
         let entries = reads.get(owner)
         if (!entries) reads.set(owner, entries = new Map())
@@ -316,7 +321,7 @@ export class GitFiles implements FilesStore {
     }
     const result = selectedEntries.map(([path, version]) => ({
       path: path.slice('dss-coop/'.length), version,
-      ...(version === createHash(version.length === 64 ? 'sha256' : 'sha1').update('blob 0\0').digest('hex') ? { bytes: 0, empty: true } : { empty: false }),
+      ...(isEmptyGitBlob(version) ? { bytes: 0, empty: true } : { empty: false }),
     })).filter(entry => matchesFileSelection(entry.path, selection)).sort((a, b) => a.path.localeCompare(b.path))
     observedFileList(this.observationOwners.get(snapshot) ?? snapshot, 'list', logical + fileSelectionKey(selection), result)
     return result
@@ -327,7 +332,7 @@ export class GitFiles implements FilesStore {
     const result = entries.filter(entry => entry.type === 'blob').map(entry => ({
       path: entry.path.slice('dss-coop/'.length), version: entry.sha,
       ...(entry.size === undefined ? {} : { bytes: entry.size }),
-      empty: entry.size === 0 || entry.sha === createHash(entry.sha.length === 64 ? 'sha256' : 'sha1').update('blob 0\0').digest('hex'),
+      empty: entry.size === 0 || isEmptyGitBlob(entry.sha),
     })).filter(entry => matchesFileSelection(entry.path, selection)).sort((a, b) => a.path.localeCompare(b.path))
     observedFileList(this.observationOwners.get(snapshot) ?? snapshot, 'directory', directoryPrefix(prefix) + fileSelectionKey(selection), result)
     return result
@@ -356,7 +361,7 @@ export class GitFiles implements FilesStore {
     if (!entries) {
       entries = Object.freeze(index.entries.filter(entry => entry.type === 'blob').map(entry => Object.freeze({
         path: entry.path.slice('dss-coop/'.length), version: entry.sha,
-        empty: entry.sha === createHash(entry.sha.length === 64 ? 'sha256' : 'sha1').update('blob 0\0').digest('hex'),
+        empty: isEmptyGitBlob(entry.sha),
       })))
       this.discoveryEntries.set(membership, entries)
     }

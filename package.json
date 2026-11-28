@@ -49,7 +49,6 @@
     "docs/MEMORY_GIT.md",
     "docs/ATTACHMENTS.md",
     "python/requirements.txt",
-    "python/SHA256SUMS",
     "python/licenses/Dulwich-COPYING",
     "python/licenses/urllib3-LICENSE.txt",
     "upgrades/g09-skills-once.json",
@@ -81,13 +80,19 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
+    "test:source": "node scripts/run-source-tests.mjs",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.client.json"
   },
   "dependencies": {
-    "koffi": "*",
-    "mdast-util-from-markdown": "*",
-    "yaml": "*",
-    "zod": "*"
+    "koffi": "3.1.1",
+    "mdast-util-from-markdown": "2.1.0",
+    "yaml": "2.9.1",
+    "zod": "4.6.6"
+  },
+  "overrides": {
+    "@deepseek-ai/dsh-http-proxy@0.2.2-rc.3": {
+      "undici": "8.12.2"
+    }
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",

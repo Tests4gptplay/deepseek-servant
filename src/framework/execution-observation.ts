@@ -23,7 +23,7 @@ export interface StoredExecutionObservation {
 }
 export interface ObservationResetResult {
   reset: boolean
-  status: 'reset' | 'already-handled' | 'superseded'
+  status: 'acknowledged' | 'already-handled' | 'superseded'
 }
 /** Host-owned durable metadata, not business body storage or a new role signal. */
 export interface ExecutionObservationStore {
@@ -290,9 +290,10 @@ export class ExecutionObservations {
       if (binding!.progress === progress) binding!.progress = undefined
     })
   }
-  /** Runtime proves this native probe was consumed by this exact execution before
-   * calling. Queued delivery is not that proof. Receipt and reset share one write,
-   * so retrying a lost acknowledgement cannot reset a later observation cycle. */
+  /** Compatibility acknowledgement for older sessions which were instructed to
+   * call the reset tool. The acknowledgement mutation itself never changes the
+   * Host-owned inactivity clock, stage or pending action; synchronize may first
+   * preserve genuine model/tool progress which happened before the call. */
   async reset(identity: WorkIdentity, probeInputId: string, cycleStartedAt: number): Promise<ObservationResetResult> {
     return this.queue(identity.workId, async () => {
       const binding = this.bindings.get(identity.workId)
@@ -310,11 +311,10 @@ export class ExecutionObservations {
         return { reset: false, status: 'superseded' }
       }
       if (saved.observation.cycleStartedAt !== cycleStartedAt) throw new Error('Observation reset belongs to an obsolete cycle.')
-      const next = { ...saved, observation: createObservation(identity, this.now()),
+      const next = { ...saved,
         resetInputs: [...(saved.resetInputs ?? []), probeInputId], resetCycles: [...(saved.resetCycles ?? []), cycleStartedAt] }
-      delete next.pending
       await this.store.set(identity.workId, next, saved)
-      return { reset: true, status: 'reset' }
+      return { reset: false, status: 'acknowledged' }
     })
   }
   async flush(): Promise<void> {
