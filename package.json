@@ -1,6 +1,6 @@
 {
   "name": "deepseek-servant",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "DeepSeek Harness Local/Git 协作助理：原生六角色执行、持久会话、任务恢复与成果归档。",
   "private": true,
   "type": "module",
@@ -87,8 +87,7 @@
     "koffi": "*",
     "mdast-util-from-markdown": "*",
     "yaml": "*",
-    "zod": "*",
-    "@deepseek-ai/dsh-host-directory-picker-browse": "0.2.2-rc.3"
+    "zod": "*"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
@@ -143,6 +142,7 @@
     "@deepseek-ai/dsh-client-ui-attachment": "0.2.2-rc.3",
     "@deepseek-ai/dsh-client-ui-context-menu": "0.2.2-rc.3",
     "@deepseek-ai/dsh-client-ui-conversation": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-client-ui-directory-picker-browse": "0.2.2-rc.3",
     "@deepseek-ai/dsh-client-ui-file-drag": "0.2.2-rc.3",
     "@deepseek-ai/dsh-client-ui-layout": "0.2.2-rc.3",
     "@deepseek-ai/dsh-client-ui-permission-presets": "0.2.2-rc.3",
@@ -207,8 +207,7 @@
     "shiki": "^4.5.0",
     "simple-icons": "^16.31.0",
     "typescript": "^6.0.3",
-    "zustand": "~4.5.7",
-    "@deepseek-ai/dsh-client-ui-directory-picker-browse": "0.2.2-rc.3"
+    "zustand": "~4.5.7"
   },
   "license": "AGPL-3.0-only",
   "repository": {
