@@ -40,7 +40,7 @@ DSS 是独立安装的社区插件，使用 [DeepSeek Harness（DSH）](https://
 
 ## 0.5.4 的改进
 
-- **取消运行时锁版**：文件夹浏览和新建不再要求安装特定版本的 DSH 目录浏览依赖。
+- **取消运行时锁版**：继续使用 DSH 原生文件夹浏览组件，DSS 不再指定该组件的版本。
 - **延续席位交接修复**：同一工作线换人不提前释放席位。
 
 [完整更新说明与下载](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.4)
@@ -77,13 +77,13 @@ DSS 是独立安装的社区插件，使用 [DeepSeek Harness（DSH）](https://
 
 ## 安装与使用
 
-在 DSH 中打开 **插件 → 添加插件**，输入 npm 包名：
+在 DSH 中打开 **插件 → 添加插件**，输入：
 
 ```text
-deepseek-servant
+github:Tests4gptplay/deepseek-servant#v0.5.4
 ```
 
-固定安装 0.5.4 时，可填写 `deepseek-servant@0.5.4`，或使用 GitHub 地址 `github:Tests4gptplay/deepseek-servant#v0.5.4`。
+也可下载正式发布页的 TGZ。npm 上同号的 0.5.4 是此前的构建，不包含本次恢复的 DSH 原生目录实现；请使用 GitHub 入口安装本构建。
 
 ### 第一次使用
 

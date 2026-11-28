@@ -33,7 +33,7 @@ The two independently developed projects show **architectural convergence** in s
 
 ## What’s new in 0.5.4
 
-- Folder browsing and creation no longer depend on a pinned DSH directory-browser version at runtime.
+- Folder browsing and creation continue to use DSH’s native directory-browser component, without a fixed version requirement from DSS.
 - Retains the same-line Worker seat handoff fix from 0.5.3.
 
 [Release notes and downloads](https://github.com/Tests4gptplay/deepseek-servant/releases/tag/v0.5.4)
@@ -58,7 +58,7 @@ Search tasks and archives by title or ID, with newest tasks first when creation 
 
 ## Installation & use
 
-In DSH, choose **Plugins → Add plugin** and enter `deepseek-servant`. To pin 0.5.4, enter `deepseek-servant@0.5.4` or use `github:Tests4gptplay/deepseek-servant#v0.5.4`.
+In DSH, choose **Plugins → Add plugin** and enter `github:Tests4gptplay/deepseek-servant#v0.5.4`, or use the TGZ attached to the GitHub release. npm's 0.5.4 is the earlier build and does not include this restoration of DSH's directory browser.
 
 See [Installation & upgrade](docs/INSTALLATION.md) for installation sources, Desktop / Web instructions and upgrade guidance. The linked guide is in Chinese.
 

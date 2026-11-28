@@ -1,16 +1,28 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { listDirectory, createDirectory } from './ui-directory-filesystem.js'
+import BrowseDirectoryPicker from '@deepseek-ai/dsh-host-directory-picker-browse'
 import { clientRequestSchema } from '@deepseek-ai/dsh-client-connection'
 import { z } from 'zod'
 
-/** DSS owns this browser without registering or replacing the Host's native picker. */
-export function createUiDirectoryBrowser() {
-  return { list: listDirectory, create: createDirectory }
+/** DSS owns this browse service; the Host's native picker is not replaced. */
+export function createUiDirectoryBrowser(ctx: Context) {
+  const scope = ctx.isolate('directoryPicker')
+  let ready: Promise<void> | undefined
+  const capability = async () => {
+    ready ??= scope.plugin(BrowseDirectoryPicker).await().then(() => undefined)
+    await ready
+    const value = scope.get('directoryPicker', true)?.capability()
+    if (value?.kind !== 'browse') throw new Error('Directory browsing is unavailable.')
+    return value
+  }
+  return {
+    async list(path?: string, signal?: AbortSignal) { return (await capability()).list(path, signal) },
+    async create(path: string, name: string) { return (await capability()).createDirectory(path, name) },
+  }
 }
 
 /** Existing authenticated connection carrier and client-request envelope. */
 export function installUiDirectoryTransport(ctx: Context) {
-  const browser = createUiDirectoryBrowser()
+  const browser = createUiDirectoryBrowser(ctx)
   for (const method of ['directoryList', 'directoryCreate'] as const) {
     ctx.effect(() => ctx.connection.fetch.register({
       path: '/api/deepseek-servant-framework/' + method, methods: ['POST'], requestBody: 'buffered',
