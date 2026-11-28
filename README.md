@@ -38,9 +38,11 @@ DSS 是独立安装的社区插件，使用 [DeepSeek Harness（DSH）](https://
 
 [操作指南](https://github.com/Tests4gptplay/deepseek-servant/blob/main/PRIVATE_GIT.md) · [已测场景与限制](docs/testing/0.5.0.md)
 
-## 0.5.2 预发行候选
+## 0.5.2 的改进
 
-任务与成果档案支持按标题或任务 ID 检索，有创建时间的新任务优先显示。后台改进静默轮次、原任务接续及 Worker 席位交接。
+- **任务与成果检索**：按标题或任务 ID 搜索当前任务和成果档案。
+- **新任务优先显示**：有创建时间的任务按时间从新到旧排列。
+- **原任务接续**：执行轮次结束却没有有效交接时，针对原任务排查；Worker 换人时沿用原工作线的席位，从已有进度继续。
 
 [完整更新说明](docs/releases/0.5.2.md) · [增量验收](docs/testing/0.5.2.md)
 
