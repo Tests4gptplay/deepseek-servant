@@ -2,7 +2,7 @@
 
 ## 安装
 
-在 DSH 的 **插件 → 添加插件 → 包名或地址** 中填写 `github:Tests4gptplay/deepseek-servant#v0.5.5`。安装后启用插件，按宿主提示重启。0.5.5 尚未发布到 npm。
+在 DSH 的 **插件 → 添加插件 → 包名或地址** 中填写 `github:Tests4gptplay/deepseek-servant#v0.5.5`。也可填写 `deepseek-servant` 从 npm 安装。安装后启用插件，按宿主提示重启。0.5.5 已发布到 npm：[deepseek-servant](https://www.npmjs.com/package/deepseek-servant/v/0.5.5) · [@tests4gptplay/deepseek-servant](https://www.npmjs.com/package/@tests4gptplay/deepseek-servant/v/0.5.5)。
 
 已有插件 TGZ 时，也可填写 `deepseek-servant-0.5.5.tgz` 在运行 DSH 的电脑上的完整绝对路径，无需解压。
 
@@ -12,6 +12,8 @@
 
 ```sh
 dsh plugin --profile web add 'github:Tests4gptplay/deepseek-servant#v0.5.5'
+# 或从 npm 安装：
+# dsh plugin --profile web add deepseek-servant
 # 已有 TGZ 时改用其实际绝对路径：
 # dsh plugin --profile web add '/absolute/path/deepseek-servant-0.5.5.tgz'
 ```

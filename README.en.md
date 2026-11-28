@@ -58,7 +58,7 @@ Search tasks and archives by title or ID, with newest tasks first when creation 
 
 ## Installation & use
 
-In DSH, choose **Plugins → Add plugin** and enter `github:Tests4gptplay/deepseek-servant#v0.5.5`, or use the TGZ attached to the GitHub release. Version 0.5.5 is not yet published to npm.
+In DSH, choose **Plugins → Add plugin** and enter `github:Tests4gptplay/deepseek-servant#v0.5.5`, or use the TGZ attached to the GitHub release. For npm installation, enter `deepseek-servant` in the same field. Version 0.5.5 is available on npm: [deepseek-servant](https://www.npmjs.com/package/deepseek-servant/v/0.5.5) · [@tests4gptplay/deepseek-servant](https://www.npmjs.com/package/@tests4gptplay/deepseek-servant/v/0.5.5).
 
 See [Installation & upgrade](docs/INSTALLATION.md) for installation sources, Desktop / Web instructions and upgrade guidance. The linked guide is in Chinese.
 

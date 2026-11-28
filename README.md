@@ -83,7 +83,7 @@ DSS 是独立安装的社区插件，使用 [DeepSeek Harness（DSH）](https://
 github:Tests4gptplay/deepseek-servant#v0.5.5
 ```
 
-也可下载正式发布页的 TGZ。0.5.5 尚未发布到 npm，请使用 GitHub 入口安装本构建。
+也可下载正式发布页的 TGZ。通过 npm 安装时，在同一输入框填写 `deepseek-servant`。0.5.5 已发布到 npm：[deepseek-servant](https://www.npmjs.com/package/deepseek-servant/v/0.5.5) · [@tests4gptplay/deepseek-servant](https://www.npmjs.com/package/@tests4gptplay/deepseek-servant/v/0.5.5)。
 
 ### 第一次使用
 
