@@ -510,7 +510,7 @@ export function FrameworkPage(props: FrameworkPageProps) {
         onSelect={id => { setModeOpen(false); const request = ++modeNavigation.current; setChangingMode(true); run(controller.selectMode(id === 'git' ? 'git' : 'local').finally(() => { if (request === modeNavigation.current) setChangingMode(false) })) }}
         onClose={() => setModeOpen(false)} anchor={<Button variant="outline" size="sm" aria-label={tr('模式', 'Mode')} aria-haspopup="menu" aria-expanded={modeOpen}
           onClick={() => setModeOpen(!modeOpen)}><span>{!view ? tr('模式', 'Mode') : view.activeMode === 'git' ? 'DSS-cah' : 'local'}</span><IconChevronDownOutlineRegular size={14} /></Button>} />
-    </div>{view && <div className={css.workspaceSummary}><span>{view.settings.workspace}</span>{view.connection.workerSeats !== undefined && <span>{tr('已生效每任务 Worker 席位', 'Applied Worker seats per task')}: {view.connection.workerSeats}{view.connection.workerSeats !== view.settings.workerSeats && <> ({tr('已保存设置', 'Saved setting')}: {view.settings.workerSeats})</>}</span>}</div>}</nav>
+    </div>{view && <div className={css.workspaceSummary}><span>{view.settings.workspace}</span>{view.connection.workerSeats !== undefined && <span>{tr('每任务 Worker 席位', 'Worker seats per task')}: {view.connection.workerSeats}{view.connection.workerSeats !== view.settings.workerSeats && <> ({tr('已保存设置', 'Saved setting')}: {view.settings.workerSeats})</>}</span>}</div>}</nav>
     {(error || snapshot.error || view?.connection.detail) && <div className={css.notice} role="alert">{error || snapshot.error || view?.connection.detail}</div>}
     {exported && <p className={css.notice} role="status" style={{ flexShrink: 0, minWidth: 0, overflowWrap: 'anywhere' }}>{tr('记录已导出到', 'Records exported to')}: {exported}</p>}
     <Fragment key={scope}>{!changingMode && props.transportConnected !== false && view && props.nativePending?.(view, zh, taskId => { setSelectedTask(taskId); setTab('tasks') }, () => setTab('conversation'))}{!changingMode && props.transportConnected !== false && props.nativeInteractions?.((view?.executions ?? []).filter(row => row.role !== 'Foreground' && !view?.tasks.some(task => task.executions.some(item => item.sessionId === row.sessionId))), zh, true)}</Fragment>
@@ -732,9 +732,9 @@ function FrameworkSettingsForm(props: FrameworkPageProps & { afterSettings?: Rea
   {props.afterSettings}
     <section className={css.experimental}><h3>{tr('实验性', 'Experimental')}</h3><div className={css.experimentalGroups}><section className={css.experimentalCard}>
       <h4>{tr('页面插画', 'Page illustrations')}</h4>
-      <p className={css.muted}>{tr('更改插画后，点击上方的“保存并连接”应用设置。', 'After changing the illustrations, select “Save and connect” above to apply your changes.')}</p>
-      <label className={css.illustrationOption}><span>{tr('显示右下角人物', 'Show the bottom-right character')}</span><input type="checkbox" checked={settings.showCornerCharacter !== false} onChange={event => edit('showCornerCharacter', event.target.checked)} /></label>
-      <label className={css.illustrationOption}><span>{tr('互换对话与任务页插画', 'Swap conversation and task illustrations')}</span><input type="checkbox" checked={settings.swapPageIllustrations === true} onChange={event => edit('swapPageIllustrations', event.target.checked)} /></label>
+      <p className={css.muted}>{tr('插画设置会自动保存。', 'Illustration settings are saved automatically.')}</p>
+      <label className={css.illustrationOption}><span>{tr('显示右下角人物', 'Show the bottom-right character')}</span><input type="checkbox" checked={settings.showCornerCharacter !== false} onChange={event => edit('showCornerCharacter', event.target.checked, true)} /></label>
+      <label className={css.illustrationOption}><span>{tr('互换对话与任务页插画', 'Swap conversation and task illustrations')}</span><input type="checkbox" checked={settings.swapPageIllustrations === true} onChange={event => edit('swapPageIllustrations', event.target.checked, true)} /></label>
     </section></div></section>
   </>
 }

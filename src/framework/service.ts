@@ -1474,6 +1474,18 @@ export class FrameworkService implements Omit<FrameworkClientApi, 'subscribeChan
             this.assertOpen(); mode = z.enum(['local', 'git']).parse(input.mode);
             requested = settingsSchema.parse(input.settings);
             changedFields = z.array(settingsSchema.keyof()).optional().parse(input.changedFields);
+            if (changedFields?.length && changedFields.every(field => field === 'showCornerCharacter' || field === 'swapPageIllustrations')) {
+                return this.serialMode(mode, async () => {
+                    this.assertOpen();
+                    const stored = await this.storage.get<Saved>('framework-settings/' + mode) ?? this.config(mode);
+                    const next = applyChanges(stored.settings);
+                    if (!isDeepStrictEqual(stored.settings, next)) {
+                        await this.persistSettings(mode, { revision: randomUUID(), settings: next });
+                        this.changed();
+                    }
+                    return this.settingsView(mode);
+                }, commandId);
+            }
             const current = this.config(mode);
             settings = applyChanges(current.settings);
             if (this.moveError(mode, settings)) throw this.moveError(mode, settings);
