@@ -4,7 +4,7 @@
 
 围绕长期任务协调规划、执行与成果评价，保存进展、成果和经验，支持后续接续与方法调整。
 
-[安装与使用](#安装与使用) · [实测案例](#实测案例) · [0.5.2 预发行说明](docs/releases/0.5.2.md) · [0.5.1 更新说明](docs/releases/0.5.1.md) · [0.5.0／0.5.1 对比测试](docs/testing/0.5.1.md) · [English](https://github.com/Tests4gptplay/deepseek-servant/blob/main/README.en.md)
+[安装与使用](#安装与使用) · [0.5.2 预发行说明](docs/releases/0.5.2.md) · [0.5.1 更新说明](docs/releases/0.5.1.md) · [0.5.0／0.5.1 对比测试](docs/testing/0.5.1.md) · [English](https://github.com/Tests4gptplay/deepseek-servant/blob/main/README.en.md)
 
 <p align="center">
 <img src="https://raw.githubusercontent.com/Tests4gptplay/deepseek-servant/v0.3.0/docs/images/deepseek-servant-maids-duo.webp" width="480" alt="DeepSeek Servant 短裙与长裙女仆角色设计">
@@ -37,16 +37,6 @@ DSS 是独立安装的社区插件，使用 [DeepSeek Harness（DSH）](https://
 试用时需配置专用私有仓库，并确认参与者的访问权限。
 
 [操作指南](https://github.com/Tests4gptplay/deepseek-servant/blob/main/PRIVATE_GIT.md) · [已测场景与限制](docs/testing/0.5.0.md)
-
-## 实测案例
-
-### 《鲸骨以北》：中断后能否接着做？
-
-用一款网页游戏的制作与验收，测试 DSS 在云机断连、工作盘不可用和模型额度耗尽后，能否接回原任务，而不是从头重做。
-
-从任务下达到归档共 **41 小时 46 分 42 秒**，含等待和中断；原规划角色实际读到 **71 次**成果交接。记录线在 10 次环境或存储恢复后都有新产出，制作线有 7 次，另外 3 次受同一个内部卡点影响，换版后才继续。
-
-[阅读完整测试报告](docs/testing/0.5.2/work-long-run/REPORT.md) · [查看时间轴与证据索引](docs/testing/0.5.2/work-long-run/README.md)
 
 ## 0.5.2 的改进
 
@@ -145,6 +135,12 @@ DeepSeek 于 2026-10-31 公开的 [Super-agent 研究原型](https://github.com/
 - [alpha.39 验收](https://github.com/Tests4gptplay/deepseek-servant/blob/v0.3.0/docs/acceptance-20261026.md)
 
 </details>
+
+### 长线压测案例：《鲸骨以北》
+
+以网页游戏制作为负载，观察 DSS 在环境和模型中断后能否续做同一个任务。整轮历时 **41 小时 46 分 42 秒**，包含等待和恢复；原规划者实际读到 **71 次**成果交接。报告逐项区分了外部中断、DSS 内部卡点和人工介入。
+
+[阅读完整测试报告](docs/testing/0.5.2/work-long-run/REPORT.md) · [时间轴与证据索引](docs/testing/0.5.2/work-long-run/README.md)
 
 ## 来源与开源许可
 
