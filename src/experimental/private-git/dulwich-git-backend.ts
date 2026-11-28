@@ -275,7 +275,7 @@ export class DulwichGitBackend implements GitObjectBackend {
     await this.helper.ensureReady(signal)
   }
   async execute(command: GitObjectCommand, options: GitCommandOptions): Promise<Buffer> {
-    return await this.call({ op: 'execute', command, token: options.token, fixture: !!options.fixtureTransport },
+    return await this.call({ op: 'execute', command, token: options.token },
       options.signal, options.input === undefined ? undefined : Buffer.from(options.input)) as Buffer
   }
   async storageBytes(): Promise<number> { return await this.call({ op: 'storageBytes' }) as number }

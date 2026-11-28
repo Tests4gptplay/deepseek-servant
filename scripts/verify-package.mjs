@@ -2,9 +2,7 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { resolve, join } from 'node:path'
-import { pathToFileURL } from 'node:url'
 import { createHash } from 'node:crypto'
-import vm from 'node:vm'
 
 // Offline packaging only. This does not install dependencies, contact a registry,
 // create a native Agent, or claim that the complete Host has been exercised.
@@ -61,20 +59,17 @@ assert.equal(pkg.exports['./client'], './lib/client.js')
 for (const path of ['lib/host.js', 'lib/client.js']) {
   assert.deepEqual(await readFile(join(directory, 'package', path)), await readFile(path), 'Packed bundle differs from built candidate: ' + path)
 }
-const host = await import(pathToFileURL(join(directory, 'package', pkg.main)).href)
-assert.equal(host.name, 'deepseek-servant')
-assert.equal(typeof host.apply, 'function')
-assert.ok(host.Config.safeParse({}).success)
-let registration
-vm.runInNewContext(await readFile(join(directory, 'package/lib/client.js'), 'utf8'), { window: { __ModuleLoader__: { load(value) { registration = value } } } })
-assert.equal(registration?.id, 'deepseek-servant')
-assert.equal(typeof registration?.factory, 'function')
+// Validate package bytes as data. Never execute the Host or client here.
+const bundledHost = await readFile(join(directory, 'package/lib/host.js'), 'utf8')
+const bundledHelper = await readFile(join(directory, 'package/lib/dulwich-helper.py'), 'utf8')
+assert.doesNotMatch(bundledHost, /fixtureTransport|isolated loopback|fixture transport requires/i)
+assert.doesNotMatch(bundledHelper, /isolated loopback|request\.get\('fixture'\)/i)
 assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), initialCommit, 'Commit changed during package verification.')
 const evidence = { commit: initialCommit,
   workingTreeDirty: !!execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim(), tarball,
   sha256: createHash('sha256').update(await readFile(tarball)).digest('hex'), files: listing,
-  verified: ['offline npm pack', 'package file allowlist', 'packed Python vendor member hashes', 'packed bundle byte equality', 'packed host module import/config', 'client registration envelope captured; factory not executed'],
-  dependencies: 'Host import resolves existing repository node_modules; not a fresh dependency installation',
+  verified: ['offline npm pack', 'package file allowlist', 'packed Python vendor member hashes', 'packed bundle byte equality', 'no production loopback test route'],
+  dependencies: 'No dependency installation or Host execution',
   notVerified: ['complete Host startup', 'real Agent loop', 'browser interaction', 'remote Git account'] }
 await writeFile(join(directory, 'verification.json'), JSON.stringify(evidence, null, 2) + '\n')
 console.log(JSON.stringify(evidence, null, 2))

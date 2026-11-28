@@ -23,9 +23,6 @@ export interface RemoteGitOptions {
   onOperation?: (event: { channel: GitOperationChannel; operation: GitObjectCommand['op']; phase: 'start' | 'end'; elapsedMs?: number; success?: boolean; failureDetails?: FailureDetails; httpRequests: null; packBytes: null }) => void
   /** Growth trigger for background transport reclamation; not a hard cap on live snapshots. */
   cacheGrowthBytes?: number
-  /** Isolated fixture seam. Production never changes its validated HTTPS endpoint. */
-  remoteUrl?: (connection: RepoConnection) => string
-  inspectAuthority?: (token: ResolvedToken, binding: RepoBinding, signal: AbortSignal) => Promise<RepoConnection>
   /** Optional diagnostics; no credentials or business contents. */
   onCacheReplacement?: (event: { channel: GitOperationChannel; status: 'replaced' | 'failed'; elapsedMs: number; beforeBytes?: number; afterBytes?: number; error?: unknown }) => void
 }
@@ -43,7 +40,7 @@ interface Scope {
   preparations: Map<string, WeakRef<Preparation>>; pendingOperations: Map<string, { operation: GitCommitOperation; preparation?: Preparation }>
   operationTails: Map<string, Promise<void>>
   publicationSequence: number; confirmedBases: Map<string, number>
-  key: string; bound: RepoBinding; canonicalPending: boolean; authorization: object; connection: RepoConnection; directory: string; remote: string; fixture: boolean
+  key: string; bound: RepoBinding; canonicalPending: boolean; authorization: object; connection: RepoConnection; directory: string; remote: string
   signal: AbortSignal; controller: AbortController; channels: Map<GitOperationChannel, ObjectCache>; caches: Set<ObjectCache>
 }
 interface Session { token?: ResolvedToken; scope: Scope; cache: ObjectCache; signal: AbortSignal; active: boolean; reusable: boolean; pending: Set<Promise<unknown>> }
@@ -91,7 +88,6 @@ export class RemoteGitRepository implements GitRepository {
   constructor(private readonly binding: () => RepoBinding, private readonly tokens: TokenSource,
     private readonly options: RemoteGitOptions = {}) {
     this.signal = options.signal ? AbortSignal.any([this.epoch.signal, options.signal]) : this.epoch.signal
-    if (options.remoteUrl && !options.inspectAuthority) throw new Error('A fixture transport requires an isolated authority provider.')
     if (options.cacheGrowthBytes !== undefined && (!Number.isSafeInteger(options.cacheGrowthBytes) || options.cacheGrowthBytes <= 0)) throw new Error('Git cache growth trigger must be a positive byte count.')
   }
   private channel(): GitOperationChannel {
@@ -256,9 +252,7 @@ export class RemoteGitRepository implements GitRepository {
         await cache.transport.ready?.(acquisitionSignal)
         acquisitionSignal.throwIfAborted()
         const target = { ...binding, participantId: undefined }
-        const connection = this.options.inspectAuthority
-          ? await this.options.inspectAuthority(token, target, acquisitionSignal)
-          : await new GitHubClient(async () => token, this.options.fetcher, { signal: acquisitionSignal }).session(session => inspectPrivateRepo(session, target))
+        const connection = await new GitHubClient(async () => token, this.options.fetcher, { signal: acquisitionSignal }).session(session => inspectPrivateRepo(session, target))
         acquisitionSignal.throwIfAborted()
         if (key !== this.bindingKey()) throw new GitHubError(409, 'The Git binding changed during connection.')
         if (!connection.repository.private) throw new GitHubError(422, 'This repository is public. Git collaboration requires a private repository.')
@@ -266,14 +260,9 @@ export class RemoteGitRepository implements GitRepository {
         const directory = binding.repositoryDirectory ?? 'dss-coop'
         if (directory && (!validCoopPath('dss-coop/' + directory) || directory.startsWith('/'))) throw new Error('Use a directory inside the Git repository.')
         const path = repositoryPath(connection.repository.fullName).slice('/repos/'.length)
-        const fixture = !!this.options.remoteUrl, remote = this.options.remoteUrl?.(connection) ?? 'https://github.com/' + path + '.git'
-        if (fixture) {
-          const url = new URL(remote)
-          const allowed = ['http:', 'https:'].includes(url.protocol) && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)
-          if (!allowed) throw new Error('Isolated Git fixtures require a loopback smart HTTP endpoint.')
-        }
+        const remote = 'https://github.com/' + path + '.git'
         const scopeController = new AbortController(), scopeSignal = AbortSignal.any([epoch, scopeController.signal])
-        const scope: Scope = { key, bound: binding, canonicalPending: connect, authorization: {}, connection, directory, remote, fixture, signal: scopeSignal, controller: scopeController,
+        const scope: Scope = { key, bound: binding, canonicalPending: connect, authorization: {}, connection, directory, remote, signal: scopeSignal, controller: scopeController,
           channels: new Map([['read', cache]]), caches: new Set([cache]), publicationSequence: 0, confirmedBases: new Map(),
           preparations: new Map(), pendingOperations: new Map(), operationTails: new Map() }
         try {
@@ -369,7 +358,7 @@ export class RemoteGitRepository implements GitRepository {
     }
     notify('start')
     try {
-      const output = await session.cache.transport.execute(command, { signal: session.signal, token: session.token.value, input, fixtureTransport: session.scope.fixture })
+      const output = await session.cache.transport.execute(command, { signal: session.signal, token: session.token.value, input })
       this.check(session.scope); session.signal.throwIfAborted()
       success = true
       return output

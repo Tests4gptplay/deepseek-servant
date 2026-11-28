@@ -616,11 +616,10 @@ class Engine:
     def client(self, command, request):
         remote = command['remote']
         parsed = urlsplit(remote)
-        fixture = bool(request.get('fixture'))
         if parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise BackendError('invalid', 'Credential-bearing or ambiguous Git URLs are prohibited.')
-        if not (parsed.scheme == 'https' and parsed.hostname == 'github.com' or fixture and parsed.scheme in ('http', 'https') and parsed.hostname in ('127.0.0.1', '::1', 'localhost')):
-            raise BackendError('invalid', 'Memory Git requires the authorized HTTPS endpoint or an isolated loopback fixture.')
+        if parsed.scheme != 'https' or parsed.hostname != 'github.com':
+            raise BackendError('invalid', 'Memory Git requires the authorized GitHub HTTPS endpoint.')
         if self.remote is not None and self.remote != remote:
             raise BackendError('invalid', 'A helper cannot change repository scope.')
         with self.lock:
